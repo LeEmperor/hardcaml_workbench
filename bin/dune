@@ -1,0 +1,4 @@
+(executable
+ (public_name hardcaml_workbench)
+ (name main)
+ (libraries hardcaml_workbench))
