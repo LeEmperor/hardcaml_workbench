@@ -1,2 +1,18 @@
+; The whole synthesizable surface of this repository, as ONE wrapped library.
+;
+; (include_subdirs qualified) makes each subdirectory a sub-namespace, so a consumer
+; writes `open! Hardcaml_workbench` and reaches blocks as <Subdir>.<Module>. Executables
+; (e.g. the RTL generator) live in bin/, because include_subdirs claims this subtree.
+
+(include_subdirs qualified)
+
 (library
- (name hardcaml_workbench))
+ (name hardcaml_workbench)
+ (public_name hardcaml_workbench)
+ (libraries core hardcaml hardcaml_circuits)
+ (preprocess
+  (pps ppx_hardcaml ppx_jane))
+ (lint
+  (pps ppx_js_style))
+ (flags
+  (:standard -w -27-57-33-34-35-40-63-47-26)))
