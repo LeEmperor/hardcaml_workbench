@@ -13,36 +13,25 @@
 
 (package
  (name hardcaml_workbench)
- (synopsis "Hardcaml workbench")
+ (synopsis "A local development workbench for independent Hardcaml projects")
  (description
-  "Synthesizable blocks written in Hardcaml. Installs as one wrapped library named\nhardcaml_workbench.")
+  "A standalone native OCaml and Bonsai Web application for inspecting, running,\nmeasuring, and debugging independently owned Hardcaml projects.")
+ (allow_empty)
  (depends
   (ocaml
    (>= 5.1))
-  ; The installed library surface (lib/). Everything below is test or repo tooling
-  ; and must not be forced on a consumer.
+  ; Portable shared protocol and application code.
   core
-  hardcaml
-  hardcaml_circuits
-  ppx_hardcaml
   ppx_jane
-  ; Test frameworks: test/ only.
-  (hardcaml_step_testbench :with-test)
-  (hardcaml_waveterm :with-test)
-  (ppx_expect :with-test)
-  (base_quickcheck :with-test)
-  (alcotest :with-test)
-  ; Repo tooling: bin/generate.exe. Never installed, but needed for a root
-  ; `dune build`, so they ride with-test rather than being dropped.
-  (core_unix :with-test)
-  (jane_rope :with-test)
-  ; Web app (Bonsai, compiled to JS with js_of_ocaml). Not part of the installed
-  ; library surface, so it rides with-test like the rest of the repo tooling.
-  (bonsai :with-test)
-  (bonsai_web :with-test)
-  (js_of_ocaml :with-test)
-  (js_of_ocaml-ppx :with-test)
-  (ppx_css :with-test)
+  ; Native daemon, backend, and adapters.
+  core_unix
+  ; Browser application and JavaScript build.
+  bonsai
+  bonsai_web
+  js_of_ocaml
+  js_of_ocaml-ppx
+  ppx_css
+  ; Repository development tools.
   (ppx_js_style :with-dev-setup)
   (ocamlformat :with-dev-setup)
   (ocaml-lsp-server :with-dev-setup)))

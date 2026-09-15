@@ -1,0 +1,8 @@
+(executable
+ (name main)
+ (modes byte)
+ (libraries bonsai bonsai_web core hardcaml_workbench_protocol js_of_ocaml)
+ (preprocess
+  (pps ppx_jane))
+ (lint
+  (pps ppx_js_style)))
