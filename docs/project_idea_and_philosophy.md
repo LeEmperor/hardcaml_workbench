@@ -157,18 +157,17 @@ protocol must remain versioned so the daemon can report compatibility errors cle
 
 ## 5. Application shape
 
-The application has two runtime halves written in OCaml and compiled for different
+The application is a daemon and its clients, all written in OCaml and compiled for different
 environments:
 
 ```text
 +---------------------------------------------------------------+
-| Browser                                                       |
-|                                                               |
-| Bonsai frontend compiled from OCaml to JavaScript             |
+| Bonsai Term client (native) | Bonsai Web client (browser)     |
+| operate / measure / compare | visualize / inspect             |
 +-----------------------------+---------------------------------+
                               | typed RPC / WebSocket
 +-----------------------------v---------------------------------+
-| Local native OCaml daemon                                     |
+| Native OCaml daemon                                           |
 |                                                               |
 | projects | jobs | artifacts | Dune | tools | Vivado           |
 +-----------------------------+---------------------------------+
@@ -180,14 +179,27 @@ environments:
 +---------------------------------------------------------------+
 ```
 
-The browser cannot directly read arbitrary local files, start Dune, or control Vivado. It
-renders state and sends typed requests to the daemon. The native daemon performs local
-operations and streams results back to the frontend.
+No client reads arbitrary local files, starts Dune, or controls Vivado. A client renders state
+and sends typed requests; the daemon performs local operations and streams results back. This
+holds for the terminal client too, which is compiled natively but must still reach the machine
+only through the daemon.
 
-An installed Workbench should include the native daemon and the precompiled HTML,
-JavaScript, and CSS assets. Its launcher can start the daemon, serve those assets on a local
-address, and open the application in the user's browser. Development may run the frontend
-builder and daemon separately, but installation should feel like launching one application.
+The terminal client is delivered first. It covers the operate, measure, and compare workflows,
+which are text, and it does not depend on the JavaScript toolchain; the browser client owns the
+graphical views. See the
+[architecture's frontend choice](hardcaml_workbench_architecture.md#1-frontend-choice-and-delivery-order).
+
+An installed Workbench should include the native daemon, the native terminal client, and the
+precompiled HTML, JavaScript, and CSS assets. Its launcher can start the daemon, serve those
+assets on a local address, and open the application in the user's browser. Development may run
+the frontend builder and daemon separately, but installation should feel like launching one
+application.
+
+The daemon's lifetime is independent of any client's, so a build or flow run that takes hours
+survives a client exiting. The daemon must be co-located with the opened project and its
+toolchain, but the client need not be: it can attach from another machine over an SSH port
+forward to the daemon's loopback address. Some toolchains, notably an ASIC flow's process
+design kit and pinned environments, cannot move, which makes this the natural deployment.
 
 ## 6. Internal boundaries are application boundaries
 
@@ -204,11 +216,12 @@ The main roles are:
 - **Adapters:** native translation to Dune, Hardcaml project drivers, report tools, Vivado,
   simulators, and hardware interfaces.
 - **Daemon:** process lifetime, RPC serving, configuration, and local asset serving.
-- **Web:** Bonsai components, browser state, navigation, and presentation.
+- **Clients:** Bonsai components, client-local view state, navigation, and presentation, for
+  both the terminal and browser clients.
 
-Portable protocol values describe data that crosses the browser/daemon boundary. They must
+Portable protocol values describe data that crosses the client/daemon boundary. They must
 not contain native process handles, file descriptors, or other operating-system resources.
-For example, the frontend receives an artifact ID and metadata rather than a daemon-local
+For example, a client receives an artifact ID and metadata rather than a daemon-local
 filesystem handle. The backend resolves that ID when the user requests the artifact.
 
 ## 7. Design principles
@@ -226,10 +239,15 @@ filesystem handle. The backend resolves that ID when the user requests the artif
 6. **Tools perform work through adapters.** UI code does not construct shell commands or
    depend on Vivado, Dune, or project internals.
 7. **Every result has provenance.** Artifacts and reports retain their project, target,
-   configuration, source identity, tool version, and generating job.
-8. **Start local and preserve a remote path.** The first application runs beside the project;
-   later remote workers can implement the same typed backend contracts.
-9. **Specialize in hardware development.** Editing, general Git workflows, and generic IDE
+   configuration, source identity, tool version, execution environment identity, backend
+   build and run identity where those exist, and generating job.
+8. **No backend's vocabulary becomes the model.** Targets, artifacts, metrics, and jobs must
+   describe an FPGA flow and an ASIC flow without either one's terms becoming the shared
+   application types. An unavailable metric stays unavailable rather than becoming zero.
+9. **Start local and preserve a remote path.** The first application runs beside the project.
+   Clients may attach to a daemon on another machine over an SSH port forward; dispatching
+   jobs to remote workers is a later, separate capability over the same typed contracts.
+10. **Specialize in hardware development.** Editing, general Git workflows, and generic IDE
    features remain outside the product unless they directly support inspecting or operating
    the hardware flow.
 

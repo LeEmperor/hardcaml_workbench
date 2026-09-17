@@ -21,8 +21,14 @@ owns implementation order, dependencies, acceptance checks, and progress.
 
 Apply these established boundaries throughout construction:
 
-- Ship a standalone installed application: a native OCaml daemon plus precompiled HTML,
-  JavaScript, and CSS assets from the Bonsai frontend, launched as one local application.
+- Ship a standalone installed application: a native OCaml daemon, a native `bonsai_term`
+  client, and precompiled HTML, JavaScript, and CSS assets from the `bonsai_web` client,
+  launched as one local application. Deliver the terminal client first, per
+  [frontend choice](hardcaml_workbench_architecture.md#1-frontend-choice-and-delivery-order).
+- Keep the application backend-neutral where the backend is not the point. Targets,
+  artifacts, metrics, and jobs must describe an FPGA flow and an ASIC flow without either
+  one's vocabulary becoming the shared model. Milestone gates name a capability, not a
+  vendor tool.
 - Open independent Dune/Hardcaml repositories by root. Projects own hardware source,
   libraries, target constructors, configurations, tests, constraints, and CLI entry points.
   The Workbench owns project sessions, jobs, artifacts, processes, and tool adapters.
@@ -30,8 +36,12 @@ Apply these established boundaries throughout construction:
   an optional versioned `hardcaml-workbench.sexp`; and a versioned project-side driver
   built in the opened project's compiler/package environment for typed Hardcaml operations.
 - Compile the shared typed application protocol for native OCaml and JavaScript. Keep
-  native backend/adapter dependencies and operating-system resources out of browser code
-  and portable protocol types. The daemon resolves artifact IDs to private storage paths.
+  native backend/adapter dependencies and operating-system resources out of frontend code
+  and portable protocol types. The terminal client is native and must still depend on the
+  shared protocol only. The daemon resolves artifact IDs to private storage paths.
+- The daemon's lifetime is independent of any client's, and clients may attach from another
+  machine over an SSH port forward to its loopback address. See
+  [deployment modes](hardcaml_workbench_architecture.md#44-deployment-and-client-attachment).
 - Keep synthesizable circuits in independent projects, including a small integration fixture.
   Internal application libraries and an optional project-integration SDK do not constitute
   a production hardware library. Do not dynamically load project modules into the daemon.
@@ -66,61 +76,114 @@ application or driver support.
 
 | Architecture phase | Construction milestones | Phase exit outcome |
 | --- | --- | --- |
-| [Phase 1: MVP](hardcaml_workbench_architecture.md#20-suggested-mvp) | 1A installed application foundation; 1B generic Dune projects, jobs, and UI; 1C manifest/driver integration; 1D hierarchical reports | Launch the installed application, open an independent project, select a driver-discovered target, generate RTL, and inspect hierarchical reports with live logs. |
-| [Phase 2](hardcaml_workbench_architecture.md#21-phase-2) | 2A persistent Vivado; 2B synthesis/implementation and reports; 2C RTL viewer and history | Run and revisit synthesis/implementation work through a persistent, typed Vivado integration. |
+| [Phase 1: MVP](hardcaml_workbench_architecture.md#20-suggested-mvp) | 1A installed application foundation; 1B generic Dune projects, jobs, and terminal client; 1C manifest/driver integration; 1D first structured hierarchical report; 1E browser client and graphical views | Launch the installed application, open an independent project, select a driver-discovered target, generate RTL, and inspect a structured hierarchical report with live logs. |
+| [Phase 2](hardcaml_workbench_architecture.md#21-phase-2) | 2A persistent Tcl tool worker; 2B synthesis/implementation and reports; 2C RTL viewer and history | Run and revisit synthesis/implementation work through a persistent, typed tool worker, with Vivado as its first adapter. |
 | [Phase 3](hardcaml_workbench_architecture.md#22-phase-3) | 3A elaboration graph; 3B simulation/waveforms; 3C overlays and comparison | Explore circuit structure and behavior, relate timing to the design, and compare iterations. |
-| [Phase 4](hardcaml_workbench_architecture.md#23-phase-4) | 4A hardware programming; 4B ILA; 4C optional GUI bridge; 4D remote workers; 4E optional terminal UI | Deploy/debug hardware and extend access to remote tools and optional frontends. |
+| [Phase 4](hardcaml_workbench_architecture.md#23-phase-4) | 4A hardware programming; 4B ILA; 4C optional GUI bridge; 4D distributed remote workers | Deploy/debug hardware and extend execution to remote build machines. |
 
 Default order:
 
 ```text
 1A -> 1B -> 1C -> 1D [MVP gate]
-                    |
-                    v
-2A -> 2B -> 2C [Phase 2 gate]
-             |
-             +-> 3A --+
-             +-> 3B --+-> 3C [Phase 3 gate]
-                          |
-                          +-> 4A -> 4B
-                          +-> 4C (optional)
-                          +-> 4D
-                          +-> 4E (optional)
+       |           |
+       |           v
+       |           2A -> 2B -> 2C [Phase 2 gate]
+       |                        |
+       |                        +-> 3A --+
+       |                        +-> 3B --+-> 3C [Phase 3 gate]
+       |                                      |
+       |                                      +-> 4A -> 4B
+       |                                      +-> 4C (optional)
+       |                                      +-> 4D
+       |
+       +-> A.1 -> A.2 -> A.3   (ASIC track; A.2 also needs 1C)
+       +-> 1E                  (browser client, gated on the JS toolchain)
 ```
 
 The existing subdivision is retained. 1A establishes the installed runtime and an independent
-fixture; 1B adds generic project opening through Dune and the supervised-job UI required by
+fixture; 1B adds generic project opening through Dune and the supervised-job client required by
 architecture section 25. 1C builds manifest/driver integration on that project and job
-foundation; 1D uses the driver boundary for reports before Phase 2 adds persistent Vivado.
-Generic Dune build/test support is delivered in 1B; Phase 3 adds typed project simulation.
+foundation; 1D uses the driver boundary for the first structured report before Phase 2 adds the
+persistent tool worker. Generic Dune build/test support is delivered in 1B; Phase 3 adds typed
+project simulation.
+
+Two revisions to the earlier ordering:
+
+- **The frontend order is terminal first.** 1A and 1B deliver the `bonsai_term` client; 1E
+  adds the `bonsai_web` client and the graphical views. 1E is a Phase 1 milestone but not part
+  of the MVP gate, because it depends on the external
+  [JavaScript toolchain prerequisite](development.md#javascript-toolchain-prerequisite) that
+  currently blocks compiling browser assets at all. The MVP must not be gated on an upstream
+  fix outside this repository.
+- **The MVP report gate is backend-parametric.** 1D requires one structured hierarchical or
+  staged report obtained through the opened project's own reporting path. An FPGA project
+  satisfies it with `hardcaml_xilinx_reports`; an ASIC project satisfies it with its flow
+  report. Vivado's own integration begins in 2A, so Phase 1 does not require a Xilinx
+  installation.
 
 3A and 3B extend the project-driver integration from 1C and can be built independently after
-Phase 2. In Phase 4, 4B depends on 4A; 4C, 4D, and 4E are separate extensions.
-Remote support does not inherently require a Vivado
-socket bridge: select and document its transport when defining that milestone. Optional
-extensions are recorded as deferred if they are not selected, rather than marked complete.
+Phase 2. In Phase 4, 4B depends on 4A; 4C and 4D are separate extensions. 4D is the
+distributed-worker model only: attached operation, where clients connect to a daemon running
+beside the project on another machine, is a deployment mode available from 1B and needs no
+milestone of its own. Select and document 4D's transport when defining that milestone; it does
+not inherently require a Vivado socket bridge. Optional extensions are recorded as deferred if
+they are not selected, rather than marked complete.
 
-### Optional ASIC integration track
+### ASIC integration track
 
 Follow [ASIC project ownership](hardcaml_workbench_architecture.md#asic-projects-and-hardcaml_asic).
-The existing four-phase/Vivado roadmap and exit gates remain intact. This track
-can proceed from the relevant 1B/1C capabilities without waiting for Vivado or
-becoming a prerequisite for the emulator's ASIC work. All items are initially open.
+The existing four-phase roadmap and exit gates remain intact. This track runs parallel to them
+from the relevant 1B/1C capabilities, without waiting for Vivado and without becoming a
+prerequisite for the emulator's ASIC work. All items are initially open.
+
+This track is no longer described as optional. `hardcaml_asic` already emits bundles and its
+flow already produces a collected structured result, so the ASIC path is where a
+provenance-carrying report exists today, while the FPGA equivalent still depends on the
+unwritten Vivado worker. A.1 and A.2 are therefore the cheapest route to a Workbench that is
+actually used, and the natural way to satisfy 1D's report gate. No Phase gate blocks on this
+track, but that is a statement about the gates rather than a judgement that the work is
+speculative.
+
+The architecture changes this track depends on are recorded in
+[jobs, builds, and runs](hardcaml_workbench_architecture.md#42-job-system) and the
+[artifact model](hardcaml_workbench_architecture.md#18-artifact-model). Five requirements the
+FPGA framing did not surface must hold before A.2 is implemented:
+
+1. **Build and run identity are distinct.** One immutable build bundle has many runs. A job
+   carries optional build and run references; re-running must not alter build provenance, and
+   reopening a stored result must not execute the flow again.
+2. **Staged runs are resumable.** Emit, preflight, run, postcheck, collect, and report are
+   separately runnable. Record requested versus completed stages; a completed earlier stage is
+   not evidence a later one passed.
+3. **Results are multi-corner.** A single worst slack cannot represent a run that analyses
+   several corners or modes. Metrics carry unit, tool, stage, corner, and source report.
+4. **Physical and submission checks are first-class.** DRC, LVS, antenna, and harness
+   precheck results are pass/fail/not-run, separate from timing metrics and from stage
+   completion.
+5. **Environment identity is provenance.** Process design kit, pinned flow virtual
+   environments, harness support tooling, and interpreter version are part of the execution
+   record. Recording them is not provisioning them.
 
 - [ ] **A.1 — Open an ASIC consumer as an ordinary project.** After 1B, run its
   existing Dune build/test or project commands in its selected environment.
-  Evidence: CLI use remains independent; jobs retain logs/status and do not
-  implicitly install tools or a PDK.
+  This is level-1 integration only: running the project's existing commands needs no
+  manifest, no driver, and no ASIC-specific Workbench code, which is itself the evidence
+  that the integration layer is not FPGA-specific. Evidence: CLI use remains independent;
+  jobs retain logs/status and do not implicitly install tools or a PDK.
 - [ ] **A.2 — Integrate ASIC build and execution artifacts.** Depends on 1C's
   versioned driver/artifact support and a consumer with an emitted ASIC bundle
   (the emulator tracks this in P0.6/P0.7). Before implementation, define operation
   capabilities, ASIC target/configuration summaries, schema compatibility, and
-  cancellation ownership in the architecture. Derive target facts from the
-  consumer's declaration/build; keep the manifest small. Evidence: generate or
+  cancellation ownership in the architecture, and satisfy the five requirements above.
+  Derive target facts from the consumer's declaration/build; keep the manifest small.
+  Long-term the runner belongs to the ASIC library or a project entry point and Workbench
+  only supervises it; do not let Workbench accumulate flow semantics or learn to call the
+  flow's own scripts directly. Evidence: generate or
   run through the project entry point, display results with original manifest/
   execution IDs, preserve report/source-set roles and unknown metrics, and reject
   incompatible integration explicitly. Bundle emission must not display as
-  physical closure. Reopening a result must not launch the flow again.
+  physical closure. Reopening a result must not launch the flow again. Detaching and
+  reattaching a client during a long run must not duplicate or orphan it.
 - [ ] **A.3 — Reuse supported inspection views.** After A.2 and the relevant
   report/graph/simulation capabilities, display ASIC reports and project-provided
   traces with configuration/build/run identity. Evidence: views match source
@@ -155,23 +218,32 @@ Steps:
   from architecture sections 4 and 18. Represent external roots and integration availability;
   generic projects need not have Hardcaml targets. Keep native resources private and expose
   artifact IDs/metadata for daemon-mediated retrieval.
+- [ ] Keep those schemas backend-neutral from the start, per architecture sections 4.1, 4.2,
+  and 18: extensible backend-tagged target facts rather than an FPGA part field; open
+  namespaced artifact kinds rather than a closed variant; optional build and run references on
+  jobs and artifacts; and metrics carrying unit, tool, stage, corner, and source report rather
+  than a fixed LUT/FF/DSP record. These are cheap now and a protocol revision later.
 - [ ] Define the first typed request/response and incremental update contracts. Resolve the
   application RPC transport and serialization choice in the architecture before wiring the
   client. Compile shared definitions for both native OCaml and JavaScript; browser code
   depends on the shared protocol, not native backend or adapter libraries.
-- [ ] Package the native daemon, compiled Bonsai JavaScript, HTML, and CSS. Provide a launcher
-  that starts local serving and opens the browser, with a project-root argument for 1B.
-  Document both the development startup workflow and the installed application workflow.
+- [ ] Package the native daemon and the native `bonsai_term` client, with a project-root
+  argument for 1B. Bind the daemon to loopback only. Document both the development startup
+  workflow and the installed application workflow. Browser asset packaging belongs to 1E and
+  must not gate this milestone; the recorded JavaScript toolchain prerequisite currently
+  prevents it.
 - [ ] Add a deterministic miniature Dune/Hardcaml project under test fixtures. Exercise it
   from an external temporary root with its own `dune-project`, build/test entry points,
   and environment; do not link its circuit modules into Workbench application libraries
   or absorb it into the Workbench Dune workspace. It needs no manifest/driver until 1C.
 
 **Exit check:** build and install into a test prefix, then launch outside the Workbench
-checkout. The installed daemon serves packaged frontend assets and the browser obtains a
-typed response without a development asset server. Confirm native/browser dependency
-separation and ordinary fixture build/test commands in its separate root. Record exact
-commands; this establishes the foundation for section 25's first implementation milestone.
+checkout. The installed daemon accepts a connection from the installed terminal client, which
+obtains a typed response. Confirm that the client depends on the shared protocol only, with no
+dependency path to the backend or adapters, and that ordinary fixture build/test commands work
+in its separate root. Record exact commands; this establishes the foundation for section 25's
+first implementation milestone. Record the browser client as blocked on its upstream
+prerequisite rather than as incomplete work in this milestone.
 
 ### 1B. Open generic Dune projects and deliver the first job workflow
 
@@ -196,15 +268,21 @@ Steps:
   status, failures, cancellation, timestamps, and stdout/stderr capture.
 - [ ] Expose job submission, state retrieval, and incremental log/status updates through RPC.
   Reconnecting a browser should recover current daemon state without launching the job again.
-- [ ] Build the project/hierarchy pane, jobs table, and console/log pane in Bonsai. Show
-  real generic project information and a clearly labeled fixture hierarchy until 1C
-  supplies elaborated hierarchy; present unavailable Hardcaml actions explicitly.
+- [ ] Build the project/hierarchy pane, jobs table, and console/log pane in the `bonsai_term`
+  client. Show real generic project information and a clearly labeled fixture hierarchy until
+  1C supplies elaborated hierarchy; present unavailable Hardcaml actions explicitly. Keep view
+  state in the client and all project, job, and artifact state in the daemon, so 1E adds a
+  second client rather than a second state model.
 - [ ] Wire project build/test requests through the typed API, Dune adapter, and supervisor
   to visible completion. At least one is the supervised backend action in section 25.
   Adapters derive tool invocations; the daemon supervisor owns processes; UI sends typed
   requests rather than constructing commands.
 - [ ] Verify success, nonzero exit, launch failure, cancellation, and daemon shutdown behavior
   with small local commands; ensure supervised child processes are cleaned up.
+- [ ] Confirm the daemon outlives its clients: exit the client during a running job, then
+  reattach and recover the job's state and accumulated log. Confirm the same client works
+  against a daemon on another machine through an SSH port forward, which is the attached
+  deployment mode in architecture section 4.4 and needs no additional transport work.
 
 **Exit demo:** use the installed application to open the external fixture without any
 Workbench-specific files, inspect Dune-derived information, and run build/test actions in
@@ -256,45 +334,98 @@ project's selected environment and that ordinary project commands work without t
 Workbench. Exercise missing/incompatible integration with generic build/test still usable.
 Changing project, target, or configuration must not display previous results as current.
 
-### 1D. Add hierarchical timing and utilization reports
+### 1D. Add the first structured hierarchical report
 
-**References:** [Xilinx reports integration](hardcaml_workbench_architecture.md#6-hardcaml_xilinx_reports),
+**References:** [MVP checklist](hardcaml_workbench_architecture.md#20-suggested-mvp),
+[metrics and checks](hardcaml_workbench_architecture.md#18-artifact-model),
+[Xilinx reports integration](hardcaml_workbench_architecture.md#6-hardcaml_xilinx_reports),
 [project-side operations](hardcaml_workbench_architecture.md#5-hardcaml-integration),
-[batch invocation](hardcaml_workbench_architecture.md#101-level-1--batch-invocation),
-[MVP checklist](hardcaml_workbench_architecture.md#20-suggested-mvp).
-**Depends on:** 1C; a usable Vivado installation for live integration validation.
+[batch invocation](hardcaml_workbench_architecture.md#101-level-1--batch-invocation).
+**Depends on:** 1C, and one opened project with a working reporting path.
+
+The gate is one structured hierarchical or staged report obtained through the opened project's
+own reporting path, carrying provenance and mapped onto the design. Either path satisfies it:
+
+| Path | Report source | Live prerequisite |
+| --- | --- | --- |
+| FPGA | `hardcaml_xilinx_reports` through the project driver | A usable Vivado installation |
+| ASIC | The project's flow report, per A.2 | A provisioned flow environment and an emitted bundle |
+
+Implement whichever path the first real opened project provides. Record which path closed the
+gate and which remains pending; implementing the second one is not required to complete this
+milestone.
 
 Steps:
 
-- [ ] Integrate `hardcaml_xilinx_reports` through the project driver, preferring its library
-  API when compatible with the project's Hardcaml version. Return structured results to
-  the daemon. If a project initially exposes only a CLI, invoke it through a native adapter
-  behind the same typed operation and record the reason/follow-up.
-- [ ] Run hierarchical report generation as supervised jobs using the initial batch flow;
-  use project-owned part/clock/constraint inputs and associate parent/child work and outputs
-  with the selected project, target, and configuration. Supervision must cover the driver
-  and its tool subprocesses, including cancellation and cleanup.
-- [ ] Store structured timing/utilization results alongside raw reports and logs, and map
-  results back to hierarchy instances.
-- [ ] Display a resource/timing table and a selected-node report inspector, including job
-  status and explicit unavailable/failed results rather than misleading zero values.
-- [ ] Exercise report mapping and failures with fixtures, then validate a real run against
-  its generated reports. Surface missing tools, licensing failures, and invalid part or
-  constraint configuration as actionable job failures.
+- [ ] Define the typed report operation on the driver contract independently of which tool
+  answers it. Return structured results to the daemon with the metric representation from
+  architecture section 18: unit, tool, stage, corner, and source report.
+- [ ] For the FPGA path, integrate `hardcaml_xilinx_reports` through the project driver,
+  preferring its library API when compatible with the project's Hardcaml version. If a project
+  initially exposes only a CLI, invoke it through a native adapter behind the same typed
+  operation and record the reason/follow-up.
+- [ ] For the ASIC path, obtain the collected flow result through the project's own entry
+  point per A.2, and preserve build and run identity rather than re-deriving it.
+- [ ] Run report generation as supervised jobs using the initial batch flow; use project-owned
+  target, clock, and constraint inputs and associate parent/child work and outputs with the
+  selected project, target, and configuration. Supervision must cover the driver and its tool
+  subprocesses, including cancellation and cleanup.
+- [ ] Store structured results alongside raw reports and logs, and map results back to
+  hierarchy instances.
+- [ ] Display a metric table and a selected-node report inspector, including job status and
+  explicit unavailable/failed results rather than misleading zero values. Keep stage
+  completion, timing goals, and required verification checks visually distinct; an emitted
+  build must not read as a completed run, and a completed run must not read as closure.
+- [ ] Exercise report mapping and failures with fixtures, then validate a real run against its
+  generated reports. Surface missing tools, licensing failures, unprovisioned environments,
+  and invalid target or constraint configuration as actionable job failures.
 
 **Phase 1 exit demo:** complete all ten MVP items in architecture section 20 on a real
-Hardcaml target in an independent project: installed daemon/frontend, project opening,
-driver target discovery/selection, driver Verilog generation, hierarchical reports,
-hierarchy, resource/timing table, live logs, and node inspection. Retain 1B's generic Dune
-workflow and 1C's compatibility/fallback checks. Run from outside the Workbench checkout
-and verify the opened project remains usable through its normal CLI. Canned report
-fixtures alone leave the live Vivado integration check pending.
+Hardcaml target in an independent project: installed daemon and terminal client, project
+opening, driver target discovery/selection, driver RTL generation, one structured hierarchical
+or staged report, hierarchy, a metric table with units and analysis context, live logs, and
+node inspection. Retain 1B's generic Dune workflow and 1C's compatibility/fallback checks. Run
+from outside the Workbench checkout and verify the opened project remains usable through its
+normal CLI. Canned report fixtures alone leave the live integration check pending for whichever
+path was implemented. 1E is not required by this gate.
 
-## 5. Phase 2 — Persistent Vivado and repeatable runs
+### 1E. Add the browser client and graphical views
 
-### 2A. Build the persistent Vivado worker
+**References:** [frontend choice](hardcaml_workbench_architecture.md#1-frontend-choice-and-delivery-order),
+[shared application protocol](hardcaml_workbench_architecture.md#43-application-protocol-and-runtime-boundaries),
+[UI layout](hardcaml_workbench_architecture.md#8-suggested-ui-layout),
+[JavaScript prerequisite](development.md#javascript-toolchain-prerequisite).
+**Depends on:** 1B for the typed client surface, and an aligned OxCaml/js_of_ocaml package pair
+or an upstream compatibility fix. Not part of the MVP gate.
 
-**References:** [persistent subprocess](hardcaml_workbench_architecture.md#102-level-2--persistent-vivado-tcl-subprocess),
+Steps:
+
+- [ ] Promote the web target to JavaScript mode and require `web/main.bc.js` to build. Do not
+  patch the shared opam switch ad hoc, and do not treat the bytecode target as evidence of
+  this check.
+- [ ] Package the compiled JavaScript, HTML, and CSS with the daemon, and extend the launcher
+  to serve them from the daemon's loopback address and open a browser.
+- [ ] Implement the project/hierarchy, jobs, console, and report views over the same typed
+  requests the terminal client already uses. A type or request added for the browser client
+  that the terminal client cannot use is a protocol design error, not a browser feature.
+- [ ] Verify that two clients attached to one daemon observe the same projects, jobs, and
+  artifacts, and that per-client selection and layout remain local to each client.
+
+**Exit demo:** launch a job from the terminal client and observe it in the browser client, and
+the reverse. Serve packaged assets from an installed daemon with no development asset server,
+both locally and over a forwarded loopback port. The graphical views themselves arrive with the
+Phase 3 milestones; this milestone delivers the client and the shared views.
+
+Until this milestone completes, record the browser client as blocked with the upstream
+prerequisite as its concrete blocker, and do not describe the application as shipping browser
+assets.
+
+## 5. Phase 2 — Persistent tool workers and repeatable runs
+
+### 2A. Build the persistent Tcl tool worker
+
+**References:** [tool worker strategy](hardcaml_workbench_architecture.md#9-tool-worker-strategy),
+[persistent subprocess](hardcaml_workbench_architecture.md#102-level-2--persistent-vivado-tcl-subprocess),
 [transport order](hardcaml_workbench_architecture.md#12-socket-vs-persistent-stdinstdout),
 [serialization](hardcaml_workbench_architecture.md#14-important-tclevent-loop-considerations),
 [Vivado milestone](hardcaml_workbench_architecture.md#26-recommended-vivado-milestone).
@@ -304,6 +435,12 @@ Steps:
 
 - [ ] Start and own `vivado -mode tcl` in the daemon, with explicit session lifecycle and
   association to the opened project. Keep worker handles in native backend/adapter state.
+- [ ] Name and structure the subsystem for its role rather than its first instance: worker
+  mechanics (framing, serialization, timeouts, cancellation, restart, session invalidation)
+  are tool-independent, while command vocabulary, report parsing, and result interpretation
+  belong to each tool's adapter. Vivado is the first adapter; OpenROAD, which the ASIC flow
+  already drives, is the plausible second. Do not generalize beyond one adapter speculatively,
+  but do not put Vivado's vocabulary in the worker.
 - [ ] Implement command IDs, completion/error framing, safe structured serialization, and
   stdout/stderr capture. Do not rely on the normal Tcl prompt as a completion boundary.
 - [ ] Serialize commands through one executor per session; keep transport details behind
@@ -314,13 +451,14 @@ Steps:
   `version`, `pwd`, and `get_parts` before opening projects or running synthesis.
 
 **Exit demo:** execute several typed requests in one real Vivado process, correlate each
-result correctly, recover from a worker failure, and terminate/restart cleanly.
+result correctly, recover from a worker failure, and terminate/restart cleanly. Confirm the
+worker mechanics contain no Vivado-specific command or report knowledge.
 
 ### 2B. Add synthesis, implementation, and structured reports
 
 **References:** [structured API](hardcaml_workbench_architecture.md#15-structured-vivado-api),
 [project model](hardcaml_workbench_architecture.md#41-project-model),
-[Vivado strategy](hardcaml_workbench_architecture.md#9-vivado-integration-strategy),
+[tool worker strategy](hardcaml_workbench_architecture.md#9-tool-worker-strategy),
 [Phase 2 scope](hardcaml_workbench_architecture.md#21-phase-2).
 **Depends on:** 2A.
 
@@ -485,13 +623,21 @@ Steps:
 **Exit demo:** make a manual GUI change, refresh the workbench's view, and execute a typed
 workbench action in that same session. Verify disconnect behavior.
 
-### 4D. Add remote build-machine support
+### 4D. Add distributed remote build workers
 
 **References:** [Phase 4 scope](hardcaml_workbench_architecture.md#23-phase-4),
+[deployment modes](hardcaml_workbench_architecture.md#44-deployment-and-client-attachment),
 [project/runtime boundary](hardcaml_workbench_architecture.md#3-recommended-high-level-architecture),
 [transport considerations](hardcaml_workbench_architecture.md#12-socket-vs-persistent-stdinstdout).
 **Depends on:** Phase 3 exit gate in the default roadmap; reuses 1B–1C's project/environment
 and driver contracts plus job supervision, artifact access, and history.
+
+This milestone is the distributed-worker mode only: a local daemon dispatching jobs to remote
+build machines. It is not how a user works against a remote machine in general. The attached
+mode, where the daemon runs beside the project and its toolchain and clients connect over an
+SSH port forward, is available from 1B and carries none of this milestone's cost. Prefer it,
+and implement 4D only when work genuinely must be dispatched to a machine that does not hold
+the project.
 
 Steps:
 
@@ -509,45 +655,35 @@ recover from a connection interruption with a correct final job state. Exercise 
 driver operation in the remote project environment as well as generic Dune execution;
 neither requires the project's hardware modules to be linked into the Workbench.
 
-### 4E. Optionally add a Bonsai Term frontend
-
-**References:** [frontend choice](hardcaml_workbench_architecture.md#1-primary-ui-choice),
-[shared application protocol](hardcaml_workbench_architecture.md#43-application-protocol-and-runtime-boundaries),
-[Phase 4 scope](hardcaml_workbench_architecture.md#23-phase-4).
-**Depends on:** Phase 3 exit gate in the default roadmap; uses existing daemon/RPC services.
-
-Steps:
-
-- [ ] Select a focused terminal workflow: project/target selection, job launch, status, logs,
-  and report summaries.
-- [ ] Implement it over the shared typed application protocol with daemon-owned projects,
-  jobs, artifacts, and tool execution.
-
-**Exit demo:** launch and inspect a job in the terminal and observe the same state in the web
-frontend. Graphical feature parity is not required by this optional milestone.
-
 **Phase 4 exit:** 4A, 4B, and 4D pass their live checks; record whether each optional extension
 was completed or deferred. Do not imply that untested hardware or remote flows are complete.
+The terminal frontend moved to 1A/1B and the browser frontend to 1E; neither is a Phase 4
+milestone any longer.
 
 ## 8. Decisions to resolve at the point of need
 
 The standalone application, independent-project ownership, three integration levels,
-project-side typed Hardcaml calls, and native/browser separation are already established.
-The table records remaining details to close in the architecture when implementing each
-milestone; it does not reopen those boundaries.
+project-side typed Hardcaml calls, native/frontend separation, terminal-first frontend order,
+backend neutrality of the shared schemas, and loopback-only daemon binding are already
+established. The table records remaining details to close in the architecture when
+implementing each milestone; it does not reopen those boundaries.
 
 | Before implementation of | Decision to record in the architecture | Relevant section |
 | --- | --- | --- |
-| 1A | Application RPC transport/serialization, initial portable schemas, launcher/asset installation and serving, and concrete Dune library/dependency layout within established runtime roles | 3, 4.3, 24 |
+| 1A | Application RPC transport/serialization, launcher and installation, and concrete Dune library/dependency layout within established runtime roles | 3, 4.3, 24 |
+| 1A | Concrete backend-neutral schema shapes: extensible target facts, the artifact-kind namespace and role vocabulary, optional build/run references, and the metric representation with unit, tool, stage, corner, and source | 4.1, 4.2, 18 |
 | 1B | Root validation, project environment selection, supported Dune inspection/commands/RPC, and project/job/log snapshot and reconnect semantics | 4.1–4.3, 25 |
+| 1B | Which session state is daemon-owned and shared versus per-client, the single owner of cancellation with multiple clients attached, and the client's connection/reattach behavior against a forwarded loopback address | 4.3, 4.4 |
 | 1C | Initial manifest schema/defaults, driver protocol operations/versions and compatibility errors, target/configuration validation, hierarchy identity, artifact registration/access, and source provenance; whether an SDK is useful | 4.1, 4.3, 5, 18, 24 |
 | A.2–A.3 | ASIC driver capabilities/results, target summaries without FPGA-only assumptions, immutable build/execution identity mapping, one execution/cancellation owner, and supported views | 4.1, 18 |
-| 1D | Supported project/report-library and Vivado versions, fixture FPGA part/constraints, and driver report operation/result mapping or justified existing CLI fallback | 5, 6, 10.1 |
+| A.2–A.3 | Stage requested-versus-completed representation, per-corner metric grouping, physical/submission check results, and execution environment identity in provenance | 4.2, 18 |
+| 1D | The typed report operation and result mapping independently of which tool answers it; then, for whichever path closes the gate, supported project/report-library and tool versions and fixture target/constraint inputs, or a justified existing CLI fallback | 5, 6, 10.1, 18 |
+| 1E | Browser asset packaging and serving from the daemon's loopback address, and the resolution or pinning of the OxCaml/js_of_ocaml compatibility prerequisite | 3, 4.3, 24 |
 | 2A | Framing, command serialization, timeout/cancellation, worker restart, and session invalidation | 10.2, 14, 15, 26 |
 | 2C | Durable storage, artifact paths, schema evolution, and interrupted-run recovery | 18, 21 |
 | 3A–3C | Versioned driver graph/simulation extensions, graph identity/scale, waveform format, timing-name mapping, and comparison compatibility | 4.3, 5, 7, 19, 22 |
 | 4A–4B | Supported hardware, device/bitstream association, and ILA capture configuration | 17, 23 |
-| 4C–4D | Connection trust, session ownership, remote transport and project environment, source/artifact transfer, and recovery | 3, 4.1, 11–14, 23 |
+| 4C–4D | Connection trust, session ownership, remote transport and project environment, source/artifact transfer, and recovery. The attached deployment mode is already settled in 4.4; these decisions concern the distributed-worker mode only | 3, 4.1, 4.4, 11–14, 23 |
 
 ## 9. Completion and progress tracking
 
@@ -582,11 +718,15 @@ implementation and validation evidence; a checked task list alone is insufficien
 
 | Milestone | Status | Implementation / validation evidence or blocker |
 | --- | --- | --- |
-| 1A — Installed application foundation | In progress | [Development baseline](development.md#baseline-recorded-for-milestone-1a) and [application packaging foundation](development.md#application-packaging-foundation): toolchain/dependency audit, passing repository checks, application-role Dune targets, and native/browser dependency separation recorded 2026-09-14. JavaScript promotion remains pending on the documented OxCaml/js_of_ocaml compatibility prerequisite; no application startup command exists until the remaining 1A runtime/installation work is implemented. |
-| 1B — Generic Dune projects, jobs, and UI | Not started | — |
+| 1A — Installed application foundation | In progress | [Development baseline](development.md#baseline-recorded-for-milestone-1a) and [application packaging foundation](development.md#application-packaging-foundation): toolchain/dependency audit, passing repository checks, application-role Dune targets, and native/frontend dependency separation recorded 2026-09-14. JavaScript promotion moved to 1E and is tracked as blocked there; no application startup command exists until the remaining 1A runtime/installation work is implemented. |
+| 1B — Generic Dune projects, jobs, and terminal client | Not started | — |
 | 1C — Versioned manifest/driver and RTL | Not started | — |
-| 1D — Hierarchical reports / MVP gate | Not started | — |
-| 2A — Persistent Vivado worker | Not started | — |
+| 1D — First structured hierarchical report / MVP gate | Not started | — |
+| 1E — Browser client and graphical views | Blocked | Two layers of the same blocker, checked 2026-09-17. `js_of_ocaml` is not installed in the `5.2.0+ox` switch and its `oxcaml-js_of_ocaml*` packages are guarded, so `dune build` currently fails on `web/main.bc` with `Library "js_of_ocaml" not found`; behind that sits the recorded [OxCaml/js_of_ocaml incompatibility](development.md#javascript-toolchain-prerequisite) that would block the JavaScript target even once installed. Next action: track an aligned compiler/js_of_ocaml pair or an upstream fix. Not part of the MVP gate; the daemon, protocol, project-integration, backend, and adapter targets build. |
+| A.1 — Open an ASIC consumer as an ordinary project | Not started | — |
+| A.2 — ASIC build and execution artifacts | Not started | — |
+| A.3 — Reuse supported inspection views for ASIC | Not started | — |
+| 2A — Persistent Tcl tool worker | Not started | — |
 | 2B — Synthesis, implementation, reports | Not started | — |
 | 2C — RTL viewer and history / Phase 2 gate | Not started | — |
 | 3A — Elaboration graph | Not started | — |
@@ -595,10 +735,16 @@ implementation and validation evidence; a checked task list alone is insufficien
 | 4A — Hardware programming | Not started | — |
 | 4B — ILA capture | Not started | — |
 | 4C — GUI socket bridge (optional) | Not started | — |
-| 4D — Remote builds | Not started | — |
-| 4E — Bonsai Term (optional) | Not started | — |
+| 4D — Distributed remote workers | Not started | — |
 
-**Next construction task:** implement 1A's installed application foundation and independent
-fixture, then complete 1B's generic Dune project/job demo before adding the versioned
-manifest and project driver in 1C and hierarchical reports in 1D. This plan revision does
-not implement code or mark any milestone complete.
+**Next construction task:** implement 1A's installed application foundation, terminal client,
+and independent fixture, then complete 1B's generic Dune project/job demo before adding the
+versioned manifest and project driver in 1C and the first structured report in 1D.
+
+The shortest route from the current state to a Workbench that is actually used runs through
+A.1: open `hardcaml_asic` or its consumer as an ordinary project, run its Dune build and test
+as supervised jobs with streaming logs, then run its flow steps as jobs and render the
+structured result it already collects. That exercises 1B end to end and most of 1D's value
+with no Vivado, no manifest, no driver, and no JavaScript toolchain. Prefer one small vertical
+slice of this kind over further planning; this plan revision does not implement code or mark
+any milestone complete.
