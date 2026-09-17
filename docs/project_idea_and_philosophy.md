@@ -75,6 +75,21 @@ The Workbench owns:
 - the typed application protocol,
 - the Bonsai user interface.
 
+### ASIC project ownership
+
+An ASIC project can use [`hardcaml_asic`](../../hardcaml_asic/docs/architecture.md)
+for target/resource resolution, generated flow inputs, and immutable build/run
+records. Those remain project-side capabilities. Workbench supervises the project's
+driver or commands and presents their results; its session model and manifest do
+not become another source of clocks, memory policies, TT metadata, or constraints.
+Workbench artifact/job IDs link to the original ASIC build and execution identities.
+
+This optional integration follows the same progressive model below. It does not
+require the project's hardware to link Workbench application libraries, and it
+does not require a Workbench UI to elaborate, simulate, or harden a design.
+The protocol emulator's host API and device recovery remain emulator concerns;
+a dedicated operator extension would be a later explicit product decision.
+
 ## 4. Progressive project integration
 
 Project integration should have three levels. A project can adopt the Workbench gradually

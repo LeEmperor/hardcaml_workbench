@@ -58,8 +58,9 @@ The Workbench's switch wrapper does not establish the execution environment of a
 project; selecting and using that environment belongs to project integration in 1B–1C.
 
 These are scaffolding observations, not evidence that the toolchain or any milestone passes.
-All milestones below begin as **Not started**. Existing unrelated working-tree changes are
-outside this documentation task.
+The starting-point observations are historical; checked items below record subsequent
+progress, including the first 1A toolchain/packaging work. They do not establish complete
+application or driver support.
 
 ## 3. Roadmap and dependencies
 
@@ -98,6 +99,38 @@ Phase 2. In Phase 4, 4B depends on 4A; 4C, 4D, and 4E are separate extensions.
 Remote support does not inherently require a Vivado
 socket bridge: select and document its transport when defining that milestone. Optional
 extensions are recorded as deferred if they are not selected, rather than marked complete.
+
+### Optional ASIC integration track
+
+Follow [ASIC project ownership](hardcaml_workbench_architecture.md#asic-projects-and-hardcaml_asic).
+The existing four-phase/Vivado roadmap and exit gates remain intact. This track
+can proceed from the relevant 1B/1C capabilities without waiting for Vivado or
+becoming a prerequisite for the emulator's ASIC work. All items are initially open.
+
+- [ ] **A.1 — Open an ASIC consumer as an ordinary project.** After 1B, run its
+  existing Dune build/test or project commands in its selected environment.
+  Evidence: CLI use remains independent; jobs retain logs/status and do not
+  implicitly install tools or a PDK.
+- [ ] **A.2 — Integrate ASIC build and execution artifacts.** Depends on 1C's
+  versioned driver/artifact support and a consumer with an emitted ASIC bundle
+  (the emulator tracks this in P0.6/P0.7). Before implementation, define operation
+  capabilities, ASIC target/configuration summaries, schema compatibility, and
+  cancellation ownership in the architecture. Derive target facts from the
+  consumer's declaration/build; keep the manifest small. Evidence: generate or
+  run through the project entry point, display results with original manifest/
+  execution IDs, preserve report/source-set roles and unknown metrics, and reject
+  incompatible integration explicitly. Bundle emission must not display as
+  physical closure. Reopening a result must not launch the flow again.
+- [ ] **A.3 — Reuse supported inspection views.** After A.2 and the relevant
+  report/graph/simulation capabilities, display ASIC reports and project-provided
+  traces with configuration/build/run identity. Evidence: views match source
+  artifacts; unsupported views are explicit. Any emulator device-control extension
+  remains a separate product/API decision over its own host library.
+
+Record completion or explicit deferral per item. The helper library owns ASIC
+resource/target/flow semantics; this track owns application integration. The
+emulator's [L.4](../../scaf/docs/phase_plan.md#10-later--application-on-the-existing-host-api)
+owns its project-side adapter. Exact driver APIs are not yet implemented or frozen.
 
 ## 4. Phase 1 — A usable MVP
 
@@ -508,6 +541,7 @@ milestone; it does not reopen those boundaries.
 | 1A | Application RPC transport/serialization, initial portable schemas, launcher/asset installation and serving, and concrete Dune library/dependency layout within established runtime roles | 3, 4.3, 24 |
 | 1B | Root validation, project environment selection, supported Dune inspection/commands/RPC, and project/job/log snapshot and reconnect semantics | 4.1–4.3, 25 |
 | 1C | Initial manifest schema/defaults, driver protocol operations/versions and compatibility errors, target/configuration validation, hierarchy identity, artifact registration/access, and source provenance; whether an SDK is useful | 4.1, 4.3, 5, 18, 24 |
+| A.2–A.3 | ASIC driver capabilities/results, target summaries without FPGA-only assumptions, immutable build/execution identity mapping, one execution/cancellation owner, and supported views | 4.1, 18 |
 | 1D | Supported project/report-library and Vivado versions, fixture FPGA part/constraints, and driver report operation/result mapping or justified existing CLI fallback | 5, 6, 10.1 |
 | 2A | Framing, command serialization, timeout/cancellation, worker restart, and session invalidation | 10.2, 14, 15, 26 |
 | 2C | Durable storage, artifact paths, schema evolution, and interrupted-run recovery | 18, 21 |

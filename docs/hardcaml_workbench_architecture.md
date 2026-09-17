@@ -226,8 +226,10 @@ type target =
 
 Avoid coupling the entire application directly to command-line flags.
 
-The project model should become the source of truth from which adapters derive typed tool
-requests. Project-local paths must be resolved relative to the selected, validated root.
+The project model is the Workbench session's view from which adapters derive typed tool
+requests. The opened project remains authoritative for design constructors and configuration;
+driver-derived target facts must not become a second independently edited design description.
+Project-local paths must be resolved relative to the selected, validated root.
 
 Project integration has three levels:
 
@@ -269,6 +271,48 @@ and projects must remain usable through their ordinary Dune commands without lau
 Workbench.
 
 ---
+
+### ASIC projects and `hardcaml_asic`
+
+The [ASIC library architecture](../../hardcaml_asic/docs/architecture.md) defines an
+independent project declaration, temporary elaboration context, resolved target, immutable
+build bundle, and separate execution record. The
+[protocol emulator](../../scaf/docs/construction-plan.md) is its first reference consumer.
+These are planned integration boundaries, not a claim of implemented ASIC support here.
+
+For such a project, the driver calls the project's own `hardcaml_asic` version. The
+declaration/build supplies harness plus technology, clocks, valid configurations, resource
+selection policies, source sets, constraints, collateral, and generated TT metadata. The
+Workbench manifest identifies the driver/aliases; it must not duplicate those facts as a
+second configuration authority. Discovery can expose immutable summaries and supported
+configuration choices without permitting raw edits to protected target values.
+
+The ASIC adapter owns flow rendering, tool-specific invocation semantics, and result
+interpretation. A project command or optional library runner executes the same emitted
+bundle available from the CLI. Workbench owns job scheduling/supervision, cancellation,
+logs, and presentation of the resulting records. Define one execution owner per request;
+do not launch an independent flow again merely to import its results. Environment/PDK
+provisioning remains explicit and is not a side effect of opening or elaborating a project.
+
+Integration can progress from generic build/test commands (1B), to versioned project
+operations and build/run artifact import (1C plus an optional ASIC extension), to typed
+simulation/waveforms when 3B is available. It does not require the Vivado milestones and
+does not change their exit gates. Keep backend-specific target facts extensible rather
+than assuming every target has an FPGA part or produces a bitstream. Exact ASIC operation,
+capability, result, and cancellation schemas must be recorded before implementation.
+
+Workbench jobs and artifact IDs reference ASIC build-manifest and execution identities;
+they do not replace or rewrite those records. Preserve model/synthesis source-set roles,
+requested versus selected resources, fallback/override reasons, requested versus actual
+tools, and links to original reports. Distinguish bundle emission, flow completion, timing
+closure, and physical checks; an unavailable metric stays unknown. Browser retrieval still
+uses artifact IDs, with paths and input-content preservation managed by the backend.
+
+The emulator retains its device host API, firmware loader, protocol tests, and recovery
+logic. Generic design inspection fits Workbench's scope; a protocol-emulator operator
+extension is a separate future decision, not implied by FPGA Hardware Manager support.
+Neither Workbench nor commercial EDA adapters gate the emulator's hardware/tapeout path.
+Sibling links above identify workspace documentation, not runtime/build path requirements.
 
 ## 4.2 Job System
 
@@ -1042,8 +1086,11 @@ dirty working-tree state where available
 generating job
 ```
 
-Do not claim an exact committed source identity for dirty or non-Git inputs. Complete
-provenance will enable design comparisons later.
+Do not claim an exact committed source identity for dirty or non-Git inputs. Preserve
+the input contents needed for reproduction as well as hashes. For ASIC integration, retain
+the immutable build manifest and separate execution record under their original identities;
+link the Workbench job/artifacts to them as described in section 4.1. Complete provenance
+will enable design comparisons later.
 
 ---
 
