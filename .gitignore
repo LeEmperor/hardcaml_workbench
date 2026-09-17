@@ -1,0 +1,32 @@
+# dune
+_build/
+*.install
+
+# ocaml
+*.cm[iox]
+*.annot
+*.cmt*
+*.merlin
+
+# editor
+*.swp
+*~
+.DS_Store
+
+*.exe
+*.bc
+CLAUDE.md
+
+# build system
+_opam/
+env.sh
+*.vcd
+
+# release staging (build products; regenerated per release)
+MANIFEST.txt
+SHA256SUMS
+release-group/*
+!release-group/README.md
+
+# python scratch
+__pycache__/

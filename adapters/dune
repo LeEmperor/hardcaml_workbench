@@ -1,0 +1,11 @@
+(library
+ (name hardcaml_workbench_adapters)
+ (libraries
+  core
+  core_unix
+  hardcaml_workbench_project_integration
+  hardcaml_workbench_protocol)
+ (preprocess
+  (pps ppx_jane))
+ (lint
+  (pps ppx_js_style)))

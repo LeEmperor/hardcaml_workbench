@@ -5,22 +5,33 @@
 (generate_opam_files true)
 
 (source
- (github username/reponame))
+ (github LeEmperor/hardcaml_workbench))
 
-(authors "Author Name <author@example.com>")
+(authors "Bohdan Purtell <bohdanpurtell@gmail.com>")
 
-(maintainers "Maintainer Name <maintainer@example.com>")
-
-(license LICENSE)
-
-(documentation https://url/to/documentation)
+(maintainers "Bohdan Purtell <bohdanpurtell@gmail.com>")
 
 (package
  (name hardcaml_workbench)
- (synopsis "A short synopsis")
- (description "A longer description")
- (depends ocaml)
- (tags
-  ("add topics" "to describe" your project)))
-
-; See the complete stanza docs at https://dune.readthedocs.io/en/stable/reference/dune-project/index.html
+ (synopsis "A local development workbench for independent Hardcaml projects")
+ (description
+  "A standalone native OCaml and Bonsai Web application for inspecting, running,\nmeasuring, and debugging independently owned Hardcaml projects.")
+ (allow_empty)
+ (depends
+  (ocaml
+   (>= 5.1))
+  ; Portable shared protocol and application code.
+  core
+  ppx_jane
+  ; Native daemon, backend, and adapters.
+  core_unix
+  ; Browser application and JavaScript build.
+  bonsai
+  bonsai_web
+  js_of_ocaml
+  js_of_ocaml-ppx
+  ppx_css
+  ; Repository development tools.
+  (ppx_js_style :with-dev-setup)
+  (ocamlformat :with-dev-setup)
+  (ocaml-lsp-server :with-dev-setup)))

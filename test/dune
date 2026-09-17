@@ -1,3 +1,0 @@
-(test
- (name test_hardcaml_workbench)
- (libraries hardcaml_workbench))
