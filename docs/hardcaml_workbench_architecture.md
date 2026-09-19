@@ -265,6 +265,19 @@ harness, technology, and resolved geometry facts, and a simulation-only target m
 neither. Do not promote one backend's vocabulary into the shared target type, and do not
 require a target to produce a bitstream.
 
+The implemented schema in `protocol/` follows these concepts with three refinements, made
+while deriving milestone 1A's types and recorded here so this section stays the source of
+truth:
+
+- `build_configs` is named `configurations`, matching `Configuration_id.t`. A configuration
+  carries its identity, target, and description; the settings it selects belong to the
+  versioned driver contract and are added in 1C rather than duplicated here.
+- `boards` is not implemented. A board is an FPGA-backend concept, and representing it as a
+  field every project has would be the coupling the paragraph above prohibits. It returns as
+  backend-declared facts or its own type when Phase 4 needs it.
+- A target fact carries an optional `display` string, so a backend can control how a
+  structured value is shown without the UI interpreting the backend's vocabulary.
+
 Avoid coupling the entire application directly to command-line flags.
 
 The project model is the Workbench session's view from which adapters derive typed tool
@@ -1231,6 +1244,13 @@ type artifact =
   }
 ```
 
+The implemented schema in `protocol/` makes `target` and `configuration` optional on both
+artifacts and jobs. A generic Dune project has no targets, so its build log is an artifact of
+a project rather than of a target; requiring one would force a placeholder identifier that
+names nothing. `availability` is a peer of the metadata rather than part of it, because an
+artifact whose content has since been removed is still a registered result with intact
+provenance.
+
 A closed kind variant would force a protocol revision for every backend. The FPGA vocabulary
 is one namespace: Verilog, checkpoints, bitstreams, timing and utilization reports, and tool
 logs. An ASIC flow adds GDS, LEF/DEF, SDC constraints, gate-level netlists, simulation
@@ -1287,7 +1307,11 @@ type metric =
 
 A missing, unsupported, or unparseable metric is unavailable with a recorded reason. It is
 never zero and never a pass. This rule already governs the ASIC library's results and applies
-equally to Vivado's.
+equally to Vivado's. The implemented `Metric.Value.t` carries `Unavailable of
+{ reason : string }` as one of its cases rather than pairing a value with a separate
+availability flag, so there is no representation of a metric that is both absent and
+numeric. Its `source` is optional for the same reason: a metric that is unavailable because
+no report was produced has no report to cite.
 
 Timing is not a single number. Report setup and hold analyses separately, and report per
 corner or mode wherever the flow analyses more than one; a single worst slack cannot represent

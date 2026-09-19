@@ -1,0 +1,17 @@
+; `-source-tree-root .` is required for every inline test in this switch. The installed
+; `ppx_expect` runtime patches `Filename.concat (source_tree_root ()) (basename filename)`,
+; which discards the subdirectory, so an expect test outside the Dune project root aborts
+; the runner even when it passes. Dune already runs the runner in the library directory and
+; passes the correct relative path; this flag wins because Dune appends stanza flags last.
+; See docs/development.md#inline-expect-test-prerequisite.
+
+(library
+ (name hardcaml_workbench_protocol_test)
+ (libraries core hardcaml_workbench_protocol)
+ (inline_tests
+  (flags
+   (-source-tree-root .)))
+ (preprocess
+  (pps ppx_jane))
+ (lint
+  (pps ppx_js_style)))

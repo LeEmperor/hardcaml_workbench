@@ -214,11 +214,11 @@ Steps:
   packaging and correct dependency classifications. Establish shared protocol, project
   integration, native backend/adapters, daemon, and Bonsai web roles from section 24.
   Keep the project SDK optional; any SDK is driver integration support, not circuit source.
-- [ ] Implement the initial project, target, job, and artifact types needed by 1B–1D, derived
+- [x] Implement the initial project, target, job, and artifact types needed by 1B–1D, derived
   from architecture sections 4 and 18. Represent external roots and integration availability;
   generic projects need not have Hardcaml targets. Keep native resources private and expose
   artifact IDs/metadata for daemon-mediated retrieval.
-- [ ] Keep those schemas backend-neutral from the start, per architecture sections 4.1, 4.2,
+- [x] Keep those schemas backend-neutral from the start, per architecture sections 4.1, 4.2,
   and 18: extensible backend-tagged target facts rather than an FPGA part field; open
   namespaced artifact kinds rather than a closed variant; optional build and run references on
   jobs and artifacts; and metrics carrying unit, tool, stage, corner, and source report rather
@@ -718,7 +718,7 @@ implementation and validation evidence; a checked task list alone is insufficien
 
 | Milestone | Status | Implementation / validation evidence or blocker |
 | --- | --- | --- |
-| 1A — Installed application foundation | In progress | [Development baseline](development.md#baseline-recorded-for-milestone-1a) and [application packaging foundation](development.md#application-packaging-foundation): toolchain/dependency audit, passing repository checks, application-role Dune targets, and native/frontend dependency separation recorded 2026-09-14. JavaScript promotion moved to 1E and is tracked as blocked there; no application startup command exists until the remaining 1A runtime/installation work is implemented. |
+| 1A — Installed application foundation | In progress | [Development baseline](development.md#baseline-recorded-for-milestone-1a), [application packaging foundation](development.md#application-packaging-foundation), and [shared protocol schemas](development.md#shared-protocol-schemas). Toolchain/dependency audit, passing repository checks, application-role Dune targets, and native/frontend dependency separation recorded 2026-09-14; the project, target, job, and artifact schemas in `protocol/`, with backend-neutral target facts, open artifact kinds, optional backend build/run references, and unit/tool/stage/corner metrics, recorded 2026-09-18 with thirteen representation checks in `protocol/test/`. Remaining: the typed request/response and incremental update contracts, which need the architecture to record the application RPC transport and serialization choice first; daemon and `bonsai_term` client packaging; and the independent fixture. No application startup command exists yet. JavaScript promotion moved to 1E and is tracked as blocked there. |
 | 1B — Generic Dune projects, jobs, and terminal client | Not started | — |
 | 1C — Versioned manifest/driver and RTL | Not started | — |
 | 1D — First structured hierarchical report / MVP gate | Not started | — |
@@ -737,8 +737,10 @@ implementation and validation evidence; a checked task list alone is insufficien
 | 4C — GUI socket bridge (optional) | Not started | — |
 | 4D — Distributed remote workers | Not started | — |
 
-**Next construction task:** implement 1A's installed application foundation, terminal client,
-and independent fixture, then complete 1B's generic Dune project/job demo before adding the
+**Next construction task:** resolve the application RPC transport and serialization choice
+in the architecture, then define 1A's typed request/response and incremental update contracts
+over the schemas now in `protocol/`, package the daemon and terminal client, and add the
+independent fixture. Then complete 1B's generic Dune project/job demo before adding the
 versioned manifest and project driver in 1C and the first structured report in 1D.
 
 The shortest route from the current state to a Workbench that is actually used runs through
