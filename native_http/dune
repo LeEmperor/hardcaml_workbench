@@ -1,0 +1,7 @@
+(library
+ (name hardcaml_workbench_native_http)
+ (libraries async cohttp-async core hardcaml_workbench_protocol)
+ (preprocess
+  (pps ppx_jane))
+ (lint
+  (pps ppx_js_style)))

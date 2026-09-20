@@ -223,16 +223,22 @@ Steps:
   namespaced artifact kinds rather than a closed variant; optional build and run references on
   jobs and artifacts; and metrics carrying unit, tool, stage, corner, and source report rather
   than a fixed LUT/FF/DSP record. These are cheap now and a protocol revision later.
-- [ ] Define the first typed request/response and incremental update contracts. Resolve the
-  application RPC transport and serialization choice in the architecture before wiring the
-  client. Compile shared definitions for both native OCaml and JavaScript; browser code
-  depends on the shared protocol, not native backend or adapter libraries.
-- [ ] Package the native daemon and the native `bonsai_term` client, with a project-root
+- [x] Record the application RPC, serialization, update/reconnect, launcher, installation,
+  and fixture decisions in the architecture. Decided 2026-09-19 in
+  [protocol decisions](hardcaml_workbench_architecture.md#1a-application-protocol-decisions-2026-09-19)
+  and [installation decisions](hardcaml_workbench_architecture.md#1a-launcher-installation-and-fixture-decisions-2026-09-19).
+  This completes design only; transport dependencies and runtime behavior remain unvalidated.
+- [x] Implement the versioned typed request/response and incremental update contracts from
+  those decisions: S-expressions over HTTP, `hello`, empty `snapshot`, and long-poll `updates`.
+  Compile and test the portable definitions natively; keep browser compatibility and leave
+  actual JavaScript codec execution to 1E. Browser code depends on the shared protocol,
+  not native backend or adapter libraries.
+- [x] Package the native daemon and the native `bonsai_term` client, with a project-root
   argument for 1B. Bind the daemon to loopback only. Document both the development startup
   workflow and the installed application workflow. Browser asset packaging belongs to 1E and
   must not gate this milestone; the recorded JavaScript toolchain prerequisite currently
   prevents it.
-- [ ] Add a deterministic miniature Dune/Hardcaml project under test fixtures. Exercise it
+- [x] Add a deterministic miniature Dune/Hardcaml project under test fixtures. Exercise it
   from an external temporary root with its own `dune-project`, build/test entry points,
   and environment; do not link its circuit modules into Workbench application libraries
   or absorb it into the Workbench Dune workspace. It needs no manifest/driver until 1C.
@@ -254,35 +260,44 @@ prerequisite rather than as incomplete work in this milestone.
 [UI layout](hardcaml_workbench_architecture.md#8-suggested-ui-layout).
 **Depends on:** 1A.
 
+**Status:** Implementation complete; acceptance pending. The root/session, environment, Dune
+inspection, V1 compatibility, per-project FIFO scheduling, process-group cancellation, and
+daemon-session log decisions were recorded in architecture section 4.3 on 2026-09-20. Automated
+and installed checks pass. Real Ghostty/Xfce resize confirmation and attachment through an SSH
+forward to an authorized second machine remain human acceptance checks, so the milestone is not
+marked complete.
+
 Steps:
 
-- [ ] Open a user-selected independent root containing `dune-project`; validate the root,
+- [x] Open a user-selected independent root containing `dune-project`; validate the root,
   create a daemon-owned project session, and resolve project-local paths against it.
   Define how the project's execution environment is selected and reported; do not silently
   substitute the Workbench build switch for the project's environment.
-- [ ] Use supported Dune inspection commands/RPC through a native Dune adapter for generic
+- [x] Use supported Dune inspection commands/RPC through a native Dune adapter for generic
   workspace information and normal build/test actions without a manifest or driver.
   Keep Dune authoritative for the build graph; generic inspection does not infer hardware
   top-level constructors, valid parameter sets, clocks, or parts.
-- [ ] Implement daemon-owned process supervision and the job lifecycle, including exit
+- [x] Implement daemon-owned process supervision and the job lifecycle, including exit
   status, failures, cancellation, timestamps, and stdout/stderr capture.
-- [ ] Expose job submission, state retrieval, and incremental log/status updates through RPC.
+- [x] Expose job submission, state retrieval, and incremental log/status updates through RPC.
   Reconnecting a browser should recover current daemon state without launching the job again.
-- [ ] Build the project/hierarchy pane, jobs table, and console/log pane in the `bonsai_term`
+- [x] Build the project/hierarchy pane, jobs table, and console/log pane in the `bonsai_term`
   client. Show real generic project information and a clearly labeled fixture hierarchy until
   1C supplies elaborated hierarchy; present unavailable Hardcaml actions explicitly. Keep view
   state in the client and all project, job, and artifact state in the daemon, so 1E adds a
   second client rather than a second state model.
-- [ ] Wire project build/test requests through the typed API, Dune adapter, and supervisor
+- [x] Wire project build/test requests through the typed API, Dune adapter, and supervisor
   to visible completion. At least one is the supervised backend action in section 25.
   Adapters derive tool invocations; the daemon supervisor owns processes; UI sends typed
   requests rather than constructing commands.
-- [ ] Verify success, nonzero exit, launch failure, cancellation, and daemon shutdown behavior
+- [x] Verify success, nonzero exit, launch failure, cancellation, and daemon shutdown behavior
   with small local commands; ensure supervised child processes are cleaned up.
-- [ ] Confirm the daemon outlives its clients: exit the client during a running job, then
-  reattach and recover the job's state and accumulated log. Confirm the same client works
-  against a daemon on another machine through an SSH port forward, which is the attached
-  deployment mode in architecture section 4.4 and needs no additional transport work.
+- [x] Confirm the daemon outlives its clients: exit the client during a running job, then
+  reattach and recover the daemon-owned job without submitting another one.
+- [ ] Confirm the same client works against a daemon on another machine through an SSH port
+  forward, which is the attached deployment mode in architecture section 4.4 and needs no
+  additional transport work. No authorized second host was available on 2026-09-20; exact
+  commands and the acceptance checklist are recorded in `docs/development.md`.
 
 **Exit demo:** use the installed application to open the external fixture without any
 Workbench-specific files, inspect Dune-derived information, and run build/test actions in
@@ -665,8 +680,8 @@ milestone any longer.
 The standalone application, independent-project ownership, three integration levels,
 project-side typed Hardcaml calls, native/frontend separation, terminal-first frontend order,
 backend neutrality of the shared schemas, and loopback-only daemon binding are already
-established. The table records remaining details to close in the architecture when
-implementing each milestone; it does not reopen those boundaries.
+established. The table records decisions at each milestone; the 1A rows are resolved in sections 4.3
+and 24 as of 2026-09-19, while later rows remain to close during implementation; it does not reopen those boundaries.
 
 | Before implementation of | Decision to record in the architecture | Relevant section |
 | --- | --- | --- |
@@ -718,11 +733,11 @@ implementation and validation evidence; a checked task list alone is insufficien
 
 | Milestone | Status | Implementation / validation evidence or blocker |
 | --- | --- | --- |
-| 1A — Installed application foundation | In progress | [Development baseline](development.md#baseline-recorded-for-milestone-1a), [application packaging foundation](development.md#application-packaging-foundation), and [shared protocol schemas](development.md#shared-protocol-schemas). Toolchain/dependency audit, passing repository checks, application-role Dune targets, and native/frontend dependency separation recorded 2026-09-14; the project, target, job, and artifact schemas in `protocol/`, with backend-neutral target facts, open artifact kinds, optional backend build/run references, and unit/tool/stage/corner metrics, recorded 2026-09-18 with thirteen representation checks in `protocol/test/`. Remaining: the typed request/response and incremental update contracts, which need the architecture to record the application RPC transport and serialization choice first; daemon and `bonsai_term` client packaging; and the independent fixture. No application startup command exists yet. JavaScript promotion moved to 1E and is tracked as blocked there. |
-| 1B — Generic Dune projects, jobs, and terminal client | Not started | — |
+| 1A — Installed application foundation | Complete | Completed 2026-09-20. `protocol/V1`, `native_http/`, `daemon/rpc_server.ml`, the installed daemon/client, runtime discovery/locking, and the isolated counter fixture implement the recorded design. `scripts/test-native-application.sh` passed installed typed exchange from outside the checkout, concurrent startup, stale discovery, client exit/reattach, explicit endpoint failure without replacement, and shutdown. `FIXTURE_OPAM_SWITCH=5.2.0+ox ./scripts/test-fixture.sh` built and tested the copied external fixture. Codec/RPC tests cover malformed requests, unsupported versions, instance and cursor errors, timeout heartbeat, limits, and HTTP trust checks. `dune describe external-lib-deps` confirms the terminal has no backend/adapter/project-integration path. Native package build/install, opam lint, format, lint, tests, and default build pass; exact commands are in [development notes](development.md#milestone-1a-installed-native-foundation). Browser validation remains separately tracked in 1E and is not claimed by this milestone. |
+| 1B — Generic Dune projects, jobs, and terminal client | In progress | Implementation complete 2026-09-20. Protocol/RPC, adapter, supervisor, logs, installed external-fixture workflow, and PTY resize checks pass. Real Ghostty/Xfce font-zoom and another-machine SSH-forward checks remain pending; see development notes. |
 | 1C — Versioned manifest/driver and RTL | Not started | — |
 | 1D — First structured hierarchical report / MVP gate | Not started | — |
-| 1E — Browser client and graphical views | Blocked | Two layers of the same blocker, checked 2026-09-17. `js_of_ocaml` is not installed in the `5.2.0+ox` switch and its `oxcaml-js_of_ocaml*` packages are guarded, so `dune build` currently fails on `web/main.bc` with `Library "js_of_ocaml" not found`; behind that sits the recorded [OxCaml/js_of_ocaml incompatibility](development.md#javascript-toolchain-prerequisite) that would block the JavaScript target even once installed. Next action: track an aligned compiler/js_of_ocaml pair or an upstream fix. Not part of the MVP gate; the daemon, protocol, project-integration, backend, and adapter targets build. |
+| 1E — Browser client and graphical views | Blocked | Two layers of the same blocker, checked 2026-09-17. `js_of_ocaml` is not installed in the `5.2.0+ox` switch and its `oxcaml-js_of_ocaml*` packages are guarded, so `dune build` currently fails on `web/main.bc` with `Library "js_of_ocaml" not found`; behind that sits the recorded [OxCaml/js_of_ocaml incompatibility](development.md#javascript-toolchain-prerequisite) that would block the JavaScript target even once installed. Later evidence: the 2026-09-18 development notes record a successful protocol JavaScript compilation probe and a local Bonsai dependency repair. The original blocker diagnosis needs revalidation; next action in 1E is to build browser assets and execute the codecs with the selected toolchain. Not part of the MVP gate; the daemon, protocol, project-integration, backend, and adapter targets build. |
 | A.1 — Open an ASIC consumer as an ordinary project | Not started | — |
 | A.2 — ASIC build and execution artifacts | Not started | — |
 | A.3 — Reuse supported inspection views for ASIC | Not started | — |
@@ -737,11 +752,9 @@ implementation and validation evidence; a checked task list alone is insufficien
 | 4C — GUI socket bridge (optional) | Not started | — |
 | 4D — Distributed remote workers | Not started | — |
 
-**Next construction task:** resolve the application RPC transport and serialization choice
-in the architecture, then define 1A's typed request/response and incremental update contracts
-over the schemas now in `protocol/`, package the daemon and terminal client, and add the
-independent fixture. Then complete 1B's generic Dune project/job demo before adding the
-versioned manifest and project driver in 1C and the first structured report in 1D.
+**Next construction task:** implement 1B's generic Dune project/job demo. Resolve its project-environment and Dune
+inspection details at that point; driver, report, and vendor-worker decisions remain with
+1C, 1D, and 2A respectively. Do not expand 1A into those milestones.
 
 The shortest route from the current state to a Workbench that is actually used runs through
 A.1: open `hardcaml_asic` or its consumer as an ordinary project, run its Dune build and test

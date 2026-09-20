@@ -1,0 +1,17 @@
+(rule
+ (alias all)
+ (deps lifecycle-trigger)
+ (action
+  (progn
+   (echo "fixture build: started")
+   (run sleep 1)
+   (echo "fixture build: complete"))))
+
+(rule
+ (alias runtest)
+ (deps lifecycle-trigger)
+ (action
+  (progn
+   (echo "fixture test: started")
+   (run sleep 1)
+   (echo "fixture test: complete"))))

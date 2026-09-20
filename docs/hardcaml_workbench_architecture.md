@@ -188,7 +188,7 @@ may serve those assets from a local address and open that address in the user's 
 | hierarchy | workspace tabs | inspector | jobs | console      |
 +----------------------------+---------------------------------+
                              |
-                       typed RPC / WS
+                       typed RPC / HTTP
                              |
 +----------------------------v---------------------------------+
 |                  Hardcaml Workbench Daemon                   |
@@ -509,9 +509,182 @@ code observes and requests state transitions regardless of how it is compiled.
 
 More than one client may be attached to one daemon at once, including one of each kind.
 Projects, jobs, artifacts, and tool sessions are daemon-owned and shared between them;
-selection, layout, and scroll position are per-client. Record which state is shared before
-implementing the second client, and define one owner for cancellation so two attached clients
-cannot both claim a job.
+selection, layout, and scroll position are per-client. The protocol decisions below define reconnect behavior and daemon-owned cancellation;
+client selection, layout, and scroll position never become shared session state.
+
+### 1A application protocol decisions (2026-09-19)
+
+These decisions define the implemented 1A foundation. Optimize for a modest local task
+runner with a terminal client first and a browser client later.
+
+**Transport and runtime.** Use HTTP/1.1 on `127.0.0.1`, typed S-expression request/response
+bodies, and long polling for incremental updates. Use Async and `cohttp-async` for the native
+server and client; the browser will use its HTTP API with the same portable codecs.
+[Cohttp provides an Async client/server implementation](https://github.com/mirage/ocaml-cohttp).
+Exact compatibility with this repository's switch must be checked during implementation;
+this decision does not claim the dependency is installed or tested. No WebSocket, custom TCP
+framing, or binary RPC layer is required for Phase 1. Existing `bin_io` derivations can remain,
+but the application wire format is `sexp`.
+
+Freeze wire definitions under a versioned `Protocol.V1` module rather than serializing mutable
+internal records without a version boundary. Encode one S-expression per HTTP body with
+`Content-Type: application/sexp`; use the existing generated parsers/printers, not hand-written
+string interpolation. HTTP supplies message framing. Treat log contents as bytes (escaped by
+the S-expression codec); decode for display with replacement for invalid UTF-8.
+
+**Endpoints and compatibility.** `GET /api/hello` returns a fixed bootstrap record containing
+application version, supported protocol versions (initially `[1]`), daemon instance ID, and
+capability names. Each daemon start creates a new instance ID. Every subsequent API call is
+`POST /api/v1/<operation>` with a typed body containing the expected daemon instance ID.
+Reject a mismatched instance before acting. Clients refuse unsupported protocol versions
+with a useful error; build versions need not match when the protocol version does. Additive
+operations are advertised by capability; changing existing wire shapes requires a new
+protocol version. The project-driver protocol remains separately versioned in 1C.
+
+Use an operation module with paired request/response types and a shared typed error record
+for each endpoint. The native and browser transport wrappers expose these typed operations,
+not an untyped dispatch interface to UI code. HTTP 200 contains a typed success/error result
+for a decoded operation. Malformed input, unknown endpoint/version, and oversized requests
+use 400, 404, and 413 respectively, with the common error envelope where possible. Common
+errors include invalid request, unsupported operation, not found, conflict, instance changed,
+and internal failure. Catch decoding failures at the boundary; never return native exception
+traces as application results. Initially cap request bodies at 1 MiB and log response payloads
+at 256 KiB; these are server limits, not new wire versions.
+
+| Operation | Contract and milestone |
+| --- | --- |
+| `hello` | Bootstrap and compatibility information; 1A. |
+| `snapshot` | Full current project/job/artifact metadata plus an atomic event cursor; 1A may return empty collections. No log bodies or artifact contents. |
+| `updates` | Cursor in, bounded ordered event batch and next cursor out; may wait up to 25 seconds. 1A supports an empty heartbeat. |
+| `open-project` | Root and explicit environment selection in, daemon-owned project summary out; implemented in 1B. |
+| `submit-job` | Project ID, typed supported action, and submission key in, job snapshot out; implemented in 1B. |
+| `cancel-job` | Job ID in, current job snapshot out; implemented in 1B. |
+| `read-log` | Job ID and record offset in, bounded stdout/stderr records, next offset, and EOF flag out; implemented in 1B. |
+
+Implement only `hello`, `snapshot`, and `updates` in 1A. The other rows constrain their
+extensions but do not require empty handlers or invented project/driver implementations.
+Artifact content retrieval by ID belongs to 1C and will use a dedicated bounded/streaming
+response rather than embedding contents in a snapshot. Root input is an explicit exception
+to opaque-ID access: it denotes a path on the daemon's machine, never a client-side file handle.
+
+**Updates and reconnect.** Use a single daemon-wide monotonically increasing event sequence
+paired with the daemon instance ID. Capture a snapshot and its cursor atomically relative to
+state mutations; updates after that cursor must include every subsequent mutation. Events
+carry entity upserts/removals and log-available notices. Send full changed entity records
+initially; no field-level patch language is needed. Clients apply events in order, ignore
+already-applied sequence numbers, and resume from the last applied cursor. A bounded
+in-memory event ring is enough (initial limit: 4096 events). If the cursor predates retained
+events, return `Resync_required`; the client gets a fresh snapshot. Reject future cursors.
+An empty timeout response retains the cursor. Canceling a poll affects only that HTTP request.
+Slow clients must not block processes or grow an unbounded queue.
+
+Logs live separately in daemon-owned files for the daemon session. Assign ordered record
+offsets per job, with stream tags; ordering means observed capture order, not inferred causal
+ordering between stdout and stderr. `read-log` pages from an offset; `updates` only announces
+availability. A refreshed snapshot lets clients rediscover jobs and resume their log offsets
+after event retention expires. EOF means both process output streams have closed and all
+captured records are available. Logs and metadata need not survive a daemon restart until
+2C; reconnecting to the same daemon must recover them.
+
+Use reconnect backoff starting at 250 ms and capped at 5 seconds. A new daemon instance
+invalidates previous cursors and session IDs; show that the session restarted, then fetch a
+new snapshot. Never replay job submission automatically across daemon instances. Within one
+instance, a submission key identifies one request: atomically store its action and resulting
+job ID before starting the process; retrying the same key/action returns that job, while
+reusing it with a different action is a conflict. Retain keys for the daemon lifetime. Ordinary
+reconnection fetches state; it does not submit work. Any attached client may request
+cancellation, but only the daemon supervisor performs it. Repeated cancellation is harmless;
+a terminal job keeps its recorded outcome. Closing a client never cancels jobs.
+
+### 1B generic-project and job decisions (2026-09-20)
+
+These decisions complete the milestone 1B rows in the construction plan without changing an
+existing V1 wire shape.
+
+**Roots and sessions.** `open-project` accepts an absolute or relative directory path on the
+daemon machine. The daemon resolves it with `realpath`, requires an existing directory and a
+regular `dune-project` file directly in that directory, and stores the canonical absolute root.
+Symlink spellings and paths containing `..` therefore identify the same root. One daemon has
+one project session per `(canonical root, environment selection)`: repeating the same open
+returns the same project ID and cached inspection without starting Dune again; selecting another environment creates a
+separate session because its Dune view and jobs can differ. Opening never searches parents and
+never modifies the project.
+
+**Execution environments.** Selection is mandatory in the typed operation and is one of:
+
+- `Inherit_daemon`, meaning the exact environment inherited when the daemon started; or
+- `Opam_switch <name>`, executed as `opam exec --switch=<name> --set-switch -- <argv>`.
+
+The response displays the selection, provenance (`daemon process` or the named opam switch),
+resolved Dune version, and command prefix. The inherited choice is deliberate rather than a
+fallback. A missing `opam`, unknown switch, missing `dune`, or failed probe rejects the open;
+the daemon never substitutes the switch used to build Workbench. This milestone records and
+uses environments but does not create, install, or mutate them. Secrets and the full native
+environment are not exposed.
+
+**Dune inspection.** The supported implementation is Dune 3.22 or newer, validated with
+3.24.2. Inspection runs `dune describe workspace --root <root> --format=sexp --lang=0.1`
+inside the selected environment and parses the versioned S-expression. The response exposes
+generic workspace entries (library, executable, tests, and other Dune item kinds) and context
+names; these are workspace structure, never inferred Hardcaml hierarchy. Dune RPC is not used
+because Dune 3.24.2 labels it experimental and says not to use it. Build and test translate to
+`dune build --root <root> --no-buffer @all` and
+`dune runtest --root <root> --no-buffer`, with plain argv, no shell. `--no-buffer` lets action
+output reach the supervisor before completion. Inspection probe or parse failure rejects the
+open with bounded diagnostic text. Later Dune
+formats require an explicit adapter update rather than permissive guessing.
+
+**Compatibility.** Existing `Project.t`, `Job.t`, snapshot, and event shapes remain frozen.
+V1 gains additive capability-advertised operation modules. `open-project` returns a project
+plus its environment and workspace inspection; repeat-open retrieves refreshed details.
+Snapshots and entity events carry the existing stable summaries. A future need to persist
+workspace details in snapshots requires a new protocol version, not a silent record change.
+
+**Scheduling and ownership.** The daemon owns project sessions, jobs, submission keys,
+processes, process groups, log files, state transitions, and event order. Each project session
+has a FIFO queue and at most one running Dune job, avoiding nondeterministic contention on
+Dune's build lock. Different sessions may run concurrently. Jobs pass through queued,
+starting, running, and one terminal state. Clients own only focus, selection, layout, scrolling,
+and consumed log offsets. Any attached client may request cancellation; the supervisor is the
+only component that signals processes.
+
+**Processes and logs.** The adapter returns an executable, argv, working directory, and
+environment selection. The supervisor starts a fresh process group, captures stdout and stderr
+concurrently, and records chunks in observed callback order. Cancellation sends `SIGTERM` to
+the group, drains output for a bounded interval, then sends `SIGKILL`; daemon shutdown first
+rejects new work and applies the same sequence to every active group. Exit/cancel races settle
+once, and descendants share the group. Client disconnection has no process effect.
+
+Logs are append-only files in a private per-daemon temporary directory. An in-memory index
+contains only record offsets and byte locations, so output volume is not retained in memory.
+`read-log` returns at most 256 records and 256 KiB from an ordered record offset, preserves
+stdout/stderr tags and bytes, returns the next record offset, and reports EOF only after both
+pipes close and the process is reaped. Log bodies are absent from snapshots and events;
+`Log_available` announces only the next offset. Log files and submission keys last for the
+daemon instance and are removed at shutdown; durable restart recovery remains milestone 2C.
+
+**Terminal resize behavior.** The 1A black-screen regression was a missed invalidation, not a
+terminal, tmux, or signal-delivery failure. The client ignored Bonsai Term's `dimensions`
+input and returned one physically identical `View.t`; Bonsai Term therefore skipped
+`Term.image` after `SIGWINCH`. The switch's `notty-community` line-diff patch additionally
+retains its previous-line cache in `Tmachine.set_size`, so forcing only a nominal view change
+can still omit unchanged lines after a width-only resize. The repository does not patch the
+shared switch. Its reproducible workaround makes the view depend on current dimensions and
+places content over a real terminal-sized space rectangle. This changes Notty's operations
+for width and height changes and repaints the resized alternate screen. Below 68 columns or
+20 rows the client renders a clipped, recoverable “terminal too small” view. Optional
+diagnostics append dimensions and caught errors to a file, never to the active terminal.
+The upstream fix would require both Bonsai Term to render after resize regardless of physical
+view equality and the patched Notty `Tmachine.set_size` to invalidate `previous_lines`.
+
+**Local HTTP trust.** Preserve section 4.4's same-user local/SSH trust boundary without adding
+accounts or tokens. Require the non-simple `X-Workbench-Protocol: 1` header and the specified
+content type on all POST operations. Do not enable CORS; reject cross-origin browser requests
+and reject a supplied Origin unless it matches the loopback Host authority, including port.
+Validate Host as a literal loopback address or `localhost` (with its port), rejecting arbitrary
+DNS names. Native clients may omit Origin. This blocks ordinary websites from invoking the
+local command API; it does not isolate mutually untrusted local users. Serve browser assets
+from the daemon's origin in 1E. SSH forwarding can use a different local port.
 
 ## 4.4 Deployment and Client Attachment
 
@@ -1504,14 +1677,16 @@ build targets:
 | Project integration | `hardcaml_workbench_project_integration` | shared protocol and portable parsing libraries |
 | Native backend | `hardcaml_workbench_backend` | shared protocol, project integration, `core`, and `core_unix` |
 | Native adapters | `hardcaml_workbench_adapters` | shared protocol, project integration, `core`, and `core_unix` |
-| Native daemon | `daemon/main.exe` | shared protocol, backend, adapters, `core`, and `core_unix` |
-| Browser frontend | `web/main.bc` initially; `web/main.bc.js` before RPC wiring | shared protocol, `core`, `bonsai`, and `bonsai_web` |
+| Native HTTP client | `hardcaml_workbench_native_http` | shared protocol, Async, Cohttp, `core`, and `core_unix` |
+| Native daemon transport | `hardcaml_workbench_rpc_server` | shared protocol, Async, Cohttp, and `core` |
+| Native daemon | `hardcaml-workbench-daemon` | shared protocol, native transport, backend, adapters, `core`, and `core_unix` |
+| Terminal client | `hardcaml-workbench` | shared protocol, native HTTP client, Async, Bonsai, and `bonsai_term` |
+| Browser frontend | `web/main.bc` initially; `web/main.bc.js` in 1E | shared protocol, `core`, `bonsai`, and `bonsai_web` |
 
 The protocol and project-integration libraries remain free of `core_unix` and operating-system
 resources. The web executable has no dependency path to the backend or adapters. The initial
 structure-only target builds bytecode to validate that dependency graph; it is not a browser
-deliverable. Promote it to a js_of_ocaml target before the later 1A task compiles the shared
-protocol for JavaScript. The daemon and web executable remain private build targets, and the
+deliverable. Promote it to a js_of_ocaml target in 1E for the browser and JavaScript protocol gate. The daemon and web executable remain private build targets, and the
 package is explicitly allowed to have no install stanzas, until the installation task adds the
 launcher and asset rules.
 
@@ -1521,7 +1696,79 @@ and formatter/linter packages remain development-only. The application package i
 depend on Hardcaml circuit libraries or `ppx_hardcaml`: circuit dependencies belong to the
 independent fixture and opened projects. Add a project SDK only if the 1C driver work demonstrates
 that it is useful, and keep it separate from circuit ownership. Transport/server packages are
-deferred until the RPC and serialization decision is recorded later in 1A.
+selected in section 4.3; add and validate them during the remaining 1A implementation.
+
+### 1A launcher, installation, and fixture decisions (2026-09-19)
+
+Install two native executables: `hardcaml-workbench` (the `bonsai_term` client plus local
+startup orchestration) and `hardcaml-workbench-daemon` (the server). Keep their libraries
+private. Add `terminal/` and a private native HTTP client library; neither may depend on
+backend, adapters, or project integration. The shared protocol contains only portable types
+and codecs; Async/Cohttp transport code belongs outside it. The terminal may depend on
+`bonsai_term`, Async, and the native HTTP client. The daemon links the server, backend, and
+adapters. The launcher may spawn the installed daemon executable, but only the daemon starts
+project tools.
+
+The planned CLI is:
+
+- `hardcaml-workbench [--project-root ROOT]`: attach to the user's default local daemon,
+  starting it when absent, then enter the terminal UI.
+- `hardcaml-workbench --connect http://127.0.0.1:PORT [--project-root ROOT]`: attach to the
+  specified endpoint (including an SSH forward); never start a replacement daemon on failure.
+- `hardcaml-workbench-daemon --port PORT`: run in the foreground, suitable for a service
+  manager; port 0 requests an ephemeral port. Loopback binding cannot be overridden.
+
+The root is interpreted on the daemon's machine. In 1A retain it as the pending open request
+and show that project opening is unavailable; 1B sends `open-project`. Omitting it opens the
+shared session view without implicitly choosing the client's working directory.
+
+For automatic local startup, use a user-private runtime directory under `XDG_RUNTIME_DIR`,
+falling back to `XDG_STATE_HOME/hardcaml-workbench` (default `~/.local/state/hardcaml-workbench`).
+Use owner-only directory/file permissions. Serialize startup with an OS advisory lock; the
+auto-started daemon holds a separate lifetime lock. It binds port 0 and atomically publishes
+endpoint, instance ID, and PID only after it can answer `hello`. Probe readiness with a
+10-second deadline. Validate the instance ID when attaching; a PID alone is not evidence of
+identity, and stale metadata is never a reason to kill a PID. If the lifetime lock is held
+but readiness fails, report the failure instead of spawning a second daemon. Manually
+launched daemons need not participate in default-daemon discovery.
+
+Launch the automatic daemon in a separate session with stdin detached and diagnostics in the
+private runtime directory, so terminal exit or hangup does not stop it. The daemon persists
+until explicitly stopped. On SIGINT/SIGTERM, stop accepting work, cancel supervised process
+groups, drain output with a bounded grace period, then force termination and exit. Phase 1
+does not recover jobs after daemon exit. Do not add idle shutdown, a service installer, or a
+remote-daemon lifecycle manager in 1A.
+
+The installed client locates its sibling daemon relative to the installation's executable
+directory, with an explicit development override for build-tree use; it must not depend on
+the checkout or launch the Workbench switch wrapper. Validate installation into a temporary
+prefix and launch from an unrelated directory. Document actual development commands only
+once implemented.
+
+Keep the native application as `hardcaml_workbench`; make browser packaging a separate
+optional `hardcaml_workbench_web` package in the same repository when packaging is implemented.
+Move browser-only dependencies out of the native package so its build/install gate does not
+require the browser toolchain. The web package will install precompiled assets under its
+package share directory in 1E; missing assets leave terminal use available. Preserve the
+browser/shared dependency boundary and run native protocol checks now. Require an actual
+JavaScript codec build and round-trip execution in 1E; a bytecode build or compilation-only
+probe is not that check.
+
+The 1A implementation creates both generated package descriptions now so the native package
+has no browser-only dependencies. `hardcaml_workbench_web` remains an empty packaging boundary
+until 1E installs real assets. The native client also provides `--plain` for deterministic
+non-TTY validation; this changes only presentation and performs the same typed exchange as the
+interactive Bonsai Term view. `--discovery-dir` is a daemon-internal launcher argument, not a
+remote lifecycle interface.
+
+Create the deterministic fixture under `test/fixtures/example_project`, excluded from the
+Workbench workspace (for example with Dune's `data_only_dirs`). Copy it into a temporary
+external directory for every integration run. Give it its own `dune-project`, a tiny Hardcaml
+counter, and a deterministic passing test. Its dependencies belong to the fixture. Select an
+existing fixture environment explicitly in the harness; it may be the same installed switch
+as Workbench, but must never be selected implicitly. Do not install dependencies or introduce
+a manifest/driver for the 1A fixture. Record the environment and ordinary Dune build/test
+commands as exit evidence.
 
 The Workbench repository does not contain a production library of synthesizable circuits.
 `test/fixtures/example_project` represents a separately owned repository for integration

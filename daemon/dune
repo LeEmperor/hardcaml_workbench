@@ -1,11 +1,32 @@
+(library
+ (name hardcaml_workbench_rpc_server)
+ (modules rpc_server)
+ (libraries
+  async
+  cohttp-async
+  core
+  hardcaml_workbench_backend
+  hardcaml_workbench_protocol)
+ (preprocess
+  (pps ppx_jane))
+ (lint
+  (pps ppx_js_style)))
+
 (executable
  (name main)
+ (modules main)
+ (public_name hardcaml-workbench-daemon)
+ (package hardcaml_workbench)
  (libraries
+  async
+  cohttp-async
   core
   core_unix.command_unix
   hardcaml_workbench_adapters
   hardcaml_workbench_backend
-  hardcaml_workbench_protocol)
+  hardcaml_workbench_native_http
+  hardcaml_workbench_protocol
+  hardcaml_workbench_rpc_server)
  (preprocess
   (pps ppx_jane))
  (lint

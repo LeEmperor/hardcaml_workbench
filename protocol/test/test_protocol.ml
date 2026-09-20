@@ -357,3 +357,422 @@ let%expect_test "a job round-trips through sexp" =
     [%sexp (Job.equal job (Job.t_of_sexp (Job.sexp_of_t job)) : bool)];
   [%expect {| ("equal after round trip" true) |}]
 ;;
+
+let%expect_test "V1 codecs round-trip frozen wire values and reject malformed input" =
+  let hello : V1.Hello.Response.t =
+    { application_version = "0.1.0"
+    ; protocol_versions = [ 1 ]
+    ; instance_id = "instance-1"
+    ; capabilities = [ "snapshot"; "updates" ]
+    }
+  in
+  let encoded = V1.Codec.encode V1.Hello.Response.sexp_of_t hello in
+  let decoded = V1.Codec.decode V1.Hello.Response.t_of_sexp encoded in
+  let malformed = V1.Codec.decode V1.Hello.Response.t_of_sexp "(not-a-hello)" in
+  show
+    "round trip"
+    [%sexp
+      (Result.equal V1.Hello.Response.equal V1.Error.equal decoded (Ok hello) : bool)];
+  show
+    "malformed kind"
+    [%sexp
+      (Result.map_error malformed ~f:(fun error -> error.kind)
+       : (V1.Hello.Response.t, V1.Error.Kind.t) Result.t)];
+  [%expect
+    {|
+    ("round trip" true)
+    ("malformed kind" (Error Invalid_request))
+    |}]
+;;
+
+let require_portable_round_trip
+  label
+  ~equal
+  ~sexp_of
+  ~of_sexp
+  ~bin_size
+  ~bin_write
+  ~bin_read
+  value
+  =
+  let sexp_value = of_sexp (sexp_of value) in
+  if not (equal value sexp_value)
+  then raise_s [%message "sexp round trip failed" (label : string)];
+  let buffer = Bin_prot.Common.create_buf (bin_size value) in
+  let length = bin_write buffer ~pos:0 value in
+  if length <> Bigstring.length buffer
+  then
+    raise_s [%message "bin_io size disagreed with writer" (label : string) (length : int)];
+  let position = ref 0 in
+  let bin_value = bin_read buffer ~pos_ref:position in
+  if !position <> length || not (equal value bin_value)
+  then
+    raise_s
+      [%message
+        "bin_io round trip failed" (label : string) (!position : int) (length : int)]
+;;
+
+let%expect_test "V1 1B operation values have portable codecs and bounded wire shapes" =
+  let check label equal sexp_of of_sexp bin_size bin_write bin_read value =
+    require_portable_round_trip
+      label
+      ~equal
+      ~sexp_of
+      ~of_sexp
+      ~bin_size
+      ~bin_write
+      ~bin_read
+      value
+  in
+  let inherited = V1.Environment_selection.Inherit_daemon in
+  let opam = V1.Environment_selection.Opam_switch "workbench-switch" in
+  List.iter [ inherited; opam ] ~f:(fun value ->
+    check
+      "environment selection"
+      V1.Environment_selection.equal
+      V1.Environment_selection.sexp_of_t
+      V1.Environment_selection.t_of_sexp
+      V1.Environment_selection.bin_size_t
+      V1.Environment_selection.bin_write_t
+      V1.Environment_selection.bin_read_t
+      value);
+  let environment : V1.Environment_summary.t =
+    { selection = opam
+    ; provenance = "opam switch workbench-switch"
+    ; dune_version = "3.24.2"
+    ; command_prefix = [ "opam"; "exec"; "--switch=workbench-switch"; "--" ]
+    }
+  in
+  check
+    "environment summary"
+    V1.Environment_summary.equal
+    V1.Environment_summary.sexp_of_t
+    V1.Environment_summary.t_of_sexp
+    V1.Environment_summary.bin_size_t
+    V1.Environment_summary.bin_write_t
+    V1.Environment_summary.bin_read_t
+    environment;
+  let workspace_item : V1.Dune_workspace.Item.t =
+    { kind = "library"
+    ; names = [ "workbench"; "workbench_private" ]
+    ; source_path = Some "lib"
+    }
+  in
+  check
+    "workspace item"
+    V1.Dune_workspace.Item.equal
+    V1.Dune_workspace.Item.sexp_of_t
+    V1.Dune_workspace.Item.t_of_sexp
+    V1.Dune_workspace.Item.bin_size_t
+    V1.Dune_workspace.Item.bin_write_t
+    V1.Dune_workspace.Item.bin_read_t
+    workspace_item;
+  let workspace : V1.Dune_workspace.Inspection.t =
+    { contexts = [ "default" ]; items = [ workspace_item ] }
+  in
+  check
+    "workspace inspection"
+    V1.Dune_workspace.Inspection.equal
+    V1.Dune_workspace.Inspection.sexp_of_t
+    V1.Dune_workspace.Inspection.t_of_sexp
+    V1.Dune_workspace.Inspection.bin_size_t
+    V1.Dune_workspace.Inspection.bin_write_t
+    V1.Dune_workspace.Inspection.bin_read_t
+    workspace;
+  List.iter [ V1.Dune_action.Build; Test ] ~f:(fun value ->
+    check
+      "Dune action"
+      V1.Dune_action.equal
+      V1.Dune_action.sexp_of_t
+      V1.Dune_action.t_of_sexp
+      V1.Dune_action.bin_size_t
+      V1.Dune_action.bin_write_t
+      V1.Dune_action.bin_read_t
+      value);
+  let open_request : V1.Open_project.Request.t =
+    { instance_id = "instance-1"; root = "/workspace/project"; environment = opam }
+  in
+  let open_payload : V1.Open_project.Payload.t = { project; environment; workspace } in
+  let open_response : V1.Open_project.Response.t = Ok open_payload in
+  check
+    "open-project request"
+    V1.Open_project.Request.equal
+    V1.Open_project.Request.sexp_of_t
+    V1.Open_project.Request.t_of_sexp
+    V1.Open_project.Request.bin_size_t
+    V1.Open_project.Request.bin_write_t
+    V1.Open_project.Request.bin_read_t
+    open_request;
+  check
+    "open-project payload"
+    V1.Open_project.Payload.equal
+    V1.Open_project.Payload.sexp_of_t
+    V1.Open_project.Payload.t_of_sexp
+    V1.Open_project.Payload.bin_size_t
+    V1.Open_project.Payload.bin_write_t
+    V1.Open_project.Payload.bin_read_t
+    open_payload;
+  check
+    "open-project response"
+    V1.Open_project.Response.equal
+    V1.Open_project.Response.sexp_of_t
+    V1.Open_project.Response.t_of_sexp
+    V1.Open_project.Response.bin_size_t
+    V1.Open_project.Response.bin_write_t
+    V1.Open_project.Response.bin_read_t
+    open_response;
+  let submit_request : V1.Submit_job.Request.t =
+    { instance_id = "instance-1"
+    ; project = project_id
+    ; action = Build
+    ; submission_key = "submission-1"
+    }
+  in
+  let submit_payload : V1.Submit_job.Payload.t = { job } in
+  let submit_response : V1.Submit_job.Response.t = Ok submit_payload in
+  check
+    "submit-job request"
+    V1.Submit_job.Request.equal
+    V1.Submit_job.Request.sexp_of_t
+    V1.Submit_job.Request.t_of_sexp
+    V1.Submit_job.Request.bin_size_t
+    V1.Submit_job.Request.bin_write_t
+    V1.Submit_job.Request.bin_read_t
+    submit_request;
+  check
+    "submit-job payload"
+    V1.Submit_job.Payload.equal
+    V1.Submit_job.Payload.sexp_of_t
+    V1.Submit_job.Payload.t_of_sexp
+    V1.Submit_job.Payload.bin_size_t
+    V1.Submit_job.Payload.bin_write_t
+    V1.Submit_job.Payload.bin_read_t
+    submit_payload;
+  check
+    "submit-job response"
+    V1.Submit_job.Response.equal
+    V1.Submit_job.Response.sexp_of_t
+    V1.Submit_job.Response.t_of_sexp
+    V1.Submit_job.Response.bin_size_t
+    V1.Submit_job.Response.bin_write_t
+    V1.Submit_job.Response.bin_read_t
+    submit_response;
+  let cancel_request : V1.Cancel_job.Request.t =
+    { instance_id = "instance-1"; job = job_id }
+  in
+  let cancel_payload : V1.Cancel_job.Payload.t = { job } in
+  let cancel_response : V1.Cancel_job.Response.t = Ok cancel_payload in
+  check
+    "cancel-job request"
+    V1.Cancel_job.Request.equal
+    V1.Cancel_job.Request.sexp_of_t
+    V1.Cancel_job.Request.t_of_sexp
+    V1.Cancel_job.Request.bin_size_t
+    V1.Cancel_job.Request.bin_write_t
+    V1.Cancel_job.Request.bin_read_t
+    cancel_request;
+  check
+    "cancel-job payload"
+    V1.Cancel_job.Payload.equal
+    V1.Cancel_job.Payload.sexp_of_t
+    V1.Cancel_job.Payload.t_of_sexp
+    V1.Cancel_job.Payload.bin_size_t
+    V1.Cancel_job.Payload.bin_write_t
+    V1.Cancel_job.Payload.bin_read_t
+    cancel_payload;
+  check
+    "cancel-job response"
+    V1.Cancel_job.Response.equal
+    V1.Cancel_job.Response.sexp_of_t
+    V1.Cancel_job.Response.t_of_sexp
+    V1.Cancel_job.Response.bin_size_t
+    V1.Cancel_job.Response.bin_write_t
+    V1.Cancel_job.Response.bin_read_t
+    cancel_response;
+  List.iter [ V1.Read_log.Stream.Stdout; Stderr ] ~f:(fun value ->
+    check
+      "log stream"
+      V1.Read_log.Stream.equal
+      V1.Read_log.Stream.sexp_of_t
+      V1.Read_log.Stream.t_of_sexp
+      V1.Read_log.Stream.bin_size_t
+      V1.Read_log.Stream.bin_write_t
+      V1.Read_log.Stream.bin_read_t
+      value);
+  let log_bytes = "rpc-log-marker\000\255\n" in
+  let log_record : V1.Read_log.Record.t =
+    { offset = 7; stream = Stderr; data = log_bytes }
+  in
+  let read_request : V1.Read_log.Request.t =
+    { instance_id = "instance-1"
+    ; job = job_id
+    ; offset = 7
+    ; max_records = 12
+    ; max_bytes = 4096
+    }
+  in
+  let read_payload : V1.Read_log.Payload.t =
+    { records = [ log_record ]; next_offset = 8; eof = true }
+  in
+  let read_response : V1.Read_log.Response.t = Ok read_payload in
+  check
+    "log record"
+    V1.Read_log.Record.equal
+    V1.Read_log.Record.sexp_of_t
+    V1.Read_log.Record.t_of_sexp
+    V1.Read_log.Record.bin_size_t
+    V1.Read_log.Record.bin_write_t
+    V1.Read_log.Record.bin_read_t
+    log_record;
+  check
+    "read-log request"
+    V1.Read_log.Request.equal
+    V1.Read_log.Request.sexp_of_t
+    V1.Read_log.Request.t_of_sexp
+    V1.Read_log.Request.bin_size_t
+    V1.Read_log.Request.bin_write_t
+    V1.Read_log.Request.bin_read_t
+    read_request;
+  check
+    "read-log payload"
+    V1.Read_log.Payload.equal
+    V1.Read_log.Payload.sexp_of_t
+    V1.Read_log.Payload.t_of_sexp
+    V1.Read_log.Payload.bin_size_t
+    V1.Read_log.Payload.bin_write_t
+    V1.Read_log.Payload.bin_read_t
+    read_payload;
+  check
+    "read-log response"
+    V1.Read_log.Response.equal
+    V1.Read_log.Response.sexp_of_t
+    V1.Read_log.Response.t_of_sexp
+    V1.Read_log.Response.bin_size_t
+    V1.Read_log.Response.bin_write_t
+    V1.Read_log.Response.bin_read_t
+    read_response;
+  let log_event : V1.Event.t = Log_available { job = job_id; next_offset = 8 } in
+  let sequenced : V1.Event.sequenced = { sequence = 9; event = log_event } in
+  check
+    "log-available event"
+    V1.Event.equal
+    V1.Event.sexp_of_t
+    V1.Event.t_of_sexp
+    V1.Event.bin_size_t
+    V1.Event.bin_write_t
+    V1.Event.bin_read_t
+    log_event;
+  check
+    "sequenced log event"
+    V1.Event.equal_sequenced
+    V1.Event.sexp_of_sequenced
+    V1.Event.sequenced_of_sexp
+    V1.Event.bin_size_sequenced
+    V1.Event.bin_write_sequenced
+    V1.Event.bin_read_sequenced
+    sequenced;
+  let snapshot : V1.Snapshot.Payload.t =
+    { projects = [ project ]
+    ; jobs = [ job ]
+    ; artifacts = [ artifact ]
+    ; cursor = { instance_id = "instance-1"; sequence = 9 }
+    }
+  in
+  let field_names = function
+    | Sexp.List fields ->
+      List.filter_map fields ~f:(function
+        | List (Atom name :: _) -> Some name
+        | Atom _ | List _ -> None)
+    | Atom _ -> []
+  in
+  let constructor = function
+    | Sexp.List (Atom name :: _) -> name
+    | Atom name -> name
+    | List (List _ :: _) | List [] -> "<not-a-constructor>"
+  in
+  let snapshot_sexp = V1.Snapshot.Payload.sexp_of_t snapshot in
+  show
+    "environment choices"
+    [%sexp ([ inherited; opam ] : V1.Environment_selection.t list)];
+  show
+    "environment summary fields"
+    [%sexp (field_names (V1.Environment_summary.sexp_of_t environment) : string list)];
+  show "workspace" [%sexp (workspace : V1.Dune_workspace.Inspection.t)];
+  show
+    "workspace field shapes"
+    [%sexp
+      ([ field_names (V1.Dune_workspace.Item.sexp_of_t workspace_item)
+       ; field_names (V1.Dune_workspace.Inspection.sexp_of_t workspace)
+       ]
+       : string list list)];
+  show "operation actions" [%sexp ([ Build; Test ] : V1.Dune_action.t list)];
+  show
+    "operation request fields"
+    [%sexp
+      ([ field_names (V1.Open_project.Request.sexp_of_t open_request)
+       ; field_names (V1.Submit_job.Request.sexp_of_t submit_request)
+       ; field_names (V1.Cancel_job.Request.sexp_of_t cancel_request)
+       ; field_names (V1.Read_log.Request.sexp_of_t read_request)
+       ]
+       : string list list)];
+  show
+    "operation payload fields"
+    [%sexp
+      ([ field_names (V1.Open_project.Payload.sexp_of_t open_payload)
+       ; field_names (V1.Submit_job.Payload.sexp_of_t submit_payload)
+       ; field_names (V1.Cancel_job.Payload.sexp_of_t cancel_payload)
+       ; field_names (V1.Read_log.Payload.sexp_of_t read_payload)
+       ]
+       : string list list)];
+  show
+    "operation response constructors"
+    [%sexp
+      ([ constructor (V1.Open_project.Response.sexp_of_t open_response)
+       ; constructor (V1.Submit_job.Response.sexp_of_t submit_response)
+       ; constructor (V1.Cancel_job.Response.sexp_of_t cancel_response)
+       ; constructor (V1.Read_log.Response.sexp_of_t read_response)
+       ]
+       : string list)];
+  show "log streams" [%sexp ([ Stdout; Stderr ] : V1.Read_log.Stream.t list)];
+  show
+    "log record fields"
+    [%sexp (field_names (V1.Read_log.Record.sexp_of_t log_record) : string list)];
+  show "log byte length" [%sexp (String.length log_record.data : int)];
+  show "snapshot fields" [%sexp (field_names snapshot_sexp : string list)];
+  show
+    "snapshot contains log bytes"
+    [%sexp
+      (String.is_substring (Sexp.to_string snapshot_sexp) ~substring:log_bytes : bool)];
+  show
+    "log event contains log bytes"
+    [%sexp
+      (String.is_substring
+         (Sexp.to_string (V1.Event.sexp_of_t log_event))
+         ~substring:log_bytes
+       : bool)];
+  [%expect
+    {|
+    ("environment choices" (Inherit_daemon (Opam_switch workbench-switch)))
+    ("environment summary fields"
+     (selection provenance dune_version command_prefix))
+    (workspace
+     ((contexts (default))
+      (items
+       (((kind library) (names (workbench workbench_private))
+         (source_path (lib)))))))
+    ("workspace field shapes" ((kind names source_path) (contexts items)))
+    ("operation actions" (Build Test))
+    ("operation request fields"
+     ((instance_id root environment) (instance_id project action submission_key)
+      (instance_id job) (instance_id job offset max_records max_bytes)))
+    ("operation payload fields"
+     ((project environment workspace) (job) (job) (records next_offset eof)))
+    ("operation response constructors" (Ok Ok Ok Ok))
+    ("log streams" (Stdout Stderr))
+    ("log record fields" (offset stream data))
+    ("log byte length" 17)
+    ("snapshot fields" (projects jobs artifacts cursor))
+    ("snapshot contains log bytes" false)
+    ("log event contains log bytes" false)
+    |}]
+;;

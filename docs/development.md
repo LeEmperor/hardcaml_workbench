@@ -41,16 +41,30 @@ Run these commands serially because they share Dune's `_build` lock. The wrapper
 the Workbench's own build environment only. An independent project opened by the Workbench
 must be built and tested in that project's selected environment.
 
-The application-role foundation can also be built explicitly:
+The native application can also be built explicitly:
 
 ```sh
-./scripts/with-switch.sh dune build daemon/main.exe web/main.bc
+./scripts/with-switch.sh dune build terminal/main.exe daemon/main.exe
 ```
 
-There is not yet a local application startup command. Later 1A work will add the native
-daemon, compiled web assets, development startup workflow, and installed launcher; this
-document should gain those commands when they exist. (The RTL-generator scaffold this
-paragraph previously pointed at, `bin/generate.ml`, was removed by the packaging task.)
+For automatic development startup, point the launcher at the build-tree daemon. Omit
+`--plain` to enter the interactive Bonsai Term UI:
+
+```sh
+HARDCAML_WORKBENCH_DAEMON="$PWD/_build/default/daemon/main.exe" \
+  ./scripts/with-switch.sh dune exec hardcaml-workbench -- --plain
+```
+
+For separate foreground processes:
+
+```sh
+./scripts/with-switch.sh dune exec hardcaml-workbench-daemon -- --port 8080
+./scripts/with-switch.sh dune exec hardcaml-workbench -- \
+  --connect http://127.0.0.1:8080 --project-root /path/on/daemon/host
+```
+
+The 1A client reports the project root as pending because opening begins in 1B. Browser assets
+belong to 1E. The removed RTL-generator scaffold does not participate in startup.
 
 ## Baseline recorded for milestone 1A
 
@@ -93,9 +107,10 @@ checked on 2026-09-14 and did not yet contain support for these instructions.
 
 For the structure-only packaging task, `web/main.bc` validates that Bonsai code can depend
 on the portable protocol without reaching native libraries. This bytecode file is not a
-browser asset. Before the shared protocol is compiled for JavaScript later in 1A, use an
+browser asset. For the browser gate in 1E, use an
 aligned compiler/js_of_ocaml package pair or an upstream-supported compatibility fix, change
-the web target to JavaScript mode, and require `web/main.bc.js` to build. Do not patch the
+the web target to JavaScript mode, and require `web/main.bc.js` to build and its protocol codecs
+to execute successfully. Do not patch the
 shared opam switch ad hoc or treat the bytecode target as completion of that later check.
 
 ### Bonsai dependency installation prerequisite
@@ -253,3 +268,233 @@ after its own and the last `-source-tree-root` wins.
 
 Verified on 2026-09-18 in `protocol/test/`: passing tests pass, a deliberately wrong
 expectation produces a correct diff, and `dune promote` writes back to the source file.
+
+## Remaining 1A implementation decisions
+
+Recorded 2026-09-19; documentation only. The authoritative choices are in the architecture's
+[protocol decisions](hardcaml_workbench_architecture.md#1a-application-protocol-decisions-2026-09-19)
+and [launcher/installation decisions](hardcaml_workbench_architecture.md#1a-launcher-installation-and-fixture-decisions-2026-09-19).
+Use HTTP with typed S-expression bodies, Async/Cohttp native transport, and long polling.
+Package the native launcher/terminal client and daemon independently of optional browser
+assets. Follow the [implementation handoff](construction_phase_plan.md#9-completion-and-progress-tracking)
+for the remaining work and acceptance evidence. No proposed CLI command is available yet,
+and Cohttp compatibility with this switch has not been validated.
+
+The older JavaScript blocker entries above are historical observations. The 2026-09-18
+shared-protocol compilation probe and local Bonsai dependency repair are later evidence;
+neither establishes a working browser client or a completed browser codec execution check.
+Revalidate the browser prerequisites in 1E rather than treating the old diagnosis as current.
+
+## Milestone 1A installed native foundation
+
+Completed and validated on 2026-09-20 with OCaml `5.2.0+ox`, Dune `3.24.2`, Async
+`v0.18~preview.130.106+341`, Cohttp Async `6.3.0`, and Bonsai Term
+`v0.18~preview.130.106+341`.
+
+`protocol/V1` freezes portable S-expression definitions for `hello`, empty `snapshot`, and
+long-poll `updates`. The native server and client use Async/Cohttp outside the protocol
+library. The server enforces loopback Host values, same-origin requests, the protocol and
+content-type headers, request limits, instance identity, cursors, and poll limits. The daemon
+binds loopback only. Automatic startup uses private XDG runtime state, advisory startup and
+lifetime locks, atomic discovery metadata, readiness checks, detached execution, and the
+installed sibling daemon. A stale PID is never signaled by discovery logic.
+
+The normal client is a Bonsai Term application. `--plain` is a deterministic non-TTY view for
+automation and performs the same typed exchange. Client exit leaves the daemon alive. An
+explicit `--connect` failure is reported without consulting discovery or starting a daemon.
+
+The native package and browser-only dependency set are separate generated opam packages.
+`hardcaml_workbench.opam` contains Async, Cohttp Async, Bonsai, and Bonsai Term, but no
+`bonsai_web`, js_of_ocaml, or `ppx_css`. `hardcaml_workbench_web.opam` reserves the optional
+browser package; it installs no assets until 1E. `dune describe external-lib-deps` reports the
+terminal's internal dependencies as only `hardcaml_workbench_native_http` and
+`hardcaml_workbench_protocol`.
+
+The installed workflow is:
+
+```sh
+prefix="$(mktemp -d)"
+./scripts/with-switch.sh dune build -p hardcaml_workbench @install
+./scripts/with-switch.sh dune install --prefix "$prefix" hardcaml_workbench
+cd /tmp
+XDG_RUNTIME_DIR="$(mktemp -d)" "$prefix/bin/hardcaml-workbench"
+```
+
+The daemon can instead be run in the foreground with
+`$prefix/bin/hardcaml-workbench-daemon --port 8080`, then attached with
+`$prefix/bin/hardcaml-workbench --connect http://127.0.0.1:8080`. SIGINT or SIGTERM performs
+bounded shutdown. The automatic daemon persists until explicitly signaled or managed by a
+future service integration; there is intentionally no idle shutdown.
+
+Exact validation commands and outcomes:
+
+```sh
+./scripts/with-switch.sh opam list --installed --short \
+  cohttp-async async async_unix bonsai_term                  # all installed
+./scripts/with-switch.sh dune describe external-lib-deps    # boundary confirmed
+./scripts/test-native-application.sh                        # passed
+FIXTURE_OPAM_SWITCH=5.2.0+ox ./scripts/test-fixture.sh      # build/test passed externally
+./scripts/with-switch.sh dune build -p hardcaml_workbench @install  # passed
+./scripts/with-switch.sh opam lint hardcaml_workbench.opam  # passed
+./scripts/with-switch.sh opam lint hardcaml_workbench_web.opam # passed
+./scripts/with-switch.sh dune build @fmt                    # passed
+./scripts/with-switch.sh dune build @lint                   # passed
+./scripts/with-switch.sh dune runtest                       # passed
+./scripts/with-switch.sh dune build                         # passed
+```
+
+`scripts/test-native-application.sh` installs to a temporary prefix and launches from a
+separate directory. It checks successful typed exchange, pending project-root handling,
+concurrent startup, stale metadata, client exit and reattachment to the same PID, explicit
+endpoint failure without replacement, and SIGTERM shutdown. `scripts/test-fixture.sh` requires
+an explicit `FIXTURE_OPAM_SWITCH`, copies the miniature counter project outside the Workbench
+tree, and runs ordinary Dune build and test commands there.
+
+Browser readiness is not part of this evidence. No JavaScript asset or codec was executed;
+the bytecode web scaffold remains only a dependency-boundary check until 1E.
+
+## Milestone 1B generic Dune workflow
+
+Implementation completed on 2026-09-20 with acceptance pending as described below. Install to
+a temporary prefix and copy the generic fixture outside the checkout:
+
+```sh
+prefix="$(mktemp -d)"
+fixture="$(mktemp -d)"
+./scripts/with-switch.sh dune build -p hardcaml_workbench @install
+./scripts/with-switch.sh dune install --prefix "$prefix" hardcaml_workbench
+cp -R test/fixtures/example_project/. "$fixture/"
+rm -rf "$fixture/_build"
+```
+
+Launch the installed interactive client from any directory. The inherited environment is an
+explicit selection and means the daemon's startup environment; it is never an implicit
+Workbench-switch fallback:
+
+```sh
+XDG_RUNTIME_DIR="$(mktemp -d)" \
+  "$prefix/bin/hardcaml-workbench" \
+  --project-root "$fixture" \
+  --environment opam:5.2.0+ox
+```
+
+Use `--environment inherited` only when the daemon was deliberately started in the project's
+environment. Interactive controls are:
+
+```text
+b  submit Dune build      t  submit Dune test
+c  cancel selected job   j/k  select next/previous job
+r  reconnect and refresh q or Ctrl-C  exit client only
+```
+
+The project pane labels information as generic Dune workspace structure. Driver-dependent
+Hardcaml hierarchy, RTL, target, clock, and part operations remain explicitly unavailable until
+1C. Jobs and logs remain in the daemon after the client exits. Starting the same command again
+reattaches and retrieves snapshots/log offsets without resubmitting work.
+While open, the client retries a lost connection from 250 ms up to 5 seconds. A new daemon
+instance clears obsolete local session/log offsets, reports the restart, fetches a new snapshot,
+and never replays a previous submission.
+
+Non-TTY automation uses the same typed operations:
+
+```sh
+"$prefix/bin/hardcaml-workbench" --plain \
+  --project-root "$fixture" --environment opam:5.2.0+ox
+"$prefix/bin/hardcaml-workbench" --plain \
+  --project-root "$fixture" --environment opam:5.2.0+ox \
+  --action build --wait
+"$prefix/bin/hardcaml-workbench" --plain \
+  --project-root "$fixture" --environment opam:5.2.0+ox \
+  --action test --wait
+```
+
+The adapter uses Dune 3.22 or newer and was validated with 3.24.2. It probes `dune --version`,
+inspects with
+`dune describe workspace --root ROOT --format=sexp --lang=0.1`, and runs
+`dune build --root ROOT --no-buffer @all` or
+`dune runtest --root ROOT --no-buffer`. Dune RPC is not used because 3.24.2 marks it
+experimental. Only local workspace entries and project-relative display paths cross the API.
+
+### Resize regression and diagnostics
+
+The fixed client repaints on every dimension change, renders a recoverable small-terminal view,
+and writes optional diagnostics outside the terminal stream:
+
+```sh
+HARDCAML_WORKBENCH_DIAGNOSTICS=/tmp/hardcaml-workbench-resize.log \
+  "$prefix/bin/hardcaml-workbench" \
+  --project-root "$fixture" --environment opam:5.2.0+ox
+```
+
+Automated PTY evidence:
+
+```sh
+./scripts/test-terminal-resize.py "$prefix/bin/hardcaml-workbench" \
+  --project-root "$fixture" --environment opam:5.2.0+ox
+```
+
+On 2026-09-20 this passed `80x24 -> 120x40 -> 40x10 -> 1x1 -> 80x24 ->
+100x24 -> 80x24`. Every transition emitted repaint bytes (5998, 826, 230, 2714, 3198,
+2714 respectively), the process remained responsive, diagnostics contained each dimension,
+and normal rendering recovered after growth. This is automated PTY evidence, not real-terminal
+acceptance.
+
+For the required workstation check, launch the command above over SSH first in Ghostty and then
+in Xfce Terminal. Repeatedly use Ctrl+plus/minus past the prior failure threshold, shrink below
+68x20, return to a normal size, press `b`, select with `j/k`, and press `q`. Expected: a
+“terminal too small” screen while constrained, complete redraw after growth, responsive controls,
+and dimension records in the diagnostics file. This real-terminal check remains pending user
+confirmation.
+
+### Attached remote daemon
+
+On an authorized remote project host:
+
+```sh
+ssh project-host
+/installed/prefix/bin/hardcaml-workbench-daemon --port 8080
+```
+
+On the workstation, in another terminal:
+
+```sh
+ssh -N -L 18080:127.0.0.1:8080 project-host
+/installed/prefix/bin/hardcaml-workbench \
+  --connect http://127.0.0.1:18080 \
+  --project-root /absolute/project/path/on/project-host \
+  --environment opam:PROJECT_SWITCH
+```
+
+Confirm that the displayed root and Dune version are remote, start a build, exit the client while
+it is running, reconnect with the same command, and verify one job with continuing logs. Cancel
+it from a second attached client and verify both clients observe `Cancelled` while retaining
+their own selected rows. This check was not run because no authorized second host was available;
+a local tunnel or second local client is not recorded as substitute evidence.
+
+### 1B validation evidence
+
+The following passed serially on 2026-09-20:
+
+```sh
+./scripts/with-switch.sh dune build @fmt
+./scripts/with-switch.sh dune build @lint
+./scripts/with-switch.sh dune runtest
+./scripts/with-switch.sh dune build
+./scripts/with-switch.sh dune build -p hardcaml_workbench @install
+./scripts/with-switch.sh opam lint hardcaml_workbench.opam
+./scripts/with-switch.sh opam lint hardcaml_workbench_web.opam
+./scripts/with-switch.sh dune describe external-lib-deps
+FIXTURE_OPAM_SWITCH=5.2.0+ox ./scripts/test-fixture.sh
+OPAM_SWITCH=5.2.0+ox ./scripts/test-native-application.sh
+```
+
+Protocol tests cover every new codec and logs remaining outside snapshots. Adapter tests cover
+environment argv, Dune versions, local-only workspace parsing, and typed build/test translation.
+Backend tests cover live stdout/stderr, success, nonzero exit, launch failure, signal death,
+cancellation, descendant cleanup, shutdown, FIFO scheduling, file-backed bounded log paging and
+EOF, deduplication/conflicts, and snapshot/event consistency. RPC tests cover all routes,
+capabilities, malformed/instance errors, populated snapshots/events, retained-cursor behavior,
+and real log retrieval. Installed acceptance opens a copied external fixture, observes start
+output before process completion, runs build/test, reattaches without duplicate jobs, uses two
+observers, rejects invalid roots/environments, and retains the 1A lifecycle checks. Dependency
+inspection confirms the terminal still depends only on native HTTP and protocol internally.

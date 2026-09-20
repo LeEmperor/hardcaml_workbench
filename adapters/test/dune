@@ -1,0 +1,12 @@
+; See docs/development.md#inline-expect-test-prerequisite.
+
+(library
+ (name hardcaml_workbench_adapters_test)
+ (libraries core hardcaml_workbench_adapters hardcaml_workbench_protocol)
+ (inline_tests
+  (flags
+   (-source-tree-root .)))
+ (preprocess
+  (pps ppx_jane))
+ (lint
+  (pps ppx_js_style)))

@@ -1,0 +1,16 @@
+(executable
+ (name main)
+ (public_name hardcaml-workbench)
+ (package hardcaml_workbench)
+ (libraries
+  async
+  bonsai
+  bonsai_term
+  core
+  core_unix.command_unix
+  hardcaml_workbench_native_http
+  hardcaml_workbench_protocol)
+ (preprocess
+  (pps ppx_jane bonsai.ppx_bonsai))
+ (lint
+  (pps ppx_js_style)))
