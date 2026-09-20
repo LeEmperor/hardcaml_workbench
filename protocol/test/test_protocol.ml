@@ -20,10 +20,41 @@ let timestamp =
 
 let project_id = Project_id.of_string "project-1"
 let target_id = Target_id.of_string "target-1"
+let configuration_id = Configuration_id.of_string "configuration-1"
 let job_id = Job_id.of_string "job-1"
 let artifact_id = Artifact_id.of_string "artifact-1"
 let fpga = Backend_id.of_string "fpga"
 let vivado = { Tool_version.tool = "vivado"; version = Some "2023.2" }
+
+let%expect_test "generation and artifact access are additive V1 operations" =
+  let generation : V1.Generate_rtl.Request.t =
+    { instance_id = "instance-1"
+    ; project = project_id
+    ; target = target_id
+    ; configuration = Configuration_id.of_string "configuration-1"
+    ; submission_key = "generate-1"
+    }
+  in
+  let read : V1.Read_artifact.Request.t =
+    { instance_id = "instance-1"; artifact = artifact_id; offset = 256; max_bytes = 4096 }
+  in
+  print_s (V1.Generate_rtl.Request.sexp_of_t generation);
+  print_s (V1.Read_artifact.Request.sexp_of_t read);
+  print_s
+    [%sexp
+      (V1.Codec.decode
+         V1.Generate_rtl.Request.t_of_sexp
+         (V1.Codec.encode V1.Generate_rtl.Request.sexp_of_t generation)
+       |> Result.is_ok
+       : bool)];
+  [%expect
+    {|
+    ((instance_id instance-1) (project project-1) (target target-1)
+     (configuration configuration-1) (submission_key generate-1))
+    ((instance_id instance-1) (artifact artifact-1) (offset 256)
+     (max_bytes 4096))
+    true |}]
+;;
 
 let project =
   { Project.id = project_id
@@ -383,6 +414,67 @@ let%expect_test "V1 codecs round-trip frozen wire values and reject malformed in
     ("round trip" true)
     ("malformed kind" (Error Invalid_request))
     |}]
+;;
+
+let%expect_test "structured hierarchy and read operation have portable codecs" =
+  let round_trip ~equal ~sexp_of ~of_sexp ~bin_size ~bin_write ~bin_read value =
+    assert (equal value (of_sexp (sexp_of value)));
+    let buffer = Bin_prot.Common.create_buf (bin_size value) in
+    ignore (bin_write buffer ~pos:0 value : int);
+    assert (equal value (bin_read buffer ~pos_ref:(ref 0)))
+  in
+  let hierarchy : Hierarchy.t =
+    { artifact = artifact.id
+    ; project = project_id
+    ; target = target_id
+    ; configuration = configuration_id
+    ; generating_job = job_id
+    ; rtl_artifacts = [ Artifact_id.of_string "rtl-1" ]
+    ; provenance
+    ; root = "/"
+    ; nodes =
+        [ { key = "/"
+          ; parent = None
+          ; instance_name = None
+          ; circuit_name = "counter_top"
+          ; input_ports = [ { name = "clock_i"; width = 1 } ]
+          ; output_ports = [ { name = "count_o"; width = 4 } ]
+          ; metadata = []
+          }
+        ; { key = "/11:u_counter_0"
+          ; parent = Some "/"
+          ; instance_name = Some "u_counter_0"
+          ; circuit_name = "counter"
+          ; input_ports = []
+          ; output_ports = [ { name = "count_o"; width = 4 } ]
+          ; metadata = []
+          }
+        ]
+    }
+  in
+  round_trip
+    ~equal:Hierarchy.equal
+    ~sexp_of:Hierarchy.sexp_of_t
+    ~of_sexp:Hierarchy.t_of_sexp
+    ~bin_size:Hierarchy.bin_size_t
+    ~bin_write:Hierarchy.bin_write_t
+    ~bin_read:Hierarchy.bin_read_t
+    hierarchy;
+  let response : V1.Read_hierarchy.Response.t = Ok { hierarchy } in
+  round_trip
+    ~equal:V1.Read_hierarchy.Response.equal
+    ~sexp_of:V1.Read_hierarchy.Response.sexp_of_t
+    ~of_sexp:V1.Read_hierarchy.Response.t_of_sexp
+    ~bin_size:V1.Read_hierarchy.Response.bin_size_t
+    ~bin_write:V1.Read_hierarchy.Response.bin_write_t
+    ~bin_read:V1.Read_hierarchy.Response.bin_read_t
+    response;
+  show "nodes" [%sexp (List.length hierarchy.nodes : int)];
+  let repeated_instance_key = (List.nth_exn hierarchy.nodes 1).key in
+  show "distinct repeated instance key" [%sexp (repeated_instance_key : string)];
+  [%expect {|
+    (nodes 2)
+    ("distinct repeated instance key" /11:u_counter_0) |}]
 ;;
 
 let require_portable_round_trip

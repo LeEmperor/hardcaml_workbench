@@ -129,3 +129,12 @@ let read_artifact t request =
     ~response_of_sexp:V1.Read_artifact.Response.t_of_sexp
     request
 ;;
+
+let read_hierarchy t request =
+  post
+    t
+    ~path:"/api/v1/read-hierarchy"
+    ~sexp_of_request:V1.Read_hierarchy.Request.sexp_of_t
+    ~response_of_sexp:V1.Read_hierarchy.Response.t_of_sexp
+    request
+;;

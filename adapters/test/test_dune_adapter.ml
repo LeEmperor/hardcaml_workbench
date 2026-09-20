@@ -26,17 +26,18 @@ let%expect_test "selected environments produce complete argv" =
     {|
     ((executable dune) (argv (dune --version)) (cwd /work/project)
      (environment Inherit_daemon))
-    ((executable opam)
-     (argv
-      (opam exec --switch=project-switch --set-switch -- dune describe workspace
-       --root /work/project --format=sexp --lang=0.1))
-      (cwd /work/project) (environment (Opam_switch project-switch)))
     ((executable dune)
      (argv
       (dune exec --root /work/project --no-buffer ./workbench/driver.exe --
        generate-rtl --protocol-version 1 --target counter --configuration
        eight-bit --output-dir /private/job-output))
-     (cwd /work/project) (environment Inherit_daemon)) |}]
+     (cwd /work/project) (environment Inherit_daemon))
+    ((executable opam)
+     (argv
+      (opam exec --switch=project-switch --set-switch -- dune describe workspace
+       --root /work/project --format=sexp --lang=0.1))
+     (cwd /work/project) (environment (Opam_switch project-switch)))
+    |}]
 ;;
 
 let%expect_test "Dune version validation" =

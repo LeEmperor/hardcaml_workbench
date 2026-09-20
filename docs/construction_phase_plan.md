@@ -8,22 +8,22 @@ demonstrable milestones. The philosophy defines product intent and ownership bou
 the architecture remains the main source of truth for system design and scope. This plan
 owns implementation order, dependencies, acceptance checks, and progress.
 
-- Preserve the architecture's four phases. Milestone IDs such as **1A** subdivide those
-  phases; they do not introduce a competing roadmap.
+- Retain the four-phase roadmap as background and preserve completed milestone evidence.
+  The active release below supersedes its default order and MVP gate; implement D1–D4
+  before considering reactivation of parked work.
 - Read each milestone's architecture references before implementing it. The steps below
   are implementation guidance, not replacement interface or protocol specifications.
 - When implementation reveals a new architectural decision or a conflict, update the
   relevant architecture section first, then revise this plan and the affected code.
 - Keep durable design decisions in the architecture. Keep milestone status and completion
   evidence here. Follow the [formatting guide](formatting_guide.md) for coding conventions.
-- Treat later-phase details as a planning baseline. Refine their tasks when prerequisites
-  are demonstrated, while retaining the scope established by the architecture.
+- Treat parked details as options, not commitments. Reactivate them only for an explicit
+  workflow need and revise their acceptance scope at that point.
 
 Apply these established boundaries throughout construction:
 
-- Ship a standalone installed application: a native OCaml daemon, a native `bonsai_term`
-  client, and precompiled HTML, JavaScript, and CSS assets from the `bonsai_web` client,
-  launched as one local application. Deliver the terminal client first, per
+- Ship a standalone installed native OCaml daemon and `bonsai_term` client for the
+  active release. Browser assets and their toolchain work are parked, per
   [frontend choice](hardcaml_workbench_architecture.md#1-frontend-choice-and-delivery-order).
 - Keep the application backend-neutral where the backend is not the point. Targets,
   artifacts, metrics, and jobs must describe an FPGA flow and an ASIC flow without either
@@ -45,6 +45,127 @@ Apply these established boundaries throughout construction:
 - Keep synthesizable circuits in independent projects, including a small integration fixture.
   Internal application libraries and an optional project-integration SDK do not constitute
   a production hardware library. Do not dynamically load project modules into the daemon.
+
+## Active release — scaf build and flow dashboard (2026-09-20)
+
+**User goal:** replace manual build/flow monitoring and process-list guesswork for
+`hardcaml_protemu` in `../scaf/`. Launch work from the TUI, keep setup/hold timing in
+a dedicated panel, keep stage and result boxes permanently visible, and inspect
+flow status/results and general design information on one monitor.
+
+This section is the active construction backlog and release gate, following the
+[architecture scope decision](hardcaml_workbench_architecture.md#active-release-scope--protemu-monitoring-2026-09-20).
+It supersedes the old `1C → 1D` gate and default phase order. Reuse delivered
+1A–1C capabilities; final human hierarchy acceptance passed on 2026-09-20.
+Structural hierarchy is delivered, while per-node reports remain deferred; first ship a staged project report. No code or live
+integration completion is claimed by this planning revision.
+
+### D1 — Open the real project and inspect one existing result
+
+**Status:** Not started. **Depends on:** existing 1B and delivered 1C integration.
+
+- [ ] Open `../scaf/` as an independent project in its intended environment; exercise
+  ordinary build/test with logs and existing cancellation. Record root, revision,
+  environment and commands; keep direct CLI use working.
+- [ ] Inspect the current `scaf/docs/flow.md`, `flow.sh`, collected records and archived
+  reports. Document the minimal project-side adapter contract for declared operations,
+  explicit build/run selection, result schema/version and bounded progress updates.
+  Reuse existing driver/job/artifact plumbing; extend only what this project needs.
+- [ ] Import an explicitly selected existing result, including setup/hold, checks,
+  final standard-cell area and utilization. Preserve original build/run identity and
+  report references. Reopen it without rebuilding, provisioning, or starting hardening.
+- [ ] Define a capability/evidence mapping for the desired persistent badges: lint,
+  emit, sim, GDS, harden, signoff-block and signoff-chip. Do not assume each is a
+  supported command or equate it to the project's adopted flow stage of a similar name.
+
+**Demo:** open scaf and view one real archived run's timing/check summary in the TUI,
+with unsupported/missing evidence explicit. Fixture-only results do not close D1.
+
+### D2 — Launch and observe the existing flow
+
+**Status:** Not started. **Depends on:** D1's project operation/identity contract.
+
+- [ ] Launch the canonical project entry point (`./flow.sh`, or its project-owned
+  adapter) through the daemon supervisor. Offer a full run and explicitly selected
+  supported stages; show requested extent before launch. Respect project prerequisite
+  and output-selection behavior rather than rebuilding the dependency graph in Workbench.
+- [ ] Keep the real stage strip visible: currently `build → emit → preflight → run →
+  postcheck → collect → report → archive`. Show declared unsupported capabilities
+  separately from runnable stages. Distinguish process exit from goal/check verdicts.
+- [ ] Establish live project-owned stage-start/end/failure and substep status evidence.
+  Existing final JSON and a human-readable final summary are not sufficient proof of
+  live progress support. Add a small structured status/event interface in the consumer
+  if needed; Workbench must not infer success from process names or log silence.
+- [ ] Display current stage/substep where known, elapsed times, last progress/log
+  activity, connection freshness and log tail. Keep not-run, queued, running, passed,
+  failed, skipped, blocked, cancelled/interrupted and unsupported distinguishable.
+  Report unknown substeps honestly; no fabricated percent complete or ETA.
+- [ ] Verify cancellation ownership including containerized tool descendants used by
+  this actual flow. Confirm client detach/reattach preserves the same execution and
+  state without duplicate submission. Observation loss must not display as completion.
+
+**Demo:** start real flow work in the TUI, observe it without `btop`, detach/reattach,
+and recover its status/logs. Exercise a bounded failing/cancelled invocation; no
+general-purpose persistent Tcl worker or flow-resume framework is required.
+
+### D3 — Deliver the always-visible timing/results dashboard
+
+**Status:** Not started. **Depends on:** D1 results and D2 execution updates.
+
+- [ ] Build the stable layout: identity/header, persistent flow strip, timing panel,
+  result/check badges, compact area/utilization summary, and active job/log region.
+  Keep essentials visible on resize and make a selected box open its evidence.
+- [ ] Show setup and hold worst slack with units, corner/mode, producing stage,
+  constraint context and freshness. Add per-corner detail, TNS and violation counts
+  when available through the project adapter. Unconstrained timing is an explicit
+  problem; missing/not-yet-produced measurements are not passing zeroes.
+- [ ] Keep DRC/LVS/antenna, TT precheck, simulation and any declared block/chip signoff
+  verdicts separate from stage completion and timing goals. GDS existence is an artifact
+  fact, not a signoff verdict. Unsupported checks retain their place in the display.
+- [ ] Keep current source, selected immutable build/run, and measurement source clear.
+  While a new run has no timing, show pending; any previous-result reference must name
+  its different run and age. Never assemble a misleading green dashboard from mixed runs.
+- [ ] Publish completed/partial results and useful failure evidence through existing
+  artifact access. Link the primary failure to its stage/log/report. Confirm values
+  against the project's own reporter and underlying records.
+
+**Demo:** a real run updates the same dashboard from pending to completion/failure;
+setup and hold remain in a dedicated region, stage boxes persist, and every displayed
+verdict is traceable to the selected run. Existing archives remain inspectable.
+
+### D4 — Validate daily use and close the release
+
+**Status:** Not started. **Depends on:** D1–D3.
+
+- [ ] Complete one real physical flow launched from the installed Workbench and compare
+  displayed results with the project's reports. Stored results validate display but
+  do not substitute for live launch/progress evidence.
+- [ ] Confirm the pending real SSH/tmux live-update check along with failure,
+  cancellation, resize, client exit and reattachment in this workflow.
+- [ ] Reopen a named project-owned result after daemon restart without launching a flow.
+  This requires result import/reopen, not preservation of a live process across daemon
+  restart or a general durable Workbench history store.
+- [ ] Use the dashboard for normal project iterations; record and fix concrete friction
+  before adding another subsystem. Retain relevant generic-project/fixture regression
+  checks; do not expand the live acceptance matrix beyond the intended deployment.
+
+**Release exit:** the user can launch, monitor and inspect scaf's actual build/flow
+from the server-side TUI, see setup/hold and persistent stage/check outcomes, and no
+longer needs a process monitor to guess whether the flow finished.
+
+### Parked work and bounded follow-ups
+
+| Scope | Disposition / reactivation trigger |
+| --- | --- |
+| 1C hierarchy human acceptance; per-node reports | Structural hierarchy is implemented, automated validation passes, and final human hierarchy inspection passed on 2026-09-20. Per-node reports stay deferred until an actual inspection task needs them. Neither blocks the dashboard. |
+| 1E browser and JS/toolchain fixes | Parked; revisit when graphical inspection is needed. Existing blocker notes are historical evidence, not an active repair task. |
+| 2A–2B persistent Vivado/Tcl worker and second report backend | Parked; use the real project's existing batch flow now. Revisit for an actual FPGA workflow. |
+| 2C CodeMirror and general durable history | Parked. Explicit reopening of project-owned stored results is in D1/D4; reconsider a database only if that proves inadequate. |
+| 3A–3C graphs, integrated waveforms, overlays and cross-run comparison | Parked. Existing simulation commands/results may appear in this dashboard without a waveform viewer. |
+| 4A–4D hardware programming, ILA, GUI bridge and distributed workers | Parked until a concrete user workflow requires them. |
+| Workstation-native client through forwarded HTTP | Remains deferred; server-side TUI over SSH is the acceptance deployment. |
+| General ASIC resumability/multi-project framework | Deferred beyond the minimal scaf adapter. Preserve existing stage/build/run/check semantics without implementing a second runner. |
+| Extra resource/system indicators | After D3, add cheap existing cell/FF/memory counts, core/die area, or CPU/RAM/free-disk context if useful. These are not new release gates. |
 
 ## 2. Starting point
 
@@ -73,6 +194,11 @@ progress, including the first 1A toolchain/packaging work. They do not establish
 application or driver support.
 
 ## 3. Roadmap and dependencies
+
+**Historical broader roadmap:** the table and dependency graph below retain the
+original milestone organization. Their phase gates and order are superseded for the
+active release by D1–D4 above. Parked milestones do not automatically become active
+when their old prerequisites complete.
 
 | Architecture phase | Construction milestones | Phase exit outcome |
 | --- | --- | --- |
@@ -130,6 +256,12 @@ not inherently require a Vivado socket bridge. Optional extensions are recorded 
 they are not selected, rather than marked complete.
 
 ### ASIC integration track
+
+**Scope update (2026-09-20):** D1–D3 select scaf as the first consumer and implement
+only its required operation/result contract. The broader A.2 requirements below are
+design context, not a requirement to build general resumability before displaying
+existing results. Preserve the consumer's supplied build/run, corner and check
+semantics in the minimal integration.
 
 Follow [ASIC project ownership](hardcaml_workbench_architecture.md#asic-projects-and-hardcaml_asic).
 The existing four-phase roadmap and exit gates remain intact. This track runs parallel to them
@@ -317,6 +449,10 @@ it is not evidence claimed for 1B and does not block completion under the user-a
 
 ### 1C. Add the versioned manifest and project driver for real RTL
 
+**Scope update (2026-09-20):** reuse the delivered discovery, RTL/artifact, and
+structural-hierarchy work in D1–D4. Automated implementation and final human hierarchy
+acceptance are complete. This does not change the active D1–D4 construction order.
+
 **References:** [project model](hardcaml_workbench_architecture.md#41-project-model),
 [Hardcaml integration](hardcaml_workbench_architecture.md#5-hardcaml-integration),
 [runtime protocol](hardcaml_workbench_architecture.md#43-application-protocol-and-runtime-boundaries),
@@ -324,17 +460,29 @@ it is not evidence claimed for 1B and does not block completion under the user-a
 [artifact model](hardcaml_workbench_architecture.md#18-artifact-model).
 **Depends on:** 1B.
 
-**Status:** In progress. The first bounded slice defines manifest version 1 and driver describe
+**Status:** Complete, including final human hierarchy acceptance on 2026-09-20. The first bounded slice defines manifest version 1 and driver describe
 protocol version 1, implements optional-integration status, supervised discovery, refresh, and
-fixture target/configuration display. Target selection, elaboration, RTL, hierarchy, artifact
-retrieval, and full provenance remain open and the milestone is not complete.
+fixture target/configuration display. The second bounded slice adds client-local selection,
+supervised real RTL generation, daemon-owned artifact registration/retrieval, and execution-boundary
+source provenance. The final bounded slice adds genuine elaborated structural hierarchy, stable
+occurrence keys, atomic association/retrieval, and terminal inspection. Automated gates pass, and
+the user confirmed the final hierarchy checklist in the intended server-side terminal workflow.
+
+The user accepted the complete RTL/artifact terminal checklist on 2026-09-20: configuration
+selection, distinct four/eight-bit generated output, artifact inspection and isolation,
+resize/navigation, and same-daemon reconnect without regeneration. This accepts the second bounded
+slice only, not hierarchy or the complete milestone.
 
 A human check found that the first attached terminal session remained on its pending open response
 after discovery completed, although reopening showed the daemon's cached result. The client now
 reduces the production incremental event stream and prefers that current project record over the
 open response. Automated reducer, backend-ordering, installed plain-client, and no-input PTY checks
-cover the repair. Final confirmation in the user's real SSH/tmux terminal remains pending; this does
-not change milestone 1C's In progress status.
+cover the repair. The incremental-state repair and the later RTL/artifact workflow have now been
+confirmed in the user's real terminal. The final hierarchy check also passed: live availability,
+root and repeated-child identity, four/eight-bit port inspection, collapse/expansion, compact
+scrolling, resize recovery, historical-result labeling, and reconnect without rerunning work.
+Together with the recorded automated exit checks, this closes milestone 1C. Workstation-native
+SSH-forward validation remains deferred, not passed.
 
 Delivered in this slice:
 
@@ -347,10 +495,22 @@ Delivered in this slice:
   cached and never repeat work. Failed refresh clears old summaries rather than presenting stale
   success.
 - [x] Discover and display the external fixture's real counter target and default configuration,
-  while keeping hardware hierarchy explicitly unavailable.
+  then expose the hierarchy produced by the same elaboration as its generated RTL.
 - [x] Propagate initial and refreshed discovery results to the same attached client through ordered
   incremental project events, including failed-result invalidation, without reopening or routine
   full snapshots.
+- [x] Select currently declared targets/configurations in each client, reconcile those selections
+  across refresh, and reject stale or mismatched IDs both at submission and before execution.
+- [x] Generate configuration-specific Verilog in the fixture's selected project environment through
+  one supervised driver operation while retaining generic Dune fallback and cancellation behavior.
+- [x] Import generated outputs all-or-nothing into private daemon-owned storage, publish immutable
+  artifact identities before terminal job completion, and retrieve bounded content by ID without
+  exposing storage paths.
+- [x] Record target/configuration, generating job, environment, actual reported tool versions,
+  Git context, dirty state, and deterministic source hashes captured at execution boundaries.
+- [x] Import a bounded version-1 structural hierarchy sidecar atomically with RTL, preserve repeated
+  instance occurrences with deterministic length-prefixed paths, retrieve it by artifact ID, and
+  inspect its tree, node ports, metadata, and current/historical identity in the terminal.
 
 Steps:
 
@@ -360,20 +520,21 @@ Steps:
   environment, FPGA-part, or default-target fields only after documenting their behavior.
 - [x] Define the versioned driver describe/result contract, compatibility handling, target and
   configuration registration, session-scoped identity, framing/output limits, diagnostics,
-  cancellation, and refresh. Hierarchy identity and later operation schemas remain open.
-- [ ] Add a driver to the independent fixture, built and invoked through Dune in that
+  cancellation, and refresh. Generation and hierarchy contracts now include deterministic
+  occurrence identity and versioned structured result retrieval; later-phase operations remain open.
+- [x] Add a driver to the independent fixture, built and invoked through Dune in that
   project's compiler, package, and Hardcaml environment. Link circuit libraries only in
   the project driver; use typed library APIs there for discovery, elaboration, and Verilog
   generation. Any optional SDK helps implement this contract without owning circuits.
-- [ ] Discover registered targets/configurations through the driver, select one in the UI,
+- [x] Discover registered targets/configurations through the driver, select one in the UI,
   and execute elaboration/RTL generation as daemon-supervised jobs. The project remains
   responsible for valid target constructors and configuration values.
-- [ ] Replace the labeled fixture hierarchy with driver-returned elaborated hierarchy as
+- [x] Replace the labeled fixture hierarchy with driver-returned elaborated hierarchy as
   structured data; preserve instance identity for later reports and graphs.
-- [ ] Register RTL with project/root identity, target, configuration, generating job,
+- [x] Register RTL with project/root identity, target, configuration, generating job,
   tool versions, source identity/hash, commit where available, dirty state, and creation
   time. Represent unknown provenance for dirty or non-Git inputs honestly.
-- [ ] Retrieve artifact content through the daemon by ID; keep filesystem locations private.
+- [x] Retrieve artifact content through the daemon by ID; keep filesystem locations private.
   Handle invalid manifests, unsupported manifest/driver versions, missing drivers, invalid
   configurations, unavailable targets, and elaboration failures. Missing or incompatible
   optional integration must leave generic Dune operations usable.
@@ -387,6 +548,11 @@ Workbench. Exercise missing/incompatible integration with generic build/test sti
 Changing project, target, or configuration must not display previous results as current.
 
 ### 1D. Add the first structured hierarchical report
+
+**Scope update (2026-09-20):** the active staged-report implementation and release
+checks are D1–D4. The earlier gate below is retained as background; per-node report
+mapping, a second backend and the full general ASIC integration track are
+not prerequisites for the scaf dashboard.
 
 **References:** [MVP checklist](hardcaml_workbench_architecture.md#20-suggested-mvp),
 [metrics and checks](hardcaml_workbench_architecture.md#18-artifact-model),
@@ -443,6 +609,10 @@ path was implemented. 1E is not required by this gate.
 
 ### 1E. Add the browser client and graphical views
 
+**Status override (2026-09-20): Parked.** The prerequisite investigation below is
+historical. No browser/toolchain repair or live browser validation is scheduled for
+the active release.
+
 **References:** [frontend choice](hardcaml_workbench_architecture.md#1-frontend-choice-and-delivery-order),
 [shared application protocol](hardcaml_workbench_architecture.md#43-application-protocol-and-runtime-boundaries),
 [UI layout](hardcaml_workbench_architecture.md#8-suggested-ui-layout),
@@ -468,9 +638,9 @@ the reverse. Serve packaged assets from an installed daemon with no development 
 both locally and over a forwarded loopback port. The graphical views themselves arrive with the
 Phase 3 milestones; this milestone delivers the client and the shared views.
 
-Until this milestone completes, record the browser client as blocked with the upstream
-prerequisite as its concrete blocker, and do not describe the application as shipping browser
-assets.
+Until this milestone is reactivated, record the browser client as parked, retaining
+the prerequisite evidence for later revalidation. Do not describe the application
+as shipping browser assets.
 
 ## 5. Phase 2 — Persistent tool workers and repeatable runs
 
@@ -764,40 +934,43 @@ UI workflows and reconnect recovery. Keep fixture tests usable without Vivado or
 and record live validation separately with project root, tool versions, target/configuration,
 commands, and outcome. An unavailable prerequisite is a pending check.
 
-Use **Not started**, **In progress**, **Blocked**, **Complete**, or **Deferred (optional)**.
+Use **Not started**, **In progress**, **Blocked**, **Complete**, **Re-scoped**, or
+**Deferred / Parked**. Re-scoped items point to their replacement acceptance checks;
+they do not claim completion.
 When blocked, record the concrete blocker and the next action. When complete, link the
 implementation and validation evidence; a checked task list alone is insufficient.
 
 | Milestone | Status | Implementation / validation evidence or blocker |
 | --- | --- | --- |
+| D1 — Real scaf project and existing result | Not started | Active release; project CLI/records inspected for scope, live Workbench integration not yet validated. |
+| D2 — Launch and observe scaf flow | Not started | Active release; live structured stage/substep evidence needs an explicit project-side contract. |
+| D3 — Persistent timing/results dashboard | Not started | Active release; dedicated timing, stage/check boxes, area/utilization, identity and logs. |
+| D4 — Daily-use validation / release gate | Not started | Active release; real flow and SSH/tmux checks required. |
 | 1A — Installed application foundation | Complete | Completed 2026-09-20. `protocol/V1`, `native_http/`, `daemon/rpc_server.ml`, the installed daemon/client, runtime discovery/locking, and the isolated counter fixture implement the recorded design. `scripts/test-native-application.sh` passed installed typed exchange from outside the checkout, concurrent startup, stale discovery, client exit/reattach, explicit endpoint failure without replacement, and shutdown. `FIXTURE_OPAM_SWITCH=5.2.0+ox ./scripts/test-fixture.sh` built and tested the copied external fixture. Codec/RPC tests cover malformed requests, unsupported versions, instance and cursor errors, timeout heartbeat, limits, and HTTP trust checks. `dune describe external-lib-deps` confirms the terminal has no backend/adapter/project-integration path. Native package build/install, opam lint, format, lint, tests, and default build pass; exact commands are in [development notes](development.md#milestone-1a-installed-native-foundation). Browser validation remains separately tracked in 1E and is not claimed by this milestone. |
 | 1B — Generic Dune projects, jobs, and terminal client | Complete | Completed 2026-09-20 under the recorded acceptance scope adjustment. Protocol/RPC, adapter, supervisor, file-backed logs, installed external-fixture workflow, and PTY resize checks pass. The user confirmed repeated resizing while navigating, visible generic Dune workspace information, explicit unavailable hierarchy, build/test completion, per-job logs including repeated no-output jobs, diagnostics toggling, and state recovery after exit/relaunch in the intended server-side TUI over ordinary SSH. The UI follow-up makes state plus process outcome primary, distinguishes empty logs through known EOF, bounds verbose connection diagnostics behind `d`, middle-truncates the default root, and exposes complete wrapped diagnostic fields with `[`/`]` scrolling. This human evidence does not claim every terminal/tmux combination or crossing the small-terminal threshold. A workstation-native client through an SSH-forwarded HTTP endpoint is explicitly deferred by the user, not passed; commands remain in the development notes. |
-| 1C — Versioned manifest/driver and RTL | In progress | The manifest/describe discovery slice passed on 2026-09-20. Portable tests cover defaults, unknown/duplicate/invalid fields, unsupported versions, driver framing/output limits, capabilities, keys, and references. Backend tests cover cached open, stable refresh identities, manifest repair, malformed/incompatible/nonzero/launch failures, stale-result clearing, cancellation, selected environment propagation, and generic fallback. The copied fixture builds/tests and runs its counter driver directly. Installed checks cover no manifest, manifest-only custom aliases, compatible discovery, reconnect without rerun, explicit refresh, missing driver, invalid manifest, generic fallback, and external launch. Format, lint, tests, build, package install build, opam lint, dependency boundaries, and PTY resize pass; exact commands are in the development notes. Target selection, elaboration/RTL, real hierarchy, artifact retrieval, and full provenance remain open; no full milestone completion is claimed. |
-| 1D — First structured hierarchical report / MVP gate | Not started | — |
-| 1E — Browser client and graphical views | Blocked | Two layers of the same blocker, checked 2026-09-17. `js_of_ocaml` is not installed in the `5.2.0+ox` switch and its `oxcaml-js_of_ocaml*` packages are guarded, so `dune build` currently fails on `web/main.bc` with `Library "js_of_ocaml" not found`; behind that sits the recorded [OxCaml/js_of_ocaml incompatibility](development.md#javascript-toolchain-prerequisite) that would block the JavaScript target even once installed. Later evidence: the 2026-09-18 development notes record a successful protocol JavaScript compilation probe and a local Bonsai dependency repair. The original blocker diagnosis needs revalidation; next action in 1E is to build browser assets and execute the codecs with the selected toolchain. Not part of the MVP gate; the daemon, protocol, project-integration, backend, and adapter targets build. |
-| A.1 — Open an ASIC consumer as an ordinary project | Not started | — |
-| A.2 — ASIC build and execution artifacts | Not started | — |
-| A.3 — Reuse supported inspection views for ASIC | Not started | — |
-| 2A — Persistent Tcl tool worker | Not started | — |
-| 2B — Synthesis, implementation, reports | Not started | — |
-| 2C — RTL viewer and history / Phase 2 gate | Not started | — |
-| 3A — Elaboration graph | Not started | — |
-| 3B — Typed project simulation and waveforms | Not started | — |
-| 3C — Overlays and comparison / Phase 3 gate | Not started | — |
-| 4A — Hardware programming | Not started | — |
-| 4B — ILA capture | Not started | — |
-| 4C — GUI socket bridge (optional) | Not started | — |
-| 4D — Distributed remote workers | Not started | — |
+| 1C — Versioned manifest/driver, RTL, and hierarchy | Complete | All three implementation slices pass automated validation on 2026-09-20. The final slice exports genuine Hardcaml instance occurrences from the same elaboration as RTL, imports hierarchy and RTL atomically, preserves deterministic structural keys, retrieves structured results by hierarchy artifact ID, and provides terminal tree/navigation/inspection with exact current-versus-historical labeling. Tests cover malformed/disconnected/cyclic/deep/oversized trees, duplicate identities and ports, repeated instances, configuration-specific widths, unsupported drivers, capability changes during an in-flight generation, cancellation at the registration commit boundary, event ordering, reconnect, collapse/expansion, compact scrolling, and resize. Direct fixture and installed outside-checkout workflows pass. Discovery, RTL/artifact, and final hierarchy human checklists are accepted. The user confirmed live hierarchy, repeated-child identity, four/eight-bit widths, navigation, collapse/expansion, scrolling, resize, historical labeling, and reconnect without rerunning work. Exact commands and acceptance evidence are in the development notes; workstation-native SSH-forward validation remains deferred. |
+| 1D — First structured hierarchical report / former MVP gate | Re-scoped | D1–D4 own the active staged-report release; per-node report mapping is deferred. |
+| 1E — Browser client and graphical views | Parked | Historical JS/toolchain blockers and subsequent probes remain in development notes. Revalidate only when browser work is reactivated. |
+| A.1 — Open an ASIC consumer as an ordinary project | Re-scoped | D1 selects the real scaf consumer; integration validation remains open. |
+| A.2 — ASIC build and execution artifacts | Re-scoped | D1–D3 deliver the minimal scaf path; general resumability/framework work is deferred. |
+| A.3 — Reuse supported inspection views for ASIC | Re-scoped | D3 supplies the first dashboard; broader inspection is parked. |
+| 2A — Persistent Tcl tool worker | Parked | Requires a concrete vendor-tool workflow. |
+| 2B — Synthesis, implementation, reports | Parked | Existing project batch flow is the active path. |
+| 2C — RTL viewer and history / Phase 2 gate | Parked | D1/D4 reopen project-owned results; general history and CodeMirror deferred. |
+| 3A — Elaboration graph | Parked | — |
+| 3B — Typed project simulation and waveforms | Parked | Existing project simulation results can appear in D3 without this subsystem. |
+| 3C — Overlays and comparison / Phase 3 gate | Parked | — |
+| 4A — Hardware programming | Parked | — |
+| 4B — ILA capture | Parked | — |
+| 4C — GUI socket bridge (optional) | Parked | — |
+| 4D — Distributed remote workers | Parked | — |
 
-**Next construction task:** continue 1C after this bounded discovery slice with target/configuration
-selection and the separately designed elaboration/RTL, hierarchy, artifact retrieval, and
-provenance path, or exercise A.1's ordinary generic-project path against an ASIC consumer. Report
-and vendor-worker decisions remain with 1D and 2A respectively.
+1C's delivered hierarchy implementation and completed human acceptance evidence are retained
+above. D4 still owns the active release's real-terminal dashboard check; hierarchy acceptance
+does not establish that separate workflow.
 
-The shortest route from the current state to a Workbench that is actually used runs through
-A.1: open `hardcaml_asic` or its consumer as an ordinary project, run its Dune build and test
-as supervised jobs with streaming logs, then run its flow steps as jobs and render the
-structured result it already collects. That exercises 1B end to end and most of 1D's value
-with no Vivado, no manifest, no driver, and no JavaScript toolchain. Prefer one small vertical
-slice of this kind over further planning; this plan revision does not implement code or mark
-any milestone complete.
+**Next construction task:** D1 — open `../scaf/`, validate its ordinary build/test
+workflow, and expose one explicitly selected existing physical result through the
+smallest project-owned adapter. Then D2 adds launch/progress, D3 makes timing and
+stage/check outcomes permanently visible, and D4 validates daily use. No parked
+milestone is a prerequisite for this sequence.

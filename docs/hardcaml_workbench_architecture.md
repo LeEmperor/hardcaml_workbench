@@ -6,6 +6,101 @@ guiding boundaries. The [construction phase plan](construction_phase_plan.md) tr
 implementation order and completion criteria for the phases described here. Design changes
 belong in this document first; the plan should then be updated to match.
 
+## Active release scope — protemu monitoring (2026-09-20)
+
+The next release is a terminal build/flow dashboard for **`hardcaml_protemu` in the
+`../scaf/` worktree**. Its job is to launch the existing project flow, show what is
+running without consulting `btop`, and keep timing, flow outcomes, and system/design
+information visible. This scope takes precedence over the broader delivery order and
+MVP requirements below. Sections 21–23 and the browser frontend are parked roadmap
+ideas, not commitments or prerequisites for this release.
+
+Use the installed native daemon and server-side TUI over ordinary SSH. Reuse the
+existing supervisor, project environment, logs, artifact access, and integration
+contracts. Keep project commands and flow semantics in the project; Workbench must
+not become a second LibreLane orchestrator. A small project-side adapter may expose
+the existing CLI and records without requiring every operation to be a typed
+Hardcaml elaboration call.
+
+### First real integration and evidence boundary
+
+[`scaf/docs/flow.md`](../../scaf/docs/flow.md) is authoritative for the project's
+flow. At this scope revision its public entry point is `./flow.sh`, whose full
+sequence is `build → emit → preflight → run → postcheck → collect → report → archive`.
+Named steps do not implicitly execute their prerequisites. Existing run selection
+must be explicit; never guess the intended run from the newest directory.
+
+The project already records `run.json`, `results.json`, postchecks, reports, and
+archives under `flow_results/`. Its reporter exposes setup/hold slack, per-corner
+timing detail, unconstrained modes, and verification checks; the collector includes
+final standard-cell area and utilization. Reuse these results through a project-owned
+adapter. Availability of final records does **not** establish live substep telemetry:
+the first integration slice must identify or add a bounded machine-readable
+progress/status path on the project side, with its schema and update behavior
+documented before wiring it into Workbench.
+
+### Always-visible terminal dashboard
+
+Use a stable full-screen layout with these regions; resizing may compact them but
+must preserve identity, execution state, timing summary, and stage outcomes:
+
+1. **Identity/header:** project and worktree, target/configuration, source revision
+   and dirty state, selected build/run, requested flow extent, clock target and
+   technology where supplied. Distinguish the currently edited source from the
+   immutable inputs of the displayed result.
+2. **Flow strip:** persistent boxes for declared stages with not-run, queued, running,
+   passed, failed, cancelled/interrupted, skipped, blocked, or unsupported states as
+   appropriate. Show elapsed time and let selection open the supporting log/result.
+   Retain boxes before and after execution. A later stage cannot inherit an earlier
+   stage's success, and a result from another build/run cannot silently fill a box.
+3. **Timing panel:** setup and hold worst slack separately, units, corner/mode,
+   producing stage, clock constraint, and result age. Add TNS and violating-path
+   counts when the project exposes them, with per-corner drilldown. Unconstrained,
+   unavailable, and not-yet-produced are explicit states, never green zeroes.
+4. **Results/checks panel:** lint, emit, simulation, GDS, harden, signoff-block, and
+   signoff-chip are desired persistent capability/result badges. The project must
+   declare their mapping to actual operations and evidence. These names are not all
+   current `flow.sh` stages: unsupported badges stay visible as unsupported; a GDS
+   artifact is not proof of signoff, and block signoff is not chip signoff. Display
+   DRC, LVS, antenna, TT precheck and gate-level simulation separately when supplied.
+5. **Execution/log panel:** active project stage and tool substep when known, total
+   and stage elapsed time, last progress/log activity, connection/observation freshness,
+   and a log tail with access to the first actionable failure. Process liveness and
+   log activity are separate from verified progress and successful completion. A quiet
+   tool is not automatically hung; loss of observation is not completion. Do not invent
+   percentage complete or ETA without meaningful project/tool evidence.
+6. **Compact design summary:** standard-cell area and utilization from existing
+   collected results. Cell/FF/memory/macro counts, die/core area, and routing/congestion
+   summaries may be added when already available with clear stage/unit context.
+
+Timing and metrics are the **latest available measurements for a named run/stage**,
+not continuously measurable quantities. While a new run has no timing result, show
+pending; an explicitly labeled previous-result reference may remain visible. Never
+present previous timing as a fresh measurement of the running or edited design.
+
+The dashboard must launch a full flow or explicitly selected supported steps, show
+their requested extent, and offer existing cancellation/log navigation. The daemon
+owns execution so detach/reattach does not launch duplicate work. Import/reopen a
+selected project-owned stored result without executing the physical flow. This is
+required now; a general daemon database and cross-run comparison UI are not.
+
+Host CPU/RAM/free-disk and supervised-process resource usage are useful secondary
+indicators, not completion evidence. Add them only after the flow/timing dashboard
+works and if cheap to obtain. Power estimates require a meaningful activity/model
+context and are not an initial gate. Full graph/waveform viewers, elaborate resource
+analytics, and arbitrary dashboard customization remain parked.
+
+### Release boundary
+
+Release when the real scaf workflow can be launched and monitored, its persisted
+results reopened, and timing/check evidence inspected in the TUI. Validate a real
+physical run plus failure/cancellation and reattachment behavior. Structured
+elaborated hierarchy and per-node reports are no longer release gates. Browser work,
+Vivado workers, a second report backend, graph/waveform/overlay views, hardware/ILA,
+GUI bridging, and distributed workers require a new explicit user need before
+activation. Workstation-native attachment validation stays deferred. A general
+durable history store is reconsidered only if reopening project archives is inadequate.
+
 ## Purpose
 
 Build a standalone development application that opens and operates on independent
@@ -321,8 +416,8 @@ or incompatible integration without preventing generic Dune use.
 
 ### 1C discovery contracts (2026-09-20)
 
-This section fixes only the first bounded 1C slice: manifest validation and target/configuration
-discovery. Elaboration, RTL, hierarchy, artifacts, and complete provenance remain later 1C work.
+This section records the first bounded 1C slice: manifest validation and target/configuration
+discovery. The later sections below define the delivered RTL/artifact and hierarchy slices.
 
 **Manifest version 1.** `hardcaml-workbench.sexp` is optional. When present it is a sequence of
 exactly these top-level forms, each required exactly once and with `lang` first:
@@ -427,10 +522,9 @@ or implemented now.
 ### 1C RTL generation and artifact contracts (2026-09-20)
 
 This is the second bounded 1C slice. It adds client-local target/configuration selection, one
-supervised RTL operation, daemon-lifetime artifact registration, and bounded content retrieval. It
-does not add an elaborated hierarchy model. Generating RTL necessarily elaborates the selected
-circuit inside the project driver, but exporting that circuit as portable hierarchy data remains
-the next 1C slice.
+supervised RTL operation, daemon-lifetime artifact registration, and bounded content retrieval.
+At this slice boundary it did not add an elaborated hierarchy model; the final 1C section below
+defines the subsequently delivered portable hierarchy data.
 
 **Selection.** Target and configuration selection is client-local view state. The daemon owns the
 declared project summaries and the jobs/artifacts that cite them; it does not own a shared “current
@@ -485,8 +579,9 @@ output. Driver scratch/output directories are removed after processing; imported
 lasts for the daemon lifetime and is removed on daemon shutdown.
 
 Registration is all-or-nothing for this operation. The daemon validates and imports every declared
-output before publishing any artifact. On failure or cancellation it removes staged files and
-registers none. Cancellation requested while output processing is in progress wins over success.
+output before publishing any artifact. On failure or cancellation before registration it removes
+staged files and registers none. Successful registration is the commit point: a cancellation request
+received from a registration event cannot turn the committed result into a cancelled job.
 After successful import the daemon stores all artifacts, updates the generating job with their IDs,
 then emits artifact upserts and the updated job before the terminal successful job event. This makes
 the snapshot/event stream self-consistent when completion is advertised. Build/run references are
@@ -531,6 +626,91 @@ A small `hardcaml_workbench_project` SDK may help external projects declare targ
 implement the driver protocol. It is project-integration code, not synthesizable hardware,
 and projects must remain usable through their ordinary Dune commands without launching the
 Workbench.
+
+### 1C elaborated hierarchy contracts (2026-09-20)
+
+This final 1C slice exports the structural instance hierarchy produced by the same project-side
+Hardcaml elaboration that emits RTL. It is deliberately smaller than Phase 3's signal/operator
+graph: a hierarchy contains instance occurrences, parent relationships, logical instance and
+circuit names, module input/output port names and widths, and small project-supplied metadata.
+Source locations, signal connectivity, operators, registers, memories, clock/reset classification,
+and report metrics are absent unless a later version explicitly supplies them. The daemon never
+infers any of these facts from Verilog or from the Dune workspace.
+
+**Driver capability and handoff.** Driver protocol version 1 retains its frozen describe and
+`generate-rtl` response shapes. A hierarchy-capable driver additionally advertises
+`generate-rtl-hierarchy`. This capability means that every successful `generate-rtl` invocation
+declares exactly one output with kind `hardcaml/elaboration-hierarchy`, role `report`, and media
+`application/x-hardcaml-workbench-hierarchy-sexp`. The output is a version-1 hierarchy sidecar in
+the existing private output directory. It is capped at 8 MiB and never enters driver stdout. A
+driver advertising the capability but omitting, duplicating, or returning a malformed hierarchy
+fails the complete generation operation, and no RTL or hierarchy artifact is registered. A driver
+without the capability remains fully usable for describe and RTL generation; hierarchy retrieval
+for its RTL result reports unsupported rather than invalidating that result. A hierarchy output
+from a driver that did not advertise the capability remains an ordinary opaque artifact.
+The daemon pins the selected driver path and advertised capability into the queued generation
+operation; a concurrent integration refresh cannot switch the executable or reinterpret an
+in-flight result after its execution has started.
+
+RTL and hierarchy therefore come from one process, one source observation interval, and one
+elaboration. They share the Workbench project, target, configuration, generating job, optional
+backend build/run references, environment, tool versions, source identity, and creation time. The
+daemon imports the sidecar as an immutable artifact alongside the RTL and registers its decoded
+structured result only after every output has validated and copied successfully. The hierarchy
+result cites its hierarchy artifact and all RTL artifacts from that job. Artifact and structured
+result registration precede the job's successful terminal update. Failure or cancellation exposes
+neither partial artifacts nor a partial hierarchy.
+
+**Portable representation.** The driver sidecar repeats protocol version, target key,
+configuration key, root structural key, and a flat bounded node list. Each node has:
+
+- a structural key and optional parent key;
+- an optional logical instance name (`None` only for the root) and a circuit/module name;
+- input and output ports, each with a nonempty name and positive bit width; and
+- bounded `(name, value)` metadata for facts such as an unresolved/black-box implementation.
+
+The application result adds its hierarchy artifact ID, project/target/configuration IDs, generating
+job, RTL artifact IDs, and artifact provenance. A separate additive `read-hierarchy` application V1
+operation accepts the daemon instance and hierarchy artifact ID and returns that result. Hierarchies
+are not added to snapshots or incremental events: the small artifact metadata and the generating
+job's existing artifact IDs advertise availability, while a client fetches the potentially large
+tree explicitly. Same-daemon reconnect recovers it without elaboration replay. Durable restart
+recovery remains milestone 2C.
+
+The sidecar allows at most 10,000 nodes, depth 256, 4,096 ports or metadata entries per node, and
+4,096 bytes per key/name/value. Validation requires exactly one root, the declared root to exist
+and have no parent, every other parent to exist, every node to be reachable exactly once from the
+root, unique structural keys, no cycles, unique sibling instance names, and no duplicate port or
+metadata names within a node. Invalid UTF-8 is not assigned extra semantics: names are S-expression
+strings and treated as bytes for identity and display truncation.
+
+**Structural identity.** An instance key is its elaborated occurrence path, not a module name,
+signal UID, random ID, or traversal position. The root key is `/`. Every child segment is encoded as
+`<decimal-byte-length>:<logical-instance-name>` and appended to its parent key after `/`; for example
+`/11:u_counter_0`. Length-prefixing makes `/`, `:`, spaces, and arbitrary bytes in names
+unambiguous. Duplicate logical instance names under one parent would produce the same path and are
+rejected rather than disambiguated by visit order. Repeated instances of one circuit consequently
+have distinct keys whenever their project-owned instance names differ.
+
+For a deterministic elaboration that preserves logical instance names and parentage, structural
+keys repeat across jobs and daemon restarts. They may also repeat across configurations whose
+structure is unchanged, but this is not promised when configuration changes hierarchy or naming.
+Every key is interpreted only inside its hierarchy artifact/result; the artifact ID plus key is the
+unambiguous application reference. Workbench project, job, and artifact IDs remain daemon-session
+identities and are intentionally separate. Hardcaml's circuit database stores module definitions;
+the driver traverses each parent's actual `Circuit.instantiations`, resolving child circuits through
+that database, so repeated occurrences are preserved. An unresolved instantiation is retained as a
+leaf with explicit unavailable implementation metadata rather than fabricated children.
+
+**Current versus historical presentation.** Target and configuration selection remains
+client-local. For the current selection, the newest generation attempt is authoritative: queued or
+running means pending, failure/cancellation is shown as such, and an older successful hierarchy is
+not silently substituted. A completed hierarchy-capable result is current only when its exact
+target/configuration matches the selection and its generating job is that selection's newest
+generation attempt. A user may explicitly inspect any historical generation job; the terminal
+labels its job, target, configuration, and historical status. Expansion, selected
+node, and tree scroll are client-local. Refresh can remove declarations without rewriting immutable
+historical results.
 
 ---
 
@@ -676,7 +856,7 @@ The daemon and browser share a typed application protocol. Its OCaml definitions
 compiled to native code for the daemon and to JavaScript for the Bonsai frontend. They cover
 portable values such as:
 
-- project, target, configuration, job, artifact, and hierarchy IDs,
+- project, target, configuration, job, artifact, and hierarchy structural identities,
 - project and target summaries,
 - typed requests and responses,
 - job snapshots and incremental updates,
@@ -768,11 +948,14 @@ at 256 KiB; these are server limits, not new wire versions.
 | `submit-job` | Project ID, typed supported action, and submission key in, job snapshot out; implemented in 1B. |
 | `cancel-job` | Job ID in, current job snapshot out; implemented in 1B. |
 | `read-log` | Job ID and record offset in, bounded stdout/stderr records, next offset, and EOF flag out; implemented in 1B. |
+| `refresh-integration` | Project ID in, queued driver-discovery job out; implemented in 1C. |
+| `generate-rtl` | Project, target, configuration, and submission key in, queued generation job out; implemented in 1C. |
+| `read-artifact` | Artifact ID and bounded byte range in, content page and EOF metadata out; implemented in 1C. |
+| `read-hierarchy` | Hierarchy artifact ID in, associated immutable structural hierarchy result out; implemented in 1C. |
 
-Implement only `hello`, `snapshot`, and `updates` in 1A. The other rows constrain their
-extensions but do not require empty handlers or invented project/driver implementations.
-Artifact content retrieval by ID belongs to 1C and will use a dedicated bounded/streaming
-response rather than embedding contents in a snapshot. Root input is an explicit exception
+The milestone annotations record when each row became implemented; additive operations are
+capability-advertised. Artifact content remains outside snapshots and uses its dedicated bounded
+response. Root input is an explicit exception
 to opaque-ID access: it denotes a path on the daemon's machine, never a client-side file handle.
 
 **Updates and reconnect.** Use a single daemon-wide monotonically increasing event sequence
@@ -1762,9 +1945,11 @@ example; a multi-corner comparison is a table over corners, not one slack column
 
 # 20. Suggested MVP
 
-Do not start with a complete hardware IDE.
+The active MVP is the [protemu monitoring release](#active-release-scope--protemu-monitoring-2026-09-20).
+The construction plan's D1–D4 slices define its acceptance checks. The earlier
+general-purpose checklist below is retained as historical scope, not a release gate.
 
-## Phase 1
+## Earlier Phase 1 baseline (superseded as the active gate)
 
 Build:
 
@@ -1782,7 +1967,8 @@ Build:
 9. Show live job/log output.
 10. Allow clicking a hierarchy node to inspect its report.
 
-This already produces a useful tool.
+Hierarchy and node inspection from this baseline are deferred until the real workflow
+needs them; the staged report dashboard does not depend on them.
 
 Stating item 6 in terms of the project's reporting path rather than one library keeps the MVP
 gate reachable without a Vivado installation, and keeps the first useful Workbench available
@@ -1792,7 +1978,7 @@ to an ASIC project. Vivado's own integration begins in Phase 2, where it belongs
 
 # 21. Phase 2
 
-Add:
+Parked, subject to an explicit workflow need rather than automatic implementation:
 
 - persistent Vivado process,
 - synthesis/implementation jobs,
@@ -1806,7 +1992,7 @@ Add:
 
 # 22. Phase 3
 
-Add:
+Parked, subject to an explicit workflow need rather than automatic implementation:
 
 - Hardcaml elaboration graph,
 - hierarchy drilldown,
@@ -1820,7 +2006,7 @@ Add:
 
 # 23. Phase 4
 
-Add:
+Parked, subject to an explicit workflow need rather than automatic implementation:
 
 - FPGA hardware manager,
 - programming,

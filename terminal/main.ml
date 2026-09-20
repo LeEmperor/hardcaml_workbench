@@ -22,6 +22,16 @@ type artifact_view =
   ; truncated : bool
   }
 
+type hierarchy_view =
+  { hierarchy : Hierarchy.t
+  ; nodes : Hierarchy.Node.t String.Table.t
+  ; children : Hierarchy.Node.t list String.Table.t
+  ; mutable selected_key : string
+  ; mutable expanded : String.Set.t
+  ; mutable scroll : int
+  ; mutable pane_scroll : int
+  }
+
 type session =
   { requested_endpoint : string option
   ; project_root : string option
@@ -37,6 +47,8 @@ type session =
   ; mutable selected_configuration : Configuration_id.t option
   ; mutable selected_artifact : Artifact_id.t option
   ; mutable artifact_view : artifact_view option
+  ; mutable hierarchy_view : hierarchy_view option
+  ; hierarchy_errors : string Artifact_id.Table.t
   ; logs : log_state Job_id.Table.t
   ; mutable status : string
   ; mutable polling : bool
@@ -187,6 +199,8 @@ let create_session
       ; selected_configuration = None
       ; selected_artifact = None
       ; artifact_view = None
+      ; hierarchy_view = None
+      ; hierarchy_errors = Artifact_id.Table.create ()
       ; logs = Job_id.Table.create ()
       ; status = "connected"
       ; polling = false
@@ -230,38 +244,36 @@ let reconcile_selection session =
     session.selected_target <- None;
     session.selected_configuration <- None;
     session.selected_artifact <- None;
-    session.artifact_view <- None
+    session.artifact_view <- None;
+    session.hierarchy_view <- None
   | Some project ->
-    let selected_target =
-      Option.bind session.selected_target ~f:(fun id ->
-        List.find project.targets ~f:(fun target -> Target_id.equal target.id id))
-      |> Option.first_some (List.hd project.targets)
+    let target, configuration =
+      State.reconcile_selection
+        project
+        ~target:session.selected_target
+        ~configuration:session.selected_configuration
     in
-    session.selected_target <- Option.map selected_target ~f:(fun target -> target.id);
-    let selected_configuration =
-      Option.bind selected_target ~f:(fun target ->
-        Option.bind session.selected_configuration ~f:(fun id ->
-          List.find project.configurations ~f:(fun configuration ->
-            Configuration_id.equal configuration.id id
-            && Target_id.equal configuration.target target.id))
-        |> Option.first_some
-             (List.find project.configurations ~f:(fun configuration ->
-                Target_id.equal configuration.target target.id)))
-    in
-    session.selected_configuration
-    <- Option.map selected_configuration ~f:(fun configuration -> configuration.id);
+    session.selected_target <- target;
+    session.selected_configuration <- configuration;
     let artifacts = project_artifacts session in
     let selected_artifact =
-      Option.bind session.selected_artifact ~f:(fun id ->
-        List.find artifacts ~f:(fun artifact -> Artifact_id.equal artifact.id id))
-      |> Option.first_some (List.hd artifacts)
+      Option.first_some
+        (Option.bind session.selected_artifact ~f:(fun id ->
+           List.find artifacts ~f:(fun artifact -> Artifact_id.equal artifact.id id)))
+        (List.hd artifacts)
     in
-    session.selected_artifact <- Option.map selected_artifact ~f:(fun artifact -> artifact.id);
+    session.selected_artifact
+    <- Option.map selected_artifact ~f:(fun artifact -> artifact.id);
     Option.iter session.artifact_view ~f:(fun view ->
       if not
            (Option.value_map session.selected_artifact ~default:false ~f:(fun id ->
               Artifact_id.equal id view.artifact))
-      then session.artifact_view <- None)
+      then session.artifact_view <- None);
+    Option.iter session.hierarchy_view ~f:(fun view ->
+      if not
+           (List.exists artifacts ~f:(fun artifact ->
+              Artifact_id.equal artifact.id view.hierarchy.artifact))
+      then session.hierarchy_view <- None)
 ;;
 
 let selected_target session =
@@ -286,6 +298,44 @@ let selected_artifact session =
 ;;
 
 let selected_job session = List.nth (project_jobs session) session.selected
+
+let preserve_selected_job session selected_job_id =
+  let jobs = project_jobs session in
+  session.selected
+  <- State.preserve_job_selection
+       jobs
+       ~selected_job:selected_job_id
+       ~fallback_index:session.selected
+;;
+
+let is_hierarchy_artifact (artifact : Artifact.t) =
+  String.equal artifact.kind.namespace "hardcaml"
+  && String.equal artifact.kind.name "elaboration-hierarchy"
+  && Artifact.Role.equal artifact.kind.role Report
+  && Option.equal
+       String.equal
+       artifact.kind.media
+       (Some "application/x-hardcaml-workbench-hierarchy-sexp")
+;;
+
+let hierarchy_artifact_for_job session job =
+  List.find_map job.Job.artifacts ~f:(fun id ->
+    List.find session.snapshot.artifacts ~f:(fun artifact ->
+      Artifact_id.equal artifact.id id && is_hierarchy_artifact artifact))
+;;
+
+let current_generation session =
+  match
+    current_project session, session.selected_target, session.selected_configuration
+  with
+  | Some project, Some target, Some configuration ->
+    State.latest_generation
+      session.snapshot.jobs
+      ~project:project.id
+      ~target
+      ~configuration
+  | _ -> None
+;;
 
 let log_state session job =
   Hashtbl.find_or_add session.logs job ~default:(fun () ->
@@ -347,17 +397,18 @@ let snapshot_request session ~instance_id =
 let apply_updates session ~instance_id updates =
   if not (V1.Daemon_instance_id.equal instance_id session.hello.instance_id)
   then Ok `Stale
-  else
+  else (
+    let selected_job_id = Option.map (selected_job session) ~f:(fun job -> job.id) in
     State.apply_updates session.snapshot updates
     |> Result.map ~f:(fun snapshot ->
       session.snapshot <- snapshot;
       reconcile_selection session;
-      let count = List.length (project_jobs session) in
-      session.selected <- Int.min session.selected (Int.max 0 (count - 1));
-      `Applied)
+      preserve_selected_job session selected_job_id;
+      `Applied))
 ;;
 
 let resync session ~instance_id =
+  let selected_job_id = Option.map (selected_job session) ~f:(fun job -> job.id) in
   let%map snapshot = snapshot_request session ~instance_id in
   match snapshot with
   | _ when not (V1.Daemon_instance_id.equal instance_id session.hello.instance_id) ->
@@ -366,8 +417,7 @@ let resync session ~instance_id =
   | Ok snapshot ->
     session.snapshot <- snapshot;
     reconcile_selection session;
-    let count = List.length (project_jobs session) in
-    session.selected <- Int.min session.selected (Int.max 0 (count - 1));
+    preserve_selected_job session selected_job_id;
     Ok ()
 ;;
 
@@ -428,6 +478,7 @@ let rec refresh session =
           read_selected_log session))
 
 and reconnect session =
+  let selected_job_id = Option.map (selected_job session) ~f:(fun job -> job.id) in
   session.status <- "reconnecting...";
   let%map loaded =
     load_state
@@ -451,8 +502,14 @@ and reconnect session =
     session.hello <- hello;
     session.opened <- opened;
     session.snapshot <- snapshot;
+    if instance_changed
+    then (
+      session.hierarchy_view <- None;
+      Hashtbl.clear session.hierarchy_errors);
     reconcile_selection session;
-    session.selected <- 0;
+    if instance_changed
+    then session.selected <- 0
+    else preserve_selected_job session selected_job_id;
     Hashtbl.clear session.logs;
     session.reconnect_delay_ms <- 250;
     session.status
@@ -533,7 +590,8 @@ let next_after values current ~equal =
      | Some current ->
        (match List.findi values ~f:(fun _ value -> equal current value) with
         | None -> Some first
-        | Some (index, _) -> Some (List.nth_exn values ((index + 1) mod List.length values))))
+        | Some (index, _) ->
+          Some (List.nth_exn values ((index + 1) mod List.length values))))
 ;;
 
 let cycle_target session =
@@ -547,7 +605,7 @@ let cycle_target session =
     reconcile_selection session;
     session.status
     <- Option.value_map next ~default:"no project target is available" ~f:(fun target ->
-      "selected target " ^ target.name)
+         "selected target " ^ target.name)
 ;;
 
 let cycle_configuration session =
@@ -562,8 +620,10 @@ let cycle_configuration session =
     session.selected_configuration
     <- Option.map next ~f:(fun configuration -> configuration.id);
     session.status
-    <- Option.value_map next ~default:"selected target has no configuration" ~f:(fun config ->
-      "selected configuration " ^ config.name)
+    <- Option.value_map
+         next
+         ~default:"selected target has no configuration"
+         ~f:(fun config -> "selected configuration " ^ config.name)
   | None, _ | _, None -> session.status <- "no target is selected"
 ;;
 
@@ -574,12 +634,16 @@ let cycle_artifact session =
   session.selected_artifact <- Option.map next ~f:(fun artifact -> artifact.id);
   session.artifact_view <- None;
   session.status
-  <- Option.value_map next ~default:"no generated artifact is available" ~f:(fun artifact ->
-    "selected artifact " ^ artifact.metadata.display_name)
+  <- Option.value_map
+       next
+       ~default:"no generated artifact is available"
+       ~f:(fun artifact -> "selected artifact " ^ artifact.metadata.display_name)
 ;;
 
 let generate_rtl session =
-  match current_project session, selected_target session, selected_configuration session with
+  match
+    current_project session, selected_target session, selected_configuration session
+  with
   | Some project, Some target, Some configuration ->
     let key = submission_key "generate-rtl" in
     session.status
@@ -630,6 +694,8 @@ let inspect_artifact session =
        return ()
      | _ ->
        let limit = 1024 * 1024 in
+       let requested_instance = session.hello.instance_id in
+       let requested_client = session.client in
        let rec read offset parts bytes =
          if bytes >= limit
          then return (Ok (String.concat (List.rev parts), true))
@@ -638,8 +704,8 @@ let inspect_artifact session =
            let%bind page =
              request session.diagnostics_file (fun () ->
                Http.Client.read_artifact
-                 session.client
-                 { instance_id = session.hello.instance_id
+                 requested_client
+                 { instance_id = requested_instance
                  ; artifact = artifact.id
                  ; offset
                  ; max_bytes
@@ -649,16 +715,157 @@ let inspect_artifact session =
            | Error message -> return (Error message)
            | Ok page when page.eof ->
              return (Ok (String.concat (List.rev (page.data :: parts)), false))
-           | Ok page -> read page.next_offset (page.data :: parts) (bytes + String.length page.data))
+           | Ok page ->
+             read page.next_offset (page.data :: parts) (bytes + String.length page.data))
        in
        session.status <- "fetching artifact " ^ artifact.metadata.display_name ^ "...";
        let%map result = read 0 [] 0 in
-       (match result with
-        | Error message -> session.status <- "artifact retrieval failed: " ^ message
-        | Ok (content, truncated) ->
-          session.artifact_view <- Some { artifact = artifact.id; content; truncated };
-          session.status
-          <- (if truncated then "artifact view truncated at 1 MiB" else "artifact loaded")))
+       if V1.Daemon_instance_id.equal requested_instance session.hello.instance_id
+          && Option.value_map session.selected_artifact ~default:false ~f:(fun id ->
+            Artifact_id.equal id artifact.id)
+       then (
+         match result with
+         | Error message -> session.status <- "artifact retrieval failed: " ^ message
+         | Ok (content, truncated) ->
+           session.artifact_view <- Some { artifact = artifact.id; content; truncated };
+           session.status
+           <- (if truncated then "artifact view truncated at 1 MiB" else "artifact loaded")))
+;;
+
+let hierarchy_candidate session =
+  match selected_job session with
+  | Some job when State.is_generation_job job -> Some job
+  | Some _ | None -> current_generation session
+;;
+
+let index_hierarchy (hierarchy : Hierarchy.t) =
+  let nodes = Hashtbl.create (module String) in
+  let children = Hashtbl.create (module String) in
+  List.iter hierarchy.nodes ~f:(fun node ->
+    Hashtbl.set nodes ~key:node.key ~data:node;
+    Option.iter node.parent ~f:(fun parent ->
+      Hashtbl.add_multi children ~key:parent ~data:node));
+  Hashtbl.to_alist children
+  |> List.iter ~f:(fun (parent, entries) ->
+    Hashtbl.set
+      children
+      ~key:parent
+      ~data:
+        (List.sort entries ~compare:(fun a b ->
+           Option.compare String.compare a.instance_name b.instance_name)));
+  nodes, children
+;;
+
+let hierarchy_children children parent =
+  Hashtbl.find children parent |> Option.value ~default:[]
+;;
+
+let inspect_hierarchy session =
+  match hierarchy_candidate session with
+  | None ->
+    session.status <- "no RTL generation result is available for hierarchy inspection";
+    return ()
+  | Some job when not (Job.State.equal job.state Complete) ->
+    session.status
+    <- (match job.state with
+        | Queued | Starting | Running -> "hierarchy pending in " ^ Job_id.to_string job.id
+        | Failed ->
+          "hierarchy unavailable because generation failed in " ^ Job_id.to_string job.id
+        | Cancelled ->
+          "hierarchy unavailable because generation was cancelled in "
+          ^ Job_id.to_string job.id
+        | Complete -> assert false);
+    return ()
+  | Some job ->
+    (match hierarchy_artifact_for_job session job with
+     | None ->
+       session.status
+       <- "structured hierarchy unsupported for generation " ^ Job_id.to_string job.id;
+       return ()
+     | Some artifact ->
+       (match session.hierarchy_view with
+        | Some view when Artifact_id.equal view.hierarchy.artifact artifact.id ->
+          session.hierarchy_view <- None;
+          session.status <- "closed hierarchy view";
+          return ()
+        | _ ->
+          let requested_instance = session.hello.instance_id in
+          session.status <- "fetching hierarchy for " ^ Job_id.to_string job.id ^ "...";
+          let%map response =
+            request session.diagnostics_file (fun () ->
+              Http.Client.read_hierarchy
+                session.client
+                { instance_id = requested_instance; artifact = artifact.id })
+          in
+          if not
+               (V1.Daemon_instance_id.equal requested_instance session.hello.instance_id)
+          then ()
+          else (
+            match response with
+            | Error message ->
+              Hashtbl.set session.hierarchy_errors ~key:artifact.id ~data:message;
+              session.status <- "hierarchy retrieval failed: " ^ message
+            | Ok payload ->
+              let hierarchy = payload.hierarchy in
+              if not
+                   (Artifact_id.equal hierarchy.artifact artifact.id
+                    && Job_id.equal hierarchy.generating_job job.id)
+              then
+                session.status <- "hierarchy response identity did not match the request"
+              else (
+                Hashtbl.remove session.hierarchy_errors artifact.id;
+                let nodes, children = index_hierarchy hierarchy in
+                session.hierarchy_view
+                <- Some
+                     { hierarchy
+                     ; nodes
+                     ; children
+                     ; selected_key = hierarchy.root
+                     ; expanded = String.Set.singleton hierarchy.root
+                     ; scroll = 0
+                     ; pane_scroll = 0
+                     };
+                session.status <- "hierarchy loaded"))))
+;;
+
+let visible_hierarchy_nodes view =
+  let rec visit depth key =
+    match Hashtbl.find view.nodes key with
+    | None -> []
+    | Some node ->
+      let children =
+        if Set.mem view.expanded key
+        then
+          hierarchy_children view.children key
+          |> List.concat_map ~f:(fun child -> visit (depth + 1) child.key)
+        else []
+      in
+      (depth, node) :: children
+  in
+  visit 0 view.hierarchy.root
+;;
+
+let move_hierarchy_selection session delta =
+  Option.iter session.hierarchy_view ~f:(fun view ->
+    let nodes = visible_hierarchy_nodes view in
+    let current =
+      List.findi nodes ~f:(fun _ (_, node) -> String.equal node.key view.selected_key)
+      |> Option.value_map ~default:0 ~f:fst
+    in
+    let next = Int.max 0 (Int.min (List.length nodes - 1) (current + delta)) in
+    Option.iter (List.nth nodes next) ~f:(fun (_, node) ->
+      view.selected_key <- node.key;
+      view.pane_scroll <- 0))
+;;
+
+let toggle_hierarchy_expansion session =
+  Option.iter session.hierarchy_view ~f:(fun view ->
+    if not (List.is_empty (hierarchy_children view.children view.selected_key))
+    then
+      view.expanded
+      <- (if Set.mem view.expanded view.selected_key
+          then Set.remove view.expanded view.selected_key
+          else Set.add view.expanded view.selected_key))
 ;;
 
 let cancel_selected session =
@@ -784,7 +991,7 @@ let integration_lines session =
           sprintf
             "%s Target: %s (top %s) [%s]"
             (if Option.value_map session.selected_target ~default:false ~f:(fun id ->
-               Target_id.equal id target.id)
+                  Target_id.equal id target.id)
              then ">"
              else " ")
             target.name
@@ -798,11 +1005,10 @@ let integration_lines session =
         List.map project.configurations ~f:(fun config ->
           sprintf
             "%s Configuration: %s [%s]"
-            (if
-               Option.value_map
-                 session.selected_configuration
-                 ~default:false
-                 ~f:(fun id -> Configuration_id.equal id config.id)
+            (if Option.value_map
+                  session.selected_configuration
+                  ~default:false
+                  ~f:(fun id -> Configuration_id.equal id config.id)
              then ">"
              else " ")
             config.name
@@ -817,6 +1023,137 @@ let integration_lines session =
     ]
     @ targets
     @ configurations
+;;
+
+let hierarchy_status_lines session =
+  match current_generation session with
+  | None -> [ "Hardware hierarchy: unavailable; generate RTL for this selection" ]
+  | Some job ->
+    (match job.state with
+     | Queued | Starting | Running ->
+       [ sprintf
+           "Hardware hierarchy: pending (%s, %s)"
+           (Job_id.to_string job.id)
+           (Job.State.to_string job.state)
+       ]
+     | Failed ->
+       [ "Hardware hierarchy: latest generation failed (" ^ Job_id.to_string job.id ^ ")"
+       ]
+     | Cancelled ->
+       [ "Hardware hierarchy: latest generation was cancelled ("
+         ^ Job_id.to_string job.id
+         ^ ")"
+       ]
+     | Complete ->
+       (match hierarchy_artifact_for_job session job with
+        | None -> [ "Hardware hierarchy: unsupported for this completed result" ]
+        | Some artifact ->
+          (match Hashtbl.find session.hierarchy_errors artifact.id with
+           | Some message -> [ "Hardware hierarchy: unavailable: " ^ message ]
+           | None ->
+             [ "Hardware hierarchy output from "
+               ^ Job_id.to_string job.id
+               ^ " (h inspect)"
+             ])))
+;;
+
+let hierarchy_view_lines session view ~height =
+  let hierarchy = view.hierarchy in
+  let current =
+    State.hierarchy_is_current
+      hierarchy
+      ~latest:(current_generation session)
+      ~target:session.selected_target
+      ~configuration:session.selected_configuration
+  in
+  let project = current_project session in
+  let target =
+    Option.bind project ~f:(fun project ->
+      List.find project.targets ~f:(fun target ->
+        Target_id.equal target.id hierarchy.target))
+    |> Option.value_map ~default:(Target_id.to_string hierarchy.target) ~f:(fun target ->
+      target.name)
+  in
+  let configuration =
+    Option.bind project ~f:(fun project ->
+      List.find project.configurations ~f:(fun configuration ->
+        Configuration_id.equal configuration.id hierarchy.configuration))
+    |> Option.value_map
+         ~default:(Configuration_id.to_string hierarchy.configuration)
+         ~f:(fun configuration -> configuration.name)
+  in
+  let visible = visible_hierarchy_nodes view in
+  let selected_index =
+    List.findi visible ~f:(fun _ (_, node) -> String.equal node.key view.selected_key)
+    |> Option.value_map ~default:0 ~f:fst
+  in
+  let tree_height = Int.max 1 (height - 13) in
+  if selected_index < view.scroll
+  then view.scroll <- selected_index
+  else if selected_index >= view.scroll + tree_height
+  then view.scroll <- selected_index - tree_height + 1;
+  let tree =
+    visible
+    |> Fn.flip List.drop view.scroll
+    |> Fn.flip List.take tree_height
+    |> List.map ~f:(fun (depth, node) ->
+      let children = hierarchy_children view.children node.key in
+      let marker =
+        if List.is_empty children
+        then " "
+        else if Set.mem view.expanded node.key
+        then "-"
+        else "+"
+      in
+      let name = Option.value node.instance_name ~default:"<root>" in
+      sprintf
+        "%s%s%s %s : %s"
+        (if String.equal node.key view.selected_key then ">" else " ")
+        (String.make (depth * 2) ' ')
+        marker
+        name
+        node.circuit_name)
+  in
+  let inspector =
+    match Hashtbl.find view.nodes view.selected_key with
+    | None -> [ "Node: unavailable" ]
+    | Some node ->
+      let ports ports =
+        match ports with
+        | [] -> "none"
+        | ports ->
+          List.map ports ~f:(fun port ->
+            sprintf "%s[%d]" port.Hierarchy.Port.name port.width)
+          |> String.concat ~sep:", "
+      in
+      let metadata =
+        match node.metadata with
+        | [] -> "none"
+        | metadata ->
+          List.map metadata ~f:(fun item -> item.name ^ "=" ^ item.value)
+          |> String.concat ~sep:", "
+      in
+      [ "Node instance: " ^ Option.value node.instance_name ~default:"<root>"
+      ; "Circuit: " ^ node.circuit_name
+      ; "Key: " ^ node.key
+      ; "Inputs: " ^ ports node.input_ports
+      ; "Outputs: " ^ ports node.output_ports
+      ; "Metadata: " ^ metadata
+      ; "Signals/source: unavailable in structural hierarchy"
+      ]
+  in
+  let lines =
+    [ sprintf "HARDWARE HIERARCHY [%s]" (if current then "current" else "historical")
+    ; sprintf "Result: job %s" (Job_id.to_string hierarchy.generating_job)
+    ; sprintf "Target: %s" target
+    ; sprintf "Configuration: %s" configuration
+    ; sprintf "Tree [%d/%d]" view.scroll (Int.max 0 (List.length visible - tree_height))
+    ]
+    @ tree
+    @ inspector
+  in
+  view.pane_scroll <- Int.min view.pane_scroll (Int.max 0 (List.length lines - height));
+  List.drop lines view.pane_scroll
 ;;
 
 let artifact_lines session =
@@ -839,16 +1176,17 @@ let artifact_lines session =
         |> Option.value_map ~default:"no configuration" ~f:(fun config -> config.name)
       in
       sprintf
-        "%s %s (%s) | %s / %s | job %s"
+        "%s %s (%s) | %s / %s | job %s | [%s]"
         (if Option.value_map session.selected_artifact ~default:false ~f:(fun id ->
-           Artifact_id.equal id artifact.id)
+              Artifact_id.equal id artifact.id)
          then ">"
          else " ")
         artifact.metadata.display_name
         (Artifact.Kind.to_string artifact.kind)
         target
         configuration
-        (Job_id.to_string artifact.generating_job))
+        (Job_id.to_string artifact.generating_job)
+        (Artifact_id.to_string artifact.id))
 ;;
 
 let connection_detail_lines session ~width =
@@ -953,11 +1291,12 @@ let render session ({ Bonsai_term.Dimensions.width; height } as dimensions) =
       let controls =
         if session.show_connection_details
         then
-          "d project | [/] details | b/t jobs | n/m select | g RTL | a/v artifact | i \
-           refresh | j/k job | c cancel | r reconnect | q exit"
+          "d project | [/] details | b/t jobs | n/m select | g RTL | a/v artifact | h \
+           hierarchy | i refresh | j/k job | c cancel | r reconnect | q exit"
         else
-          "b build | t test | n target | m config | g RTL | a artifact | v view | i \
-           refresh | j/k job | c cancel | d details | r reconnect | q exit"
+          "b/t jobs | n/m select | g RTL | a/v artifact | h hierarchy | u/o node | e \
+           expand | [/] pane | i refresh | j/k job | c cancel | d details | r reconnect \
+           | q exit"
       in
       let top_height = Int.max 8 ((height - List.length header - 3) / 2) in
       let console_height = Int.max 1 (height - List.length header - top_height - 3) in
@@ -989,15 +1328,20 @@ let render session ({ Bonsai_term.Dimensions.width; height } as dimensions) =
             @ (lines
                |> Fn.flip List.drop session.connection_details_scroll
                |> Fn.flip List.take visible_lines))
-          else
-            [ "PROJECT / GENERIC DUNE WORKSPACE" ]
-            @ project_lines session ~width:left_width
-            @ [ ""; "WORKBENCH INTEGRATION" ]
-            @ integration_lines session
-            @ [ ""; "Hardware hierarchy: unavailable until the next 1C slice"; "" ]
-            @ artifact_lines session
-            @ [ ""; "DUNE ITEMS" ]
-            @ workspace_rows
+          else (
+            match session.hierarchy_view with
+            | Some view -> hierarchy_view_lines session view ~height:top_height
+            | None ->
+              [ "PROJECT / GENERIC DUNE WORKSPACE" ]
+              @ project_lines session ~width:left_width
+              @ [ ""; "WORKBENCH INTEGRATION" ]
+              @ integration_lines session
+              @ [ "" ]
+              @ hierarchy_status_lines session
+              @ [ "" ]
+              @ artifact_lines session
+              @ [ ""; "DUNE ITEMS" ]
+              @ workspace_rows)
         in
         pane ~width:left_width ~height:top_height lines
       in
@@ -1019,37 +1363,38 @@ let render session ({ Bonsai_term.Dimensions.width; height } as dimensions) =
         | Some view ->
           let label =
             selected_artifact session
-            |> Option.value_map ~default:(Artifact_id.to_string view.artifact) ~f:(fun artifact ->
-              artifact.metadata.display_name)
+            |> Option.value_map
+                 ~default:(Artifact_id.to_string view.artifact)
+                 ~f:(fun artifact -> artifact.metadata.display_name)
           in
           ( "RTL ARTIFACT: " ^ label
           , (String.split_lines view.content
              @ if view.truncated then [ "[artifact view truncated at 1 MiB]" ] else [])
             |> Fn.flip List.take console_height )
         | None ->
-          "LIVE STDOUT / STDERR",
-          (match selected_job session with
-        | None -> [ "  (select a job to read logs)" ]
-        | Some job ->
-          let state = log_state session job.id in
-          let records =
-            List.concat_map state.records ~f:(fun record ->
-              let tag =
-                match record.stream with
-                | V1.Read_log.Stream.Stdout -> "[stdout] "
-                | Stderr -> "[stderr] "
-              in
-              String.split_lines record.data |> List.map ~f:(fun line -> tag ^ line))
-          in
-          (match state.fetch with
-           | Presentation.Log_fetch.Error message when not (List.is_empty records) ->
-             records @ [ "[log retrieval failed] " ^ message ]
-           | _ when not (List.is_empty records) -> records
-           | fetch ->
-             Presentation.empty_log_notice ~job_state:job.state ~fetch
-             |> Option.to_list
-             |> List.map ~f:(fun line -> "  " ^ line))
-           |> Fn.flip take_end console_height)
+          ( "LIVE STDOUT / STDERR"
+          , (match selected_job session with
+             | None -> [ "  (select a job to read logs)" ]
+             | Some job ->
+               let state = log_state session job.id in
+               let records =
+                 List.concat_map state.records ~f:(fun record ->
+                   let tag =
+                     match record.stream with
+                     | V1.Read_log.Stream.Stdout -> "[stdout] "
+                     | Stderr -> "[stderr] "
+                   in
+                   String.split_lines record.data |> List.map ~f:(fun line -> tag ^ line))
+               in
+               (match state.fetch with
+                | Presentation.Log_fetch.Error message when not (List.is_empty records) ->
+                  records @ [ "[log retrieval failed] " ^ message ]
+                | _ when not (List.is_empty records) -> records
+                | fetch ->
+                  Presentation.empty_log_notice ~job_state:job.state ~fetch
+                  |> Option.to_list
+                  |> List.map ~f:(fun line -> "  " ^ line))
+               |> Fn.flip take_end console_height) )
       in
       View.vcat
         [ View.vcat (List.map header ~f:(fun line -> View.text (fit width line)))
@@ -1111,6 +1456,17 @@ let tui session ~exit ~dimensions graph =
         Effect.Ignore
       | Key_press { key; mods = [] } when key_is 'v' key ->
         Effect.of_deferred_thunk (fun () -> inspect_artifact session)
+      | Key_press { key; mods = [] } when key_is 'h' key ->
+        Effect.of_deferred_thunk (fun () -> inspect_hierarchy session)
+      | Key_press { key; mods = [] } when key_is 'u' key ->
+        move_hierarchy_selection session (-1);
+        Effect.Ignore
+      | Key_press { key; mods = [] } when key_is 'o' key ->
+        move_hierarchy_selection session 1;
+        Effect.Ignore
+      | Key_press { key; mods = [] } when key_is 'e' key ->
+        toggle_hierarchy_expansion session;
+        Effect.Ignore
       | Key_press { key; mods = [] } when key_is 'j' key ->
         let count = List.length (project_jobs session) in
         session.selected <- Int.min (Int.max 0 (count - 1)) (session.selected + 1);
@@ -1126,11 +1482,17 @@ let tui session ~exit ~dimensions graph =
         if session.show_connection_details
         then
           session.connection_details_scroll
-          <- Int.max 0 (session.connection_details_scroll - 1);
+          <- Int.max 0 (session.connection_details_scroll - 1)
+        else
+          Option.iter session.hierarchy_view ~f:(fun view ->
+            view.pane_scroll <- Int.max 0 (view.pane_scroll - 1));
         Effect.Ignore
       | Key_press { key; mods = [] } when key_is ']' key ->
         if session.show_connection_details
-        then session.connection_details_scroll <- session.connection_details_scroll + 1;
+        then session.connection_details_scroll <- session.connection_details_scroll + 1
+        else
+          Option.iter session.hierarchy_view ~f:(fun view ->
+            view.pane_scroll <- view.pane_scroll + 1);
         Effect.Ignore
       | Key_press { key; mods = [] } when key_is 'r' key ->
         Effect.of_deferred_thunk (fun () -> reconnect session)
@@ -1155,7 +1517,7 @@ let print_opened session =
       (Job.Kind.to_string job.kind));
   List.iter (integration_lines session) ~f:print_endline;
   List.iter (artifact_lines session) ~f:print_endline;
-  printf "Hardware hierarchy: unavailable until the next 1C slice\n"
+  List.iter (hierarchy_status_lines session) ~f:print_endline
 ;;
 
 let print_log_record (record : V1.Read_log.Record.t) =
@@ -1207,9 +1569,7 @@ let wait_for_job session initial_job =
 
 let resolve_selection values selector ~name ~id ~kind =
   match selector with
-  | None ->
-    List.hd values
-    |> Result.of_option ~error:(sprintf "no %s is available" kind)
+  | None -> List.hd values |> Result.of_option ~error:(sprintf "no %s is available" kind)
   | Some selector ->
     let matches =
       List.filter values ~f:(fun value ->
@@ -1240,7 +1600,8 @@ let wait_for_discovery_if_needed session =
        Result.bind result ~f:(fun job ->
          if Job.State.equal job.state Complete
          then Ok ()
-         else Error (sprintf "discovery ended in state %s" (Job.State.to_string job.state))))
+         else
+           Error (sprintf "discovery ended in state %s" (Job.State.to_string job.state))))
 ;;
 
 let run_plain_generate session ~target_selector ~configuration_selector ~wait =
@@ -1250,7 +1611,8 @@ let run_plain_generate session ~target_selector ~configuration_selector ~wait =
   | Ok () ->
     reconcile_selection session;
     (match current_project session with
-     | None -> return (Or_error.error_string "--action generate-rtl requires --project-root")
+     | None ->
+       return (Or_error.error_string "--action generate-rtl requires --project-root")
      | Some project ->
        (match
           resolve_selection
@@ -1315,14 +1677,20 @@ let run_plain_generate session ~target_selector ~configuration_selector ~wait =
                         List.find session.snapshot.artifacts ~f:(fun artifact ->
                           Artifact_id.equal artifact.id id)
                       with
-                      | None -> printf "Artifact %s: metadata unavailable\n" (Artifact_id.to_string id)
+                      | None ->
+                        printf
+                          "Artifact %s: metadata unavailable\n"
+                          (Artifact_id.to_string id)
                       | Some artifact ->
                         printf
                           "Artifact %s: %s (%s, %s bytes)\n"
                           (Artifact_id.to_string artifact.id)
                           artifact.metadata.display_name
                           (Artifact.Kind.to_string artifact.kind)
-                          (Option.value_map artifact.metadata.size_in_bytes ~default:"unknown" ~f:Int.to_string));
+                          (Option.value_map
+                             artifact.metadata.size_in_bytes
+                             ~default:"unknown"
+                             ~f:Int.to_string));
                     Ok ())))))
 ;;
 
@@ -1347,6 +1715,40 @@ let run_plain_artifact session artifact_id =
       if page.eof then return (Ok ()) else read page.next_offset
   in
   read 0
+;;
+
+let run_plain_hierarchy session artifact_id =
+  let artifact = Artifact_id.of_string artifact_id in
+  let%map response =
+    request session.diagnostics_file (fun () ->
+      Http.Client.read_hierarchy
+        session.client
+        { instance_id = session.hello.instance_id; artifact })
+  in
+  match response with
+  | Error message -> Or_error.error_string message
+  | Ok payload ->
+    let hierarchy = payload.hierarchy in
+    let nodes, children = index_hierarchy hierarchy in
+    printf "Hierarchy artifact: %s\n" (Artifact_id.to_string hierarchy.artifact);
+    printf "Generating job: %s\n" (Job_id.to_string hierarchy.generating_job);
+    printf "Target: %s\n" (Target_id.to_string hierarchy.target);
+    printf "Configuration: %s\n" (Configuration_id.to_string hierarchy.configuration);
+    let rec print_node depth key =
+      match Hashtbl.find nodes key with
+      | None -> ()
+      | Some node ->
+        printf
+          "%s%s : %s [%s]\n"
+          (String.make (depth * 2) ' ')
+          (Option.value node.instance_name ~default:"<root>")
+          node.circuit_name
+          node.key;
+        hierarchy_children children key
+        |> List.iter ~f:(fun child -> print_node (depth + 1) child.key)
+    in
+    print_node 0 hierarchy.root;
+    Ok ()
 ;;
 
 let run_plain_action session action ~wait =
@@ -1458,6 +1860,7 @@ let run
   ~target
   ~configuration
   ~artifact
+  ~hierarchy
   ~refresh_integration:refresh_requested
   ~wait
   ~diagnostics_file
@@ -1469,16 +1872,28 @@ let run
   match parse_environment environment, parse_action action with
   | Error error, _ | _, Error error -> return (Error error)
   | Ok (environment_selection, environment_label), Ok action ->
-    if (Option.is_some action || Option.is_some artifact || refresh_requested) && not plain
+    if (Option.is_some action
+        || Option.is_some artifact
+        || Option.is_some hierarchy
+        || refresh_requested)
+       && not plain
     then
       return
         (Or_error.error_string
-           "--action, --artifact, and --refresh-integration are available only with --plain")
-    else if List.count [ Option.is_some action; Option.is_some artifact; refresh_requested ] ~f:Fn.id > 1
+           "--action, --artifact, --hierarchy, and --refresh-integration are available \
+            only with --plain")
+    else if List.count
+              [ Option.is_some action
+              ; Option.is_some artifact
+              ; Option.is_some hierarchy
+              ; refresh_requested
+              ]
+              ~f:Fn.id
+            > 1
     then
       return
         (Or_error.error_string
-           "choose one of --action, --artifact, or --refresh-integration")
+           "choose one of --action, --artifact, --hierarchy, or --refresh-integration")
     else if wait && Option.is_none action && not refresh_requested
     then
       return (Or_error.error_string "--wait requires --action or --refresh-integration")
@@ -1487,10 +1902,11 @@ let run
       return
         (Or_error.error_string
            "--action and --refresh-integration require --project-root")
-    else if
-      (Option.is_some target || Option.is_some configuration)
-      && not (Option.equal Poly.equal action (Some `Generate_rtl))
-    then return (Or_error.error_string "--target/--configuration require --action generate-rtl")
+    else if (Option.is_some target || Option.is_some configuration)
+            && not (Option.equal Poly.equal action (Some `Generate_rtl))
+    then
+      return
+        (Or_error.error_string "--target/--configuration require --action generate-rtl")
     else (
       let%bind created =
         create_session
@@ -1507,18 +1923,19 @@ let run
         if plain || not (Core_unix.isatty Core_unix.stdout)
         then (
           print_opened session;
-          match action, artifact, refresh_requested with
-          | None, None, false -> return (Ok ())
-          | Some (`Build | `Test as action), None, false ->
+          match action, artifact, hierarchy, refresh_requested with
+          | None, None, None, false -> return (Ok ())
+          | Some ((`Build | `Test) as action), None, None, false ->
             run_plain_action session action ~wait
-          | Some `Generate_rtl, None, false ->
+          | Some `Generate_rtl, None, None, false ->
             run_plain_generate
               session
               ~target_selector:target
               ~configuration_selector:configuration
               ~wait
-          | None, Some artifact, false -> run_plain_artifact session artifact
-          | None, None, true -> run_plain_refresh session ~wait
+          | None, Some artifact, None, false -> run_plain_artifact session artifact
+          | None, None, Some hierarchy, false -> run_plain_hierarchy session hierarchy
+          | None, None, None, true -> run_plain_refresh session ~wait
           | _ -> assert false)
         else
           Monitor.try_with_or_error (fun () ->
@@ -1547,15 +1964,22 @@ let command =
          "--action"
          (optional string)
          ~doc:"build|test|generate-rtl submit one action in plain mode"
-     and target =
-       flag "--target" (optional string) ~doc:"NAME|ID target for generate-rtl"
+     and target = flag "--target" (optional string) ~doc:"NAME|ID target for generate-rtl"
      and configuration =
        flag
          "--configuration"
          (optional string)
          ~doc:"NAME|ID configuration for generate-rtl"
      and artifact =
-       flag "--artifact" (optional string) ~doc:"ID retrieve artifact content in plain mode"
+       flag
+         "--artifact"
+         (optional string)
+         ~doc:"ID retrieve artifact content in plain mode"
+     and hierarchy =
+       flag
+         "--hierarchy"
+         (optional string)
+         ~doc:"ARTIFACT_ID retrieve structured hierarchy in plain mode"
      and refresh_integration =
        flag
          "--refresh-integration"
@@ -1577,6 +2001,7 @@ let command =
        ~target
        ~configuration
        ~artifact
+       ~hierarchy
        ~refresh_integration
        ~wait
        ~diagnostics_file)

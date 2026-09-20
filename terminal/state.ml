@@ -90,6 +90,54 @@ let add_job_if_absent (snapshot : V1.Snapshot.Payload.t) (job : Job.t) =
   else { snapshot with jobs = job :: snapshot.jobs }
 ;;
 
+let reconcile_selection (project : Project.t) ~target ~configuration =
+  let target =
+    Option.first_some
+      (Option.bind target ~f:(fun id ->
+         List.find project.targets ~f:(fun target -> Target_id.equal target.id id)))
+      (List.hd project.targets)
+  in
+  let configuration =
+    Option.bind target ~f:(fun target ->
+      Option.first_some
+        (Option.bind configuration ~f:(fun id ->
+           List.find project.configurations ~f:(fun configuration ->
+             Configuration_id.equal configuration.id id
+             && Target_id.equal configuration.target target.id)))
+        (List.find project.configurations ~f:(fun configuration ->
+           Target_id.equal configuration.target target.id)))
+  in
+  ( Option.map target ~f:(fun target -> target.id)
+  , Option.map configuration ~f:(fun configuration -> configuration.id) )
+;;
+
+let is_generation_job (job : Job.t) =
+  String.equal job.kind.namespace "project-driver"
+  && String.equal job.kind.name "generate-rtl"
+;;
+
+let latest_generation jobs ~project ~target ~configuration =
+  List.filter jobs ~f:(fun job ->
+    is_generation_job job
+    && Project_id.equal job.project project
+    && Option.equal Target_id.equal job.target (Some target)
+    && Option.equal Configuration_id.equal job.configuration (Some configuration))
+  |> List.max_elt ~compare:(fun a b -> Timestamp.compare a.created_at b.created_at)
+;;
+
+let hierarchy_is_current (hierarchy : Hierarchy.t) ~latest ~target ~configuration =
+  Option.equal Target_id.equal target (Some hierarchy.target)
+  && Option.equal Configuration_id.equal configuration (Some hierarchy.configuration)
+  && Option.value_map latest ~default:false ~f:(fun job ->
+    Job_id.equal job.Job.id hierarchy.generating_job)
+;;
+
+let preserve_job_selection jobs ~selected_job ~fallback_index =
+  Option.bind selected_job ~f:(fun id ->
+    List.findi jobs ~f:(fun _ job -> Job_id.equal job.Job.id id) |> Option.map ~f:fst)
+  |> Option.value ~default:(Int.min fallback_index (Int.max 0 (List.length jobs - 1)))
+;;
+
 let test_instance = V1.Daemon_instance_id.of_string "daemon"
 let test_project_id name = Project_id.of_string ("daemon/project/" ^ name)
 
@@ -200,6 +248,65 @@ let%test_unit "live discovery events replace the pending project in the attached
   assert (Project.equal selected available);
   assert (List.length selected.targets = 1);
   assert (List.length selected.configurations = 1)
+;;
+
+let%test_unit "selection follows target associations across refresh" =
+  let project_id = test_project_id "selection" in
+  let target name : Target.t =
+    { id = Target_id.of_string ("target-" ^ name)
+    ; name
+    ; top = name
+    ; backend = Backend_id.of_string "simulation"
+    ; clocks = []
+    ; facts = []
+    }
+  in
+  let first = target "first" in
+  let second = target "second" in
+  let config name target : Configuration.t =
+    { id = Configuration_id.of_string ("config-" ^ name)
+    ; target = target.Target.id
+    ; name
+    ; description = None
+    }
+  in
+  let first_config = config "first" first in
+  let second_config = config "second" second in
+  let project =
+    test_project
+      ~id:project_id
+      ~name:"selection"
+      ~driver:(Available { version = Some 1 })
+      ~targets:[ first; second ]
+      ~configurations:[ first_config; second_config ]
+      ()
+  in
+  let selected_target, selected_config =
+    reconcile_selection
+      project
+      ~target:(Some second.id)
+      ~configuration:(Some second_config.id)
+  in
+  assert (Option.equal Target_id.equal selected_target (Some second.id));
+  assert (Option.equal Configuration_id.equal selected_config (Some second_config.id));
+  let refreshed =
+    { project with targets = [ first ]; configurations = [ first_config ] }
+  in
+  let selected_target, selected_config =
+    reconcile_selection refreshed ~target:selected_target ~configuration:selected_config
+  in
+  assert (Option.equal Target_id.equal selected_target (Some first.id));
+  assert (Option.equal Configuration_id.equal selected_config (Some first_config.id));
+  let moved = { first_config with target = second.id } in
+  let no_config = { project with configurations = [ moved; second_config ] } in
+  let selected_target, selected_config =
+    reconcile_selection
+      no_config
+      ~target:(Some first.id)
+      ~configuration:(Some first_config.id)
+  in
+  assert (Option.equal Target_id.equal selected_target (Some first.id));
+  assert (Option.is_none selected_config)
 ;;
 
 let%test_unit "project and job event ordering cannot restore stale discovery" =
@@ -324,4 +431,122 @@ let%test_unit "changed and failed refresh events replace only their project" =
          ; next_cursor = { instance_id = test_instance; sequence = 25 }
          ; heartbeat = false
          }))
+;;
+
+let%test_unit "latest generation is exact to project target and configuration" =
+  let project = test_project_id "hierarchy-selection" in
+  let target = Target_id.of_string "target" in
+  let other_target = Target_id.of_string "other-target" in
+  let configuration = Configuration_id.of_string "configuration" in
+  let other_configuration = Configuration_id.of_string "other-configuration" in
+  let generation id created_at state target configuration : Job.t =
+    { (Job.create
+         ~id:(Job_id.of_string id)
+         ~kind:{ namespace = "project-driver"; name = "generate-rtl" }
+         ~project
+         ~created_at:(Timestamp.of_time_ns (Time_ns.of_int_ns_since_epoch created_at)))
+      with
+      target = Some target
+    ; configuration = Some configuration
+    ; state
+    }
+  in
+  let old_success = generation "old" 1 Complete target configuration in
+  let latest_failure = generation "failed" 2 Failed target configuration in
+  let other_config = generation "other-config" 3 Complete target other_configuration in
+  let other_project =
+    { (generation "other-project" 4 Complete target configuration) with
+      project = test_project_id "other"
+    }
+  in
+  let other_target_job =
+    generation "other-target" 5 Complete other_target configuration
+  in
+  let selected =
+    latest_generation
+      [ old_success; other_config; latest_failure; other_project; other_target_job ]
+      ~project
+      ~target
+      ~configuration
+    |> Option.value_exn
+  in
+  assert (Job_id.equal selected.id latest_failure.id)
+;;
+
+let%test_unit "an older hierarchy for the same selection is historical" =
+  let hierarchy : Hierarchy.t =
+    { artifact = Artifact_id.of_string "hierarchy"
+    ; project = test_project_id "history"
+    ; target = Target_id.of_string "target"
+    ; configuration = Configuration_id.of_string "configuration"
+    ; generating_job = Job_id.of_string "old-job"
+    ; rtl_artifacts = []
+    ; provenance =
+        { project_root = Project_root.of_absolute_path "/tmp/history"
+        ; target = None
+        ; configuration = None
+        ; build = None
+        ; run = None
+        ; generating_job = Job_id.of_string "old-job"
+        ; requested_tools = []
+        ; actual_tools = []
+        ; environment = []
+        ; source = Provenance.Source_identity.unknown ~reason:"test"
+        ; created_at = Timestamp.of_time_ns Time_ns.epoch
+        }
+    ; root = "/"
+    ; nodes = []
+    }
+  in
+  let latest =
+    { (Job.create
+         ~id:(Job_id.of_string "new-job")
+         ~kind:{ namespace = "project-driver"; name = "generate-rtl" }
+         ~project:hierarchy.project
+         ~created_at:(Timestamp.of_time_ns Time_ns.epoch))
+      with
+      target = Some hierarchy.target
+    ; configuration = Some hierarchy.configuration
+    ; state = Failed
+    }
+  in
+  assert (
+    not
+      (hierarchy_is_current
+         hierarchy
+         ~latest:(Some latest)
+         ~target:(Some hierarchy.target)
+         ~configuration:(Some hierarchy.configuration)));
+  assert (
+    hierarchy_is_current
+      { hierarchy with generating_job = latest.id }
+      ~latest:(Some latest)
+      ~target:(Some hierarchy.target)
+      ~configuration:(Some hierarchy.configuration));
+  assert (
+    not
+      (hierarchy_is_current
+         { hierarchy with generating_job = latest.id }
+         ~latest:(Some latest)
+         ~target:(Some hierarchy.target)
+         ~configuration:(Some (Configuration_id.of_string "other-configuration"))))
+;;
+
+let%test_unit "job selection follows identity when a newer job arrives" =
+  let project = test_project_id "job-selection" in
+  let job id created_at =
+    Job.create
+      ~id:(Job_id.of_string id)
+      ~kind:{ namespace = "dune"; name = "build" }
+      ~project
+      ~created_at:(Timestamp.of_time_ns (Time_ns.of_int_ns_since_epoch created_at))
+  in
+  let selected = job "selected" 1 in
+  let newer = job "newer" 2 in
+  assert (
+    preserve_job_selection
+      [ newer; selected ]
+      ~selected_job:(Some selected.id)
+      ~fallback_index:0
+    = 1)
 ;;

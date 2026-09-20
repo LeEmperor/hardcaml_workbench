@@ -1,6 +1,9 @@
 (library
  (name test_project_integration)
- (libraries core hardcaml_workbench_project_integration hardcaml_workbench_protocol)
+ (libraries
+  core
+  hardcaml_workbench_project_integration
+  hardcaml_workbench_protocol)
  (preprocess
   (pps ppx_jane))
  (inline_tests

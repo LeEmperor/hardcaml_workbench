@@ -218,8 +218,9 @@ for _attempt in $(seq 1 500); do
   sleep 0.05
 done
 grep -Fq "driver=available v1" "$work_root/integrated-ready.txt"
-grep -Fq "Four-bit counter (top counter)" "$work_root/integrated-ready.txt"
-grep -Fq "Default four-bit counter" "$work_root/integrated-ready.txt"
+grep -Fq "Four-bit counter (top counter_top)" "$work_root/integrated-ready.txt"
+grep -Fq "4-bit counter" "$work_root/integrated-ready.txt"
+grep -Fq "8-bit counter" "$work_root/integrated-ready.txt"
 grep -Fq "Jobs: 1" "$work_root/integrated-ready.txt"
 XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$integrated_fixture" \
   --environment "opam:$switch" --refresh-integration --wait \
@@ -227,12 +228,70 @@ XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$integrated_fixture
 grep -Fq "Submitted integration refresh job" "$work_root/integrated-refresh.txt"
 grep -Eq '^Job .*: Complete$' "$work_root/integrated-refresh.txt"
 grep -Fq "driver=available v1" "$work_root/integrated-refresh.txt"
-grep -Fq "Four-bit counter (top counter)" "$work_root/integrated-refresh.txt"
-grep -Fq "Default four-bit counter" "$work_root/integrated-refresh.txt"
+grep -Fq "Four-bit counter (top counter_top)" "$work_root/integrated-refresh.txt"
+grep -Fq "4-bit counter" "$work_root/integrated-refresh.txt"
+grep -Fq "8-bit counter" "$work_root/integrated-refresh.txt"
+
+# Generation waits through incremental events, registers isolated artifacts, and retrieves by ID.
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$integrated_fixture" \
+  --environment "opam:$switch" --action generate-rtl \
+  --target "Four-bit counter" --configuration "4-bit counter" --wait \
+  >"$work_root/generate-four.txt"
+grep -Eq '^Job .*: Complete$' "$work_root/generate-four.txt"
+four_artifact="$(grep -E '^Artifact .*: counter-4\.v ' "$work_root/generate-four.txt" | \
+  cut -d' ' -f2 | tr -d ':')"
+four_hierarchy="$(grep -E '^Artifact .*: counter-4 hierarchy ' \
+  "$work_root/generate-four.txt" | cut -d' ' -f2 | tr -d ':')"
+test -n "$four_artifact"
+test -n "$four_hierarchy"
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$integrated_fixture" \
+  --environment "opam:$switch" --artifact "$four_artifact" \
+  >"$work_root/four-rtl.txt"
+grep -Fq 'module counter' "$work_root/four-rtl.txt"
+grep -Eq 'output[[:space:]]+\[3:0\][[:space:]]+count_o' "$work_root/four-rtl.txt"
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --hierarchy "$four_hierarchy" \
+  >"$work_root/four-hierarchy.txt"
+grep -Fq '<root> : counter_top [/]' "$work_root/four-hierarchy.txt"
+grep -Fq 'u_counter_0 : counter [/11:u_counter_0]' "$work_root/four-hierarchy.txt"
+grep -Fq 'u_counter_1 : counter [/11:u_counter_1]' "$work_root/four-hierarchy.txt"
+
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$integrated_fixture" \
+  --environment "opam:$switch" --action generate-rtl \
+  --target "Four-bit counter" --configuration "8-bit counter" --wait \
+  >"$work_root/generate-eight.txt"
+grep -Eq '^Job .*: Complete$' "$work_root/generate-eight.txt"
+eight_artifact="$(grep -E '^Artifact .*: counter-8\.v ' "$work_root/generate-eight.txt" | \
+  cut -d' ' -f2 | tr -d ':')"
+eight_hierarchy="$(grep -E '^Artifact .*: counter-8 hierarchy ' \
+  "$work_root/generate-eight.txt" | cut -d' ' -f2 | tr -d ':')"
+test -n "$eight_artifact"
+test -n "$eight_hierarchy"
+test "$eight_artifact" != "$four_artifact"
+test "$eight_hierarchy" != "$four_hierarchy"
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$integrated_fixture" \
+  --environment "opam:$switch" --artifact "$eight_artifact" \
+  >"$work_root/eight-rtl.txt"
+grep -Eq 'output[[:space:]]+\[7:0\][[:space:]]+count_o' "$work_root/eight-rtl.txt"
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --hierarchy "$eight_hierarchy" \
+  >"$work_root/eight-hierarchy.txt"
+grep -Fq 'u_counter_0 : counter [/11:u_counter_0]' "$work_root/eight-hierarchy.txt"
+grep -Fq 'u_counter_1 : counter [/11:u_counter_1]' "$work_root/eight-hierarchy.txt"
+
 XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$integrated_fixture" \
   --environment "opam:$switch" >"$work_root/integrated-reconnect.txt"
 grep -Fq "driver=available v1" "$work_root/integrated-reconnect.txt"
-grep -Fq "Jobs: 2" "$work_root/integrated-reconnect.txt"
+grep -Fq "Jobs: 4" "$work_root/integrated-reconnect.txt"
+grep -Fq "$four_artifact" "$work_root/integrated-reconnect.txt"
+grep -Fq "$eight_artifact" "$work_root/integrated-reconnect.txt"
+grep -Fq "$four_hierarchy" "$work_root/integrated-reconnect.txt"
+grep -Fq "$eight_hierarchy" "$work_root/integrated-reconnect.txt"
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --hierarchy "$four_hierarchy" \
+  >"$work_root/reconnected-hierarchy.txt"
+grep -Fq 'u_counter_1 : counter [/11:u_counter_1]' "$work_root/reconnected-hierarchy.txt"
+XDG_RUNTIME_DIR="$runtime" \
+  "$repo_root/scripts/test-terminal-resize.py" "$client" \
+  --project-root "$integrated_fixture" --environment "opam:$switch" \
+  --expect-hierarchy
 
 # Missing and invalid optional integration remain actionable without disabling generic jobs.
 XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$missing_driver_fixture" \

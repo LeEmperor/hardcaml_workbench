@@ -42,10 +42,11 @@ def main() -> None:
     parser.add_argument("--project-root")
     parser.add_argument("--environment", default="inherited")
     parser.add_argument("--expect-live-discovery", action="store_true")
+    parser.add_argument("--expect-hierarchy", action="store_true")
     args = parser.parse_args()
 
     master, slave = pty.openpty()
-    initial_size = (120, 40) if args.expect_live_discovery else (80, 24)
+    initial_size = (120, 40) if args.expect_live_discovery or args.expect_hierarchy else (80, 24)
     set_size(slave, *initial_size)
     runtime = tempfile.TemporaryDirectory(prefix="hardcaml-workbench-resize-")
     diagnostics = os.path.join(runtime.name, "resize.log")
@@ -72,7 +73,7 @@ def main() -> None:
             raise RuntimeError("initial frame did not contain the bounded project pane")
         if b"Daemon instance:" in initial:
             raise RuntimeError("verbose daemon identity leaked into the default project view")
-        if args.expect_live_discovery:
+        if args.expect_live_discovery or args.expect_hierarchy:
             discovery = initial
             deadline = time.monotonic() + 60
             expected = (b"Integration: Driver", b"Four-bit counter")
@@ -85,6 +86,55 @@ def main() -> None:
                 raise RuntimeError(
                     f"attached client did not render live discovery without input: {missing!r}"
                 )
+        if args.expect_hierarchy:
+            os.write(master, b"g")
+            generation = b""
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and b"Hardware hierarchy output from" not in generation:
+                if process.poll() is not None:
+                    raise RuntimeError("client exited while waiting for hierarchy generation")
+                generation += read_available(master)
+            if b"Hardware hierarchy output from" not in generation:
+                raise RuntimeError("attached client did not observe hierarchy availability")
+            os.write(master, b"h")
+            hierarchy = b""
+            deadline = time.monotonic() + 10
+            expected_hierarchy = (b"HARDWARE HIERARCHY [current]", b"u_counter_0", b"u_counter_1")
+            while time.monotonic() < deadline and not all(
+                value in hierarchy for value in expected_hierarchy
+            ):
+                hierarchy += read_available(master)
+            missing = [value for value in expected_hierarchy if value not in hierarchy]
+            if missing:
+                raise RuntimeError(f"hierarchy view was incomplete: {missing!r}")
+            os.write(master, b"m")
+            historical = read_available(master)
+            if b"HARDWARE HIERARCHY [historical]" not in historical:
+                raise RuntimeError("older hierarchy was not labeled historical after selection changed")
+            os.write(master, b"m")
+            current = read_available(master)
+            if b"HARDWARE HIERARCHY [current]" not in current:
+                raise RuntimeError("hierarchy did not return to current after restoring selection")
+            os.write(master, b"o")
+            selected = read_available(master)
+            if b"Node instance: u_counter_0" not in selected:
+                raise RuntimeError("hierarchy node navigation did not update the inspector")
+            os.write(master, b"u")
+            root_selected = read_available(master)
+            if b"Node instance: <root>" not in root_selected:
+                raise RuntimeError("hierarchy navigation did not return to the root")
+            os.write(master, b"e")
+            collapsed = read_available(master)
+            if b">+ <root>" not in collapsed:
+                raise RuntimeError("hierarchy root did not collapse")
+            os.write(master, b"e")
+            expanded = read_available(master)
+            if (
+                b">- <root>" not in expanded
+                or b"u_counter_0" not in expanded
+                or b"u_counter_1" not in expanded
+            ):
+                raise RuntimeError("hierarchy root did not re-expand")
         stages = [(120, 40), (40, 10), (1, 1), (80, 24), (100, 24), (80, 24)]
         evidence = []
         for columns, rows in stages:
@@ -109,8 +159,22 @@ def main() -> None:
                 raise RuntimeError(f"scrolled connection details did not expose {label!r}")
         os.write(master, b"d")
         project = read_available(master)
-        if b"PROJECT / GENERIC DUNE" not in project:
-            raise RuntimeError("project pane did not recover after closing connection details")
+        expected_pane = b"HARDWARE HIERARCHY" if args.expect_hierarchy else b"PROJECT / GENERIC DUNE"
+        if expected_pane not in project:
+            raise RuntimeError("left pane did not recover after closing connection details")
+        if args.expect_hierarchy:
+            scrolled_hierarchy = project
+            for _ in range(20):
+                os.write(master, b"]")
+                scrolled_hierarchy += read_available(master, 0.1)
+            if b"Signals/source:" not in scrolled_hierarchy:
+                raise RuntimeError("compact hierarchy pane could not scroll to the inspector")
+            restored_hierarchy = b""
+            for _ in range(20):
+                os.write(master, b"[")
+                restored_hierarchy += read_available(master, 0.1)
+            if b"HARDWARE HIERARCHY" not in restored_hierarchy:
+                raise RuntimeError("compact hierarchy pane could not scroll back to its header")
         os.write(master, b"q")
         process.wait(timeout=5)
         if process.returncode != 0:
@@ -124,6 +188,8 @@ def main() -> None:
         print("Terminal resize checks: passed")
         if args.expect_live_discovery:
             print("Attached-client live discovery: passed")
+        if args.expect_hierarchy:
+            print("Attached-client hierarchy navigation: passed")
         print("Repaint bytes: " + ", ".join(evidence))
     finally:
         if process.poll() is None:

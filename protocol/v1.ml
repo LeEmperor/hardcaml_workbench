@@ -14,6 +14,7 @@ let max_poll_timeout_ms = 25_000
 let max_log_records = 256
 let max_log_bytes = 256 * 1024
 let max_artifact_bytes = 256 * 1024
+let max_hierarchy_bytes = 8 * 1024 * 1024
 
 module Error = struct
   module Kind = struct
@@ -269,6 +270,24 @@ module Read_artifact = struct
       ; eof : bool
       }
     [@@deriving bin_io, compare, equal, sexp]
+  end
+
+  module Response = struct
+    type t = (Payload.t, Error.t) Result.t [@@deriving bin_io, compare, equal, sexp]
+  end
+end
+
+module Read_hierarchy = struct
+  module Request = struct
+    type t =
+      { instance_id : Daemon_instance_id.t
+      ; artifact : Artifact_id.t
+      }
+    [@@deriving bin_io, compare, equal, sexp]
+  end
+
+  module Payload = struct
+    type t = { hierarchy : Hierarchy.t } [@@deriving bin_io, compare, equal, sexp]
   end
 
   module Response = struct

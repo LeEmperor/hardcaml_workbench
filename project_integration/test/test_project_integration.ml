@@ -159,3 +159,141 @@ let%expect_test "generate-rtl validates request identity and output handoff" =
     (Error "output path \"../escape.v\" is not a normalized relative path")
     (Error "generate-rtl result declared no outputs") |}]
 ;;
+
+let hierarchy_node ?parent ?instance_name ?(inputs = []) ?(outputs = []) key circuit_name
+  : Hierarchy.Node.t
+  =
+  { key
+  ; parent
+  ; instance_name
+  ; circuit_name
+  ; input_ports = inputs
+  ; output_ports = outputs
+  ; metadata = []
+  }
+;;
+
+let hierarchy nodes : Driver_protocol.Hierarchy_response.t =
+  { protocol_version = 1
+  ; target = "counter"
+  ; configuration = "four-bit"
+  ; root = "/"
+  ; nodes
+  }
+;;
+
+let%expect_test "hierarchy validates identity, references, cycles, and port facts" =
+  let root =
+    hierarchy_node
+      ~outputs:[ { Hierarchy.Port.name = "count_o"; width = 4 } ]
+      "/"
+      "counter_top"
+  in
+  let child name =
+    hierarchy_node
+      ~parent:"/"
+      ~instance_name:name
+      (Driver_protocol.hierarchy_key ~parent:"/" name)
+      "counter"
+  in
+  let check nodes =
+    let result =
+      Driver_protocol.validate_hierarchy
+        ~target:"counter"
+        ~configuration:"four-bit"
+        (hierarchy nodes)
+      |> Result.map ~f:(fun hierarchy ->
+        List.map hierarchy.nodes ~f:(fun node -> node.key))
+    in
+    print_s ([%sexp_of: (string list, string) Result.t] result)
+  in
+  check [ root; child "same/module"; child "same:module" ];
+  check [ root; child "duplicate"; child "duplicate" ];
+  check
+    [ root
+    ; hierarchy_node
+        ~parent:"/missing"
+        ~instance_name:"child"
+        "/7:missing/5:child"
+        "counter"
+    ];
+  check
+    [ root
+    ; hierarchy_node ~parent:"/1:b" ~instance_name:"a" "/1:a" "counter"
+    ; hierarchy_node ~parent:"/1:a" ~instance_name:"b" "/1:b" "counter"
+    ];
+  let _, deep_nodes =
+    List.fold
+      (List.init (Driver_protocol.max_hierarchy_depth + 1) ~f:Fn.id)
+      ~init:("/", [ root ])
+      ~f:(fun (parent, nodes) index ->
+        let instance_name = sprintf "n%d" index in
+        let key = Driver_protocol.hierarchy_key ~parent instance_name in
+        key, hierarchy_node ~parent ~instance_name key "counter" :: nodes)
+  in
+  check (List.rev deep_nodes);
+  check
+    [ { root with
+        output_ports =
+          [ { name = "count_o"; width = 4 }; { name = "count_o"; width = 8 } ]
+      }
+    ];
+  check
+    [ { root with
+        input_ports = [ { name = "count_o"; width = 1 } ]
+      ; output_ports = [ { name = "count_o"; width = 4 } ]
+      }
+    ];
+  check [ { root with output_ports = [ { name = "count_o"; width = 0 } ] } ];
+  [%expect
+    {|
+    (Ok (/ /11:same/module /11:same:module))
+    (Error "hierarchy node key \"/9:duplicate\" is duplicated")
+    (Error "node \"/7:missing/5:child\" refers to unknown parent \"/missing\"")
+    (Error "hierarchy contains a cycle at \"/1:a\"")
+    (Error "hierarchy exceeded depth 256")
+    (Error "node.ports name \"count_o\" is duplicated")
+    (Error "node.ports name \"count_o\" is duplicated")
+    (Error "output port \"count_o\" has non-positive width") |}]
+;;
+
+let%expect_test "hierarchy framing and limits are bounded" =
+  let valid = hierarchy [ hierarchy_node "/" "counter_top" ] in
+  let encoded =
+    Driver_protocol.Hierarchy_response.sexp_of_t valid |> Sexp.to_string_mach
+  in
+  print_s
+    [%sexp
+      (Driver_protocol.parse_hierarchy ~target:"counter" ~configuration:"four-bit" encoded
+       : (Driver_protocol.Hierarchy_response.t, string) Result.t)];
+  print_s
+    [%sexp
+      (Driver_protocol.parse_hierarchy
+         ~target:"counter"
+         ~configuration:"four-bit"
+         (String.make (V1.max_hierarchy_bytes + 1) 'x')
+       : (Driver_protocol.Hierarchy_response.t, string) Result.t)];
+  let too_many_nodes =
+    { valid with
+      nodes =
+        List.init (Driver_protocol.max_hierarchy_nodes + 1) ~f:(fun _ ->
+          List.hd_exn valid.nodes)
+    }
+  in
+  print_s
+    [%sexp
+      (Driver_protocol.validate_hierarchy
+         ~target:"counter"
+         ~configuration:"four-bit"
+         too_many_nodes
+       : (Driver_protocol.Hierarchy_response.t, string) Result.t)];
+  [%expect
+    {|
+    (Ok
+     ((protocol_version 1) (target counter) (configuration four-bit) (root /)
+      (nodes
+       (((key /) (parent ()) (instance_name ()) (circuit_name counter_top)
+         (input_ports ()) (output_ports ()) (metadata ()))))))
+    (Error "hierarchy sidecar exceeded 8388608 bytes")
+    (Error "hierarchy exceeded 10000 nodes") |}]
+;;

@@ -115,6 +115,46 @@ module Generate_rtl_response = struct
   [@@deriving sexp]
 end
 
+module Port = struct
+  type t =
+    { name : string
+    ; width : int
+    }
+  [@@deriving sexp]
+end
+
+module Metadata = struct
+  type t =
+    { name : string
+    ; value : string
+    }
+  [@@deriving sexp]
+end
+
+module Node = struct
+  type t =
+    { key : string
+    ; parent : string option
+    ; instance_name : string option
+    ; circuit_name : string
+    ; input_ports : Port.t list
+    ; output_ports : Port.t list
+    ; metadata : Metadata.t list
+    }
+  [@@deriving sexp]
+end
+
+module Hierarchy_response = struct
+  type t =
+    { protocol_version : int
+    ; target : string
+    ; configuration : string
+    ; root : string
+    ; nodes : Node.t list
+    }
+  [@@deriving sexp]
+end
+
 let configurations = [ "four-bit", 4; "eight-bit", 8 ]
 
 let describe protocol_version =
@@ -126,11 +166,11 @@ let describe protocol_version =
     (Sys.getenv "OPAM_SWITCH_PREFIX" |> Option.value ~default:"inherited");
   let response : Describe_response.t =
     { protocol_version = 1
-    ; capabilities = [ "describe"; "generate-rtl" ]
+    ; capabilities = [ "describe"; "generate-rtl"; "generate-rtl-hierarchy" ]
     ; targets =
         [ { key = "counter"
           ; name = "Four-bit counter"
-          ; top = "counter"
+          ; top = "counter_top"
           ; backend = "simulation"
           ; clocks =
               [ { name = "clock_i"
@@ -170,10 +210,85 @@ let generate_rtl protocol_version target configuration output_dir =
   in
   if not (Sys_unix.is_directory_exn output_dir)
   then failwithf "output directory does not exist: %s" output_dir ();
-  let circuit = Fixture_counter.Counter.circuit ~width in
-  let verilog = Rtl.create Verilog [ circuit ] |> Rtl.full_hierarchy |> Rope.to_string in
+  let circuit, database = Fixture_counter.Counter.hierarchical_circuit ~width in
+  let verilog =
+    Rtl.create ~database Verilog [ circuit ] |> Rtl.full_hierarchy |> Rope.to_string
+  in
   let filename = sprintf "counter-%d.v" width in
   Out_channel.write_all (Filename.concat output_dir filename) ~data:verilog;
+  let port signal =
+    let name =
+      match Signal.names signal with
+      | [ name ] -> name
+      | names -> failwithf "expected one name for circuit port: %s" (String.concat ~sep:"," names) ()
+    in
+    { Port.name; width = Signal.width signal }
+  in
+  let key ~parent instance_name =
+    sprintf
+      "%s/%d:%s"
+      (if String.equal parent "/" then "" else parent)
+      (String.length instance_name)
+      instance_name
+  in
+  let rec nodes ~parent ~instance_name circuit =
+    let node_key =
+      match parent, instance_name with
+      | None, None -> "/"
+      | Some parent, Some instance_name -> key ~parent instance_name
+      | None, Some _ | Some _, None -> failwith "invalid hierarchy occurrence"
+    in
+    let node : Node.t =
+      { key = node_key
+      ; parent
+      ; instance_name
+      ; circuit_name = Circuit.name circuit
+      ; input_ports = List.map (Circuit.inputs circuit) ~f:port
+      ; output_ports = List.map (Circuit.outputs circuit) ~f:port
+      ; metadata = []
+      }
+    in
+    let children =
+      Circuit.instantiations circuit
+      |> List.sort ~compare:(fun a b ->
+        String.compare a.instantiation.instance_label b.instantiation.instance_label)
+      |> List.concat_map ~f:(fun instantiation ->
+        let instance_name = instantiation.instantiation.instance_label in
+        match
+          Circuit_database.find
+            database
+            ~mangled_name:instantiation.instantiation.circuit_name
+        with
+        | Some child -> nodes ~parent:(Some node_key) ~instance_name:(Some instance_name) child
+        | None ->
+          [ { Node.key = key ~parent:node_key instance_name
+            ; parent = Some node_key
+            ; instance_name = Some instance_name
+            ; circuit_name = instantiation.instantiation.circuit_name
+            ; input_ports =
+                List.map instantiation.instantiation.inputs ~f:(fun input ->
+                  { Port.name = input.name; width = Signal.width input.input_signal })
+            ; output_ports =
+                List.map instantiation.instantiation.outputs ~f:(fun output ->
+                  { Port.name = output.name; width = output.output_width })
+            ; metadata = [ { name = "implementation"; value = "unavailable" } ]
+            }
+          ])
+    in
+    node :: children
+  in
+  let hierarchy_filename = sprintf "counter-%d.hierarchy.sexp" width in
+  let hierarchy : Hierarchy_response.t =
+    { protocol_version = 1
+    ; target
+    ; configuration
+    ; root = "/"
+    ; nodes = nodes ~parent:None ~instance_name:None circuit
+    }
+  in
+  Out_channel.write_all
+    (Filename.concat output_dir hierarchy_filename)
+    ~data:(Sexp.to_string_mach (Hierarchy_response.sexp_of_t hierarchy));
   eprintf
     "fixture driver: generated %d-bit counter in environment prefix=%s\n%!"
     width
@@ -190,6 +305,14 @@ let generate_rtl protocol_version target configuration output_dir =
           ; media = Some "text/x-verilog"
           ; display_name = sprintf "counter-%d.v" width
           ; description = Some (sprintf "Generated %d-bit fixture counter RTL" width)
+          }
+        ; { path = hierarchy_filename
+          ; namespace = "hardcaml"
+          ; name = "elaboration-hierarchy"
+          ; role = Report
+          ; media = Some "application/x-hardcaml-workbench-hierarchy-sexp"
+          ; display_name = sprintf "counter-%d hierarchy" width
+          ; description = Some (sprintf "Elaborated %d-bit fixture hierarchy" width)
           }
         ]
     ; tools =

@@ -31,6 +31,29 @@ repository and records the resulting jobs and artifacts.
 
 ## 2. Product boundary
 
+### Immediate product: a real-project monitoring dashboard
+
+As of 2026-09-20, the next release serves `hardcaml_protemu` in the `../scaf/`
+worktree: launch the existing build/ASIC flow and monitor it in a server-side TUI
+over SSH. Keep setup/hold timing, persistent stage/result boxes, verification
+outcomes, current operation, elapsed time, and logs visible together. Add the
+existing area/utilization results as compact design information. The aim is to
+replace terminal/log/process-monitor guesswork with evidence about one real run.
+
+Results must identify their source build/run, stage, and freshness. A running
+process, completed tool stage, generated GDS, timing closure, and signoff are
+different facts. The project owns their meaning and exposes its existing commands
+and results; Workbench supervises and presents them.
+
+The [active architecture scope](hardcaml_workbench_architecture.md#active-release-scope--protemu-monitoring-2026-09-20)
+and [dashboard construction slices](construction_phase_plan.md#active-release--scaf-build-and-flow-dashboard-2026-09-20)
+define this release. Browser, persistent vendor workers, graph/waveform views,
+hardware control, distributed execution, and a second backend are parked. The
+broader vision below remains useful direction, not the definition of what must be
+finished before the tool is useful.
+
+### Longer-term product
+
 The Workbench should become the primary place to:
 
 - understand a design and its hierarchy,

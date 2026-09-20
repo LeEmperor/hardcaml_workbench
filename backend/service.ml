@@ -31,6 +31,8 @@ type artifact_entry =
   ; path : string
   }
 
+type hierarchy_entry = { hierarchy : Hierarchy.t }
+
 type project_session =
   { key : string
   ; root : string
@@ -75,6 +77,8 @@ and job_operation =
       ; configuration : Configuration_id.t
       ; target_key : string
       ; configuration_key : string
+      ; hierarchy_capable : bool
+      ; driver : string
       ; output_dir : string
       }
 
@@ -103,6 +107,7 @@ type t =
   ; running_roots : String.Hash_set.t
   ; jobs : (Job_id.t, job_entry) Hashtbl.t
   ; artifacts : (Artifact_id.t, artifact_entry) Hashtbl.t
+  ; hierarchies : (Artifact_id.t, hierarchy_entry) Hashtbl.t
   ; submissions : (string, submission) Hashtbl.t
   ; mutable event_sink : event_sink
   ; mutable sequence : int
@@ -154,11 +159,11 @@ let create
   let%map result =
     Monitor.try_with_or_error (fun () ->
       In_thread.run (fun () ->
-        match Sys_unix.file_exists log_dir with
-        | `Yes ->
-          if not (Sys_unix.is_directory_exn log_dir)
-          then failwithf "log path is not a directory: %s" log_dir ()
-        | `No | `Unknown -> Core_unix.mkdir log_dir ~perm:0o700;
+        (match Sys_unix.file_exists log_dir with
+         | `Yes ->
+           if not (Sys_unix.is_directory_exn log_dir)
+           then failwithf "log path is not a directory: %s" log_dir ()
+         | `No | `Unknown -> Core_unix.mkdir log_dir ~perm:0o700);
         Core_unix.mkdir artifact_dir ~perm:0o700;
         Core_unix.mkdir output_dir ~perm:0o700))
   in
@@ -173,6 +178,7 @@ let create
     ; running_roots = Hash_set.create (module String)
     ; jobs = Job_id.Table.create ()
     ; artifacts = Artifact_id.Table.create ()
+    ; hierarchies = Artifact_id.Table.create ()
     ; submissions = Hashtbl.create (module String)
     ; event_sink = ignore
     ; sequence = 0
@@ -247,7 +253,9 @@ let hash_project_tree root =
     let hash = Cryptokit.Hash.sha256 () in
     let add value = hash#add_string (sprintf "%d:%s" (String.length value) value) in
     let rec visit relative =
-      let path = if String.is_empty relative then root else Filename.concat root relative in
+      let path =
+        if String.is_empty relative then root else Filename.concat root relative
+      in
       let names = Sys_unix.ls_dir path |> List.sort ~compare:String.compare in
       List.iter names ~f:(fun name ->
         if not (String.equal name ".git" || String.equal name "_build")
@@ -288,8 +296,7 @@ let hash_project_tree root =
             add child_relative))
     in
     visit "";
-    "sha256:"
-    ^ Cryptokit.transform_string (Cryptokit.Hexa.encode ()) hash#result)
+    "sha256:" ^ Cryptokit.transform_string (Cryptokit.Hexa.encode ()) hash#result)
 ;;
 
 let git_output root arguments =
@@ -329,28 +336,39 @@ let capture_source root =
 ;;
 
 let source_identity start finish =
-  let same_hash = Option.equal String.equal start.hash finish.hash in
-  let design_hash = if same_hash then start.hash else None in
+  let hash_observation =
+    match start.hash, finish.hash with
+    | Some start, Some finish when String.equal start finish -> `Equal start
+    | Some _, Some _ -> `Changed
+    | None, _ | _, None -> `Unavailable
+  in
+  let design_hash =
+    match hash_observation with
+    | `Equal hash -> Some hash
+    | `Changed | `Unavailable -> None
+  in
   let same_commit = Option.equal String.equal start.git.commit finish.git.commit in
   let git_commit = if same_commit then start.git.commit else None in
   let working_tree =
-    if not same_hash
-    then
+    match hash_observation with
+    | `Changed ->
       Provenance.Working_tree.Unknown
         { reason = "project files changed between generation start and completion" }
-    else if not same_commit
-    then
-      Unknown { reason = "Git commit changed while generation was running" }
-    else (
-      match start.git.dirty, finish.git.dirty with
-      | Some false, Some false -> Clean
-      | Some _, Some _ -> Dirty
-      | _ ->
-        let reason =
-          Option.first_some finish.git.reason start.git.reason
-          |> Option.value ~default:"Git working-tree state was unavailable"
-        in
-        Unknown { reason })
+    | `Unavailable ->
+      Unknown { reason = "source hash was unavailable at a generation boundary" }
+    | `Equal _ ->
+      if not same_commit
+      then Unknown { reason = "Git commit changed while generation was running" }
+      else (
+        match start.git.dirty, finish.git.dirty with
+        | Some false, Some false -> Clean
+        | Some _, Some _ -> Dirty
+        | _ ->
+          let reason =
+            Option.first_some finish.git.reason start.git.reason
+            |> Option.value ~default:"Git working-tree state was unavailable"
+          in
+          Unknown { reason })
   in
   { Provenance.Source_identity.git_commit
   ; working_tree
@@ -691,20 +709,16 @@ type generation_selection_error =
 let generation_selection session target configuration =
   let open Integration.Driver_protocol in
   match session.driver_description with
-  | None -> Generation_unsupported "project driver discovery is not currently available" |> Error
+  | None ->
+    Generation_unsupported "project driver discovery is not currently available" |> Error
   | Some description
     when not
-           (List.mem
-              description.capabilities
-              generate_rtl_capability
-              ~equal:String.equal) ->
-    Generation_unsupported "project driver does not advertise generate-rtl" |> Error
+           (List.mem description.capabilities generate_rtl_capability ~equal:String.equal)
+    -> Generation_unsupported "project driver does not advertise generate-rtl" |> Error
   | Some description ->
     let target_description =
       List.find description.targets ~f:(fun candidate ->
-        Target_id.equal
-          (Driver_adapter.target_id session.project.id candidate.key)
-          target)
+        Target_id.equal (Driver_adapter.target_id session.project.id candidate.key) target)
     in
     let configuration_description =
       List.find description.configurations ~f:(fun candidate ->
@@ -722,8 +736,17 @@ let generation_selection session target configuration =
        |> Error
      | Some target_description, Some configuration_description ->
        if String.equal configuration_description.target target_description.key
-       then Ok (target_description.key, configuration_description.key)
-       else Generation_invalid "configuration does not belong to the selected target" |> Error)
+       then
+         Ok
+           ( target_description.key
+           , configuration_description.key
+           , List.mem
+               description.capabilities
+               generate_rtl_hierarchy_capability
+               ~equal:String.equal )
+       else
+         Generation_invalid "configuration does not belong to the selected target"
+         |> Error)
 ;;
 
 let remove_tree_sync path =
@@ -752,35 +775,62 @@ let mint_artifact_id t =
        t.next_artifact_id)
 ;;
 
-let copy_output_file ~output_dir ~source ~destination =
-  Or_error.try_with (fun () ->
-    let source_stat = Core_unix.lstat source in
-    if not (Poly.equal source_stat.st_kind S_REG)
-    then failwith "declared output is not a regular file";
-    let resolved = Filename_unix.realpath source in
-    let output_root = Filename_unix.realpath output_dir in
-    if not (String.is_prefix resolved ~prefix:(output_root ^ Filename.dir_sep))
-    then failwith "declared output resolves outside its job output directory";
-    let input = Stdlib.open_in_bin source in
-    let output = Stdlib.open_out_bin destination in
-    Exn.protect
-      ~f:(fun () ->
-        let buffer = Bytes.create (64 * 1024) in
-        let rec copy () =
-          let count = Stdlib.input input buffer 0 (Bytes.length buffer) in
-          if count > 0
-          then (
-            Stdlib.output output buffer 0 count;
-            copy ())
-        in
-        copy ();
-        Stdlib.flush output)
-      ~finally:(fun () ->
-        Stdlib.close_in_noerr input;
-        Stdlib.close_out_noerr output);
-    Core_unix.chmod destination ~perm:0o600;
-    let stat = Core_unix.lstat destination in
-    Int64.to_int_exn stat.st_size)
+let copy_output_file ~output_dir ~source ~destination ~max_bytes =
+  let result =
+    Or_error.try_with (fun () ->
+      let source_stat = Core_unix.lstat source in
+      if not (Poly.equal source_stat.st_kind S_REG)
+      then failwith "declared output is not a regular file";
+      Option.iter max_bytes ~f:(fun max_bytes ->
+        if Int64.(source_stat.st_size > of_int max_bytes)
+        then failwithf "declared output exceeded %d bytes" max_bytes ());
+      let resolved = Filename_unix.realpath source in
+      let output_root = Filename_unix.realpath output_dir in
+      if not (String.is_prefix resolved ~prefix:(output_root ^ Filename.dir_sep))
+      then failwith "declared output resolves outside its job output directory";
+      let input = Stdlib.open_in_bin source in
+      let output = Stdlib.open_out_bin destination in
+      Exn.protect
+        ~f:(fun () ->
+          let buffer = Bytes.create (64 * 1024) in
+          let rec copy bytes =
+            let count = Stdlib.input input buffer 0 (Bytes.length buffer) in
+            if count > 0
+            then (
+              let bytes = bytes + count in
+              Option.iter max_bytes ~f:(fun max_bytes ->
+                if bytes > max_bytes
+                then failwithf "declared output exceeded %d bytes" max_bytes ());
+              Stdlib.output output buffer 0 count;
+              copy bytes)
+          in
+          copy 0;
+          Stdlib.flush output)
+        ~finally:(fun () ->
+          Stdlib.close_in_noerr input;
+          Stdlib.close_out_noerr output);
+      Core_unix.chmod destination ~perm:0o600;
+      let stat = Core_unix.lstat destination in
+      Int64.to_int_exn stat.st_size)
+  in
+  if Result.is_error result
+  then
+    ignore
+      (Or_error.try_with (fun () ->
+         match Sys_unix.file_exists ~follow_symlinks:false destination with
+         | `Yes -> Core_unix.unlink destination
+         | `No | `Unknown -> ())
+       : unit Or_error.t);
+  result
+;;
+
+let read_hierarchy_file path size_in_bytes ~target ~configuration =
+  if size_in_bytes > V1.max_hierarchy_bytes
+  then Error (sprintf "hierarchy sidecar exceeded %d bytes" V1.max_hierarchy_bytes)
+  else
+    Or_error.try_with (fun () -> In_channel.read_all path)
+    |> Result.map_error ~f:Error.to_string_hum
+    |> Result.bind ~f:(Integration.Driver_protocol.parse_hierarchy ~target ~configuration)
 ;;
 
 let generation_failure entry status =
@@ -806,7 +856,15 @@ let generation_failure entry status =
   | Launch_failed { reason } -> Some ("driver launch failed: " ^ reason)
 ;;
 
-let complete_generate_rtl t entry target_key configuration_key output_dir status =
+let complete_generate_rtl
+  t
+  entry
+  target_key
+  configuration_key
+  output_dir
+  ~hierarchy_capable
+  status
+  =
   match generation_failure entry status with
   | Some reason -> return (Error reason)
   | None ->
@@ -819,114 +877,186 @@ let complete_generate_rtl t entry target_key configuration_key output_dir status
      with
      | Error reason -> return (Error reason)
      | Ok response ->
-       let%bind source_finish = capture_source entry.session.root in
-       let source =
-         match entry.source_start with
-         | Some source_start -> source_identity source_start source_finish
-         | None -> Provenance.Source_identity.unknown ~reason:"source start was not captured"
+       let hierarchy_outputs =
+         List.filter response.outputs ~f:Integration.Driver_protocol.hierarchy_output
        in
-       let build = Option.map response.build ~f:Driver_adapter.map_build_ref in
-       let run = Option.map response.run ~f:Driver_adapter.map_run_ref in
-       let created_at = Timestamp.of_time_ns (Time_ns.now ()) in
-       let requested_tools =
-         [ { Tool_version.tool = "project-driver-protocol"
-           ; version = Some (Int.to_string Integration.Driver_protocol.version)
+       if hierarchy_capable && List.length hierarchy_outputs <> 1
+       then
+         return
+           (Error
+              "hierarchy-capable driver must declare exactly one elaboration hierarchy \
+               output")
+       else (
+         let%bind source_finish = capture_source entry.session.root in
+         let source =
+           match entry.source_start with
+           | Some source_start -> source_identity source_start source_finish
+           | None ->
+             Provenance.Source_identity.unknown ~reason:"source start was not captured"
+         in
+         let build = Option.map response.build ~f:Driver_adapter.map_build_ref in
+         let run = Option.map response.run ~f:Driver_adapter.map_run_ref in
+         let created_at = Timestamp.of_time_ns (Time_ns.now ()) in
+         let requested_tools =
+           [ { Tool_version.tool = "project-driver-protocol"
+             ; version = Some (Int.to_string Integration.Driver_protocol.version)
+             }
+           ]
+         in
+         let actual_tools =
+           { Tool_version.tool = "dune"
+           ; version = Some entry.session.summary.dune_version
            }
-         ]
-       in
-       let actual_tools =
-         { Tool_version.tool = "dune"; version = Some entry.session.summary.dune_version }
-         :: { tool = "project-driver-protocol"
-            ; version = Some (Int.to_string response.protocol_version)
-            }
-         :: List.map response.tools ~f:(fun tool ->
-           { Tool_version.tool = tool.name; version = tool.version })
-       in
-       let environment =
-         [ { Environment_identity.component = "project-environment"
-           ; identity = Some entry.session.summary.provenance
-           }
-         ]
-       in
-       let copied = ref [] in
-       let%bind imported =
-         Deferred.List.map response.outputs ~how:`Sequential ~f:(fun output ->
-           let id = mint_artifact_id t in
-           let destination =
-             Filename.concat
-               t.artifact_dir
-               (sprintf "artifact-%d.content" t.next_artifact_id)
-           in
-           let source_path = Filename.concat output_dir output.path in
-           let%map copied_file =
-             In_thread.run (fun () ->
-               copy_output_file ~output_dir ~source:source_path ~destination)
-           in
-           match copied_file with
-           | Error error -> Error (Error.to_string_hum error)
-           | Ok size_in_bytes ->
-             copied := destination :: !copied;
-             let provenance : Provenance.t =
-               { project_root = entry.session.project.root
-               ; target = entry.job.target
-               ; configuration = entry.job.configuration
-               ; build
-               ; run
-               ; generating_job = entry.job.id
-               ; requested_tools
-               ; actual_tools
-               ; environment
-               ; source
-               ; created_at
-               }
+           :: { tool = "project-driver-protocol"
+              ; version = Some (Int.to_string response.protocol_version)
+              }
+           :: List.map response.tools ~f:(fun tool ->
+             { Tool_version.tool = tool.name; version = tool.version })
+         in
+         let environment =
+           [ { Environment_identity.component = "project-environment"
+             ; identity = Some entry.session.summary.provenance
+             }
+           ]
+         in
+         let copied = ref [] in
+         let%bind imported =
+           Deferred.List.map response.outputs ~how:`Sequential ~f:(fun output ->
+             let id = mint_artifact_id t in
+             let destination =
+               Filename.concat
+                 t.artifact_dir
+                 (sprintf "artifact-%d.content" t.next_artifact_id)
              in
-             let artifact : Artifact.t =
-               { id
-               ; kind =
-                   { namespace = output.namespace
-                   ; name = output.name
-                   ; role = output.role
-                   ; media = output.media
-                   }
-               ; project = entry.job.project
-               ; target = entry.job.target
-               ; configuration = entry.job.configuration
-               ; generating_job = entry.job.id
-               ; build
-               ; run
-               ; availability = Available
-               ; metadata =
-                   { display_name = output.display_name
-                   ; description = output.description
-                   ; size_in_bytes = Some size_in_bytes
-                   ; provenance
-                   }
-               }
+             let source_path = Filename.concat output_dir output.path in
+             let%map copied_file =
+               In_thread.run (fun () ->
+                 copy_output_file
+                   ~output_dir
+                   ~source:source_path
+                   ~destination
+                   ~max_bytes:
+                     (if Integration.Driver_protocol.hierarchy_output output
+                      then Some V1.max_hierarchy_bytes
+                      else None))
              in
-             Ok { artifact; path = destination })
-       in
-       (match Result.all imported with
-        | Error reason ->
-          let%map () =
-            Deferred.List.iter !copied ~how:`Sequential ~f:(fun path -> cleanup_path path)
-          in
-          Error ("artifact import failed: " ^ reason)
-        | Ok artifacts when entry.cancel_requested || t.shutting_down ->
-          let%map () =
-            Deferred.List.iter artifacts ~how:`Sequential ~f:(fun artifact ->
-              cleanup_path artifact.path)
-          in
-          Error "RTL generation was cancelled during artifact import"
-        | Ok artifacts ->
-          List.iter artifacts ~f:(fun artifact ->
-            Hashtbl.set t.artifacts ~key:artifact.artifact.id ~data:artifact;
-            emit t (Artifact_upsert artifact.artifact));
-          let artifact_ids = List.map artifacts ~f:(fun entry -> entry.artifact.id) in
-          update_job
-            t
-            entry
-            { entry.job with artifacts = artifact_ids; build; run; phase = Some "registered" };
-          return (Ok ())))
+             match copied_file with
+             | Error error -> Error (Error.to_string_hum error)
+             | Ok size_in_bytes ->
+               copied := destination :: !copied;
+               let provenance : Provenance.t =
+                 { project_root = entry.session.project.root
+                 ; target = entry.job.target
+                 ; configuration = entry.job.configuration
+                 ; build
+                 ; run
+                 ; generating_job = entry.job.id
+                 ; requested_tools
+                 ; actual_tools
+                 ; environment
+                 ; source
+                 ; created_at
+                 }
+               in
+               let artifact : Artifact.t =
+                 { id
+                 ; kind =
+                     { namespace = output.namespace
+                     ; name = output.name
+                     ; role = output.role
+                     ; media = output.media
+                     }
+                 ; project = entry.job.project
+                 ; target = entry.job.target
+                 ; configuration = entry.job.configuration
+                 ; generating_job = entry.job.id
+                 ; build
+                 ; run
+                 ; availability = Available
+                 ; metadata =
+                     { display_name = output.display_name
+                     ; description = output.description
+                     ; size_in_bytes = Some size_in_bytes
+                     ; provenance
+                     }
+                 }
+               in
+               Ok (output, { artifact; path = destination }))
+         in
+         match Result.all imported with
+         | Error reason ->
+           let%map () =
+             Deferred.List.iter !copied ~how:`Sequential ~f:(fun path ->
+               cleanup_path path)
+           in
+           Error ("artifact import failed: " ^ reason)
+         | Ok artifacts when entry.cancel_requested || t.shutting_down ->
+           let%map () =
+             Deferred.List.iter artifacts ~how:`Sequential ~f:(fun (_, artifact) ->
+               cleanup_path artifact.path)
+           in
+           Error "RTL generation was cancelled during artifact import"
+         | Ok artifacts ->
+           let hierarchy =
+             if not hierarchy_capable
+             then Ok None
+             else (
+               let _, artifact =
+                 List.find_exn artifacts ~f:(fun (output, _) ->
+                   Integration.Driver_protocol.hierarchy_output output)
+               in
+               read_hierarchy_file
+                 artifact.path
+                 (Option.value_exn artifact.artifact.metadata.size_in_bytes)
+                 ~target:target_key
+                 ~configuration:configuration_key
+               |> Result.map ~f:(fun hierarchy ->
+                 let rtl_artifacts =
+                   List.filter_map artifacts ~f:(fun (_, candidate) ->
+                     if String.equal candidate.artifact.kind.namespace "hardcaml"
+                        && String.equal candidate.artifact.kind.name "verilog"
+                     then Some candidate.artifact.id
+                     else None)
+                 in
+                 Some
+                   ( artifact.artifact.id
+                   , { Hierarchy.artifact = artifact.artifact.id
+                     ; project = entry.job.project
+                     ; target = Option.value_exn entry.job.target
+                     ; configuration = Option.value_exn entry.job.configuration
+                     ; generating_job = entry.job.id
+                     ; rtl_artifacts
+                     ; provenance = artifact.artifact.metadata.provenance
+                     ; root = hierarchy.root
+                     ; nodes = hierarchy.nodes
+                     } )))
+           in
+           (match hierarchy with
+            | Error reason ->
+              let%map () =
+                Deferred.List.iter artifacts ~how:`Sequential ~f:(fun (_, artifact) ->
+                  cleanup_path artifact.path)
+              in
+              Error ("hierarchy import failed: " ^ reason)
+            | Ok hierarchy ->
+              Option.iter hierarchy ~f:(fun (id, hierarchy) ->
+                Hashtbl.set t.hierarchies ~key:id ~data:{ hierarchy });
+              List.iter artifacts ~f:(fun (_, artifact) ->
+                Hashtbl.set t.artifacts ~key:artifact.artifact.id ~data:artifact;
+                emit t (Artifact_upsert artifact.artifact));
+              let artifact_ids =
+                List.map artifacts ~f:(fun (_, entry) -> entry.artifact.id)
+              in
+              update_job
+                t
+                entry
+                { entry.job with
+                  artifacts = artifact_ids
+                ; build
+                ; run
+                ; phase = Some "registered"
+                };
+              return (Ok ()))))
 ;;
 
 let rec run_next t root =
@@ -945,171 +1075,184 @@ let rec run_next t root =
          ; phase = Some "starting"
          ; started_at = Some started_at
          };
-        let session = entry.session in
-        let preflight =
-          match entry.operation with
-          | Dune_action _ | Driver_describe -> Ok ()
-          | Driver_generate_rtl
-              { target; configuration; target_key; configuration_key; _ } ->
-            (match generation_selection session target configuration with
-             | Ok (current_target, current_configuration)
-               when String.equal current_target target_key
-                    && String.equal current_configuration configuration_key -> Ok ()
-             | Ok _ -> Error "driver declaration changed before RTL generation started"
-             | Error (Generation_unsupported reason | Generation_invalid reason) ->
-               Error reason)
-        in
-        match preflight with
-        | Error reason ->
-          finish_entry t entry Failed None (Some reason);
-          let%bind () = Writer.close entry.log_writer in
-          let%bind () =
-            match entry.operation with
-            | Driver_generate_rtl { output_dir; _ } -> cleanup_path output_dir
-            | Dune_action _ | Driver_describe -> return ()
-          in
-          run_next t root;
-          return ()
-        | Ok () ->
-        let%bind () =
-          match entry.operation with
-          | Driver_generate_rtl _ ->
-            update_job t entry { entry.job with phase = Some "capturing source" };
-            let%map source = capture_source session.root in
-            entry.source_start <- Some source
-          | Dune_action _ | Driver_describe -> return ()
-        in
-        let invocation =
-          match entry.operation with
-          | Dune_action action ->
-           (match t.action_invocation with
-            | None ->
-              Adapter.action_invocation
-                ~build_alias:session.build_alias
-                ~test_alias:session.test_alias
-                ~root:session.root
-                ~environment:session.environment
-                action
-            | Some invocation ->
-              invocation ~root:session.root ~environment:session.environment action)
-          | Driver_describe ->
-            t.driver_invocation
-              ~root:session.root
-              ~environment:session.environment
-              ~driver:(Option.value_exn session.driver)
-          | Driver_generate_rtl { target_key; configuration_key; output_dir; _ } ->
-            t.generate_rtl_invocation
-              ~root:session.root
-              ~environment:session.environment
-              ~driver:(Option.value_exn session.driver)
-              ~target:target_key
-              ~configuration:configuration_key
-              ~output_dir
+       let session = entry.session in
+       let preflight =
+         match entry.operation with
+         | Dune_action _ | Driver_describe -> Ok ()
+         | Driver_generate_rtl
+             { target
+             ; configuration
+             ; target_key
+             ; configuration_key
+             ; hierarchy_capable
+             ; driver
+             ; _
+             } ->
+           (match generation_selection session target configuration with
+            | Ok (current_target, current_configuration, current_hierarchy_capable)
+              when String.equal current_target target_key
+                   && String.equal current_configuration configuration_key
+                   && Bool.equal current_hierarchy_capable hierarchy_capable
+                   && Option.equal String.equal session.driver (Some driver) -> Ok ()
+            | Ok _ -> Error "driver declaration changed before RTL generation started"
+            | Error (Generation_unsupported reason | Generation_invalid reason) ->
+              Error reason)
        in
-       let args = List.tl invocation.argv |> Option.value ~default:[] in
-       let argv0 = List.hd invocation.argv in
-       let%bind created =
-         Process.create
-           ?argv0
-           ~working_dir:invocation.cwd
-           ~setpgid:Core_unix.Pgid.new_process_group
-           ~prog:invocation.executable
-           ~args
-           ()
-       in
-       match created with
-       | Error launch_error ->
-         let reason = Error.to_string_hum launch_error in
-         (match entry.operation with
-           | Driver_describe ->
-             entry.session.driver_description <- None;
-             publish_driver_state
-              t
-              entry
-              (Unusable { reason = "driver launch failed: " ^ reason })
-              []
-              []
-           | Dune_action _ | Driver_generate_rtl _ -> ());
-         if entry.cancel_requested || t.shutting_down
-         then finish_entry t entry Cancelled (Some (Launch_failed { reason })) None
-         else finish_entry t entry Failed (Some (Launch_failed { reason })) (Some reason);
-          let%bind () = Writer.close entry.log_writer in
-          let%bind () =
-            match entry.operation with
-            | Driver_generate_rtl { output_dir; _ } -> cleanup_path output_dir
-            | Dune_action _ | Driver_describe -> return ()
-          in
-          run_next t root;
-         return ()
-       | Ok process ->
-         entry.process <- Some process;
-         don't_wait_for (Writer.close (Process.stdin process));
-         update_job t entry { entry.job with state = Running; phase = Some "running" };
-         if entry.cancel_requested || t.shutting_down
-         then begin_escalation t entry process;
-         let stdout = drain t entry Stdout (Process.stdout process) in
-         let stderr = drain t entry Stderr (Process.stderr process) in
-          let%bind status = Process.wait process in
-          entry.process <- None;
-         let%bind () = Deferred.all_unit [ stdout; stderr; entry.log_tail ] in
+       match preflight with
+       | Error reason ->
+         finish_entry t entry Failed None (Some reason);
          let%bind () = Writer.close entry.log_writer in
-          let status = exit_status status in
-          let%bind () =
-            if entry.cancel_requested || t.shutting_down
-         then (
-           (match entry.operation with
+         let%bind () =
+           match entry.operation with
+           | Driver_generate_rtl { output_dir; _ } -> cleanup_path output_dir
+           | Dune_action _ | Driver_describe -> return ()
+         in
+         run_next t root;
+         return ()
+       | Ok () ->
+         let%bind () =
+           match entry.operation with
+           | Driver_generate_rtl _ ->
+             update_job t entry { entry.job with phase = Some "capturing source" };
+             let%map source = capture_source session.root in
+             entry.source_start <- Some source
+           | Dune_action _ | Driver_describe -> return ()
+         in
+         let invocation =
+           match entry.operation with
+           | Dune_action action ->
+             (match t.action_invocation with
+              | None ->
+                Adapter.action_invocation
+                  ~build_alias:session.build_alias
+                  ~test_alias:session.test_alias
+                  ~root:session.root
+                  ~environment:session.environment
+                  action
+              | Some invocation ->
+                invocation ~root:session.root ~environment:session.environment action)
+           | Driver_describe ->
+             t.driver_invocation
+               ~root:session.root
+               ~environment:session.environment
+               ~driver:(Option.value_exn session.driver)
+           | Driver_generate_rtl { target_key; configuration_key; driver; output_dir; _ }
+             ->
+             t.generate_rtl_invocation
+               ~root:session.root
+               ~environment:session.environment
+               ~driver
+               ~target:target_key
+               ~configuration:configuration_key
+               ~output_dir
+         in
+         let args = List.tl invocation.argv |> Option.value ~default:[] in
+         let argv0 = List.hd invocation.argv in
+         let%bind created =
+           Process.create
+             ?argv0
+             ~working_dir:invocation.cwd
+             ~setpgid:Core_unix.Pgid.new_process_group
+             ~prog:invocation.executable
+             ~args
+             ()
+         in
+         (match created with
+          | Error launch_error ->
+            let reason = Error.to_string_hum launch_error in
+            (match entry.operation with
              | Driver_describe ->
                entry.session.driver_description <- None;
                publish_driver_state
-                t
-                entry
-                (Unusable { reason = "driver discovery was cancelled" })
-                []
-                []
+                 t
+                 entry
+                 (Unusable { reason = "driver launch failed: " ^ reason })
+                 []
+                 []
              | Dune_action _ | Driver_generate_rtl _ -> ());
+            if entry.cancel_requested || t.shutting_down
+            then finish_entry t entry Cancelled (Some (Launch_failed { reason })) None
+            else
+              finish_entry t entry Failed (Some (Launch_failed { reason })) (Some reason);
+            let%bind () = Writer.close entry.log_writer in
             let%bind () =
               match entry.operation with
               | Driver_generate_rtl { output_dir; _ } -> cleanup_path output_dir
               | Dune_action _ | Driver_describe -> return ()
             in
-            finish_entry t entry Cancelled (Some status) None;
-            return ())
-          else (
-            match entry.operation with
-            | Dune_action _ ->
-              (match status with
-               | Exited 0 -> finish_entry t entry Complete (Some status) None
-               | Exited _ | Signaled _ -> finish_entry t entry Failed (Some status) None
-               | Launch_failed _ -> assert false);
-              return ()
-            | Driver_describe ->
-              (match complete_driver_discovery t entry status with
-               | Ok () -> finish_entry t entry Complete (Some status) None
-               | Error reason -> finish_entry t entry Failed (Some status) (Some reason));
-              return ()
-            | Driver_generate_rtl
-                { target_key; configuration_key; output_dir; _ } ->
-              let%bind completed =
-                complete_generate_rtl
-                  t
-                  entry
-                  target_key
-                  configuration_key
-                  output_dir
-                  status
-              in
-              let%bind () = cleanup_path output_dir in
+            run_next t root;
+            return ()
+          | Ok process ->
+            entry.process <- Some process;
+            don't_wait_for (Writer.close (Process.stdin process));
+            update_job t entry { entry.job with state = Running; phase = Some "running" };
+            if entry.cancel_requested || t.shutting_down
+            then begin_escalation t entry process;
+            let stdout = drain t entry Stdout (Process.stdout process) in
+            let stderr = drain t entry Stderr (Process.stderr process) in
+            let%bind status = Process.wait process in
+            entry.process <- None;
+            let%bind () = Deferred.all_unit [ stdout; stderr; entry.log_tail ] in
+            let%bind () = Writer.close entry.log_writer in
+            let status = exit_status status in
+            let%bind () =
               if entry.cancel_requested || t.shutting_down
-              then finish_entry t entry Cancelled (Some status) None
+              then (
+                (match entry.operation with
+                 | Driver_describe ->
+                   entry.session.driver_description <- None;
+                   publish_driver_state
+                     t
+                     entry
+                     (Unusable { reason = "driver discovery was cancelled" })
+                     []
+                     []
+                 | Dune_action _ | Driver_generate_rtl _ -> ());
+                let%bind () =
+                  match entry.operation with
+                  | Driver_generate_rtl { output_dir; _ } -> cleanup_path output_dir
+                  | Dune_action _ | Driver_describe -> return ()
+                in
+                finish_entry t entry Cancelled (Some status) None;
+                return ())
               else (
-                match completed with
-                | Ok () -> finish_entry t entry Complete (Some status) None
-                | Error reason ->
-                  finish_entry t entry Failed (Some status) (Some reason));
-              return ())
-          in
-          run_next t root;
-         return ())
+                match entry.operation with
+                | Dune_action _ ->
+                  (match status with
+                   | Exited 0 -> finish_entry t entry Complete (Some status) None
+                   | Exited _ | Signaled _ ->
+                     finish_entry t entry Failed (Some status) None
+                   | Launch_failed _ -> assert false);
+                  return ()
+                | Driver_describe ->
+                  (match complete_driver_discovery t entry status with
+                   | Ok () -> finish_entry t entry Complete (Some status) None
+                   | Error reason ->
+                     finish_entry t entry Failed (Some status) (Some reason));
+                  return ()
+                | Driver_generate_rtl
+                    { target_key; configuration_key; hierarchy_capable; output_dir; _ } ->
+                  let%bind completed =
+                    complete_generate_rtl
+                      t
+                      entry
+                      target_key
+                      configuration_key
+                      output_dir
+                      ~hierarchy_capable
+                      status
+                  in
+                  don't_wait_for (cleanup_path output_dir);
+                  (match completed with
+                   | Ok () -> finish_entry t entry Complete (Some status) None
+                   | Error _ when entry.cancel_requested || t.shutting_down ->
+                     finish_entry t entry Cancelled (Some status) None
+                   | Error reason ->
+                     finish_entry t entry Failed (Some status) (Some reason));
+                  return ())
+            in
+            run_next t root;
+            return ()))
 ;;
 
 let action_kind = function
@@ -1146,9 +1289,9 @@ let submit_job
         | None -> return (error Not_found "project is not open")
         | Some session ->
           let id = mint_job_id t in
-           let submission =
-             { project; operation = Submit_dune action; ready = Ivar.create () }
-           in
+          let submission =
+            { project; operation = Submit_dune action; ready = Ivar.create () }
+          in
           Hashtbl.set t.submissions ~key:submission_key ~data:submission;
           let job =
             Job.create
@@ -1208,7 +1351,7 @@ let submit_job
              then (
                Hash_set.add t.running_roots session.root;
                run_next t session.root);
-              Ok { V1.Submit_job.Payload.job })))
+             Ok { V1.Submit_job.Payload.job })))
 ;;
 
 let generate_rtl
@@ -1239,9 +1382,11 @@ let generate_rtl
            | Error (Generation_unsupported reason) ->
              return (error Unsupported_operation reason)
            | Error (Generation_invalid reason) -> return (error Invalid_request reason)
-           | Ok (target_key, configuration_key) ->
+           | Ok (target_key, configuration_key, hierarchy_capable) ->
              let id = mint_job_id t in
-             let submission = { project; operation = requested; ready = Ivar.create () } in
+             let submission =
+               { project; operation = requested; ready = Ivar.create () }
+             in
              Hashtbl.set t.submissions ~key:submission_key ~data:submission;
              let created_at = Timestamp.of_time_ns (Time_ns.now ()) in
              let job =
@@ -1249,7 +1394,8 @@ let generate_rtl
                     ~id
                     ~kind:{ namespace = "project-driver"; name = "generate-rtl" }
                     ~project
-                    ~created_at) with
+                    ~created_at)
+                 with
                  target = Some target
                ; configuration = Some configuration
                }
@@ -1257,14 +1403,19 @@ let generate_rtl
              let log_path =
                Filename.concat
                  t.log_dir
-                 (sprintf "job-%d-%d.log" (Pid.to_int (Core_unix.getpid ())) t.next_job_id)
+                 (sprintf
+                    "job-%d-%d.log"
+                    (Pid.to_int (Core_unix.getpid ()))
+                    t.next_job_id)
              in
              let output_dir =
                Filename.concat t.output_dir (sprintf "job-%d" t.next_job_id)
              in
              let%map opened =
                Monitor.try_with_or_error (fun () ->
-                 let%bind () = In_thread.run (fun () -> Core_unix.mkdir output_dir ~perm:0o700) in
+                 let%bind () =
+                   In_thread.run (fun () -> Core_unix.mkdir output_dir ~perm:0o700)
+                 in
                  Writer.open_file ~append:true ~perm:0o600 log_path)
              in
              (match opened with
@@ -1286,6 +1437,8 @@ let generate_rtl
                         ; configuration
                         ; target_key
                         ; configuration_key
+                        ; hierarchy_capable
+                        ; driver = Option.value_exn session.driver
                         ; output_dir
                         }
                   ; session
@@ -1448,10 +1601,10 @@ let refresh_integration t ({ instance_id; project } : V1.Refresh_integration.Req
                   ; process = None
                   ; cancel_requested = false
                   ; escalation_started = false
-                   ; escalation_finished = Ivar.create ()
-                   ; finished = Ivar.create ()
-                   ; source_start = None
-                   }
+                  ; escalation_finished = Ivar.create ()
+                  ; finished = Ivar.create ()
+                  ; source_start = None
+                  }
                 in
                 Hashtbl.set t.jobs ~key:id ~data:entry;
                 publish_driver_state
@@ -1521,14 +1674,14 @@ let cancel_entry t entry =
            []
            []
        | Dune_action _ | Driver_generate_rtl _ -> ());
-       finish_entry t entry Cancelled None None;
-       let%bind () = Writer.close entry.log_writer in
-       let%bind () =
-         match entry.operation with
-         | Driver_generate_rtl { output_dir; _ } -> cleanup_path output_dir
-         | Dune_action _ | Driver_describe -> return ()
-       in
-       return ()
+      finish_entry t entry Cancelled None None;
+      let%bind () = Writer.close entry.log_writer in
+      let%bind () =
+        match entry.operation with
+        | Driver_generate_rtl { output_dir; _ } -> cleanup_path output_dir
+        | Dune_action _ | Driver_describe -> return ()
+      in
+      return ()
     | None -> Ivar.read entry.finished)
 ;;
 
@@ -1621,7 +1774,7 @@ let read_log
                { V1.Read_log.Payload.records
                ; next_offset
                ; eof = Job.is_terminal entry.job && next_offset = entry.next_log_offset
-             })))
+               })))
 ;;
 
 let mark_artifact_unavailable t entry reason =
@@ -1657,7 +1810,9 @@ let read_artifact
         | Ok stat ->
           let total_size = Int64.to_int_exn stat.st_size in
           if offset < 0 || offset > total_size
-          then return (error Invalid_request "artifact offset is outside the available range")
+          then
+            return
+              (error Invalid_request "artifact offset is outside the available range")
           else (
             let length = Int.min max_bytes (total_size - offset) in
             let%bind contents =
@@ -1665,7 +1820,8 @@ let read_artifact
                 let%bind reader = Reader.open_file entry.path in
                 Monitor.protect
                   ~finally:(fun () -> Reader.close reader)
-                  (fun () -> read_exact reader ~position:offset ~length >>| Result.ok_or_failwith))
+                  (fun () ->
+                    read_exact reader ~position:offset ~length >>| Result.ok_or_failwith))
             in
             match contents with
             | Error exn ->
@@ -1681,6 +1837,37 @@ let read_artifact
                    ; total_size
                    ; eof = next_offset = total_size
                    }))))
+;;
+
+let read_hierarchy t ({ instance_id; artifact } : V1.Read_hierarchy.Request.t) =
+  match check_instance t instance_id with
+  | Error _ as error -> return error
+  | Ok () ->
+    (match Hashtbl.find t.artifacts artifact with
+     | None -> return (error Not_found "hierarchy artifact was not found")
+     | Some entry
+       when not
+              (String.equal
+                 entry.artifact.kind.namespace
+                 Integration.Driver_protocol.hierarchy_namespace
+               && String.equal
+                    entry.artifact.kind.name
+                    Integration.Driver_protocol.hierarchy_name
+               && Artifact.Role.equal entry.artifact.kind.role Report
+               && Option.equal
+                    String.equal
+                    entry.artifact.kind.media
+                    (Some Integration.Driver_protocol.hierarchy_media)) ->
+       return (error Invalid_request "artifact is not an elaboration hierarchy")
+     | Some _ ->
+       (match Hashtbl.find t.hierarchies artifact with
+        | None ->
+          return
+            (error
+               Unsupported_operation
+               "this artifact is not a registered structured hierarchy result")
+        | Some entry ->
+          return (Ok { V1.Read_hierarchy.Payload.hierarchy = entry.hierarchy })))
 ;;
 
 let shutdown t =

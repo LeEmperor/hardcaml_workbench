@@ -136,6 +136,7 @@ let run () =
            ; "cancel-job"
            ; "read-log"
            ; "read-artifact"
+           ; "read-hierarchy"
            ])
         "hello did not advertise the complete V1 capability set";
       let snapshot = Rpc.snapshot rpc { instance_id } in
@@ -270,12 +271,13 @@ let run () =
         "oversized body without Content-Length was accepted";
       let new_routes =
         [ "/api/v1/open-project"
-         ; "/api/v1/submit-job"
-         ; "/api/v1/refresh-integration"
-         ; "/api/v1/generate-rtl"
-         ; "/api/v1/cancel-job"
-         ; "/api/v1/read-log"
-         ; "/api/v1/read-artifact"
+        ; "/api/v1/submit-job"
+        ; "/api/v1/refresh-integration"
+        ; "/api/v1/generate-rtl"
+        ; "/api/v1/cancel-job"
+        ; "/api/v1/read-log"
+        ; "/api/v1/read-artifact"
+        ; "/api/v1/read-hierarchy"
         ]
       in
       let%bind () =
@@ -289,8 +291,8 @@ let run () =
       in
       let other = V1.Daemon_instance_id.of_string "other" in
       let missing_project = Project_id.of_string "missing-project" in
-       let missing_job = Job_id.of_string "missing-job" in
-       let missing_artifact = Artifact_id.of_string "missing-artifact" in
+      let missing_job = Job_id.of_string "missing-job" in
+      let missing_artifact = Artifact_id.of_string "missing-artifact" in
       let%bind wrong_open_body =
         post
           rpc
@@ -325,24 +327,24 @@ let run () =
           (V1.Refresh_integration.Request.sexp_of_t
              { instance_id = other; project = missing_project })
       in
-       require_instance_changed
-         (decode_exn V1.Refresh_integration.Response.t_of_sexp wrong_refresh_body)
-         "refresh-integration accepted another daemon instance";
-       let%bind wrong_generate_body =
-         post
-           rpc
-           "/api/v1/generate-rtl"
-           (V1.Generate_rtl.Request.sexp_of_t
-              { instance_id = other
-              ; project = missing_project
-              ; target = Target_id.of_string "missing-target"
-              ; configuration = Configuration_id.of_string "missing-configuration"
-              ; submission_key = "wrong-generate-instance"
-              })
-       in
-       require_instance_changed
-         (decode_exn V1.Generate_rtl.Response.t_of_sexp wrong_generate_body)
-         "generate-rtl accepted another daemon instance";
+      require_instance_changed
+        (decode_exn V1.Refresh_integration.Response.t_of_sexp wrong_refresh_body)
+        "refresh-integration accepted another daemon instance";
+      let%bind wrong_generate_body =
+        post
+          rpc
+          "/api/v1/generate-rtl"
+          (V1.Generate_rtl.Request.sexp_of_t
+             { instance_id = other
+             ; project = missing_project
+             ; target = Target_id.of_string "missing-target"
+             ; configuration = Configuration_id.of_string "missing-configuration"
+             ; submission_key = "wrong-generate-instance"
+             })
+      in
+      require_instance_changed
+        (decode_exn V1.Generate_rtl.Response.t_of_sexp wrong_generate_body)
+        "generate-rtl accepted another daemon instance";
       let%bind wrong_cancel_body =
         post
           rpc
@@ -364,35 +366,57 @@ let run () =
              ; max_bytes = 1
              })
       in
-       require_instance_changed
-         (decode_exn V1.Read_log.Response.t_of_sexp wrong_read_body)
-         "read-log accepted another daemon instance";
-       let%bind wrong_artifact_body =
-         post
-           rpc
-           "/api/v1/read-artifact"
-           (V1.Read_artifact.Request.sexp_of_t
-              { instance_id = other
-              ; artifact = missing_artifact
-              ; offset = 0
-              ; max_bytes = 1
-              })
-       in
-       require_instance_changed
-         (decode_exn V1.Read_artifact.Response.t_of_sexp wrong_artifact_body)
-         "read-artifact accepted another daemon instance";
-       let%bind missing_artifact_body =
-         post
-           rpc
-           "/api/v1/read-artifact"
-           (V1.Read_artifact.Request.sexp_of_t
-              { instance_id; artifact = missing_artifact; offset = 0; max_bytes = 1 })
-       in
-       require
-         (match decode_exn V1.Read_artifact.Response.t_of_sexp missing_artifact_body with
-          | Error error -> V1.Error.Kind.equal error.kind Not_found
-          | Ok _ -> false)
-         "unknown artifact did not return not-found";
+      require_instance_changed
+        (decode_exn V1.Read_log.Response.t_of_sexp wrong_read_body)
+        "read-log accepted another daemon instance";
+      let%bind wrong_artifact_body =
+        post
+          rpc
+          "/api/v1/read-artifact"
+          (V1.Read_artifact.Request.sexp_of_t
+             { instance_id = other
+             ; artifact = missing_artifact
+             ; offset = 0
+             ; max_bytes = 1
+             })
+      in
+      require_instance_changed
+        (decode_exn V1.Read_artifact.Response.t_of_sexp wrong_artifact_body)
+        "read-artifact accepted another daemon instance";
+      let%bind missing_artifact_body =
+        post
+          rpc
+          "/api/v1/read-artifact"
+          (V1.Read_artifact.Request.sexp_of_t
+             { instance_id; artifact = missing_artifact; offset = 0; max_bytes = 1 })
+      in
+      require
+        (match decode_exn V1.Read_artifact.Response.t_of_sexp missing_artifact_body with
+         | Error error -> V1.Error.Kind.equal error.kind Not_found
+         | Ok _ -> false)
+        "unknown artifact did not return not-found";
+      let%bind wrong_hierarchy_body =
+        post
+          rpc
+          "/api/v1/read-hierarchy"
+          (V1.Read_hierarchy.Request.sexp_of_t
+             { instance_id = other; artifact = missing_artifact })
+      in
+      require_instance_changed
+        (decode_exn V1.Read_hierarchy.Response.t_of_sexp wrong_hierarchy_body)
+        "read-hierarchy accepted another daemon instance";
+      let%bind missing_hierarchy_body =
+        post
+          rpc
+          "/api/v1/read-hierarchy"
+          (V1.Read_hierarchy.Request.sexp_of_t
+             { instance_id; artifact = missing_artifact })
+      in
+      require
+        (match decode_exn V1.Read_hierarchy.Response.t_of_sexp missing_hierarchy_body with
+         | Error error -> V1.Error.Kind.equal error.kind Not_found
+         | Ok _ -> false)
+        "unknown hierarchy did not return not-found";
       let initial_cursor = { (Rpc.cursor rpc) with sequence = 0 } in
       let%bind opened_body =
         post

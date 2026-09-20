@@ -18,14 +18,7 @@ let describe_invocation ~root ~environment ~driver =
     ]
 ;;
 
-let generate_rtl_invocation
-  ~root
-  ~environment
-  ~driver
-  ~target
-  ~configuration
-  ~output_dir
-  =
+let generate_rtl_invocation ~root ~environment ~driver ~target ~configuration ~output_dir =
   Dune_adapter.invocation
     ~root
     environment
