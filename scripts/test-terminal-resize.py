@@ -41,10 +41,12 @@ def main() -> None:
     parser.add_argument("client")
     parser.add_argument("--project-root")
     parser.add_argument("--environment", default="inherited")
+    parser.add_argument("--expect-live-discovery", action="store_true")
     args = parser.parse_args()
 
     master, slave = pty.openpty()
-    set_size(slave, 80, 24)
+    initial_size = (120, 40) if args.expect_live_discovery else (80, 24)
+    set_size(slave, *initial_size)
     runtime = tempfile.TemporaryDirectory(prefix="hardcaml-workbench-resize-")
     diagnostics = os.path.join(runtime.name, "resize.log")
     command = [args.client, "--diagnostics-file", diagnostics]
@@ -66,6 +68,23 @@ def main() -> None:
         initial = read_available(master, 2.0)
         if not initial:
             raise RuntimeError("client produced no initial terminal frame")
+        if b"PROJECT / GENERIC DUNE" not in initial:
+            raise RuntimeError("initial frame did not contain the bounded project pane")
+        if b"Daemon instance:" in initial:
+            raise RuntimeError("verbose daemon identity leaked into the default project view")
+        if args.expect_live_discovery:
+            discovery = initial
+            deadline = time.monotonic() + 60
+            expected = (b"Integration: Driver", b"Four-bit counter")
+            while time.monotonic() < deadline and not all(value in discovery for value in expected):
+                if process.poll() is not None:
+                    raise RuntimeError("client exited while waiting for live discovery")
+                discovery += read_available(master)
+            missing = [value for value in expected if value not in discovery]
+            if missing:
+                raise RuntimeError(
+                    f"attached client did not render live discovery without input: {missing!r}"
+                )
         stages = [(120, 40), (40, 10), (1, 1), (80, 24), (100, 24), (80, 24)]
         evidence = []
         for columns, rows in stages:
@@ -77,6 +96,21 @@ def main() -> None:
             if not output:
                 raise RuntimeError(f"client did not repaint after resize to {columns}x{rows}")
             evidence.append(f"{columns}x{rows}:{len(output)}")
+        os.write(master, b"d")
+        details = read_available(master)
+        if b"CONNECTION DETAILS" not in details or b"Daemon instance:" not in details:
+            raise RuntimeError("connection details view did not expose daemon diagnostics")
+        scrolled_details = details
+        for _ in range(30):
+            os.write(master, b"]")
+            scrolled_details += read_available(master, 0.1)
+        for label in (b"Requested environment:", b"Resolved environment:", b"Dune version:"):
+            if label not in scrolled_details:
+                raise RuntimeError(f"scrolled connection details did not expose {label!r}")
+        os.write(master, b"d")
+        project = read_available(master)
+        if b"PROJECT / GENERIC DUNE" not in project:
+            raise RuntimeError("project pane did not recover after closing connection details")
         os.write(master, b"q")
         process.wait(timeout=5)
         if process.returncode != 0:
@@ -88,6 +122,8 @@ def main() -> None:
             if marker not in diagnostics_text:
                 raise RuntimeError(f"missing diagnostic marker: {marker}")
         print("Terminal resize checks: passed")
+        if args.expect_live_discovery:
+            print("Attached-client live discovery: passed")
         print("Repaint bytes: " + ", ".join(evidence))
     finally:
         if process.poll() is None:

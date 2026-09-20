@@ -37,8 +37,11 @@ let create ~application_version ~instance_id ~service =
             ; "updates"
             ; "open-project"
             ; "submit-job"
+            ; "refresh-integration"
+            ; "generate-rtl"
             ; "cancel-job"
             ; "read-log"
+            ; "read-artifact"
             ]
         }
     ; service
@@ -220,7 +223,7 @@ let handle_post t ~path ~headers ~body =
            boundary_error `Bad_request error.kind "malformed open-project request"
          | Ok request ->
            operation_response
-             (Service.open_project t.service request)
+             (Service.open_project_with_discovery t.service request)
              V1.Open_project.Response.sexp_of_t)
       | Ok body when String.equal path "/api/v1/submit-job" ->
         (match decode body V1.Submit_job.Request.t_of_sexp with
@@ -230,6 +233,22 @@ let handle_post t ~path ~headers ~body =
            operation_response
              (Service.submit_job t.service request)
              V1.Submit_job.Response.sexp_of_t)
+      | Ok body when String.equal path "/api/v1/refresh-integration" ->
+        (match decode body V1.Refresh_integration.Request.t_of_sexp with
+         | Error error ->
+           boundary_error `Bad_request error.kind "malformed refresh-integration request"
+         | Ok request ->
+           operation_response
+              (Service.refresh_integration t.service request)
+              V1.Refresh_integration.Response.sexp_of_t)
+      | Ok body when String.equal path "/api/v1/generate-rtl" ->
+        (match decode body V1.Generate_rtl.Request.t_of_sexp with
+         | Error error ->
+           boundary_error `Bad_request error.kind "malformed generate-rtl request"
+         | Ok request ->
+           operation_response
+             (Service.generate_rtl t.service request)
+             V1.Generate_rtl.Response.sexp_of_t)
       | Ok body when String.equal path "/api/v1/cancel-job" ->
         (match decode body V1.Cancel_job.Request.t_of_sexp with
          | Error error ->
@@ -244,8 +263,16 @@ let handle_post t ~path ~headers ~body =
            boundary_error `Bad_request error.kind "malformed read-log request"
          | Ok request ->
            operation_response
-             (Service.read_log t.service request)
-             V1.Read_log.Response.sexp_of_t)
+              (Service.read_log t.service request)
+              V1.Read_log.Response.sexp_of_t)
+      | Ok body when String.equal path "/api/v1/read-artifact" ->
+        (match decode body V1.Read_artifact.Request.t_of_sexp with
+         | Error error ->
+           boundary_error `Bad_request error.kind "malformed read-artifact request"
+         | Ok request ->
+           operation_response
+             (Service.read_artifact t.service request)
+             V1.Read_artifact.Response.sexp_of_t)
       | Ok _ -> boundary_error `Not_found Not_found "unknown operation")
   | _ ->
     boundary_error
@@ -272,9 +299,12 @@ let callback t ~body _peer request =
        , ( "/api/v1/snapshot"
          | "/api/v1/updates"
          | "/api/v1/open-project"
-         | "/api/v1/submit-job"
-         | "/api/v1/cancel-job"
-         | "/api/v1/read-log" ) ) -> handle_post t ~path ~headers ~body
+          | "/api/v1/submit-job"
+          | "/api/v1/refresh-integration"
+          | "/api/v1/generate-rtl"
+          | "/api/v1/cancel-job"
+          | "/api/v1/read-log"
+          | "/api/v1/read-artifact" ) ) -> handle_post t ~path ~headers ~body
      | _ -> boundary_error `Not_found Not_found "unknown endpoint or protocol version")
 ;;
 

@@ -139,8 +139,14 @@ let parse_workspace output =
     parse fields [] []
 ;;
 
-let action_invocation ~root ~environment = function
+let action_invocation
+  ?(build_alias = "@all")
+  ?(test_alias = "@runtest")
+  ~root
+  ~environment
+  = function
   | V1.Dune_action.Build ->
-    invocation ~root environment [ "build"; "--root"; root; "--no-buffer"; "@all" ]
-  | Test -> invocation ~root environment [ "runtest"; "--root"; root; "--no-buffer" ]
+    invocation ~root environment [ "build"; "--root"; root; "--no-buffer"; build_alias ]
+  | Test ->
+    invocation ~root environment [ "build"; "--root"; root; "--no-buffer"; test_alias ]
 ;;

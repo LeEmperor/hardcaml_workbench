@@ -85,6 +85,24 @@ let submit_job t request =
     request
 ;;
 
+let refresh_integration t request =
+  post
+    t
+    ~path:"/api/v1/refresh-integration"
+    ~sexp_of_request:V1.Refresh_integration.Request.sexp_of_t
+    ~response_of_sexp:V1.Refresh_integration.Response.t_of_sexp
+    request
+;;
+
+let generate_rtl t request =
+  post
+    t
+    ~path:"/api/v1/generate-rtl"
+    ~sexp_of_request:V1.Generate_rtl.Request.sexp_of_t
+    ~response_of_sexp:V1.Generate_rtl.Response.t_of_sexp
+    request
+;;
+
 let cancel_job t request =
   post
     t
@@ -100,5 +118,14 @@ let read_log t request =
     ~path:"/api/v1/read-log"
     ~sexp_of_request:V1.Read_log.Request.sexp_of_t
     ~response_of_sexp:V1.Read_log.Response.t_of_sexp
+    request
+;;
+
+let read_artifact t request =
+  post
+    t
+    ~path:"/api/v1/read-artifact"
+    ~sexp_of_request:V1.Read_artifact.Request.sexp_of_t
+    ~response_of_sexp:V1.Read_artifact.Response.t_of_sexp
     request
 ;;

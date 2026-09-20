@@ -13,6 +13,7 @@ let max_update_events = 256
 let max_poll_timeout_ms = 25_000
 let max_log_records = 256
 let max_log_bytes = 256 * 1024
+let max_artifact_bytes = 256 * 1024
 
 module Error = struct
   module Kind = struct
@@ -150,6 +151,45 @@ module Submit_job = struct
   end
 end
 
+module Refresh_integration = struct
+  module Request = struct
+    type t =
+      { instance_id : Daemon_instance_id.t
+      ; project : Project_id.t
+      }
+    [@@deriving bin_io, compare, equal, sexp]
+  end
+
+  module Payload = struct
+    type t = { job : Job.t } [@@deriving bin_io, compare, equal, sexp]
+  end
+
+  module Response = struct
+    type t = (Payload.t, Error.t) Result.t [@@deriving bin_io, compare, equal, sexp]
+  end
+end
+
+module Generate_rtl = struct
+  module Request = struct
+    type t =
+      { instance_id : Daemon_instance_id.t
+      ; project : Project_id.t
+      ; target : Target_id.t
+      ; configuration : Configuration_id.t
+      ; submission_key : string
+      }
+    [@@deriving bin_io, compare, equal, sexp]
+  end
+
+  module Payload = struct
+    type t = { job : Job.t } [@@deriving bin_io, compare, equal, sexp]
+  end
+
+  module Response = struct
+    type t = (Payload.t, Error.t) Result.t [@@deriving bin_io, compare, equal, sexp]
+  end
+end
+
 module Cancel_job = struct
   module Request = struct
     type t =
@@ -200,6 +240,32 @@ module Read_log = struct
     type t =
       { records : Record.t list
       ; next_offset : int
+      ; eof : bool
+      }
+    [@@deriving bin_io, compare, equal, sexp]
+  end
+
+  module Response = struct
+    type t = (Payload.t, Error.t) Result.t [@@deriving bin_io, compare, equal, sexp]
+  end
+end
+
+module Read_artifact = struct
+  module Request = struct
+    type t =
+      { instance_id : Daemon_instance_id.t
+      ; artifact : Artifact_id.t
+      ; offset : int
+      ; max_bytes : int
+      }
+    [@@deriving bin_io, compare, equal, sexp]
+  end
+
+  module Payload = struct
+    type t =
+      { data : string
+      ; next_offset : int
+      ; total_size : int
       ; eof : bool
       }
     [@@deriving bin_io, compare, equal, sexp]

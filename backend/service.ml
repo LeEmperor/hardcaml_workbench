@@ -2,6 +2,10 @@ open! Core
 open! Async
 open Hardcaml_workbench_protocol
 module Adapter = Hardcaml_workbench_adapters.Dune_adapter
+module Driver_adapter = Hardcaml_workbench_adapters.Project_driver_adapter
+module Integration = Hardcaml_workbench_project_integration
+open Project_integration.Component_status
+open Project_integration.Level
 
 type event_sink = V1.Event.sequenced -> unit
 
@@ -11,19 +15,39 @@ type log_record =
   ; length : int
   }
 
+type git_state =
+  { commit : string option
+  ; dirty : bool option
+  ; reason : string option
+  }
+
+type source_capture =
+  { hash : string option
+  ; git : git_state
+  }
+
+type artifact_entry =
+  { mutable artifact : Artifact.t
+  ; path : string
+  }
+
 type project_session =
   { key : string
   ; root : string
+  ; dune_name : string
   ; environment : V1.Environment_selection.t
   ; mutable project : Project.t
   ; mutable summary : V1.Environment_summary.t
   ; mutable workspace : V1.Dune_workspace.Inspection.t
-  ; queue : job_entry Queue.t
-  ; mutable worker_running : bool
+  ; mutable manifest : Integration.Manifest.t option
+  ; mutable build_alias : string
+  ; mutable test_alias : string
+  ; mutable driver : string option
+  ; mutable driver_description : Integration.Driver_protocol.Describe_response.t option
   }
 
 and job_entry =
-  { action : V1.Dune_action.t
+  { operation : job_operation
   ; session : project_session
   ; mutable job : Job.t
   ; log_path : string
@@ -32,36 +56,79 @@ and job_entry =
   ; mutable log_position : int
   ; mutable next_log_offset : int
   ; mutable log_tail : unit Deferred.t
+  ; mutable stdout_parts : string list
+  ; mutable stdout_bytes : int
+  ; mutable stdout_overflow : bool
   ; mutable process : Process.t option
   ; mutable cancel_requested : bool
   ; mutable escalation_started : bool
   ; escalation_finished : unit Ivar.t
   ; finished : unit Ivar.t
+  ; mutable source_start : source_capture option
   }
+
+and job_operation =
+  | Dune_action of V1.Dune_action.t
+  | Driver_describe
+  | Driver_generate_rtl of
+      { target : Target_id.t
+      ; configuration : Configuration_id.t
+      ; target_key : string
+      ; configuration_key : string
+      ; output_dir : string
+      }
+
+type submission_operation =
+  | Submit_dune of V1.Dune_action.t
+  | Submit_generate_rtl of
+      { target : Target_id.t
+      ; configuration : Configuration_id.t
+      }
+[@@deriving equal]
 
 type submission =
   { project : Project_id.t
-  ; action : V1.Dune_action.t
+  ; operation : submission_operation
   ; ready : (job_entry, V1.Error.t) Result.t Ivar.t
   }
 
 type t =
   { instance_id : V1.Daemon_instance_id.t
   ; log_dir : string
+  ; artifact_dir : string
+  ; output_dir : string
   ; projects_by_key : (string, project_session) Hashtbl.t
   ; projects : (Project_id.t, project_session) Hashtbl.t
+  ; root_queues : (string, job_entry Queue.t) Hashtbl.t
+  ; running_roots : String.Hash_set.t
   ; jobs : (Job_id.t, job_entry) Hashtbl.t
+  ; artifacts : (Artifact_id.t, artifact_entry) Hashtbl.t
   ; submissions : (string, submission) Hashtbl.t
   ; mutable event_sink : event_sink
   ; mutable sequence : int
   ; mutable next_project_id : int
   ; mutable next_job_id : int
+  ; mutable next_artifact_id : int
   ; mutable shutting_down : bool
   ; kill_after : Time_float.Span.t
   ; action_invocation :
+      (root:string
+       -> environment:V1.Environment_selection.t
+       -> V1.Dune_action.t
+       -> Adapter.Invocation.t)
+        option
+  ; driver_invocation :
       root:string
       -> environment:V1.Environment_selection.t
-      -> V1.Dune_action.t
+      -> driver:string
+      -> Adapter.Invocation.t
+  ; generate_rtl_invocation :
+      root:string
+      -> environment:V1.Environment_selection.t
+      -> driver:string
+      -> target:string
+      -> configuration:string
+      -> output_dir:string
       -> Adapter.Invocation.t
   }
 
@@ -75,11 +142,15 @@ let check_instance t instance_id =
 
 let create
   ?(kill_after = Time_float.Span.of_sec 2.)
-  ?(action_invocation = Adapter.action_invocation)
+  ?action_invocation
+  ?(driver_invocation = Driver_adapter.describe_invocation)
+  ?(generate_rtl_invocation = Driver_adapter.generate_rtl_invocation)
   ~instance_id
   ~log_dir
   ()
   =
+  let artifact_dir = log_dir ^ "-artifacts" in
+  let output_dir = Filename.concat artifact_dir "job-output" in
   let%map result =
     Monitor.try_with_or_error (fun () ->
       In_thread.run (fun () ->
@@ -87,22 +158,32 @@ let create
         | `Yes ->
           if not (Sys_unix.is_directory_exn log_dir)
           then failwithf "log path is not a directory: %s" log_dir ()
-        | `No | `Unknown -> Core_unix.mkdir log_dir ~perm:0o700))
+        | `No | `Unknown -> Core_unix.mkdir log_dir ~perm:0o700;
+        Core_unix.mkdir artifact_dir ~perm:0o700;
+        Core_unix.mkdir output_dir ~perm:0o700))
   in
   Result.map result ~f:(fun () ->
     { instance_id
     ; log_dir
+    ; artifact_dir
+    ; output_dir
     ; projects_by_key = Hashtbl.create (module String)
     ; projects = Project_id.Table.create ()
+    ; root_queues = Hashtbl.create (module String)
+    ; running_roots = Hash_set.create (module String)
     ; jobs = Job_id.Table.create ()
+    ; artifacts = Artifact_id.Table.create ()
     ; submissions = Hashtbl.create (module String)
     ; event_sink = ignore
     ; sequence = 0
     ; next_project_id = 0
     ; next_job_id = 0
+    ; next_artifact_id = 0
     ; shutting_down = false
     ; kill_after
     ; action_invocation
+    ; driver_invocation
+    ; generate_rtl_invocation
     })
 ;;
 
@@ -128,10 +209,15 @@ let snapshot t ({ instance_id } : V1.Snapshot.Request.t) =
       |> List.map ~f:(fun entry -> entry.job)
       |> List.sort ~compare:(fun (a : Job.t) b -> Job_id.compare a.id b.id)
     in
+    let artifacts =
+      Hashtbl.data t.artifacts
+      |> List.map ~f:(fun entry -> entry.artifact)
+      |> List.sort ~compare:(fun (a : Artifact.t) b -> Artifact_id.compare a.id b.id)
+    in
     Ok
       { V1.Snapshot.Payload.projects
       ; jobs
-      ; artifacts = []
+      ; artifacts
       ; cursor = { instance_id = t.instance_id; sequence = t.sequence }
       }
 ;;
@@ -154,6 +240,123 @@ let command_output invocation =
             "%s\n%s"
             (Unix.Exit_or_signal.to_string_hum output.exit_status)
             (String.prefix output.stderr 4096)))
+;;
+
+let hash_project_tree root =
+  Or_error.try_with (fun () ->
+    let hash = Cryptokit.Hash.sha256 () in
+    let add value = hash#add_string (sprintf "%d:%s" (String.length value) value) in
+    let rec visit relative =
+      let path = if String.is_empty relative then root else Filename.concat root relative in
+      let names = Sys_unix.ls_dir path |> List.sort ~compare:String.compare in
+      List.iter names ~f:(fun name ->
+        if not (String.equal name ".git" || String.equal name "_build")
+        then (
+          let child_relative =
+            if String.is_empty relative then name else Filename.concat relative name
+          in
+          let child = Filename.concat root child_relative in
+          let stat = Core_unix.lstat child in
+          match stat.st_kind with
+          | S_DIR ->
+            add "directory";
+            add child_relative;
+            visit child_relative
+          | S_REG ->
+            add "file";
+            add child_relative;
+            add (if stat.st_perm land 0o111 = 0 then "regular" else "executable");
+            let channel = Stdlib.open_in_bin child in
+            Exn.protect
+              ~f:(fun () ->
+                let buffer = Bytes.create (64 * 1024) in
+                let rec copy () =
+                  let count = Stdlib.input channel buffer 0 (Bytes.length buffer) in
+                  if count > 0
+                  then (
+                    hash#add_substring buffer 0 count;
+                    copy ())
+                in
+                copy ())
+              ~finally:(fun () -> Stdlib.close_in_noerr channel)
+          | S_LNK ->
+            add "symlink";
+            add child_relative;
+            add (Core_unix.readlink child)
+          | S_CHR | S_BLK | S_FIFO | S_SOCK ->
+            add "special";
+            add child_relative))
+    in
+    visit "";
+    "sha256:"
+    ^ Cryptokit.transform_string (Cryptokit.Hexa.encode ()) hash#result)
+;;
+
+let git_output root arguments =
+  command_output
+    { Adapter.Invocation.executable = "git"
+    ; argv = "git" :: arguments
+    ; cwd = root
+    ; environment = Inherit_daemon
+    }
+;;
+
+let capture_git root =
+  let%bind inside = git_output root [ "rev-parse"; "--is-inside-work-tree" ] in
+  match inside with
+  | Error reason ->
+    return { commit = None; dirty = None; reason = Some (String.strip reason) }
+  | Ok output when not (String.equal (String.strip output) "true") ->
+    return
+      { commit = None; dirty = None; reason = Some "project root is not a Git work tree" }
+  | Ok _ ->
+    let%bind commit = git_output root [ "rev-parse"; "--verify"; "HEAD" ]
+    and status =
+      git_output root [ "status"; "--porcelain=v1"; "--untracked-files=normal" ]
+    in
+    let commit = Result.ok commit |> Option.map ~f:String.strip in
+    (match status with
+     | Ok status ->
+       return { commit; dirty = Some (not (String.is_empty status)); reason = None }
+     | Error reason ->
+       return { commit; dirty = None; reason = Some (String.strip reason) })
+;;
+
+let capture_source root =
+  let%bind hash = In_thread.run (fun () -> hash_project_tree root)
+  and git = capture_git root in
+  return { hash = Result.ok hash; git }
+;;
+
+let source_identity start finish =
+  let same_hash = Option.equal String.equal start.hash finish.hash in
+  let design_hash = if same_hash then start.hash else None in
+  let same_commit = Option.equal String.equal start.git.commit finish.git.commit in
+  let git_commit = if same_commit then start.git.commit else None in
+  let working_tree =
+    if not same_hash
+    then
+      Provenance.Working_tree.Unknown
+        { reason = "project files changed between generation start and completion" }
+    else if not same_commit
+    then
+      Unknown { reason = "Git commit changed while generation was running" }
+    else (
+      match start.git.dirty, finish.git.dirty with
+      | Some false, Some false -> Clean
+      | Some _, Some _ -> Dirty
+      | _ ->
+        let reason =
+          Option.first_some finish.git.reason start.git.reason
+          |> Option.value ~default:"Git working-tree state was unavailable"
+        in
+        Unknown { reason })
+  in
+  { Provenance.Source_identity.git_commit
+  ; working_tree
+  ; design_hash
+  ; preserved_inputs = []
+  }
 ;;
 
 let canonical_project_root root =
@@ -183,6 +386,31 @@ let project_name root =
   >>| function
   | Ok (Some name) -> name
   | Ok None | Error _ -> Filename.basename root
+;;
+
+type manifest_load =
+  | Manifest_absent
+  | Manifest_valid of Integration.Manifest.t
+  | Manifest_invalid of string
+
+let load_manifest root =
+  Monitor.try_with (fun () ->
+    In_thread.run (fun () ->
+      let path = Filename.concat root Integration.Manifest.filename in
+      match Sys_unix.file_exists path with
+      | `No | `Unknown -> Manifest_absent
+      | `Yes ->
+        (match (Core_unix.stat path).st_kind with
+         | S_REG ->
+           (match Integration.Manifest.parse_string (In_channel.read_all path) with
+            | Ok manifest -> Manifest_valid manifest
+            | Error message ->
+              Manifest_invalid (sprintf "%s: %s" Integration.Manifest.filename message))
+         | _ -> Manifest_invalid (Integration.Manifest.filename ^ ": not a regular file"))))
+  >>| function
+  | Ok result -> result
+  | Error exn ->
+    Manifest_invalid (sprintf "%s: %s" Integration.Manifest.filename (Exn.to_string exn))
 ;;
 
 let environment_key environment =
@@ -227,13 +455,49 @@ let open_project t ({ instance_id; root; environment } : V1.Open_project.Request
              (match inspection |> Result.bind ~f:Adapter.parse_workspace with
               | Error message -> return (error Internal_failure message)
               | Ok workspace ->
-                let%map name = project_name root in
+                let%bind dune_name = project_name root in
+                let%map manifest_load = load_manifest root in
+                let name, manifest, build_alias, test_alias, driver, integration =
+                  match manifest_load with
+                  | Manifest_absent ->
+                    ( dune_name
+                    , None
+                    , Integration.Manifest.default_build_alias
+                    , Integration.Manifest.default_test_alias
+                    , None
+                    , Project_integration.generic_dune )
+                  | Manifest_invalid reason ->
+                    ( dune_name
+                    , None
+                    , Integration.Manifest.default_build_alias
+                    , Integration.Manifest.default_test_alias
+                    , None
+                    , { Project_integration.level = Generic_dune
+                      ; manifest = Unusable { reason }
+                      ; driver = Absent
+                      } )
+                  | Manifest_valid manifest ->
+                    let driver_status =
+                      Option.value_map manifest.driver ~default:Absent ~f:(fun _ ->
+                        Unusable { reason = "driver discovery has not started" })
+                    in
+                    ( manifest.project_name
+                    , Some manifest
+                    , manifest.build_alias
+                    , manifest.test_alias
+                    , manifest.driver
+                    , { Project_integration.level = Manifest
+                      ; manifest =
+                          Available { version = Some Integration.Manifest.version }
+                      ; driver = driver_status
+                      } )
+                in
                 let summary = Adapter.environment_summary environment ~dune_version in
                 let project : Project.t =
                   { id = mint_project_id t
                   ; root = Project_root.of_absolute_path root
                   ; name
-                  ; integration = Project_integration.generic_dune
+                  ; integration
                   ; targets = []
                   ; configurations = []
                   }
@@ -241,12 +505,16 @@ let open_project t ({ instance_id; root; environment } : V1.Open_project.Request
                 let session =
                   { key
                   ; root
+                  ; dune_name
                   ; environment
                   ; project
                   ; summary
                   ; workspace
-                  ; queue = Queue.create ()
-                  ; worker_running = false
+                  ; manifest
+                  ; build_alias
+                  ; test_alias
+                  ; driver
+                  ; driver_description = None
                   }
                 in
                 Hashtbl.set t.projects_by_key ~key ~data:session;
@@ -264,7 +532,18 @@ let update_job t entry job =
   emit t (Job_upsert job)
 ;;
 
-let append_log t entry stream data =
+let append_log t (entry : job_entry) stream data =
+  (match entry.operation, stream with
+   | (Driver_describe | Driver_generate_rtl _), V1.Read_log.Stream.Stdout ->
+     let remaining = Integration.Driver_protocol.max_stdout_bytes - entry.stdout_bytes in
+     if remaining <= 0
+     then entry.stdout_overflow <- true
+     else (
+       let kept = String.prefix data remaining in
+       entry.stdout_parts <- kept :: entry.stdout_parts;
+       entry.stdout_bytes <- entry.stdout_bytes + String.length kept;
+       if String.length kept < String.length data then entry.stdout_overflow <- true)
+   | Dune_action _, _ | (Driver_describe | Driver_generate_rtl _), Stderr -> ());
   let pieces = String.to_list data |> List.chunks_of ~length:(16 * 1024) in
   List.iter pieces ~f:(fun chars ->
     let data = String.of_char_list chars in
@@ -327,10 +606,334 @@ let finish_entry t entry state status failure =
   Ivar.fill_if_empty entry.finished ()
 ;;
 
-let rec run_next t session =
-  match Queue.dequeue session.queue with
-  | None -> session.worker_running <- false
-  | Some entry when Job.is_terminal entry.job -> run_next t session
+let publish_driver_state t entry status targets configurations =
+  let session = entry.session in
+  let manifest = session.project.integration.manifest in
+  session.project
+  <- { session.project with
+       integration =
+         { Project_integration.level =
+             Project_integration.level_of_components ~manifest ~driver:status
+         ; manifest
+         ; driver = status
+         }
+     ; targets
+     ; configurations
+     };
+  emit t (Project_upsert session.project)
+;;
+
+let complete_driver_discovery t entry process_status =
+  match process_status with
+  | Job.Exit_status.Exited 0 when not entry.stdout_overflow ->
+    let output = String.concat (List.rev entry.stdout_parts) in
+    (match Integration.Driver_protocol.parse output with
+     | Error reason ->
+       entry.session.driver_description <- None;
+       publish_driver_state t entry (Unusable { reason }) [] [];
+       Error reason
+     | Ok response ->
+       let targets, configurations =
+         Driver_adapter.map_describe ~project:entry.session.project.id response
+       in
+       entry.session.driver_description <- Some response;
+       publish_driver_state
+         t
+         entry
+         (Available { version = Some response.protocol_version })
+         targets
+         configurations;
+       Ok ())
+  | Exited 0 ->
+    let reason =
+      sprintf
+        "driver stdout exceeded %d bytes"
+        Integration.Driver_protocol.max_stdout_bytes
+    in
+    entry.session.driver_description <- None;
+    publish_driver_state t entry (Unusable { reason }) [] [];
+    Error reason
+  | Exited code ->
+    let reason =
+      sprintf
+        "driver exited with code %d; inspect job %s diagnostics"
+        code
+        (Job_id.to_string entry.job.id)
+    in
+    entry.session.driver_description <- None;
+    publish_driver_state t entry (Unusable { reason }) [] [];
+    Error reason
+  | Signaled { signal } ->
+    let reason =
+      sprintf
+        "driver terminated by signal %s; inspect job %s diagnostics"
+        signal
+        (Job_id.to_string entry.job.id)
+    in
+    entry.session.driver_description <- None;
+    publish_driver_state t entry (Unusable { reason }) [] [];
+    Error reason
+  | Launch_failed { reason } ->
+    entry.session.driver_description <- None;
+    publish_driver_state
+      t
+      entry
+      (Unusable { reason = "driver launch failed: " ^ reason })
+      []
+      [];
+    Error reason
+;;
+
+type generation_selection_error =
+  | Generation_unsupported of string
+  | Generation_invalid of string
+
+let generation_selection session target configuration =
+  let open Integration.Driver_protocol in
+  match session.driver_description with
+  | None -> Generation_unsupported "project driver discovery is not currently available" |> Error
+  | Some description
+    when not
+           (List.mem
+              description.capabilities
+              generate_rtl_capability
+              ~equal:String.equal) ->
+    Generation_unsupported "project driver does not advertise generate-rtl" |> Error
+  | Some description ->
+    let target_description =
+      List.find description.targets ~f:(fun candidate ->
+        Target_id.equal
+          (Driver_adapter.target_id session.project.id candidate.key)
+          target)
+    in
+    let configuration_description =
+      List.find description.configurations ~f:(fun candidate ->
+        Configuration_id.equal
+          (Driver_adapter.configuration_id session.project.id candidate.key)
+          configuration)
+    in
+    (match target_description, configuration_description with
+     | None, _ ->
+       Generation_invalid "target is stale or does not belong to this project session"
+       |> Error
+     | _, None ->
+       Generation_invalid
+         "configuration is stale or does not belong to this project session"
+       |> Error
+     | Some target_description, Some configuration_description ->
+       if String.equal configuration_description.target target_description.key
+       then Ok (target_description.key, configuration_description.key)
+       else Generation_invalid "configuration does not belong to the selected target" |> Error)
+;;
+
+let remove_tree_sync path =
+  let rec remove path =
+    match Sys_unix.file_exists ~follow_symlinks:false path with
+    | `No | `Unknown -> ()
+    | `Yes ->
+      if Sys_unix.is_directory_exn ~follow_symlinks:false path
+      then (
+        Sys_unix.ls_dir path
+        |> List.iter ~f:(fun name -> remove (Filename.concat path name));
+        Core_unix.rmdir path)
+      else Core_unix.unlink path
+  in
+  remove path
+;;
+
+let cleanup_path path = In_thread.run (fun () -> remove_tree_sync path)
+
+let mint_artifact_id t =
+  t.next_artifact_id <- t.next_artifact_id + 1;
+  Artifact_id.of_string
+    (sprintf
+       "%s-artifact-%d"
+       (V1.Daemon_instance_id.to_string t.instance_id)
+       t.next_artifact_id)
+;;
+
+let copy_output_file ~output_dir ~source ~destination =
+  Or_error.try_with (fun () ->
+    let source_stat = Core_unix.lstat source in
+    if not (Poly.equal source_stat.st_kind S_REG)
+    then failwith "declared output is not a regular file";
+    let resolved = Filename_unix.realpath source in
+    let output_root = Filename_unix.realpath output_dir in
+    if not (String.is_prefix resolved ~prefix:(output_root ^ Filename.dir_sep))
+    then failwith "declared output resolves outside its job output directory";
+    let input = Stdlib.open_in_bin source in
+    let output = Stdlib.open_out_bin destination in
+    Exn.protect
+      ~f:(fun () ->
+        let buffer = Bytes.create (64 * 1024) in
+        let rec copy () =
+          let count = Stdlib.input input buffer 0 (Bytes.length buffer) in
+          if count > 0
+          then (
+            Stdlib.output output buffer 0 count;
+            copy ())
+        in
+        copy ();
+        Stdlib.flush output)
+      ~finally:(fun () ->
+        Stdlib.close_in_noerr input;
+        Stdlib.close_out_noerr output);
+    Core_unix.chmod destination ~perm:0o600;
+    let stat = Core_unix.lstat destination in
+    Int64.to_int_exn stat.st_size)
+;;
+
+let generation_failure entry status =
+  match status with
+  | Job.Exit_status.Exited 0 when entry.stdout_overflow ->
+    Some
+      (sprintf
+         "driver stdout exceeded %d bytes"
+         Integration.Driver_protocol.max_stdout_bytes)
+  | Exited 0 -> None
+  | Exited code ->
+    Some
+      (sprintf
+         "driver exited with code %d; inspect job %s diagnostics"
+         code
+         (Job_id.to_string entry.job.id))
+  | Signaled { signal } ->
+    Some
+      (sprintf
+         "driver terminated by signal %s; inspect job %s diagnostics"
+         signal
+         (Job_id.to_string entry.job.id))
+  | Launch_failed { reason } -> Some ("driver launch failed: " ^ reason)
+;;
+
+let complete_generate_rtl t entry target_key configuration_key output_dir status =
+  match generation_failure entry status with
+  | Some reason -> return (Error reason)
+  | None ->
+    let output = String.concat (List.rev entry.stdout_parts) in
+    (match
+       Integration.Driver_protocol.parse_generate
+         ~target:target_key
+         ~configuration:configuration_key
+         output
+     with
+     | Error reason -> return (Error reason)
+     | Ok response ->
+       let%bind source_finish = capture_source entry.session.root in
+       let source =
+         match entry.source_start with
+         | Some source_start -> source_identity source_start source_finish
+         | None -> Provenance.Source_identity.unknown ~reason:"source start was not captured"
+       in
+       let build = Option.map response.build ~f:Driver_adapter.map_build_ref in
+       let run = Option.map response.run ~f:Driver_adapter.map_run_ref in
+       let created_at = Timestamp.of_time_ns (Time_ns.now ()) in
+       let requested_tools =
+         [ { Tool_version.tool = "project-driver-protocol"
+           ; version = Some (Int.to_string Integration.Driver_protocol.version)
+           }
+         ]
+       in
+       let actual_tools =
+         { Tool_version.tool = "dune"; version = Some entry.session.summary.dune_version }
+         :: { tool = "project-driver-protocol"
+            ; version = Some (Int.to_string response.protocol_version)
+            }
+         :: List.map response.tools ~f:(fun tool ->
+           { Tool_version.tool = tool.name; version = tool.version })
+       in
+       let environment =
+         [ { Environment_identity.component = "project-environment"
+           ; identity = Some entry.session.summary.provenance
+           }
+         ]
+       in
+       let copied = ref [] in
+       let%bind imported =
+         Deferred.List.map response.outputs ~how:`Sequential ~f:(fun output ->
+           let id = mint_artifact_id t in
+           let destination =
+             Filename.concat
+               t.artifact_dir
+               (sprintf "artifact-%d.content" t.next_artifact_id)
+           in
+           let source_path = Filename.concat output_dir output.path in
+           let%map copied_file =
+             In_thread.run (fun () ->
+               copy_output_file ~output_dir ~source:source_path ~destination)
+           in
+           match copied_file with
+           | Error error -> Error (Error.to_string_hum error)
+           | Ok size_in_bytes ->
+             copied := destination :: !copied;
+             let provenance : Provenance.t =
+               { project_root = entry.session.project.root
+               ; target = entry.job.target
+               ; configuration = entry.job.configuration
+               ; build
+               ; run
+               ; generating_job = entry.job.id
+               ; requested_tools
+               ; actual_tools
+               ; environment
+               ; source
+               ; created_at
+               }
+             in
+             let artifact : Artifact.t =
+               { id
+               ; kind =
+                   { namespace = output.namespace
+                   ; name = output.name
+                   ; role = output.role
+                   ; media = output.media
+                   }
+               ; project = entry.job.project
+               ; target = entry.job.target
+               ; configuration = entry.job.configuration
+               ; generating_job = entry.job.id
+               ; build
+               ; run
+               ; availability = Available
+               ; metadata =
+                   { display_name = output.display_name
+                   ; description = output.description
+                   ; size_in_bytes = Some size_in_bytes
+                   ; provenance
+                   }
+               }
+             in
+             Ok { artifact; path = destination })
+       in
+       (match Result.all imported with
+        | Error reason ->
+          let%map () =
+            Deferred.List.iter !copied ~how:`Sequential ~f:(fun path -> cleanup_path path)
+          in
+          Error ("artifact import failed: " ^ reason)
+        | Ok artifacts when entry.cancel_requested || t.shutting_down ->
+          let%map () =
+            Deferred.List.iter artifacts ~how:`Sequential ~f:(fun artifact ->
+              cleanup_path artifact.path)
+          in
+          Error "RTL generation was cancelled during artifact import"
+        | Ok artifacts ->
+          List.iter artifacts ~f:(fun artifact ->
+            Hashtbl.set t.artifacts ~key:artifact.artifact.id ~data:artifact;
+            emit t (Artifact_upsert artifact.artifact));
+          let artifact_ids = List.map artifacts ~f:(fun entry -> entry.artifact.id) in
+          update_job
+            t
+            entry
+            { entry.job with artifacts = artifact_ids; build; run; phase = Some "registered" };
+          return (Ok ())))
+;;
+
+let rec run_next t root =
+  let queue = Hashtbl.find_or_add t.root_queues root ~default:Queue.create in
+  match Queue.dequeue queue with
+  | None -> Hash_set.remove t.running_roots root
+  | Some entry when Job.is_terminal entry.job -> run_next t root
   | Some entry ->
     don't_wait_for
       (let started_at = Timestamp.of_time_ns (Time_ns.now ()) in
@@ -342,11 +945,66 @@ let rec run_next t session =
          ; phase = Some "starting"
          ; started_at = Some started_at
          };
-       let invocation =
-         t.action_invocation
-           ~root:session.root
-           ~environment:session.environment
-           entry.action
+        let session = entry.session in
+        let preflight =
+          match entry.operation with
+          | Dune_action _ | Driver_describe -> Ok ()
+          | Driver_generate_rtl
+              { target; configuration; target_key; configuration_key; _ } ->
+            (match generation_selection session target configuration with
+             | Ok (current_target, current_configuration)
+               when String.equal current_target target_key
+                    && String.equal current_configuration configuration_key -> Ok ()
+             | Ok _ -> Error "driver declaration changed before RTL generation started"
+             | Error (Generation_unsupported reason | Generation_invalid reason) ->
+               Error reason)
+        in
+        match preflight with
+        | Error reason ->
+          finish_entry t entry Failed None (Some reason);
+          let%bind () = Writer.close entry.log_writer in
+          let%bind () =
+            match entry.operation with
+            | Driver_generate_rtl { output_dir; _ } -> cleanup_path output_dir
+            | Dune_action _ | Driver_describe -> return ()
+          in
+          run_next t root;
+          return ()
+        | Ok () ->
+        let%bind () =
+          match entry.operation with
+          | Driver_generate_rtl _ ->
+            update_job t entry { entry.job with phase = Some "capturing source" };
+            let%map source = capture_source session.root in
+            entry.source_start <- Some source
+          | Dune_action _ | Driver_describe -> return ()
+        in
+        let invocation =
+          match entry.operation with
+          | Dune_action action ->
+           (match t.action_invocation with
+            | None ->
+              Adapter.action_invocation
+                ~build_alias:session.build_alias
+                ~test_alias:session.test_alias
+                ~root:session.root
+                ~environment:session.environment
+                action
+            | Some invocation ->
+              invocation ~root:session.root ~environment:session.environment action)
+          | Driver_describe ->
+            t.driver_invocation
+              ~root:session.root
+              ~environment:session.environment
+              ~driver:(Option.value_exn session.driver)
+          | Driver_generate_rtl { target_key; configuration_key; output_dir; _ } ->
+            t.generate_rtl_invocation
+              ~root:session.root
+              ~environment:session.environment
+              ~driver:(Option.value_exn session.driver)
+              ~target:target_key
+              ~configuration:configuration_key
+              ~output_dir
        in
        let args = List.tl invocation.argv |> Option.value ~default:[] in
        let argv0 = List.hd invocation.argv in
@@ -362,11 +1020,26 @@ let rec run_next t session =
        match created with
        | Error launch_error ->
          let reason = Error.to_string_hum launch_error in
+         (match entry.operation with
+           | Driver_describe ->
+             entry.session.driver_description <- None;
+             publish_driver_state
+              t
+              entry
+              (Unusable { reason = "driver launch failed: " ^ reason })
+              []
+              []
+           | Dune_action _ | Driver_generate_rtl _ -> ());
          if entry.cancel_requested || t.shutting_down
          then finish_entry t entry Cancelled (Some (Launch_failed { reason })) None
          else finish_entry t entry Failed (Some (Launch_failed { reason })) (Some reason);
-         let%bind () = Writer.close entry.log_writer in
-         run_next t session;
+          let%bind () = Writer.close entry.log_writer in
+          let%bind () =
+            match entry.operation with
+            | Driver_generate_rtl { output_dir; _ } -> cleanup_path output_dir
+            | Dune_action _ | Driver_describe -> return ()
+          in
+          run_next t root;
          return ()
        | Ok process ->
          entry.process <- Some process;
@@ -376,18 +1049,66 @@ let rec run_next t session =
          then begin_escalation t entry process;
          let stdout = drain t entry Stdout (Process.stdout process) in
          let stderr = drain t entry Stderr (Process.stderr process) in
-         let%bind status = Process.wait process in
+          let%bind status = Process.wait process in
+          entry.process <- None;
          let%bind () = Deferred.all_unit [ stdout; stderr; entry.log_tail ] in
          let%bind () = Writer.close entry.log_writer in
-         let status = exit_status status in
-         if entry.cancel_requested || t.shutting_down
-         then finish_entry t entry Cancelled (Some status) None
-         else (
-           match status with
-           | Exited 0 -> finish_entry t entry Complete (Some status) None
-           | Exited _ | Signaled _ -> finish_entry t entry Failed (Some status) None
-           | Launch_failed _ -> assert false);
-         run_next t session;
+          let status = exit_status status in
+          let%bind () =
+            if entry.cancel_requested || t.shutting_down
+         then (
+           (match entry.operation with
+             | Driver_describe ->
+               entry.session.driver_description <- None;
+               publish_driver_state
+                t
+                entry
+                (Unusable { reason = "driver discovery was cancelled" })
+                []
+                []
+             | Dune_action _ | Driver_generate_rtl _ -> ());
+            let%bind () =
+              match entry.operation with
+              | Driver_generate_rtl { output_dir; _ } -> cleanup_path output_dir
+              | Dune_action _ | Driver_describe -> return ()
+            in
+            finish_entry t entry Cancelled (Some status) None;
+            return ())
+          else (
+            match entry.operation with
+            | Dune_action _ ->
+              (match status with
+               | Exited 0 -> finish_entry t entry Complete (Some status) None
+               | Exited _ | Signaled _ -> finish_entry t entry Failed (Some status) None
+               | Launch_failed _ -> assert false);
+              return ()
+            | Driver_describe ->
+              (match complete_driver_discovery t entry status with
+               | Ok () -> finish_entry t entry Complete (Some status) None
+               | Error reason -> finish_entry t entry Failed (Some status) (Some reason));
+              return ()
+            | Driver_generate_rtl
+                { target_key; configuration_key; output_dir; _ } ->
+              let%bind completed =
+                complete_generate_rtl
+                  t
+                  entry
+                  target_key
+                  configuration_key
+                  output_dir
+                  status
+              in
+              let%bind () = cleanup_path output_dir in
+              if entry.cancel_requested || t.shutting_down
+              then finish_entry t entry Cancelled (Some status) None
+              else (
+                match completed with
+                | Ok () -> finish_entry t entry Complete (Some status) None
+                | Error reason ->
+                  finish_entry t entry Failed (Some status) (Some reason));
+              return ())
+          in
+          run_next t root;
          return ())
 ;;
 
@@ -415,7 +1136,7 @@ let submit_job
     (match Hashtbl.find t.submissions submission_key with
      | Some submission ->
        if Project_id.equal project submission.project
-          && V1.Dune_action.equal action submission.action
+          && equal_submission_operation submission.operation (Submit_dune action)
        then (
          let%map ready = Ivar.read submission.ready in
          Result.map ready ~f:(fun entry -> { V1.Submit_job.Payload.job = entry.job }))
@@ -425,7 +1146,9 @@ let submit_job
         | None -> return (error Not_found "project is not open")
         | Some session ->
           let id = mint_job_id t in
-          let submission = { project; action; ready = Ivar.create () } in
+           let submission =
+             { project; operation = Submit_dune action; ready = Ivar.create () }
+           in
           Hashtbl.set t.submissions ~key:submission_key ~data:submission;
           let job =
             Job.create
@@ -454,7 +1177,7 @@ let submit_job
              Error failure
            | Ok log_writer ->
              let entry =
-               { action
+               { operation = Dune_action action
                ; session
                ; job
                ; log_path
@@ -463,22 +1186,319 @@ let submit_job
                ; log_position = 0
                ; next_log_offset = 0
                ; log_tail = return ()
+               ; stdout_parts = []
+               ; stdout_bytes = 0
+               ; stdout_overflow = false
                ; process = None
                ; cancel_requested = false
                ; escalation_started = false
                ; escalation_finished = Ivar.create ()
                ; finished = Ivar.create ()
+               ; source_start = None
                }
              in
              Hashtbl.set t.jobs ~key:id ~data:entry;
              Ivar.fill_exn submission.ready (Ok entry);
-             Queue.enqueue session.queue entry;
+             let queue =
+               Hashtbl.find_or_add t.root_queues session.root ~default:Queue.create
+             in
+             Queue.enqueue queue entry;
              emit t (Job_upsert job);
-             if not session.worker_running
+             if not (Hash_set.mem t.running_roots session.root)
              then (
-               session.worker_running <- true;
-               run_next t session);
-             Ok { V1.Submit_job.Payload.job })))
+               Hash_set.add t.running_roots session.root;
+               run_next t session.root);
+              Ok { V1.Submit_job.Payload.job })))
+;;
+
+let generate_rtl
+  t
+  ({ instance_id; project; target; configuration; submission_key } :
+    V1.Generate_rtl.Request.t)
+  =
+  match check_instance t instance_id with
+  | Error _ as error -> return error
+  | Ok () when t.shutting_down -> return (error Conflict "daemon is shutting down")
+  | Ok () when String.is_empty submission_key ->
+    return (error Invalid_request "submission_key must not be empty")
+  | Ok () ->
+    let requested = Submit_generate_rtl { target; configuration } in
+    (match Hashtbl.find t.submissions submission_key with
+     | Some submission ->
+       if Project_id.equal project submission.project
+          && equal_submission_operation submission.operation requested
+       then (
+         let%map ready = Ivar.read submission.ready in
+         Result.map ready ~f:(fun entry -> { V1.Generate_rtl.Payload.job = entry.job }))
+       else return (error Conflict "submission_key was already used for another request")
+     | None ->
+       (match Hashtbl.find t.projects project with
+        | None -> return (error Not_found "project is not open")
+        | Some session ->
+          (match generation_selection session target configuration with
+           | Error (Generation_unsupported reason) ->
+             return (error Unsupported_operation reason)
+           | Error (Generation_invalid reason) -> return (error Invalid_request reason)
+           | Ok (target_key, configuration_key) ->
+             let id = mint_job_id t in
+             let submission = { project; operation = requested; ready = Ivar.create () } in
+             Hashtbl.set t.submissions ~key:submission_key ~data:submission;
+             let created_at = Timestamp.of_time_ns (Time_ns.now ()) in
+             let job =
+               { (Job.create
+                    ~id
+                    ~kind:{ namespace = "project-driver"; name = "generate-rtl" }
+                    ~project
+                    ~created_at) with
+                 target = Some target
+               ; configuration = Some configuration
+               }
+             in
+             let log_path =
+               Filename.concat
+                 t.log_dir
+                 (sprintf "job-%d-%d.log" (Pid.to_int (Core_unix.getpid ())) t.next_job_id)
+             in
+             let output_dir =
+               Filename.concat t.output_dir (sprintf "job-%d" t.next_job_id)
+             in
+             let%map opened =
+               Monitor.try_with_or_error (fun () ->
+                 let%bind () = In_thread.run (fun () -> Core_unix.mkdir output_dir ~perm:0o700) in
+                 Writer.open_file ~append:true ~perm:0o600 log_path)
+             in
+             (match opened with
+              | Error open_error ->
+                let failure =
+                  V1.Error.create
+                    Internal_failure
+                    ("could not create generation job storage: "
+                     ^ Error.to_string_hum open_error)
+                in
+                Ivar.fill_exn submission.ready (Error failure);
+                don't_wait_for (cleanup_path output_dir);
+                Error failure
+              | Ok log_writer ->
+                let entry =
+                  { operation =
+                      Driver_generate_rtl
+                        { target
+                        ; configuration
+                        ; target_key
+                        ; configuration_key
+                        ; output_dir
+                        }
+                  ; session
+                  ; job
+                  ; log_path
+                  ; log_writer
+                  ; log_records = Hashtbl.create (module Int)
+                  ; log_position = 0
+                  ; next_log_offset = 0
+                  ; log_tail = return ()
+                  ; stdout_parts = []
+                  ; stdout_bytes = 0
+                  ; stdout_overflow = false
+                  ; process = None
+                  ; cancel_requested = false
+                  ; escalation_started = false
+                  ; escalation_finished = Ivar.create ()
+                  ; finished = Ivar.create ()
+                  ; source_start = None
+                  }
+                in
+                Hashtbl.set t.jobs ~key:id ~data:entry;
+                Ivar.fill_exn submission.ready (Ok entry);
+                let queue =
+                  Hashtbl.find_or_add t.root_queues session.root ~default:Queue.create
+                in
+                Queue.enqueue queue entry;
+                emit t (Job_upsert job);
+                if not (Hash_set.mem t.running_roots session.root)
+                then (
+                  Hash_set.add t.running_roots session.root;
+                  run_next t session.root);
+                Ok { V1.Generate_rtl.Payload.job }))))
+;;
+
+let active_driver_job t session =
+  Hashtbl.data t.jobs
+  |> List.find ~f:(fun entry ->
+    phys_equal entry.session session
+    &&
+    match entry.operation with
+    | Driver_describe -> not (Job.is_terminal entry.job)
+    | Dune_action _ | Driver_generate_rtl _ -> false)
+;;
+
+let apply_manifest_load t session manifest_load =
+  session.driver_description <- None;
+  (match manifest_load with
+   | Manifest_absent ->
+     session.manifest <- None;
+     session.build_alias <- Integration.Manifest.default_build_alias;
+     session.test_alias <- Integration.Manifest.default_test_alias;
+     session.driver <- None;
+     session.project
+     <- { session.project with
+          name = session.dune_name
+        ; integration = Project_integration.generic_dune
+        ; targets = []
+        ; configurations = []
+        }
+   | Manifest_invalid reason ->
+     session.manifest <- None;
+     session.build_alias <- Integration.Manifest.default_build_alias;
+     session.test_alias <- Integration.Manifest.default_test_alias;
+     session.driver <- None;
+     session.project
+     <- { session.project with
+          name = session.dune_name
+        ; integration =
+            { Project_integration.level = Generic_dune
+            ; manifest = Unusable { reason }
+            ; driver = Absent
+            }
+        ; targets = []
+        ; configurations = []
+        }
+   | Manifest_valid manifest ->
+     session.manifest <- Some manifest;
+     session.build_alias <- manifest.build_alias;
+     session.test_alias <- manifest.test_alias;
+     session.driver <- manifest.driver;
+     let driver =
+       Option.value_map manifest.driver ~default:Absent ~f:(fun _ ->
+         Unusable { reason = "driver discovery has not started" })
+     in
+     session.project
+     <- { session.project with
+          name = manifest.project_name
+        ; integration =
+            { Project_integration.level = Manifest
+            ; manifest = Available { version = Some Integration.Manifest.version }
+            ; driver
+            }
+        ; targets = []
+        ; configurations = []
+        });
+  emit t (Project_upsert session.project)
+;;
+
+let refresh_integration t ({ instance_id; project } : V1.Refresh_integration.Request.t) =
+  match check_instance t instance_id with
+  | Error _ as error -> return error
+  | Ok () when t.shutting_down -> return (error Conflict "daemon is shutting down")
+  | Ok () ->
+    (match Hashtbl.find t.projects project with
+     | None -> return (error Not_found "project is not open")
+     | Some session ->
+       (match active_driver_job t session with
+        | Some _ ->
+          return (error Conflict "driver discovery is already queued or running")
+        | None ->
+          let%bind manifest_load = load_manifest session.root in
+          apply_manifest_load t session manifest_load;
+          (match session.manifest, session.driver with
+           | None, _ ->
+             return
+               (error Unsupported_operation "project has no valid Workbench manifest")
+           | Some _, None ->
+             return (error Unsupported_operation "manifest does not declare a driver")
+           | Some _, Some _ ->
+             let id = mint_job_id t in
+             let job =
+               Job.create
+                 ~id
+                 ~kind:{ namespace = "project-driver"; name = "describe" }
+                 ~project
+                 ~created_at:(Timestamp.of_time_ns (Time_ns.now ()))
+             in
+             let log_path =
+               Filename.concat
+                 t.log_dir
+                 (sprintf
+                    "job-%d-%d.log"
+                    (Pid.to_int (Core_unix.getpid ()))
+                    t.next_job_id)
+             in
+             let%map opened =
+               Monitor.try_with_or_error (fun () ->
+                 Writer.open_file ~append:true ~perm:0o600 log_path)
+             in
+             (match opened with
+              | Error open_error ->
+                error
+                  Internal_failure
+                  ("could not open discovery log: " ^ Error.to_string_hum open_error)
+              | Ok log_writer ->
+                let entry =
+                  { operation = Driver_describe
+                  ; session
+                  ; job
+                  ; log_path
+                  ; log_writer
+                  ; log_records = Hashtbl.create (module Int)
+                  ; log_position = 0
+                  ; next_log_offset = 0
+                  ; log_tail = return ()
+                  ; stdout_parts = []
+                  ; stdout_bytes = 0
+                  ; stdout_overflow = false
+                  ; process = None
+                  ; cancel_requested = false
+                  ; escalation_started = false
+                   ; escalation_finished = Ivar.create ()
+                   ; finished = Ivar.create ()
+                   ; source_start = None
+                   }
+                in
+                Hashtbl.set t.jobs ~key:id ~data:entry;
+                publish_driver_state
+                  t
+                  entry
+                  (Unusable
+                     { reason = "driver discovery pending in job " ^ Job_id.to_string id })
+                  []
+                  [];
+                let queue =
+                  Hashtbl.find_or_add t.root_queues session.root ~default:Queue.create
+                in
+                Queue.enqueue queue entry;
+                emit t (Job_upsert job);
+                if not (Hash_set.mem t.running_roots session.root)
+                then (
+                  Hash_set.add t.running_roots session.root;
+                  run_next t session.root);
+                Ok { V1.Refresh_integration.Payload.job }))))
+;;
+
+let open_project_with_discovery t request =
+  let%bind opened = open_project t request in
+  match opened with
+  | Error _ -> return opened
+  | Ok payload ->
+    (match Hashtbl.find t.projects payload.project.id with
+     | None -> return opened
+     | Some session ->
+       let should_start =
+         Option.is_some session.driver
+         && List.is_empty session.project.targets
+         && Option.is_none (active_driver_job t session)
+         &&
+         match session.project.integration.driver with
+         | Unusable { reason } -> String.equal reason "driver discovery has not started"
+         | Absent | Available _ -> false
+       in
+       if not should_start
+       then return opened
+       else (
+         let%map (_ : (V1.Refresh_integration.Payload.t, V1.Error.t) Result.t) =
+           refresh_integration
+             t
+             { instance_id = request.instance_id; project = payload.project.id }
+         in
+         Ok { payload with project = session.project }))
 ;;
 
 let cancel_entry t entry =
@@ -491,9 +1511,24 @@ let cancel_entry t entry =
       begin_escalation t entry process;
       Deferred.all_unit [ Ivar.read entry.finished; Ivar.read entry.escalation_finished ]
     | None when Job.State.equal entry.job.state Queued ->
-      finish_entry t entry Cancelled None None;
-      let%bind () = Writer.close entry.log_writer in
-      return ()
+      (match entry.operation with
+       | Driver_describe ->
+         entry.session.driver_description <- None;
+         publish_driver_state
+           t
+           entry
+           (Unusable { reason = "driver discovery was cancelled" })
+           []
+           []
+       | Dune_action _ | Driver_generate_rtl _ -> ());
+       finish_entry t entry Cancelled None None;
+       let%bind () = Writer.close entry.log_writer in
+       let%bind () =
+         match entry.operation with
+         | Driver_generate_rtl { output_dir; _ } -> cleanup_path output_dir
+         | Dune_action _ | Driver_describe -> return ()
+       in
+       return ()
     | None -> Ivar.read entry.finished)
 ;;
 
@@ -586,23 +1621,76 @@ let read_log
                { V1.Read_log.Payload.records
                ; next_offset
                ; eof = Job.is_terminal entry.job && next_offset = entry.next_log_offset
-               })))
+             })))
+;;
+
+let mark_artifact_unavailable t entry reason =
+  let artifact = { entry.artifact with availability = Unavailable { reason } } in
+  entry.artifact <- artifact;
+  emit t (Artifact_upsert artifact)
+;;
+
+let read_artifact
+  t
+  ({ instance_id; artifact; offset; max_bytes } : V1.Read_artifact.Request.t)
+  =
+  match check_instance t instance_id with
+  | Error _ as error -> return error
+  | Ok () when max_bytes <= 0 || max_bytes > V1.max_artifact_bytes ->
+    return (error Invalid_request "invalid artifact read bound")
+  | Ok () ->
+    (match Hashtbl.find t.artifacts artifact with
+     | None -> return (error Not_found "artifact was not found")
+     | Some entry ->
+       let%bind stat =
+         Monitor.try_with (fun () -> In_thread.run (fun () -> Core_unix.lstat entry.path))
+       in
+       (match stat with
+        | Error _ ->
+          let reason = "artifact content is missing" in
+          mark_artifact_unavailable t entry reason;
+          return (error Not_found reason)
+        | Ok stat when not (Poly.equal stat.st_kind S_REG) ->
+          let reason = "artifact content is not a regular file" in
+          mark_artifact_unavailable t entry reason;
+          return (error Not_found reason)
+        | Ok stat ->
+          let total_size = Int64.to_int_exn stat.st_size in
+          if offset < 0 || offset > total_size
+          then return (error Invalid_request "artifact offset is outside the available range")
+          else (
+            let length = Int.min max_bytes (total_size - offset) in
+            let%bind contents =
+              Monitor.try_with (fun () ->
+                let%bind reader = Reader.open_file entry.path in
+                Monitor.protect
+                  ~finally:(fun () -> Reader.close reader)
+                  (fun () -> read_exact reader ~position:offset ~length >>| Result.ok_or_failwith))
+            in
+            match contents with
+            | Error exn ->
+              let reason = "artifact content could not be read: " ^ Exn.to_string exn in
+              mark_artifact_unavailable t entry reason;
+              return (error Not_found reason)
+            | Ok data ->
+              let next_offset = offset + String.length data in
+              return
+                (Ok
+                   { V1.Read_artifact.Payload.data
+                   ; next_offset
+                   ; total_size
+                   ; eof = next_offset = total_size
+                   }))))
 ;;
 
 let shutdown t =
   t.shutting_down <- true;
   let%bind () =
-    Hashtbl.data t.submissions
-    |> Deferred.List.iter ~how:`Parallel ~f:(fun submission ->
-      let%bind ready = Ivar.read submission.ready in
-      match ready with
-      | Error _ -> return ()
-      | Ok entry -> cancel_entry t entry)
+    Hashtbl.data t.jobs |> Deferred.List.iter ~how:`Parallel ~f:(cancel_entry t)
   in
   Monitor.try_with (fun () ->
     In_thread.run (fun () ->
-      Sys_unix.readdir t.log_dir
-      |> Array.iter ~f:(fun name -> Core_unix.unlink (Filename.concat t.log_dir name));
-      Core_unix.rmdir t.log_dir))
+      remove_tree_sync t.log_dir;
+      remove_tree_sync t.artifact_dir))
   >>| ignore
 ;;

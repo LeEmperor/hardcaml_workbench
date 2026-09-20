@@ -13,5 +13,13 @@
  (action
   (progn
    (echo "fixture test: started")
-   (run sleep 1)
-   (echo "fixture test: complete"))))
+    (run sleep 1)
+    (echo "fixture test: complete"))))
+
+(alias
+ (name workbench-build)
+ (deps (alias all)))
+
+(alias
+ (name workbench-test)
+ (deps (alias runtest)))

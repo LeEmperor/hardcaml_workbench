@@ -1,5 +1,16 @@
+(library
+ (name terminal_presentation)
+ (modules presentation state)
+ (libraries core hardcaml_workbench_protocol)
+ (preprocess
+  (pps ppx_jane))
+ (inline_tests
+  (flags
+   (-source-tree-root .))))
+
 (executable
  (name main)
+ (modules main)
  (public_name hardcaml-workbench)
  (package hardcaml_workbench)
  (libraries
@@ -9,7 +20,8 @@
   core
   core_unix.command_unix
   hardcaml_workbench_native_http
-  hardcaml_workbench_protocol)
+  hardcaml_workbench_protocol
+  terminal_presentation)
  (preprocess
   (pps ppx_jane bonsai.ppx_bonsai))
  (lint

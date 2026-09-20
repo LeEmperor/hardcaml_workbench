@@ -4,6 +4,7 @@
   async
   core
   core_unix
+  cryptokit
   hardcaml_workbench_adapters
   hardcaml_workbench_project_integration
   hardcaml_workbench_protocol)

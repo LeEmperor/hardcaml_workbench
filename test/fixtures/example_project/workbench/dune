@@ -1,0 +1,5 @@
+(executable
+ (name project_driver)
+ (libraries core core_unix.command_unix fixture_counter hardcaml)
+ (preprocess
+  (pps ppx_jane)))

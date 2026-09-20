@@ -3,6 +3,7 @@ open! Async
 open Hardcaml_workbench_protocol
 module Adapter = Hardcaml_workbench_adapters.Dune_adapter
 module Service = Hardcaml_workbench_backend.Service
+module Integration = Hardcaml_workbench_project_integration
 
 let instance_id = V1.Daemon_instance_id.of_string "service-test"
 let short_timeout = Time_float.Span.of_sec 4.
@@ -488,6 +489,550 @@ let test_log_paging ~root ~log_dir =
       return ())
 ;;
 
+let driver_response ?(version = 1) key =
+  let target : Integration.Driver_protocol.Target.t =
+    { key
+    ; name = "Counter " ^ key
+    ; top = "counter"
+    ; backend = "simulation"
+    ; clocks = []
+    ; facts = []
+    }
+  in
+  let configuration : Integration.Driver_protocol.Configuration.t =
+    { key = "default"
+    ; target = key
+    ; name = "Default"
+    ; description = Some "test configuration"
+    }
+  in
+  { Integration.Driver_protocol.Describe_response.protocol_version = version
+  ; capabilities = [ "describe"; "generate-rtl"; "future-capability" ]
+  ; targets = [ target ]
+  ; configurations = [ configuration ]
+  }
+  |> Integration.Driver_protocol.Describe_response.sexp_of_t
+  |> Sexp.to_string_mach
+;;
+
+let generation_response ~target ~configuration ~path =
+  { Integration.Driver_protocol.Generate_rtl_response.protocol_version = 1
+  ; target
+  ; configuration
+  ; outputs =
+      [ { Integration.Driver_protocol.Output.path
+        ; namespace = "hardcaml"
+        ; name = "verilog"
+        ; role = Artifact.Role.Deliverable
+        ; media = Some "text/x-verilog"
+        ; display_name = path
+        ; description = Some "generated test RTL"
+        }
+      ]
+  ; tools =
+      [ { Integration.Driver_protocol.Tool.name = "ocaml"; version = Some "test" }
+      ; { name = "hardcaml"; version = None }
+      ]
+  ; build = None
+  ; run = None
+  }
+  |> Integration.Driver_protocol.Generate_rtl_response.sexp_of_t
+  |> Sexp.to_string_mach
+;;
+
+let test_rtl_generation_and_artifacts ~root ~log_dir =
+  Out_channel.write_all
+    (Filename.concat root Integration.Manifest.filename)
+    ~data:
+      "(lang hardcaml-workbench 1)\n\
+       (project (name generation-test))\n\
+       (dune (driver ./driver.exe))\n";
+  let target key : Integration.Driver_protocol.Target.t =
+    { key; name = String.capitalize key; top = key; backend = "simulation"; clocks = []; facts = [] }
+  in
+  let configuration key target : Integration.Driver_protocol.Configuration.t =
+    { key; target; name = String.capitalize key; description = None }
+  in
+  let description : Integration.Driver_protocol.Describe_response.t =
+    { protocol_version = 1
+    ; capabilities = [ "describe"; "generate-rtl" ]
+    ; targets = [ target "counter"; target "other" ]
+    ; configurations =
+        [ configuration "four-bit" "counter"
+        ; configuration "eight-bit" "counter"
+        ; configuration "other-config" "other"
+        ]
+    }
+  in
+  let description =
+    description
+    |> Integration.Driver_protocol.Describe_response.sexp_of_t
+    |> Sexp.to_string_mach
+  in
+  let mode = ref `Valid in
+  let generate_rtl_invocation
+    ~root
+    ~environment:_
+    ~driver:_
+    ~target
+    ~configuration
+    ~output_dir
+    =
+    let width = if String.equal configuration "eight-bit" then 8 else 4 in
+    let path = sprintf "counter-%d.v" width in
+    let response = generation_response ~target ~configuration ~path in
+    match !mode with
+    | `Valid ->
+      Out_channel.write_all
+        (Filename.concat output_dir path)
+        ~data:(sprintf "module counter(output logic [%d:0] count_o); endmodule\n" (width - 1));
+      shell root (sprintf "printf %%s %s" (Filename.quote response))
+    | `Malformed -> shell root "printf not-a-result"
+    | `Missing -> shell root (sprintf "printf %%s %s" (Filename.quote response))
+    | `Nonzero -> shell root "echo generation-failed >&2; exit 19"
+    | `Launch -> missing root
+    | `Slow -> shell root "echo generation-started >&2; sleep 30"
+    | `Escape ->
+      let response = generation_response ~target ~configuration ~path:"../escape.v" in
+      shell root (sprintf "printf %%s %s" (Filename.quote response))
+  in
+  let events = ref [] in
+  let%bind service =
+    Service.create
+      ~kill_after:(Time_float.Span.of_ms 100.)
+      ~action_invocation:(fun ~root ~environment:_ _ -> shell root "echo generic-ok")
+      ~driver_invocation:(fun ~root ~environment:_ ~driver:_ ->
+        shell root (sprintf "printf %%s %s" (Filename.quote description)))
+      ~generate_rtl_invocation
+      ~instance_id
+      ~log_dir
+      ()
+  in
+  let service = Or_error.ok_exn service in
+  Service.set_event_sink service (fun event -> events := event :: !events);
+  Monitor.protect
+    ~finally:(fun () -> Service.shutdown service)
+    (fun () ->
+      let%bind opened =
+        Service.open_project_with_discovery
+          service
+          { instance_id; root; environment = Inherit_daemon }
+      in
+      let opened = ok opened in
+      let discovery =
+        (snapshot service).jobs
+        |> List.find_exn ~f:(fun job -> String.equal job.kind.name "describe")
+      in
+      let%bind discovery = wait_terminal service discovery.id in
+      require (Job.State.equal discovery.state Complete) "generation discovery failed";
+      let project =
+        (snapshot service).projects
+        |> List.find_exn ~f:(fun project -> Project_id.equal project.id opened.project.id)
+      in
+      let find_target name =
+        List.find_exn project.targets ~f:(fun value -> String.equal value.name name)
+      in
+      let find_configuration name =
+        List.find_exn project.configurations ~f:(fun value -> String.equal value.name name)
+      in
+      let counter = find_target "Counter" in
+      let other = find_target "Other" in
+      let four = find_configuration "Four-bit" in
+      let eight = find_configuration "Eight-bit" in
+      let other_config = find_configuration "Other-config" in
+      let submit_generation ?(target = counter.id) ?(configuration = four.id) key =
+        Service.generate_rtl
+          service
+          { instance_id
+          ; project = project.id
+          ; target
+          ; configuration
+          ; submission_key = key
+          }
+      in
+      let%bind first = submit_generation "four" in
+      let first = ok first in
+      let%bind first_done = wait_terminal service first.job.id in
+      require (Job.State.equal first_done.state Complete) "four-bit generation failed";
+      require (List.length first_done.artifacts = 1) "generation did not register an artifact";
+      let first_artifact = List.hd_exn first_done.artifacts in
+      let%bind first_page =
+        Service.read_artifact
+          service
+          { instance_id; artifact = first_artifact; offset = 0; max_bytes = 7 }
+      in
+      let first_page = ok first_page in
+      require
+        (String.length first_page.data <= 7 && not first_page.eof)
+        "artifact read was not bounded";
+      let%bind remainder =
+        Service.read_artifact
+          service
+          { instance_id
+          ; artifact = first_artifact
+          ; offset = first_page.next_offset
+          ; max_bytes = V1.max_artifact_bytes
+          }
+      in
+      let first_contents = first_page.data ^ (ok remainder).data in
+      require
+        (String.is_substring first_contents ~substring:"[3:0]")
+        "four-bit configuration produced the wrong RTL";
+      let artifact =
+        (snapshot service).artifacts
+        |> List.find_exn ~f:(fun artifact -> Artifact_id.equal artifact.id first_artifact)
+      in
+      require
+        (Target_id.equal (Option.value_exn artifact.target) counter.id
+         && Configuration_id.equal (Option.value_exn artifact.configuration) four.id
+         && Job_id.equal artifact.generating_job first.job.id)
+        "artifact identity was misattributed";
+      require
+        (Option.is_some artifact.metadata.provenance.source.design_hash
+         && match artifact.metadata.provenance.source.working_tree with
+            | Unknown _ -> true
+            | Clean | Dirty -> false)
+        "non-Git provenance was not represented honestly";
+      let%bind second = submit_generation ~configuration:eight.id "eight" in
+      let second = ok second in
+      let%bind second_done = wait_terminal service second.job.id in
+      require (Job.State.equal second_done.state Complete) "eight-bit generation failed";
+      let second_artifact = List.hd_exn second_done.artifacts in
+      let%bind second_contents =
+        Service.read_artifact
+          service
+          { instance_id
+          ; artifact = second_artifact
+          ; offset = 0
+          ; max_bytes = V1.max_artifact_bytes
+          }
+      in
+      require
+        (String.is_substring (ok second_contents).data ~substring:"[7:0]")
+        "eight-bit configuration produced the wrong RTL";
+      let%bind repeated = submit_generation "four-repeat" in
+      let repeated = ok repeated in
+      let%bind repeated = wait_terminal service repeated.job.id in
+      require (Job.State.equal repeated.state Complete) "repeated generation failed";
+      require
+        (List.length (snapshot service).artifacts = 3)
+        "repeated generation overwrote an earlier artifact";
+      let jobs_before_reconnect = List.length (snapshot service).jobs in
+      ignore (snapshot service : V1.Snapshot.Payload.t);
+      require
+        (List.length (snapshot service).jobs = jobs_before_reconnect)
+        "same-daemon snapshot replayed generation";
+      let stale_target = Target_id.of_string "stale-target" in
+      let%bind stale = submit_generation ~target:stale_target "stale" in
+      require_error_kind stale Invalid_request "stale target was accepted";
+      let stale_configuration = Configuration_id.of_string "stale-configuration" in
+      let%bind stale =
+        submit_generation ~configuration:stale_configuration "stale-configuration"
+      in
+      require_error_kind stale Invalid_request "stale configuration was accepted";
+      let%bind mismatch =
+        submit_generation ~target:counter.id ~configuration:other_config.id "mismatch"
+      in
+      require_error_kind mismatch Invalid_request "mismatched configuration was accepted";
+      let artifacts_before_failures = List.length (snapshot service).artifacts in
+      let%bind () =
+        Deferred.List.iter
+          [ "malformed", `Malformed
+          ; "missing", `Missing
+          ; "nonzero", `Nonzero
+          ; "launch", `Launch
+          ; "escape", `Escape
+          ]
+          ~how:`Sequential
+          ~f:(fun (key, next_mode) ->
+            mode := next_mode;
+            let%bind submitted = submit_generation key in
+            let submitted = ok submitted in
+            let%map failed = wait_terminal service submitted.job.id in
+            require (Job.State.equal failed.state Failed) "invalid generation did not fail";
+            require (List.is_empty failed.artifacts) "failed generation advertised artifacts";
+            require
+              (List.length (snapshot service).artifacts = artifacts_before_failures)
+              "failed generation registered partial output")
+      in
+      mode := `Slow;
+      let%bind slow = submit_generation "cancel-generation" in
+      let slow = ok slow in
+      let%bind (_ : Job.t) =
+        wait_for_job service slow.job.id (fun job -> Job.State.equal job.state Running)
+      in
+      let%bind cancelled = Service.cancel_job service { instance_id; job = slow.job.id } in
+      require (Job.State.equal (ok cancelled).job.state Cancelled) "generation was not cancelled";
+      require
+        (List.length (snapshot service).artifacts = artifacts_before_failures)
+        "cancelled generation registered an artifact";
+      let%bind generic = submit service project Build "generic-after-generation-failures" in
+      let%bind generic = wait_terminal service generic.job.id in
+      require (Job.State.equal generic.state Complete) "generic Dune fallback stopped working";
+      let terminal_index, _ =
+        List.rev !events
+        |> List.findi_exn ~f:(fun _ event ->
+          match event.V1.Event.event with
+          | Job_upsert job -> Job_id.equal job.id first.job.id && Job.is_terminal job
+          | _ -> false)
+      in
+      let preceding = List.rev !events |> Fn.flip List.take terminal_index in
+      require
+        (List.exists preceding ~f:(fun event ->
+           match event.event with
+           | Artifact_upsert artifact -> Artifact_id.equal artifact.id first_artifact
+           | _ -> false))
+        "terminal generation event preceded its artifact event";
+      ignore other;
+      return ())
+;;
+
+let test_source_provenance ~root ~log_dir:_ =
+  let%bind non_git_start = Service.capture_source root in
+  let%bind non_git_finish = Service.capture_source root in
+  let non_git = Service.source_identity non_git_start non_git_finish in
+  require (Option.is_some non_git.design_hash) "non-Git source hash was unavailable";
+  require
+    (match non_git.working_tree with
+     | Provenance.Working_tree.Unknown _ -> true
+     | Clean | Dirty -> false)
+    "non-Git source was not marked unknown";
+  let git arguments =
+    Process.run ~working_dir:root ~prog:"git" ~args:arguments ()
+    >>| Or_error.ok_exn
+    >>| ignore
+  in
+  let%bind () = git [ "init"; "-q" ] in
+  let%bind () = git [ "config"; "user.name"; "Workbench Test" ] in
+  let%bind () = git [ "config"; "user.email"; "workbench@example.invalid" ] in
+  let%bind () = git [ "add"; "." ] in
+  let%bind () = git [ "commit"; "-qm"; "fixture" ] in
+  let%bind clean_start = Service.capture_source root in
+  let%bind clean_finish = Service.capture_source root in
+  let clean = Service.source_identity clean_start clean_finish in
+  require
+    (Provenance.Source_identity.identifies_inputs_exactly clean
+     && Option.is_some clean.design_hash)
+    "clean Git source was not exact";
+  Out_channel.write_all (Filename.concat root "dirty-source.ml") ~data:"let dirty = true\n";
+  let%bind dirty_start = Service.capture_source root in
+  let%bind dirty_finish = Service.capture_source root in
+  let dirty = Service.source_identity dirty_start dirty_finish in
+  require
+    (match dirty.working_tree with
+     | Provenance.Working_tree.Dirty -> true
+     | Clean | Unknown _ -> false)
+    "dirty Git source was not marked dirty";
+  require
+    (Option.is_some dirty.git_commit
+     && Option.is_some dirty.design_hash
+     && not (Provenance.Source_identity.identifies_inputs_exactly dirty))
+    "dirty Git provenance claimed an exact commit or lost its evidence";
+  return ()
+;;
+
+let test_driver_discovery ~root ~log_dir =
+  Out_channel.write_all
+    (Filename.concat root Integration.Manifest.filename)
+    ~data:
+      "(lang hardcaml-workbench 1)\n\
+       (project (name discovery-test))\n\
+       (dune (driver ./driver.exe))\n";
+  require
+    (Poly.equal
+       (Sys_unix.file_exists (Filename.concat root Integration.Manifest.filename))
+       `Yes)
+    "test manifest was not written";
+  let%bind loaded_manifest = Service.load_manifest root in
+  require
+    (match loaded_manifest with
+     | Service.Manifest_valid _ -> true
+     | Manifest_absent | Manifest_invalid _ -> false)
+    "service did not load the test manifest";
+  let mode = ref `Valid in
+  let observed_environment = ref None in
+  let events = ref [] in
+  let driver_invocation ~root ~environment ~driver:_ =
+    observed_environment := Some environment;
+    match !mode with
+    | `Valid ->
+      shell root (sprintf "printf %%s %s" (Filename.quote (driver_response "counter")))
+    | `Malformed -> shell root "printf not-an-sexp"
+    | `Version ->
+      shell
+        root
+        (sprintf "printf %%s %s" (Filename.quote (driver_response ~version:2 "counter")))
+    | `Nonzero -> shell root "echo driver-failed >&2; exit 23"
+    | `Missing -> missing root
+    | `Slow -> shell root "echo discovery-started >&2; sleep 30"
+  in
+  let%bind service =
+    Service.create
+      ~kill_after:(Time_float.Span.of_ms 100.)
+      ~action_invocation:(fun ~root ~environment:_ _ ->
+        shell root "echo generic-still-works")
+      ~driver_invocation
+      ~instance_id
+      ~log_dir
+      ()
+  in
+  let service = Or_error.ok_exn service in
+  Service.set_event_sink service (fun event -> events := event :: !events);
+  Monitor.protect
+    ~finally:(fun () -> Service.shutdown service)
+    (fun () ->
+      let request : V1.Open_project.Request.t =
+        { instance_id; root; environment = Opam_switch "selected-project-switch" }
+      in
+      (* Bypass the real Dune environment probe while retaining the selected value in
+         jobs. *)
+      let request = { request with environment = Inherit_daemon } in
+      let%bind opened = Service.open_project_with_discovery service request in
+      let project = (ok opened).project in
+      let require_project_result_before_terminal job_id =
+        let events = List.rev !events in
+        let index, _ =
+          List.findi_exn events ~f:(fun _ event ->
+            match event.V1.Event.event with
+            | Job_upsert job -> Job_id.equal job.id job_id && Job.is_terminal job
+            | _ -> false)
+        in
+        require (index > 0) "terminal driver event had no preceding project result";
+        require
+          (match (List.nth_exn events (index - 1)).event with
+           | Project_upsert updated -> Project_id.equal updated.id project.id
+           | _ -> false)
+          "terminal driver event was published before its project result"
+      in
+      let describe =
+        snapshot service
+        |> fun (snapshot : V1.Snapshot.Payload.t) ->
+        match
+          List.find snapshot.jobs ~f:(fun job ->
+            Project_id.equal job.project project.id
+            && String.equal job.kind.namespace "project-driver")
+        with
+        | Some job -> job
+        | None ->
+          raise_s
+            [%message
+              "initial discovery job was not created"
+                (project.integration : Project_integration.t)
+                (snapshot.jobs : Job.t list)]
+      in
+      let%bind first = wait_terminal service describe.id in
+      require (Job.State.equal first.state Complete) "initial discovery did not complete";
+      require_project_result_before_terminal first.id;
+      let discovered =
+        snapshot service
+        |> fun (snapshot : V1.Snapshot.Payload.t) ->
+        List.find_exn snapshot.projects ~f:(fun value ->
+          Project_id.equal value.id project.id)
+      in
+      require (List.length discovered.targets = 1) "target was not discovered";
+      require
+        (List.length discovered.configurations = 1)
+        "configuration was not discovered";
+      let target_id = (List.hd_exn discovered.targets).id in
+      let config_id = (List.hd_exn discovered.configurations).id in
+      let%bind repeated = Service.open_project_with_discovery service request in
+      ignore (ok repeated : V1.Open_project.Payload.t);
+      require
+        (List.length (snapshot service).jobs = 1)
+        "repeat-open unexpectedly repeated discovery";
+      let refresh () =
+        Service.refresh_integration service { instance_id; project = project.id } >>| ok
+      in
+      let%bind refreshed = refresh () in
+      let%bind refreshed = wait_terminal service refreshed.job.id in
+      require (Job.State.equal refreshed.state Complete) "valid refresh failed";
+      require_project_result_before_terminal refreshed.id;
+      let refreshed_project =
+        snapshot service
+        |> fun (snapshot : V1.Snapshot.Payload.t) ->
+        List.find_exn snapshot.projects ~f:(fun value ->
+          Project_id.equal value.id project.id)
+      in
+      require
+        (Target_id.equal target_id (List.hd_exn refreshed_project.targets).id
+         && Configuration_id.equal
+              config_id
+              (List.hd_exn refreshed_project.configurations).id)
+        "discovery identities changed across refresh";
+      Out_channel.write_all
+        (Filename.concat root Integration.Manifest.filename)
+        ~data:
+          "(lang hardcaml-workbench 99)\n\
+           (project (name broken))\n\
+           (dune (driver ./driver.exe))\n";
+      let%bind invalid_manifest =
+        Service.refresh_integration service { instance_id; project = project.id }
+      in
+      require_error_kind
+        invalid_manifest
+        Unsupported_operation
+        "invalid manifest refresh was accepted";
+      Out_channel.write_all
+        (Filename.concat root Integration.Manifest.filename)
+        ~data:
+          "(lang hardcaml-workbench 1)\n\
+           (project (name discovery-test))\n\
+           (dune (driver ./driver.exe))\n";
+      mode := `Valid;
+      let%bind repaired = refresh () in
+      let%bind repaired = wait_terminal service repaired.job.id in
+      require
+        (Job.State.equal repaired.state Complete)
+        "repaired manifest did not recover";
+      let%bind () =
+        Deferred.List.iter
+          [ `Malformed; `Version; `Nonzero; `Missing ]
+          ~how:`Sequential
+          ~f:(fun next_mode ->
+            mode := next_mode;
+            let%bind failed = refresh () in
+            let%map failed = wait_terminal service failed.job.id in
+            require (Job.State.equal failed.state Failed) "invalid discovery did not fail";
+            require_project_result_before_terminal failed.id;
+            let current =
+              snapshot service
+              |> fun (snapshot : V1.Snapshot.Payload.t) ->
+              List.find_exn snapshot.projects ~f:(fun value ->
+                Project_id.equal value.id project.id)
+            in
+            require
+              (List.is_empty current.targets && List.is_empty current.configurations)
+              "failed refresh retained stale discovery";
+            require
+              (match current.integration.driver with
+               | Unusable { reason } -> not (String.is_empty reason)
+               | Absent | Available _ -> false)
+              "failed refresh lacked an actionable driver diagnostic")
+      in
+      mode := `Slow;
+      let%bind slow = refresh () in
+      let%bind (_ : Job.t) =
+        wait_for_job service slow.job.id (fun job -> Job.State.equal job.state Running)
+      in
+      let%bind cancelled =
+        Service.cancel_job service { instance_id; job = slow.job.id }
+      in
+      require
+        (Job.State.equal (ok cancelled).job.state Cancelled)
+        "driver discovery cancellation failed";
+      let%bind generic = submit service project Build "generic-after-driver-failure" in
+      let%map generic = wait_terminal service generic.job.id in
+      require
+        (Job.State.equal generic.state Complete)
+        "optional integration failure disabled generic Dune actions";
+      require
+        (Option.equal
+           V1.Environment_selection.equal
+           !observed_environment
+           (Some Inherit_daemon))
+        "driver did not use the selected project environment")
+;;
+
 let run () =
   with_temp_tree (fun ~root ~log_dir ->
     let tests =
@@ -498,6 +1043,9 @@ let run () =
       ; "shutdown cleanup", test_shutdown_cleanup
       ; "FIFO and submission keys", test_fifo_and_submission_keys
       ; "file-backed log paging", test_log_paging
+      ; "driver discovery, refresh, failures, and cancellation", test_driver_discovery
+      ; "RTL generation, artifacts, provenance, and retrieval", test_rtl_generation_and_artifacts
+      ; "clean, dirty, and non-Git source provenance", test_source_provenance
       ]
     in
     Deferred.List.iter tests ~how:`Sequential ~f:(fun (name, test) ->

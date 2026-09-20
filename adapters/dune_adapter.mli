@@ -23,6 +23,8 @@ val environment_summary
   -> dune_version:string
   -> V1.Environment_summary.t
 
+val invocation : root:string -> V1.Environment_selection.t -> string list -> Invocation.t
+
 (** Probe the selected environment's Dune executable. *)
 val probe_invocation : root:string -> V1.Environment_selection.t -> Invocation.t
 
@@ -36,7 +38,9 @@ val parse_workspace : string -> (V1.Dune_workspace.Inspection.t, string) Result.
 
 (** Translate a typed generic action without a shell. *)
 val action_invocation
-  :  root:string
+  :  ?build_alias:string
+  -> ?test_alias:string
+  -> root:string
   -> environment:V1.Environment_selection.t
   -> V1.Dune_action.t
   -> Invocation.t

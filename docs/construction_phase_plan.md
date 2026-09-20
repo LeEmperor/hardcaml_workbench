@@ -260,12 +260,14 @@ prerequisite rather than as incomplete work in this milestone.
 [UI layout](hardcaml_workbench_architecture.md#8-suggested-ui-layout).
 **Depends on:** 1A.
 
-**Status:** Implementation complete; acceptance pending. The root/session, environment, Dune
-inspection, V1 compatibility, per-project FIFO scheduling, process-group cancellation, and
-daemon-session log decisions were recorded in architecture section 4.3 on 2026-09-20. Automated
-and installed checks pass. Real Ghostty/Xfce resize confirmation and attachment through an SSH
-forward to an authorized second machine remain human acceptance checks, so the milestone is not
-marked complete.
+**Status:** Complete. The root/session, environment, Dune inspection, V1 compatibility,
+per-project FIFO scheduling, process-group cancellation, and daemon-session log decisions were
+recorded in architecture section 4.3 on 2026-09-20. Automated and installed checks pass. The user
+accepted the intended server-side terminal workflow over ordinary SSH, including repeated resize,
+navigation, build/test, log selection, exit, and reattachment. This does not claim every
+Ghostty/Xfce/tmux combination or the small-terminal threshold was exercised. At the user's explicit
+request, the separate workstation-native client attachment through a forwarded HTTP endpoint is
+deferred rather than passed; its original check and commands remain below as a visible follow-up.
 
 Steps:
 
@@ -294,10 +296,12 @@ Steps:
   with small local commands; ensure supervised child processes are cleaned up.
 - [x] Confirm the daemon outlives its clients: exit the client during a running job, then
   reattach and recover the daemon-owned job without submitting another one.
-- [ ] Confirm the same client works against a daemon on another machine through an SSH port
-  forward, which is the attached deployment mode in architecture section 4.4 and needs no
-  additional transport work. No authorized second host was available on 2026-09-20; exact
-  commands and the acceptance checklist are recorded in `docs/development.md`.
+- [ ] **Deferred by user:** confirm a workstation-native client works against a daemon on another
+  machine through an SSH port forward, which is the attached deployment mode in architecture
+  section 4.4 and needs no additional transport work. This is distinct from running both daemon
+  and terminal client on the server and transporting the terminal over ordinary SSH. The current
+  intended deployment is the latter. Exact commands and the retained acceptance checklist are in
+  `docs/development.md`.
 
 **Exit demo:** use the installed application to open the external fixture without any
 Workbench-specific files, inspect Dune-derived information, and run build/test actions in
@@ -305,6 +309,11 @@ its environment with output visible before completion. Exercise failure and canc
 then reconnect during a job and recover the project, job, and logs without resubmission.
 Verify that the fixture still builds/tests directly from the terminal and that no fixture
 modules link into the application. This completes section 25's first milestone.
+
+Acceptance scope adjustment recorded 2026-09-20: the exit demo is accepted using the installed
+server-side terminal client over ordinary SSH. Workstation-native attachment through a forwarded
+HTTP endpoint remains a supported architectural capability and a deferred live validation item;
+it is not evidence claimed for 1B and does not block completion under the user-approved scope.
 
 ### 1C. Add the versioned manifest and project driver for real RTL
 
@@ -315,15 +324,43 @@ modules link into the application. This completes section 25's first milestone.
 [artifact model](hardcaml_workbench_architecture.md#18-artifact-model).
 **Depends on:** 1B.
 
+**Status:** In progress. The first bounded slice defines manifest version 1 and driver describe
+protocol version 1, implements optional-integration status, supervised discovery, refresh, and
+fixture target/configuration display. Target selection, elaboration, RTL, hierarchy, artifact
+retrieval, and full provenance remain open and the milestone is not complete.
+
+A human check found that the first attached terminal session remained on its pending open response
+after discovery completed, although reopening showed the daemon's cached result. The client now
+reduces the production incremental event stream and prefers that current project record over the
+open response. Automated reducer, backend-ordering, installed plain-client, and no-input PTY checks
+cover the repair. Final confirmation in the user's real SSH/tmux terminal remains pending; this does
+not change milestone 1C's In progress status.
+
+Delivered in this slice:
+
+- [x] Parse the optional manifest, honor valid aliases, preserve safe fallback aliases, and expose
+  actionable invalid/unsupported integration without rejecting a generic Dune project.
+- [x] Run compatible driver discovery through the existing root-serialized supervisor in the
+  selected project environment, with bounded structured stdout, diagnostic stderr, cancellation,
+  stable session identities, and typed project/job updates.
+- [x] Reload manifest/discovery explicitly without daemon restart; repeat-open and reconnect remain
+  cached and never repeat work. Failed refresh clears old summaries rather than presenting stale
+  success.
+- [x] Discover and display the external fixture's real counter target and default configuration,
+  while keeping hardware hierarchy explicitly unavailable.
+- [x] Propagate initial and refreshed discovery results to the same attached client through ordered
+  incremental project events, including failed-result invalidation, without reopening or routine
+  full snapshots.
+
 Steps:
 
-- [ ] Define the initial schema/validation for optional `hardcaml-workbench.sexp`, beginning
+- [x] Define the initial schema/validation for optional `hardcaml-workbench.sexp`, beginning
   with `(lang hardcaml-workbench 1)`, project name, and Dune driver/build/test references
   from section 4.1. Keep it additive and small; do not reproduce Dune's graph. Add optional
   environment, FPGA-part, or default-target fields only after documenting their behavior.
-- [ ] Define the versioned driver request/result contract, compatibility handling, target
-  registration, configuration validation, and hierarchy identity. Keep this process
-  protocol distinct from the browser/daemon API, with portable results mapped by the adapter.
+- [x] Define the versioned driver describe/result contract, compatibility handling, target and
+  configuration registration, session-scoped identity, framing/output limits, diagnostics,
+  cancellation, and refresh. Hierarchy identity and later operation schemas remain open.
 - [ ] Add a driver to the independent fixture, built and invoked through Dune in that
   project's compiler, package, and Hardcaml environment. Link circuit libraries only in
   the project driver; use typed library APIs there for discovery, elaboration, and Verilog
@@ -734,8 +771,8 @@ implementation and validation evidence; a checked task list alone is insufficien
 | Milestone | Status | Implementation / validation evidence or blocker |
 | --- | --- | --- |
 | 1A — Installed application foundation | Complete | Completed 2026-09-20. `protocol/V1`, `native_http/`, `daemon/rpc_server.ml`, the installed daemon/client, runtime discovery/locking, and the isolated counter fixture implement the recorded design. `scripts/test-native-application.sh` passed installed typed exchange from outside the checkout, concurrent startup, stale discovery, client exit/reattach, explicit endpoint failure without replacement, and shutdown. `FIXTURE_OPAM_SWITCH=5.2.0+ox ./scripts/test-fixture.sh` built and tested the copied external fixture. Codec/RPC tests cover malformed requests, unsupported versions, instance and cursor errors, timeout heartbeat, limits, and HTTP trust checks. `dune describe external-lib-deps` confirms the terminal has no backend/adapter/project-integration path. Native package build/install, opam lint, format, lint, tests, and default build pass; exact commands are in [development notes](development.md#milestone-1a-installed-native-foundation). Browser validation remains separately tracked in 1E and is not claimed by this milestone. |
-| 1B — Generic Dune projects, jobs, and terminal client | In progress | Implementation complete 2026-09-20. Protocol/RPC, adapter, supervisor, logs, installed external-fixture workflow, and PTY resize checks pass. Real Ghostty/Xfce font-zoom and another-machine SSH-forward checks remain pending; see development notes. |
-| 1C — Versioned manifest/driver and RTL | Not started | — |
+| 1B — Generic Dune projects, jobs, and terminal client | Complete | Completed 2026-09-20 under the recorded acceptance scope adjustment. Protocol/RPC, adapter, supervisor, file-backed logs, installed external-fixture workflow, and PTY resize checks pass. The user confirmed repeated resizing while navigating, visible generic Dune workspace information, explicit unavailable hierarchy, build/test completion, per-job logs including repeated no-output jobs, diagnostics toggling, and state recovery after exit/relaunch in the intended server-side TUI over ordinary SSH. The UI follow-up makes state plus process outcome primary, distinguishes empty logs through known EOF, bounds verbose connection diagnostics behind `d`, middle-truncates the default root, and exposes complete wrapped diagnostic fields with `[`/`]` scrolling. This human evidence does not claim every terminal/tmux combination or crossing the small-terminal threshold. A workstation-native client through an SSH-forwarded HTTP endpoint is explicitly deferred by the user, not passed; commands remain in the development notes. |
+| 1C — Versioned manifest/driver and RTL | In progress | The manifest/describe discovery slice passed on 2026-09-20. Portable tests cover defaults, unknown/duplicate/invalid fields, unsupported versions, driver framing/output limits, capabilities, keys, and references. Backend tests cover cached open, stable refresh identities, manifest repair, malformed/incompatible/nonzero/launch failures, stale-result clearing, cancellation, selected environment propagation, and generic fallback. The copied fixture builds/tests and runs its counter driver directly. Installed checks cover no manifest, manifest-only custom aliases, compatible discovery, reconnect without rerun, explicit refresh, missing driver, invalid manifest, generic fallback, and external launch. Format, lint, tests, build, package install build, opam lint, dependency boundaries, and PTY resize pass; exact commands are in the development notes. Target selection, elaboration/RTL, real hierarchy, artifact retrieval, and full provenance remain open; no full milestone completion is claimed. |
 | 1D — First structured hierarchical report / MVP gate | Not started | — |
 | 1E — Browser client and graphical views | Blocked | Two layers of the same blocker, checked 2026-09-17. `js_of_ocaml` is not installed in the `5.2.0+ox` switch and its `oxcaml-js_of_ocaml*` packages are guarded, so `dune build` currently fails on `web/main.bc` with `Library "js_of_ocaml" not found`; behind that sits the recorded [OxCaml/js_of_ocaml incompatibility](development.md#javascript-toolchain-prerequisite) that would block the JavaScript target even once installed. Later evidence: the 2026-09-18 development notes record a successful protocol JavaScript compilation probe and a local Bonsai dependency repair. The original blocker diagnosis needs revalidation; next action in 1E is to build browser assets and execute the codecs with the selected toolchain. Not part of the MVP gate; the daemon, protocol, project-integration, backend, and adapter targets build. |
 | A.1 — Open an ASIC consumer as an ordinary project | Not started | — |
@@ -752,9 +789,10 @@ implementation and validation evidence; a checked task list alone is insufficien
 | 4C — GUI socket bridge (optional) | Not started | — |
 | 4D — Distributed remote workers | Not started | — |
 
-**Next construction task:** implement 1B's generic Dune project/job demo. Resolve its project-environment and Dune
-inspection details at that point; driver, report, and vendor-worker decisions remain with
-1C, 1D, and 2A respectively. Do not expand 1A into those milestones.
+**Next construction task:** continue 1C after this bounded discovery slice with target/configuration
+selection and the separately designed elaboration/RTL, hierarchy, artifact retrieval, and
+provenance path, or exercise A.1's ordinary generic-project path against an ASIC consumer. Report
+and vendor-worker decisions remain with 1D and 2A respectively.
 
 The shortest route from the current state to a Workbench that is actually used runs through
 A.1: open `hardcaml_asic` or its consumer as an ordinary project, run its Dune build and test

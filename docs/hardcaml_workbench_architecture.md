@@ -319,6 +319,214 @@ The driver protocol must be versioned. The daemon invokes the driver through Dun
 opened project's environment, supervises it as a job when appropriate, and reports missing
 or incompatible integration without preventing generic Dune use.
 
+### 1C discovery contracts (2026-09-20)
+
+This section fixes only the first bounded 1C slice: manifest validation and target/configuration
+discovery. Elaboration, RTL, hierarchy, artifacts, and complete provenance remain later 1C work.
+
+**Manifest version 1.** `hardcaml-workbench.sexp` is optional. When present it is a sequence of
+exactly these top-level forms, each required exactly once and with `lang` first:
+
+```lisp
+(lang hardcaml-workbench 1)
+(project (name mac))
+(dune
+ (driver ./workbench/project_driver.exe)
+ (build_alias @all)
+ (test_alias @runtest))
+```
+
+`project.name` is a required, nonempty atom. `dune.driver`, `dune.build_alias`, and
+`dune.test_alias` are optional and may occur at most once. Driver absence means valid
+manifest-only integration. Build and test default to `@all` and `@runtest`; an invalid manifest
+falls back to those safe generic actions and the name from `dune-project` or the root basename.
+Unknown top-level forms or fields, duplicate forms or fields, malformed records, an unsupported
+language name/version, and empty values invalidate the optional integration with a diagnostic
+that names the file and field. Version 1 has no environment, FPGA, board, or default-target field.
+
+Driver and alias values are Dune target references, never shell fragments. They must be relative,
+contain no empty, `.` or `..` path component, and remain under the canonical project root after
+lexical resolution. Aliases have the form `@name` or `path/@name`; the alias name is nonempty.
+The driver has the form `./path` and is passed as one argv element to `dune exec`. Validation is
+syntactic at manifest load; Dune remains authoritative for whether the declared target exists.
+Build and test use `dune build --root ROOT --no-buffer REFERENCE`, so declared aliases are honored
+without shell interpolation. A missing target is an ordinary supervised job failure.
+
+**Driver protocol version 1.** This is a separate process protocol, not application protocol V1.
+The daemon runs the manifest's executable as:
+
+```text
+dune exec --root ROOT --no-buffer DRIVER -- describe --protocol-version 1
+```
+
+in the session's explicitly selected environment. The process writes exactly one S-expression to
+stdout, bounded to 1 MiB including Dune/driver output, and may write human diagnostics to stderr.
+The response is generated/parsed as the following portable shape:
+
+```lisp
+((protocol_version 1)
+ (capabilities (describe))
+ (targets
+  (((key counter) (name Counter) (top counter) (backend simulation)
+    (clocks ()) (facts ()))))
+ (configurations
+  (((key default) (target counter) (name Default) (description ("8-bit counter"))))))
+```
+
+The response version must equal 1. `describe` must be advertised; absence is an unsupported
+capability, distinct from a successful empty target list. Unknown capability atoms are retained as
+forward-compatible advertisement and ignored by this client. Output that exceeds the limit,
+contains diagnostic text around the S-expression, is malformed, has duplicate/invalid keys, or
+references an unknown target fails discovery. Target/configuration keys are stable project-owned
+ASCII identifiers matching `[A-Za-z0-9][A-Za-z0-9._-]*`; target and configuration keys are unique
+in their respective namespaces. Names, top names, backend IDs, clock names, fact namespaces/names,
+and fact values are data, not executable command fragments.
+
+The daemon maps a target key to `<project-id>/target/<key>` and a configuration key to
+`<project-id>/configuration/<key>`. These are deterministic for the lifetime of the
+`(canonical-root, environment)` session and across refreshes in that session. They are not durable
+cross-daemon identities. Configuration references are resolved only within the same describe
+result, preventing data from one project session from entering another.
+
+Driver build/execution is one daemon job and uses the existing process-group supervisor, log
+store, cancellation owner, and per-root Dune FIFO. `dune exec` owns any required driver build, so
+build failure, missing targets, driver nonzero exit, and cancellation have the normal job outcome
+and diagnostic stream. Supervised build, test, and driver jobs from sessions for different
+environments but the same canonical root share that root FIFO because they contend on the same
+build tree. Different roots may run concurrently. Initial environment probes/workspace inspection
+remain the bounded open operation from 1B and rely on Dune's own lock. No second subprocess runner
+is introduced.
+
+The initial open parses the manifest and, for a valid declared driver, queues discovery once.
+Repeat-open and reconnect return daemon-owned cached state and never rerun it. The additive
+capability-advertised application operation `refresh-integration` first reloads and validates the
+manifest, then queues a new discovery job when it declares a driver; this permits repair after an
+absent/invalid manifest or failed driver without restarting the daemon. It rejects a valid manifest
+with no driver and a concurrent refresh. An absent or newly invalid manifest immediately publishes
+generic fallback with safe aliases. Starting discovery sets driver status to unavailable with a
+`discovery pending` diagnostic and clears targets/configurations. Success
+atomically publishes the new driver status and summaries. Failure/cancellation publishes an
+actionable unusable status and leaves summaries empty, so an old successful result is never shown
+as current. Generic build/test remains available throughout and uses manifest aliases only while
+the manifest is valid.
+
+The project-result event is published before the corresponding discovery job becomes terminal,
+including process-launch failure. Clients reduce ordinary incremental events into their current
+snapshot in sequence order. An `open-project` response is bootstrap/request metadata and must not
+supersede a newer project record received in the snapshot or event stream. Likewise, queued job
+records returned by submit/refresh operations must not overwrite newer event-applied job states.
+Full snapshots remain for initial attachment, retained-event resynchronization, and reconnect; they
+are not the ordinary discovery-update mechanism.
+
+No SDK is introduced for this slice. The request/response is small enough for a project driver to
+emit with its existing S-expression support, and a library would create a version/dependency
+coupling before repeated implementation has demonstrated useful shared code. Later operations may
+reuse the framing and negotiation rules, but their detailed schemas are deliberately not reserved
+or implemented now.
+
+### 1C RTL generation and artifact contracts (2026-09-20)
+
+This is the second bounded 1C slice. It adds client-local target/configuration selection, one
+supervised RTL operation, daemon-lifetime artifact registration, and bounded content retrieval. It
+does not add an elaborated hierarchy model. Generating RTL necessarily elaborates the selected
+circuit inside the project driver, but exporting that circuit as portable hierarchy data remains
+the next 1C slice.
+
+**Selection.** Target and configuration selection is client-local view state. The daemon owns the
+declared project summaries and the jobs/artifacts that cite them; it does not own a shared “current
+target.” On first usable discovery a client selects the first target in driver declaration order and
+the first configuration declared for that target. A target with no declared configuration is
+visible but cannot be submitted for RTL generation. Explicit terminal controls cycle targets and
+only the configurations belonging to the selected target. Changing target selects that target's
+first configuration.
+
+After a project event or reconnect, a client preserves IDs that still exist and still have the
+declared target/configuration association. If the target disappeared it selects the first remaining
+target; if only the configuration disappeared or moved it selects the first configuration for the
+selected target. No available replacement means an explicit unselected state. Switching to a
+different project session resets both selections. Validation in this slice means exactly that the
+submitted session IDs resolve to currently declared summaries and that the configuration's
+`target` equals the submitted target. Configuration values remain project-owned, named declarations;
+there is no generic parameter editor or expression language.
+
+**Driver operation.** Driver protocol version 1 gains the advertised `generate-rtl` capability and
+a separate request/result envelope; the existing describe shape does not change. The daemon runs:
+
+```text
+dune exec --root ROOT --no-buffer DRIVER -- generate-rtl --protocol-version 1 \
+  --target TARGET_KEY --configuration CONFIGURATION_KEY --output-dir JOB_OUTPUT_DIR
+```
+
+The one operation elaborates and emits RTL. A separate public elaboration job would add no useful
+lifecycle or result in this slice. The target and configuration are project-declared keys recovered
+from the currently discovered session summaries, never client-supplied command fragments. The
+driver must reject unknown keys and mismatched associations. The daemon rejects stale IDs before
+queueing and validates them again immediately before execution, so a refresh queued ahead of the
+operation can invalidate it consistently. Absence of `generate-rtl` is an explicit unsupported
+operation and does not affect generic Dune build/test.
+
+The result is exactly one S-expression on stdout, bounded by the existing 1 MiB driver stdout
+limit; diagnostics remain on stderr. It repeats protocol version, target key, and configuration key,
+declares a bounded nonempty list of output records, reports actual tool versions when known, and may
+carry project-supplied backend build/run references. An output record contains a relative path,
+backend-neutral artifact kind fields, display name, and optional description. RTL bytes never enter
+the result envelope. Unknown fields are not accepted in version 1. A process exit of zero is only a
+successful process outcome: malformed/incompatible results, key disagreement, duplicate or invalid
+paths, missing/non-regular output files, output-boundary escapes, import failures, or registration
+failures make the job fail.
+
+**Handoff and storage.** Before launch, the daemon creates a private job output directory outside
+the project root and passes only that destination to the driver. Each declared output must be a
+normalized relative path with no empty, `.` or `..` component. The daemon resolves it under the
+canonical job destination, rejects symlinks and non-regular files, opens it without treating a
+client-visible path as authority, and copies it into a fresh daemon-owned artifact file. Each run
+mints new artifact IDs and storage names, so a later run cannot overwrite an earlier registered
+output. Driver scratch/output directories are removed after processing; imported artifact content
+lasts for the daemon lifetime and is removed on daemon shutdown.
+
+Registration is all-or-nothing for this operation. The daemon validates and imports every declared
+output before publishing any artifact. On failure or cancellation it removes staged files and
+registers none. Cancellation requested while output processing is in progress wins over success.
+After successful import the daemon stores all artifacts, updates the generating job with their IDs,
+then emits artifact upserts and the updated job before the terminal successful job event. This makes
+the snapshot/event stream self-consistent when completion is advertised. Build/run references are
+copied only when the driver supplies them; Workbench does not invent them.
+
+**Application operations.** Application protocol V1 gains two additive, capability-advertised
+operations without changing an existing wire shape:
+
+- `generate-rtl`: daemon instance, project ID, target ID, configuration ID, and nonempty submission
+  key in; the queued job out. Submission keys use the existing daemon-lifetime idempotency rule and
+  conflict if reused for another exact selection.
+- `read-artifact`: daemon instance, artifact ID, byte offset, and requested byte count in; bytes,
+  next offset, total size, and EOF out. Reads are at most 256 KiB. Negative/future offsets, zero or
+  oversized limits are invalid requests; unknown IDs are not found; registered metadata whose
+  private content is missing returns not found and is marked unavailable before the response.
+
+Snapshots and `Artifact_upsert` events carry metadata only. Content access is always by artifact ID;
+no client receives a storage path as a handle. An artifact remains readable after the submitting
+client exits and appears in same-daemon reconnect snapshots. Durable restart recovery remains 2C.
+
+**Provenance.** Provenance is captured for the exact submitted target/configuration, not the
+client's later selection. At execution start and again after the driver exits, the daemon records
+Git HEAD and working-tree state when Git is available and computes a deterministic SHA-256 over the
+project-relative path, mode category, and bytes of regular project files, excluding `.git`, `_build`,
+and the daemon-owned output/store directories. Equal boundary hashes prove that those observed file
+sets and bytes agreed at both boundaries; they do not prove that no file changed transiently during
+execution, identify external package contents, or make the environment reproducible. Different or
+failed boundary captures produce an honest unknown source identity rather than choosing one side.
+A dirty tree retains its commit only as context, not as an exact source identity. Non-Git roots have
+no commit but may still have a boundary hash. `preserved_inputs` remains empty in this slice, so the
+hash is evidence, not a stored reconstructable source bundle.
+
+Artifact provenance records the canonical project root identity, target/configuration, generating
+job, registration time, selected environment description, Dune version, driver protocol version,
+and actual OCaml, Hardcaml, driver, or RTL tool versions reported by the project driver. Missing
+versions stay unknown. An opam switch name identifies only the selected execution context and is not
+claimed to describe all installed packages, variables, licenses, or external tools. Source capture
+occurs at execution boundaries rather than submission, because a queued operation has not consumed
+the source yet; a queued refresh can also invalidate the submitted IDs before launch.
+
 A small `hardcaml_workbench_project` SDK may help external projects declare targets and
 implement the driver protocol. It is project-integration code, not synthesizable hardware,
 and projects must remain usable through their ordinary Dune commands without launching the
@@ -1434,6 +1642,13 @@ The backend stores each artifact's filesystem location privately. Browser-visibl
 values contain the artifact ID, kind, availability, and metadata. Content is retrieved from
 the daemon by ID so browser code never relies on a daemon-local path.
 
+For the daemon-lifetime 1C implementation, private content is copied out of a driver's job-specific
+output directory into a newly named store file before registration. Metadata and private locations
+are held in the daemon's artifact repository; snapshots/events expose only the metadata. Reads are
+bounded byte pages through the application protocol. Registration never points at a mutable project
+build path, and repeated jobs retain distinct outputs. See the concrete handoff, validation,
+partial-output, cancellation, retrieval, and reconnect rules in section 4.1's 1C RTL contracts.
+
 Store provenance including:
 
 ```text
@@ -1460,6 +1675,13 @@ the input contents needed for reproduction as well as hashes. For ASIC integrati
 the immutable build manifest and separate execution record under their original identities;
 link the Workbench job/artifacts to them as described in section 4.1. Complete provenance
 will enable design comparisons later.
+
+The 1C RTL slice records a deterministic SHA-256 source-tree observation at execution start and end
+but does not yet preserve a source bundle. This narrows accidental misattribution and detects normal
+queued/running edits, while leaving a documented reproducibility gap: equal endpoint observations do
+not exclude transient edits and do not identify external dependencies. A later durable history or
+backend build bundle may populate `preserved_inputs`; it must not reinterpret this hash as proof of
+a complete environment.
 
 ## Metrics and Checks
 

@@ -28,6 +28,7 @@
    bonsai_term
    async
    cohttp-async
+   cryptokit
    ; Repository development tools.
   (ppx_js_style :with-dev-setup)
   (ocamlformat :with-dev-setup)

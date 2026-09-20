@@ -63,8 +63,8 @@ For separate foreground processes:
   --connect http://127.0.0.1:8080 --project-root /path/on/daemon/host
 ```
 
-The 1A client reports the project root as pending because opening begins in 1B. Browser assets
-belong to 1E. The removed RTL-generator scaffold does not participate in startup.
+The native client opens generic Dune projects and runs build/test jobs. Browser assets belong to
+1E. The removed RTL-generator scaffold does not participate in startup.
 
 ## Baseline recorded for milestone 1A
 
@@ -355,8 +355,8 @@ the bytecode web scaffold remains only a dependency-boundary check until 1E.
 
 ## Milestone 1B generic Dune workflow
 
-Implementation completed on 2026-09-20 with acceptance pending as described below. Install to
-a temporary prefix and copy the generic fixture outside the checkout:
+Completed on 2026-09-20 under the acceptance scope recorded below. Install to a temporary prefix
+and copy the generic fixture outside the checkout:
 
 ```sh
 prefix="$(mktemp -d)"
@@ -384,13 +384,32 @@ environment. Interactive controls are:
 ```text
 b  submit Dune build      t  submit Dune test
 c  cancel selected job   j/k  select next/previous job
-r  reconnect and refresh q or Ctrl-C  exit client only
+d  connection details    r  reconnect and refresh
+[/] scroll connection details
+q or Ctrl-C  exit client only
 ```
 
-The project pane labels information as generic Dune workspace structure. Driver-dependent
-Hardcaml hierarchy, RTL, target, clock, and part operations remain explicitly unavailable until
-1C. Jobs and logs remain in the daemon after the client exits. Starting the same command again
-reattaches and retrieves snapshots/log offsets without resubmitting work.
+The project pane labels information as generic Dune workspace structure. A compact endpoint and
+connection state remain in the header; `d` replaces the project pane with bounded endpoint,
+instance, protocol, and environment diagnostics. Driver-dependent Hardcaml hierarchy, RTL, target,
+clock, and part operations remain explicitly unavailable until 1C. Jobs and logs remain in the
+daemon after the client exits. Starting the same command again reattaches and retrieves
+snapshots/log offsets without resubmitting work.
+
+Long roots in the default project pane are middle-truncated to preserve both their leading location
+and final project directory. The diagnostics view puts Project, Root, Requested environment,
+Resolved environment, and Dune version in separate label/value blocks. It wraps the complete root
+on indented lines, preferring path separators and hard-wrapping an individual component only when
+necessary. The details header shows its current and maximum scroll offsets; use `[` and `]` to
+reach wrapped fields that do not fit the available pane height.
+
+The selected-job detail uses the job state as the prominent outcome and separately reports an exit
+code, terminating signal, or launch failure. Absence of a failure string is never presented as
+success. The console distinguishes logs not fetched yet, a running job with no output, a finished
+job whose logs have not reached EOF, known EOF with no records, and retrieval failure. In
+particular, a successful unchanged Dune build or `dune runtest` may legitimately reach EOF without
+emitting output; the UI says only that the job finished without stdout/stderr output and does not
+claim a cache hit.
 While open, the client retries a lost connection from 250 ms up to 5 seconds. A new daemon
 instance clears obsolete local session/log offsets, reports the restart, fetches a new snapshot,
 and never replays a previous submission.
@@ -439,14 +458,21 @@ On 2026-09-20 this passed `80x24 -> 120x40 -> 40x10 -> 1x1 -> 80x24 ->
 and normal rendering recovered after growth. This is automated PTY evidence, not real-terminal
 acceptance.
 
-For the required workstation check, launch the command above over SSH first in Ghostty and then
-in Xfce Terminal. Repeatedly use Ctrl+plus/minus past the prior failure threshold, shrink below
-68x20, return to a normal size, press `b`, select with `j/k`, and press `q`. Expected: a
-“terminal too small” screen while constrained, complete redraw after growth, responsive controls,
-and dimension records in the diagnostics file. This real-terminal check remains pending user
-confirmation.
+Human acceptance confirmed that repeated resizing works while navigating in the intended
+server-side TUI over SSH. The user also confirmed visible Dune information and unavailable
+hierarchy labeling, build/test submission and completion, selection of earlier per-job logs, and
+state recovery after `q` and relaunch. This records only those observations: it does not claim that
+both Ghostty and Xfce Terminal, with and without tmux, were each retested. The user did not report
+seeing the small-terminal fallback and did not confirm crossing its 68x20 character-cell threshold,
+so that is not treated as a failure. Automated PTY repaint evidence remains separate from this
+human visual acceptance.
 
 ### Attached remote daemon
+
+Two SSH workflows must not be conflated. The accepted current deployment runs both daemon and
+terminal client on the headless server and carries the terminal over an ordinary SSH session. The
+following deferred check instead installs and runs a separate native client on the workstation and
+attaches it to the server daemon's HTTP endpoint through a port forward.
 
 On an authorized remote project host:
 
@@ -468,8 +494,38 @@ ssh -N -L 18080:127.0.0.1:8080 project-host
 Confirm that the displayed root and Dune version are remote, start a build, exit the client while
 it is running, reconnect with the same command, and verify one job with continuing logs. Cancel
 it from a second attached client and verify both clients observe `Cancelled` while retaining
-their own selected rows. This check was not run because no authorized second host was available;
-a local tunnel or second local client is not recorded as substitute evidence.
+their own selected rows. This workstation-native/forwarded-endpoint check is explicitly deferred
+by the user. It is not recorded as passed, and a local tunnel or second local client is not
+substitute evidence. The capability and commands remain here for later validation, but this
+deferred check does not block 1B under the user-approved acceptance scope.
+
+### 1B human acceptance and UI follow-up
+
+The user accepted the following server-side interactive workflow on 2026-09-20:
+
+- repeated resize, including while navigating, recovers and remains usable;
+- generic Dune items/workspace information is visible and hardware hierarchy is explicitly
+  unavailable until project-driver integration;
+- jobs, live stdout/stderr, and hotkeys are visible;
+- `b` creates a job that completes, and `t` works with observed fixture test output;
+- selecting earlier jobs displays their corresponding build/test logs;
+- later repeated build/test jobs may complete with no output;
+- `q` followed by relaunch restores daemon-owned project and job state.
+
+The user subsequently confirmed that the diagnostics toggle, clear job status/log presentation,
+repeated no-output builds/tests, resize behavior, and quit/reopen recovery all pass. The remaining
+presentation polish middle-truncates the default root and makes every full diagnostic field
+available through bounded wrapping and `[`/`]` scrolling. Workstation-native attachment through a
+forwarded HTTP endpoint remains deferred and is not part of this confirmation.
+
+The UI follow-up addresses the two ambiguous presentations exposed by that review. Selected jobs
+now show `Complete`, `Failed`, or `Cancelled` prominently with process exit code, signal, launch
+failure, and any separate failure reason. Per-job log fetch state retains the protocol EOF bit, so
+an empty terminal log is distinguished from not-yet-fetched, still-running, still-draining, and
+retrieval-error states. Responses are stored only under the requested job and ignored after a
+daemon-instance change, preventing selection or reconnect races from presenting another job's log
+as current. Connection diagnostics moved from the default project content into the bounded `d`
+details view.
 
 ### 1B validation evidence
 
@@ -497,4 +553,192 @@ capabilities, malformed/instance errors, populated snapshots/events, retained-cu
 and real log retrieval. Installed acceptance opens a copied external fixture, observes start
 output before process completion, runs build/test, reattaches without duplicate jobs, uses two
 observers, rejects invalid roots/environments, and retains the 1A lifecycle checks. Dependency
-inspection confirms the terminal still depends only on native HTTP and protocol internally.
+inspection confirms the terminal role still reaches only native HTTP and protocol application
+roles, not backend, adapter, or project-integration code.
+
+The acceptance/UI follow-up was revalidated serially on 2026-09-20 with the same four repository
+commands, package install build, external fixture script, and installed native application script
+listed above. `dune runtest` includes focused presentation-state tests for queued/running versus
+terminal outcomes, exit code, signal, launch failure, missing failure reason, empty logs before EOF,
+known empty EOF, draining, and retrieval error. The installed PTY command also passed
+`80x24 -> 120x40 -> 40x10 -> 1x1 -> 80x24 -> 100x24 -> 80x24`, with repaint byte counts
+`6002, 826, 230, 2722, 3202, 2722`; it additionally verified that daemon identity is absent from
+the default project pane, appears in the bounded `d` details view, and that the project pane returns
+after closing details. This remains automated terminal-protocol evidence rather than a claim about
+visual appearance in a particular real terminal.
+
+The subsequent field-rendering PTY regression repeats the same resize sequence, checks that
+diagnostics scrolling exposes Requested environment, Resolved environment, and Dune version, then
+closes details and verifies that the project pane recovers. Pure presentation tests additionally
+check bounded middle truncation, preservation of the final project directory when it fits,
+separator-aware full-path wrapping, and fallback wrapping for a component wider than the pane.
+
+The terminal executable now also links a private terminal-presentation helper used for these pure
+tests. Its application-role dependency closure remains the native HTTP client and portable
+protocol; it has no backend, adapter, or project-integration dependency.
+
+## Milestone 1C discovery slice
+
+The first bounded 1C slice implements optional manifest version 1 and project-driver describe
+protocol version 1. It does not implement target selection, elaboration, RTL, hardware hierarchy,
+artifacts, or complete provenance. The authoritative contracts are in architecture section 4.1.
+
+The fixture now contains `hardcaml-workbench.sexp` and
+`workbench/project_driver.exe`. The driver links the fixture's counter library and genuinely
+declares target key `counter` plus configuration key `default`; Workbench does not link or load the
+fixture module. The copied fixture remains an ordinary external project and its build, tests, and
+driver work directly:
+
+```sh
+FIXTURE_OPAM_SWITCH=5.2.0+ox ./scripts/test-fixture.sh
+```
+
+Install and launch from outside the checkout exactly as before. Initial open queues discovery once;
+repeat launch and reconnect only observe the daemon-owned result:
+
+```sh
+prefix="$(mktemp -d)"
+fixture="$(mktemp -d)"
+./scripts/with-switch.sh dune build -p hardcaml_workbench @install
+./scripts/with-switch.sh dune install --prefix "$prefix" hardcaml_workbench
+cp -R test/fixtures/example_project/. "$fixture/"
+rm -rf "$fixture/_build"
+cd /tmp
+XDG_RUNTIME_DIR="$(mktemp -d)" \
+  "$prefix/bin/hardcaml-workbench" \
+  --project-root "$fixture" --environment opam:5.2.0+ox
+```
+
+The project pane shows manifest/driver availability, discovery job state, and target/configuration
+summaries. Press `i` to reload the manifest and rerun discovery. This clears old summaries while
+the new result is pending, so a failed refresh cannot look current. `r` remains reconnect only and
+does not rerun discovery. Deterministic non-TTY refresh is:
+
+```sh
+XDG_RUNTIME_DIR="$same_runtime" \
+  "$prefix/bin/hardcaml-workbench" --plain \
+  --project-root "$fixture" --environment opam:5.2.0+ox \
+  --refresh-integration --wait
+```
+
+Manifest-only projects use declared aliases. Invalid or unsupported manifests use safe generic
+`@all`/`@runtest` aliases, preserve generic build/test, and expose the validation reason. Driver
+build/exit, malformed output, protocol incompatibility, missing capability, output limit, and
+cancellation failures are job outcomes plus integration diagnostics. Driver stdout is the bounded
+structured result; stderr remains diagnostic output in the job log. All supervised build, test,
+and driver work for one canonical root, including sessions selecting different environments,
+shares one Workbench FIFO; bounded open-time inspection continues to rely on Dune's own lock.
+
+Validation completed on 2026-09-20 with OCaml `5.2.0+ox` and Dune `3.24.2`:
+
+```sh
+./scripts/with-switch.sh dune build @fmt                         # passed
+./scripts/with-switch.sh dune build @lint                        # passed
+./scripts/with-switch.sh dune runtest                            # passed
+./scripts/with-switch.sh dune build                              # passed
+FIXTURE_OPAM_SWITCH=5.2.0+ox ./scripts/test-fixture.sh           # passed
+OPAM_SWITCH=5.2.0+ox ./scripts/test-native-application.sh        # passed
+./scripts/with-switch.sh dune describe external-lib-deps         # boundary confirmed
+./scripts/with-switch.sh dune build -p hardcaml_workbench @install # passed
+./scripts/with-switch.sh opam lint hardcaml_workbench.opam       # passed
+./scripts/with-switch.sh opam lint hardcaml_workbench_web.opam   # passed
+```
+
+The installed script performs the temporary-prefix install and outside-checkout launch. It also
+runs the PTY regression through `120x40`, `40x10`, `1x1`, `80x24`, `100x24`, and `80x24`; repaint
+byte counts were `6002`, `826`, `230`, `2718`, `3202`, and `2718`. The dependency report confirms
+the terminal still reaches only native HTTP, presentation, and protocol roles, and that application
+libraries have no fixture/Hardcaml dependency. Fixture output records
+`OPAM_SWITCH_PREFIX=/home/wayne/.opam/5.2.0+ox`, providing direct evidence that its driver ran in the
+explicitly selected project environment.
+
+### 1C live discovery synchronization repair
+
+The first real-terminal 1C check found a gap that the earlier passing tests did not cover. Initial
+discovery completed and its structured output was valid, but the still-attached client continued to
+show the pending project. Quitting and reopening immediately showed the daemon's cached driver,
+target, and configuration without starting another job.
+
+The daemon had already decoded and stored the result and normally published its `Project_upsert`
+before the terminal `Job_upsert`. The terminal defect was in project selection: its fallback used
+`Option.first_some` with the open response as the preferred argument, so the pending response always
+won over the newer snapshot project. The polling loop also discarded incremental events and fetched
+a full snapshot after every poll, contrary to the application protocol's ordinary update path.
+
+The terminal now applies sequenced project, job, artifact, removal, and log-availability events to
+its local snapshot. It ignores already-applied events, rejects gaps/cursor disagreement, and uses a
+full snapshot only for initial attach, retained-event resynchronization, or reconnect. The current
+project prefers the event-reduced record and uses the open response only until that project appears.
+Submit/refresh/cancel responses add an absent job but do not replace a newer event-applied state.
+Driver process-launch failure now follows the same project-result-before-terminal-job ordering as
+the other discovery outcomes. Target and configuration names precede their long internal IDs in the
+bounded terminal rows so the useful part remains visible.
+
+Regression coverage now includes:
+
+- a pending open response followed by production `Project_upsert` and `Job_upsert` reduction in the
+  same client state used by the terminal view, yielding the real target and configuration;
+- job-complete/project-result ordering, changed refresh data, failed refresh clearing old summaries,
+  duplicate/cursor handling, and an update for another project not replacing the selected project;
+- backend publication ordering for successful, malformed, incompatible, nonzero, and process-launch
+  failure results;
+- an installed no-input PTY that starts from pending discovery and observes `Integration: Driver`
+  plus `Four-bit counter` in that same process before resize/navigation checks; and
+- installed plain refresh waiting through incremental events and printing the post-refresh target and
+  configuration without a second open, reconnect, or fresh snapshot.
+
+Final validation on 2026-09-20 used OCaml `5.2.0+ox` and Dune `3.24.2`:
+
+```sh
+./scripts/with-switch.sh dune build @fmt                           # passed
+./scripts/with-switch.sh dune build @lint                          # passed
+./scripts/with-switch.sh dune runtest                              # passed
+./scripts/with-switch.sh dune build                                # passed
+FIXTURE_OPAM_SWITCH=5.2.0+ox ./scripts/test-fixture.sh             # passed
+OPAM_SWITCH=5.2.0+ox ./scripts/test-native-application.sh          # passed
+./scripts/with-switch.sh dune build -p hardcaml_workbench @install # passed
+```
+
+The installed acceptance used fresh temporary prefixes, external fixture copies, and private runtime
+directories. Its generic resize run retained repaint counts `6002`, `826`, `230`, `2718`, `3202`,
+and `2718`. The discovery run reported `Attached-client live discovery: passed` and then passed the
+same resize stages; its repaint counts after the initial wide discovery frame were `924`, `826`,
+`230`, `2718`, `3202`, and `2718`. This is automated protocol/PTY evidence. The user's final visual
+confirmation in the original SSH/tmux workflow remains pending, and milestone 1C remains In progress.
+
+For that fresh-shell retest, create a new install, external fixture, and private daemon runtime, and
+save their paths in a sourceable file:
+
+```sh
+cd /path/to/hardcaml_workbench
+state="$(mktemp /tmp/hardcaml-workbench-1c-live.XXXXXX.env)"
+prefix="$(mktemp -d /tmp/hardcaml-workbench-1c-prefix.XXXXXX)"
+fixture="$(mktemp -d /tmp/hardcaml-workbench-1c-fixture.XXXXXX)"
+runtime="$(mktemp -d /tmp/hardcaml-workbench-1c-runtime.XXXXXX)"
+./scripts/with-switch.sh dune build -p hardcaml_workbench @install
+./scripts/with-switch.sh dune install --prefix "$prefix" hardcaml_workbench
+cp -R test/fixtures/example_project/. "$fixture/"
+rm -rf "$fixture/_build"
+printf 'export HCW_PREFIX=%q\nexport HCW_FIXTURE=%q\nexport HCW_RUNTIME=%q\n' \
+  "$prefix" "$fixture" "$runtime" >"$state"
+printf 'Saved session paths: %s\n' "$state"
+printf 'Prefix: %s\nFixture: %s\nRuntime: %s\n' "$prefix" "$fixture" "$runtime"
+```
+
+In that shell, launch from outside the checkout:
+
+```sh
+source "$state"
+cd /tmp
+XDG_RUNTIME_DIR="$HCW_RUNTIME" \
+  "$HCW_PREFIX/bin/hardcaml-workbench" \
+  --project-root "$HCW_FIXTURE" \
+  --environment opam:5.2.0+ox
+```
+
+Without pressing a key, the pending discovery should become `Integration: Driver`,
+`driver=available v1`, `Discovery: Complete`, `Target: Four-bit counter`, and
+`Configuration: Default four-bit counter`. After `q`, source the printed state file in any fresh
+shell and rerun the same launch command to verify cached repeat-open against the same new daemon; it
+must retain job 1 and must not rediscover automatically. Pressing `i` should create job 2 and update
+the same attached view through incremental events.

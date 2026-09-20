@@ -7,12 +7,44 @@ work_root="$(mktemp -d "${TMPDIR:-/tmp}/hardcaml-workbench-native.XXXXXX")"
 prefix="$work_root/prefix"
 outside="$work_root/outside"
 fixture="$work_root/fixture"
+integrated_fixture="$work_root/integrated-fixture"
+manifest_fixture="$work_root/manifest-fixture"
+missing_driver_fixture="$work_root/missing-driver-fixture"
+invalid_manifest_fixture="$work_root/invalid-manifest-fixture"
 runtime="$work_root/runtime"
 explicit_runtime="$work_root/explicit-runtime"
-mkdir -p "$prefix" "$outside" "$fixture" "$runtime" "$explicit_runtime"
+mkdir -p \
+  "$prefix" "$outside" "$fixture" "$integrated_fixture" "$manifest_fixture" \
+  "$missing_driver_fixture" "$invalid_manifest_fixture" \
+  "$runtime" "$explicit_runtime"
 
 cp -R "$repo_root/test/fixtures/example_project/." "$fixture/"
+cp -R "$repo_root/test/fixtures/example_project/." "$integrated_fixture/"
+cp -R "$repo_root/test/fixtures/example_project/." "$manifest_fixture/"
+cp -R "$repo_root/test/fixtures/example_project/." "$missing_driver_fixture/"
+cp -R "$repo_root/test/fixtures/example_project/." "$invalid_manifest_fixture/"
 rm -rf "$fixture/_build"
+rm -rf \
+  "$integrated_fixture/_build" "$manifest_fixture/_build" \
+  "$missing_driver_fixture/_build" "$invalid_manifest_fixture/_build"
+rm -f "$fixture/hardcaml-workbench.sexp"
+rm -rf "$fixture/workbench"
+rm -rf "$manifest_fixture/workbench"
+cat >"$manifest_fixture/hardcaml-workbench.sexp" <<'EOF'
+(lang hardcaml-workbench 1)
+(project (name manifest-only-fixture))
+(dune (build_alias @workbench-build) (test_alias @workbench-test))
+EOF
+cat >"$missing_driver_fixture/hardcaml-workbench.sexp" <<'EOF'
+(lang hardcaml-workbench 1)
+(project (name missing-driver-fixture))
+(dune (driver ./workbench/missing_driver.exe))
+EOF
+cat >"$invalid_manifest_fixture/hardcaml-workbench.sexp" <<'EOF'
+(lang hardcaml-workbench 99)
+(project (name invalid-manifest-fixture))
+(dune)
+EOF
 
 metadata_path="$runtime/hardcaml-workbench/daemon.sexp"
 client="$prefix/bin/hardcaml-workbench"
@@ -72,6 +104,16 @@ grep -Fq "Environment request: opam switch $switch  resolved=opam switch $switch
 grep -Eq "Generic Dune workspace: contexts=[^;]+; [1-9][0-9]* inspected item" \
   "$outside/first.txt"
 grep -Fq "Jobs: 0" "$outside/first.txt"
+
+XDG_RUNTIME_DIR="$runtime" \
+  "$repo_root/scripts/test-terminal-resize.py" "$client" \
+  --project-root "$fixture" --environment "opam:$switch"
+
+# A single attached terminal session must consume discovery events and render the result.
+XDG_RUNTIME_DIR="$runtime" \
+  "$repo_root/scripts/test-terminal-resize.py" "$client" \
+  --project-root "$integrated_fixture" --environment "opam:$switch" \
+  --expect-live-discovery
 
 XDG_RUNTIME_DIR="$explicit_runtime" "$client" --plain --connect "$first_endpoint" \
   --project-root "$fixture" --environment "opam:$switch" \
@@ -154,6 +196,71 @@ XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$fixture" \
 grep -Fq "Jobs: 3" "$work_root/jobs.txt"
 test "$(metadata_field pid)" = "$first_pid"
 
+# A valid manifest without a driver uses its declared aliases and remains manifest-only.
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$manifest_fixture" \
+  --environment "opam:$switch" >"$work_root/manifest-only.txt"
+grep -Fq "Project: manifest-only-fixture" "$work_root/manifest-only.txt"
+grep -Fq "Integration: Manifest" "$work_root/manifest-only.txt"
+grep -Fq "driver=absent" "$work_root/manifest-only.txt"
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$manifest_fixture" \
+  --environment "opam:$switch" --action test --wait >"$work_root/manifest-test.txt"
+grep -Eq '^Job .*: Complete$' "$work_root/manifest-test.txt"
+
+# Compatible driver discovery is daemon-owned, cached on repeat-open, and explicitly refreshable.
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$integrated_fixture" \
+  --environment "opam:$switch" >"$work_root/integrated-open.txt"
+for _attempt in $(seq 1 500); do
+  XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$integrated_fixture" \
+    --environment "opam:$switch" >"$work_root/integrated-ready.txt"
+  if grep -Fq "driver=available v1" "$work_root/integrated-ready.txt"; then
+    break
+  fi
+  sleep 0.05
+done
+grep -Fq "driver=available v1" "$work_root/integrated-ready.txt"
+grep -Fq "Four-bit counter (top counter)" "$work_root/integrated-ready.txt"
+grep -Fq "Default four-bit counter" "$work_root/integrated-ready.txt"
+grep -Fq "Jobs: 1" "$work_root/integrated-ready.txt"
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$integrated_fixture" \
+  --environment "opam:$switch" --refresh-integration --wait \
+  >"$work_root/integrated-refresh.txt"
+grep -Fq "Submitted integration refresh job" "$work_root/integrated-refresh.txt"
+grep -Eq '^Job .*: Complete$' "$work_root/integrated-refresh.txt"
+grep -Fq "driver=available v1" "$work_root/integrated-refresh.txt"
+grep -Fq "Four-bit counter (top counter)" "$work_root/integrated-refresh.txt"
+grep -Fq "Default four-bit counter" "$work_root/integrated-refresh.txt"
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$integrated_fixture" \
+  --environment "opam:$switch" >"$work_root/integrated-reconnect.txt"
+grep -Fq "driver=available v1" "$work_root/integrated-reconnect.txt"
+grep -Fq "Jobs: 2" "$work_root/integrated-reconnect.txt"
+
+# Missing and invalid optional integration remain actionable without disabling generic jobs.
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$missing_driver_fixture" \
+  --environment "opam:$switch" >"$work_root/missing-driver-open.txt"
+for _attempt in $(seq 1 500); do
+  XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$missing_driver_fixture" \
+    --environment "opam:$switch" >"$work_root/missing-driver-ready.txt"
+  if grep -Fq "driver=unusable: driver exited with code" \
+    "$work_root/missing-driver-ready.txt"; then
+    break
+  fi
+  sleep 0.05
+done
+grep -Fq "driver=unusable: driver exited with code" "$work_root/missing-driver-ready.txt"
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$missing_driver_fixture" \
+  --environment "opam:$switch" --action build --wait \
+  >"$work_root/missing-driver-build.txt"
+grep -Eq '^Job .*: Complete$' "$work_root/missing-driver-build.txt"
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$invalid_manifest_fixture" \
+  --environment "opam:$switch" >"$work_root/invalid-manifest-open.txt"
+grep -Fq "Integration: Generic_dune" "$work_root/invalid-manifest-open.txt"
+grep -Fq "unsupported hardcaml-workbench manifest version 99" \
+  "$work_root/invalid-manifest-open.txt"
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$invalid_manifest_fixture" \
+  --environment "opam:$switch" --action test --wait \
+  >"$work_root/invalid-manifest-test.txt"
+grep -Eq '^Job .*: Complete$' "$work_root/invalid-manifest-test.txt"
+
 if XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$outside" \
   --environment "opam:$switch" >"$work_root/invalid-root.txt" 2>&1; then
   echo "error: invalid project root unexpectedly succeeded" >&2
@@ -205,4 +312,5 @@ printf 'Installed client: %s\n' "$client"
 printf 'Installed daemon: %s\n' "$prefix/bin/hardcaml-workbench-daemon"
 printf 'Installed launch directory: %s\n' "$outside"
 printf 'External fixture: %s\n' "$fixture"
+printf 'Integrated external fixture: %s\n' "$integrated_fixture"
 printf 'Native lifecycle and installed workflow checks: passed\n'

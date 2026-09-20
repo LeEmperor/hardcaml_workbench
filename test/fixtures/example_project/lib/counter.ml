@@ -24,3 +24,12 @@ let create (_scope : Scope.t) (i : _ I.t) : _ O.t =
   let count = reg_fb spec ~width:4 ~f:(fun count -> count +:. 1) in
   { O.count_o = count }
 ;;
+
+let circuit ~width =
+  if width <= 0 then invalid_arg "counter width must be positive";
+  let clock_i = input "clock_i" 1 in
+  let clear_i = input "clear_i" 1 in
+  let spec = Reg_spec.create ~clock:clock_i ~clear:clear_i () in
+  let count = reg_fb spec ~width ~f:(fun count -> count +:. 1) in
+  Circuit.create_exn ~name:"counter" [ output "count_o" count ]
+;;
