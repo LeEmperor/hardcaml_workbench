@@ -2,6 +2,7 @@ open! Core
 open! Async
 open Hardcaml_workbench_protocol
 module Http = Hardcaml_workbench_native_http
+module Baseline_fixture = Terminal_presentation.Baseline_fixture
 module Presentation = Terminal_presentation.Presentation
 module State = Terminal_presentation.State
 
@@ -1408,6 +1409,113 @@ let render session ({ Bonsai_term.Dimensions.width; height } as dimensions) =
   View.zcat [ content; background ]
 ;;
 
+(* Baseline capture.
+
+   This is a development hook, not a second UI. It builds a [session] directly from a
+   deterministic fixture and calls the same [render] the interactive client calls, then
+   serialises the resulting [View.t] with Notty. Nothing above this point changes, so the
+   captures show the production layout rather than a reimplementation of it. *)
+
+let session_of_baseline_fixture (fixture : Baseline_fixture.t) =
+  let session =
+    { requested_endpoint = Some fixture.endpoint
+    ; project_root = Some (Project_root.to_absolute_path fixture.opened.project.root)
+    ; environment_selection = fixture.opened.environment.selection
+    ; environment_label = fixture.environment_label
+    ; diagnostics_file = None
+    ; client = Http.Client.create fixture.endpoint
+    ; hello = fixture.hello
+    ; opened = Some fixture.opened
+    ; snapshot = fixture.snapshot
+    ; selected = 0
+    ; selected_target = fixture.selected_target
+    ; selected_configuration = fixture.selected_configuration
+    ; selected_artifact = fixture.selected_artifact
+    ; artifact_view = None
+    ; hierarchy_view = None
+    ; hierarchy_errors = Artifact_id.Table.create ()
+    ; logs = Job_id.Table.create ()
+    ; status = fixture.status
+    ; polling = false
+    ; reconnect_delay_ms = 250
+    ; last_dimensions = None
+    ; show_connection_details = fixture.show_connection_details
+    ; connection_details_scroll = 0
+    }
+  in
+  reconcile_selection session;
+  preserve_selected_job session fixture.selected_job;
+  List.iter fixture.logs ~f:(fun { job; records; fetch } ->
+    let state = log_state session job in
+    state.records <- records;
+    state.next_offset
+    <- List.fold records ~init:0 ~f:(fun offset record ->
+         Int.max offset (record.offset + 1));
+    state.fetch <- fetch);
+  Option.iter fixture.artifact_view ~f:(fun { artifact; content; truncated } ->
+    session.artifact_view <- Some { artifact; content; truncated });
+  Option.iter fixture.hierarchy ~f:(fun (hierarchy, state) ->
+    let nodes, children = index_hierarchy hierarchy in
+    session.hierarchy_view
+    <- Some
+         { hierarchy
+         ; nodes
+         ; children
+         ; selected_key = state.selected_key
+         ; expanded = String.Set.of_list state.expanded
+         ; scroll = 0
+         ; pane_scroll = 0
+         });
+  session
+;;
+
+let capture_dimensions =
+  [ { Bonsai_term.Dimensions.width = 80; height = 24 }
+  ; { Bonsai_term.Dimensions.width = 120; height = 40 }
+  ]
+;;
+
+let render_to_string session dimensions ~cap =
+  let { Bonsai_term.Dimensions.width; height } = dimensions in
+  let buffer = Buffer.create (width * height * 2) in
+  Notty.Render.to_buffer
+    buffer
+    cap
+    (0, 0)
+    (width, height)
+    (Bonsai_term.View.Private.notty_image (render session dimensions));
+  Buffer.contents buffer
+;;
+
+let capture_baseline_frames ~directory =
+  Core_unix.mkdir_p directory;
+  let written =
+    List.concat_map Baseline_fixture.all ~f:(fun fixture ->
+      List.concat_map capture_dimensions ~f:(fun dimensions ->
+        let { Bonsai_term.Dimensions.width; height } = dimensions in
+        let stem = sprintf "%s.%dx%d" fixture.name width height in
+        (* A fresh session per capture: [render] reconciles scroll offsets in place, so a
+           reused session would carry the previous size's state into the next capture. *)
+        [ ( stem ^ ".txt"
+          , render_to_string
+              (session_of_baseline_fixture fixture)
+              dimensions
+              ~cap:Notty.Cap.dumb
+            ^ "\n" )
+        ; ( stem ^ ".ansi"
+          , render_to_string
+              (session_of_baseline_fixture fixture)
+              dimensions
+              ~cap:Notty.Cap.ansi )
+        ]))
+  in
+  List.iter written ~f:(fun (name, contents) ->
+    Out_channel.write_all (Filename.concat directory name) ~data:contents);
+  List.iter Baseline_fixture.all ~f:(fun fixture ->
+    printf "%s: %s\n" fixture.name fixture.summary);
+  printf "wrote %d files to %s\n" (List.length written) directory
+;;
+
 let key_is char = function
   | Bonsai_term.Event.Key.ASCII value -> Char.equal char value
   | Uchar value -> Uchar.equal value (Uchar.of_char char)
@@ -1991,20 +2099,35 @@ let command =
          "--diagnostics-file"
          (optional string)
          ~doc:"FILE append dimensions and caught errors outside the active terminal"
+     and capture_baseline =
+       flag
+         "--capture-baseline"
+         (optional string)
+         ~doc:
+           "DIR render the deterministic UI fixtures into DIR and exit (development \
+            baseline capture; no daemon or project needed)"
      in
-     run
-       ~endpoint
-       ~project_root
-       ~environment
-       ~plain
-       ~action
-       ~target
-       ~configuration
-       ~artifact
-       ~hierarchy
-       ~refresh_integration
-       ~wait
-       ~diagnostics_file)
+     match capture_baseline with
+     | Some directory ->
+       (* The capture renders fixtures; it neither connects to a daemon nor opens a
+          project, so it never enters [run] and none of the session flags apply. *)
+       fun () ->
+       capture_baseline_frames ~directory;
+       return (Ok ())
+     | None ->
+       run
+         ~endpoint
+         ~project_root
+         ~environment
+         ~plain
+         ~action
+         ~target
+         ~configuration
+         ~artifact
+         ~hierarchy
+         ~refresh_integration
+         ~wait
+         ~diagnostics_file)
 ;;
 
 let () = Command_unix.run command

@@ -920,3 +920,48 @@ artifact ID through `read-hierarchy`; it is not a per-node report or a full sign
 This acceptance does not claim every terminal/tmux combination was tested. Workstation-native
 attachment through an SSH-forwarded HTTP endpoint remains explicitly deferred. The separately
 planned D1–D4 dashboard workflow and its own live acceptance requirements are unchanged.
+
+## Terminal baseline captures — prettification P0 item 1, 2026-09-20
+
+The pre-prettification terminal UI is recorded as deterministic frames under
+`test/baselines/terminal/`. Regenerate or verify them with:
+
+```sh
+./scripts/capture-terminal-baseline.sh          # rewrite the captures
+./scripts/capture-terminal-baseline.sh --check  # rebuild, recapture, diff, change nothing
+```
+
+The script builds `terminal/main.exe` through `scripts/with-switch.sh` and runs it with the
+new `--capture-baseline DIR` development flag, which renders the fixtures in
+`terminal/baseline_fixture.ml` through the production `render` and exits. No daemon,
+project, or network is involved.
+[docs/terminal_baseline_captures.md](terminal_baseline_captures.md) documents the three
+scenarios, what the captures preserve, and the layout problems they record.
+
+`notty-community` is now a declared dependency of `hardcaml_workbench`. It was already an
+indirect requirement of `bonsai_term` and is present in the `5.2.0+ox` switch as findlib
+library `notty` version 0.2.4; the capture uses `Notty.Render.to_buffer` directly on the
+image behind `Bonsai_term.View`, so the dependency is declared rather than relied on
+transitively. No package was installed or upgraded for this work.
+
+Validation on 2026-09-20, all from the Workbench checkout:
+
+```sh
+./scripts/with-switch.sh dune build @fmt      # passes
+./scripts/with-switch.sh dune build @lint     # passes
+./scripts/with-switch.sh dune runtest         # passes
+./scripts/with-switch.sh dune build           # passes
+./scripts/with-switch.sh opam lint hardcaml_workbench.opam   # passes
+./scripts/capture-terminal-baseline.sh --check               # passes
+```
+
+Repeatability was checked by capturing into two separate directories in separate process
+invocations and diffing them, and by running `--check` after a full regeneration; all
+twelve files matched byte for byte. Stripping SGR sequences from each `.ansi` file
+reproduces its `.txt` file exactly, and `ESC[0m` is the only escape sequence any capture
+contains, which is the evidence for the claim that the current UI applies no colour or
+bold in normal operation.
+
+This is a layout baseline only. It is not a live terminal acceptance result, and it does
+not replace `scripts/test-terminal-resize.py` or human review in the intended SSH/tmux
+environment.

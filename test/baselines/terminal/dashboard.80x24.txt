@@ -1,0 +1,24 @@
+Hardcaml Workbench | connected | http://127.0.0.1:41733                         
+PROJECT / GENERIC DUNE ...|JOBS                                                 
+Project: hardcaml_prote...|                                                     
+Root: /home/way..._protemu|SELECTED JOB                                         
+Environment: opam switc...|  daemon/job/2026-09-20T14-03-11Z/0004-dune-runtes...
+Contexts: default         |  STATUS: Failed                                     
+                          |  Process: exited with code 2                        
+WORKBENCH INTEGRATION     |  Failure reason: dune runtest reported 3 failing ...
+Integration: Driver  ma...|                                                     
+Discovery: Complete (da...|  daemon/job/2026-09-20T14-03-11Z/0008-project-dri...
+> Target: protemu_top_p...|  daemon/job/2026-09-20T14-03-11Z/0007-project-dri...
+--------------------------------------------------------------------------------
+LIVE STDOUT / STDERR                                                            
+[stdout] -|expected occupancy 4096                                              
+[stdout] +|actual   occupancy 4090                                              
+[stderr] FAILED: test_hardcaml_protemu_physical_emulation_regression.ml, line...
+[stdout] -|expected [ por_release; pll_lock; core_release; capture_release ]    
+[stdout] +|actual   [ por_release; core_release; pll_lock; capture_release ]    
+[stderr] FAILED: test_hardcaml_protemu_physical_emulation_regression.ml, line...
+[stdout] -|expected checksum 0x5a3c                                             
+[stdout] +|actual   checksum 0x5a3d                                             
+[stderr] 3 failing expect tests; run dune promote to accept the new output      
+[stdout] dune runtest exited with status 2                                      
+b/t jobs | n/m select | g RTL | a/v artifact | h hierarchy | u/o node | e exp...

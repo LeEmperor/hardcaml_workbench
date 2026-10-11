@@ -26,6 +26,9 @@
    core_unix
    bonsai
    bonsai_term
+   ; Direct use of Notty is limited to the development baseline capture, which
+   ; serialises a rendered bonsai_term view; bonsai_term already requires it.
+   notty-community
    async
    cohttp-async
    cryptokit

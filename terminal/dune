@@ -1,6 +1,6 @@
 (library
  (name terminal_presentation)
- (modules presentation state)
+ (modules baseline_fixture presentation state)
  (libraries core hardcaml_workbench_protocol)
  (preprocess
   (pps ppx_jane))
@@ -21,6 +21,7 @@
   core_unix.command_unix
   hardcaml_workbench_native_http
   hardcaml_workbench_protocol
+  notty-community
   terminal_presentation)
  (preprocess
   (pps ppx_jane bonsai.ppx_bonsai))

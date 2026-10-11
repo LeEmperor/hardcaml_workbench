@@ -16,6 +16,7 @@ depends: [
   "core_unix"
   "bonsai"
   "bonsai_term"
+  "notty-community"
   "async"
   "cohttp-async"
   "cryptokit"
