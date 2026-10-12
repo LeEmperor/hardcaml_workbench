@@ -11,6 +11,6 @@ Generated files. Do not edit them by hand.
 `<scenario>.<width>x<height>.ansi` is the same frame with the terminal escape sequences
 the client would actually emit.
 
-See [docs/terminal_baseline_captures.md](../../../docs/terminal_baseline_captures.md) for
+See [archived capture notes](../../../docs/archive/2026-10-12/terminal_baseline_captures.md) for
 the scenarios, what the captures do and do not preserve, and the layout problems they
 record.

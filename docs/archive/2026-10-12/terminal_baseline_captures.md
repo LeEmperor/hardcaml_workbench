@@ -1,4 +1,4 @@
-# Terminal baseline captures
+# Terminal baseline captures (archived)
 
 Recorded 2026-09-20 for
 [prettification P0](prettification.md#p0--establish-a-bounded-visual-target-and-test-seam),

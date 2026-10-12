@@ -1,4 +1,4 @@
-# Hardcaml Workbench — Project Idea and Philosophy
+# Hardcaml Workbench — Project Idea and Philosophy (archived)
 
 ## 1. The idea
 
@@ -31,7 +31,36 @@ repository and records the resulting jobs and artifacts.
 
 ## 2. Product boundary
 
-### Immediate product: a real-project monitoring dashboard
+### Immediate product: a modular hardware-operation workspace
+
+Direction reset on 2026-10-12: build a configurable Bonsai Term workspace for a
+dedicated monitor, backed by the existing native daemon. Feature **modules** own
+processing and semantic state; **tiles** are movable views with local interaction
+state over typed feature contracts. One module can feed several tiles, and one
+tile can combine several modules. View lifetime does not control job lifetime.
+
+ASIC and FPGA-only projects share execution, tests/regressions, artifacts, timing,
+clocks and diagnostics where their semantics agree. Project/target capabilities
+select providers and specialized features. An ASIC project's FPGA emulation
+remains part of that ASIC project. Physical-design and technology-specific evidence
+need not be flattened into FPGA terminology or vice versa.
+
+Develop against a small independent, version-pinned test ASIC, with recorded real
+reports and deterministic replay for headless tests. The removed `scaf` worktree,
+evolving emulator and moving `hardcaml_asic` development are no longer release
+dependencies. Choose and validate the specimen in the new construction plan.
+
+The product should make flow execution, regression outcomes, timing, clocks,
+physical design and artifact inspection understandable, including for a first-time
+ASIC developer. Reuse normal CLI operations; preserve provenance and explain what
+each observation does and does not establish. Headless Bonsai interaction tests
+are a primary development tool, with visual review reserved for appearance.
+
+See the [active architecture](hardcaml_workbench_architecture.md#active-direction--modules-and-tiles-2026-10-12)
+and [W0–W6 construction plan](construction_phase_plan.md). The older immediate
+product below is historical context, superseded by this direction.
+
+### Historical immediate product: real-project monitoring (2026-09-20)
 
 As of 2026-09-20, the next release serves `hardcaml_protemu` in the `../scaf/`
 worktree: launch the existing build/ASIC flow and monitor it in a server-side TUI
@@ -45,9 +74,9 @@ process, completed tool stage, generated GDS, timing closure, and signoff are
 different facts. The project owns their meaning and exposes its existing commands
 and results; Workbench supervises and presents them.
 
-The [active architecture scope](hardcaml_workbench_architecture.md#active-release-scope--protemu-monitoring-2026-09-20)
-and [dashboard construction slices](construction_phase_plan.md#active-release--scaf-build-and-flow-dashboard-2026-09-20)
-define this release. Browser, persistent vendor workers, graph/waveform views,
+The [historical architecture scope](hardcaml_workbench_architecture.md#historical-release-scope--protemu-monitoring-2026-09-20)
+and [archived dashboard construction slices](construction_phase_plan_2026_09.md#active-release--scaf-build-and-flow-dashboard-2026-09-20)
+defined that release. Browser, persistent vendor workers, graph/waveform views,
 hardware control, distributed execution, and a second backend are parked. The
 broader vision below remains useful direction, not the definition of what must be
 finished before the tool is useful.

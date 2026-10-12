@@ -1,4 +1,10 @@
-# Terminal layout specification
+# Terminal layout specification (archived)
+
+**Historical fixed-layout proposal — superseded 2026-10-12.** The active
+[module/tile architecture](hardcaml_workbench_architecture.md#active-direction--modules-and-tiles-2026-10-12)
+and [construction plan](construction_phase_plan.md) replace this mandatory screen
+contract with a configurable workspace. Retain the cell-budget analysis as input
+to an ASIC preset and compact tile design, not as global layout acceptance criteria.
 
 Written 2026-09-20 for
 [prettification P0](prettification.md#p0--establish-a-bounded-visual-target-and-test-seam),
@@ -17,12 +23,12 @@ they remain the record of the *current* screen, which this specification replace
 
 ## 1. Authority, inputs, and what this fixes
 
-- The [architecture's active release scope](hardcaml_workbench_architecture.md#active-release-scope--protemu-monitoring-2026-09-20)
+- The [architecture's historical release scope](hardcaml_workbench_architecture.md#historical-release-scope--protemu-monitoring-2026-09-20)
   stays authoritative for product scope and evidence semantics. Its six required
   dashboard regions (identity, flow strip, timing, results/checks, execution/log,
   compact design summary) are the regions budgeted below. Section 13 records every
   place this design compacts one of them, and confirms that none is weakened.
-- The [construction plan](construction_phase_plan.md#active-release--scaf-build-and-flow-dashboard-2026-09-20)
+- The [archived construction plan](construction_phase_plan_2026_09.md#active-release--scaf-build-and-flow-dashboard-2026-09-20)
   owns D1–D4. This document does not move a release gate.
 - [prettification.md](prettification.md) owns P0–P5 and the visual/interaction
   direction. The schematic wide layout sketched there is superseded by section 6;

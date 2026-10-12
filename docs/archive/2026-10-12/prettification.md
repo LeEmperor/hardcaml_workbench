@@ -1,4 +1,11 @@
-# Terminal prettification and Bonsai refactoring
+# Terminal prettification and Bonsai refactoring (archived)
+
+**Planning status — superseded 2026-10-12.** The module/tile architecture and
+[current construction plan](construction_phase_plan.md) replace P0–P5 as the active
+sequence. Retain this audit, baseline evidence and semantic styling guidance as
+reference. The fixed scaf dashboard and exact layout budget are not current
+requirements. W2 introduces the tile host, headless Bonsai interaction seam and
+first styled tiles; later slices apply them to real test-ASIC evidence.
 
 Written 2026-09-20 following a source-level audit of the terminal client, the local
 `bonsai_term_examples` checkout, and the installed Bonsai Term interfaces.
@@ -23,9 +30,9 @@ prerequisite to seeing a real ASIC flow run.
 
 ### Authority and starting point
 
-- The [architecture's active release scope](hardcaml_workbench_architecture.md#active-release-scope--protemu-monitoring-2026-09-20)
+- The [architecture's historical release scope](hardcaml_workbench_architecture.md#historical-release-scope--protemu-monitoring-2026-09-20)
   remains authoritative for product scope and evidence semantics.
-- The [construction plan](construction_phase_plan.md#active-release--scaf-build-and-flow-dashboard-2026-09-20)
+- The [archived construction plan](construction_phase_plan_2026_09.md#active-release--scaf-build-and-flow-dashboard-2026-09-20)
   owns D1–D4 release progress. This document supplies the supporting UI/refactoring
   work packages, called P0–P5, rather than a competing release roadmap.
 - The existing 1A–1C foundation includes daemon-owned execution, discovery, RTL,

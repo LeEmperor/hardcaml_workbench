@@ -1,4 +1,4 @@
-# Development and Local Validation
+# Development and Local Validation (archived evidence)
 
 ## Workbench switch
 
@@ -276,7 +276,7 @@ Recorded 2026-09-19; documentation only. The authoritative choices are in the ar
 and [launcher/installation decisions](hardcaml_workbench_architecture.md#1a-launcher-installation-and-fixture-decisions-2026-09-19).
 Use HTTP with typed S-expression bodies, Async/Cohttp native transport, and long polling.
 Package the native launcher/terminal client and daemon independently of optional browser
-assets. Follow the [implementation handoff](construction_phase_plan.md#9-completion-and-progress-tracking)
+assets. Follow the [historical implementation handoff](construction_phase_plan_2026_09.md#9-completion-and-progress-tracking)
 for the remaining work and acceptance evidence. No proposed CLI command is available yet,
 and Cohttp compatibility with this switch has not been validated.
 
