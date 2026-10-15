@@ -1,7 +1,12 @@
 # F11 — Tiered run-summary caching and fast switching
 
-Status: **requested/agreed direction, 2026-10-15; implementation pending**.
-Delivery: FS0a memory foundations, FS0b provider invalidation, FS0c persistence.
+Status (2026-10-15): **FS0 bounded L1/L2, coalesced reads, observation invalidation
+and explicit Refresh implemented**. [Provider integration](../fs0_provider_integration.md)
+defines numerical budgets/freshness. [Acceptance](../fs0_acceptance.md) proves fixture
+report calls 2→2 and exact real warm/restart identities with `Cached_unverified`.
+Requirements below remain normative: no cheap provider revision query exists,
+ordinary switching is not perpetual validation, and performance/size benchmarks
+remain open. Canonical evidence and retention remain provider-owned.
 
 ## User outcome
 

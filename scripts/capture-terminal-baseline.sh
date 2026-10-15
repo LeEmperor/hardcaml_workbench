@@ -26,7 +26,7 @@ if [[ $# -gt 0 ]]; then
 fi
 
 cd "$repository_root"
-./scripts/with-switch.sh dune build terminal/main.exe
+./scripts/with-switch.sh dune build -j20 terminal/main.exe
 client="$repository_root/_build/default/terminal/main.exe"
 
 case "$mode" in

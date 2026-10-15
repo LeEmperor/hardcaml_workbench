@@ -13,6 +13,13 @@ The HTML/PNG names mentioned in the handoff are external prototype references;
 this import contains the two requested Markdown exports, not those assets. Their
 described browser behavior is not evidence of terminal implementation or real EDA.
 
+**Post-intake FS0 update:** the daemon workspace registry and provisional tile host
+are now implemented; below, the implementation correction and Ches notes describe
+what source inspection found at intake. First A–E skins and presentation controls
+now run on the actual host; the richer gallery remains incomplete. See the
+[preset guide](../appearance_presets.md) for controls and tested captures.
+See the [delivery plan](../construction_phase_plan.md) for current evidence.
+
 ## Workbench interpretation and precedence
 
 The gallery owns current appearance preferences/candidates. [F12](../features/appearance.md)

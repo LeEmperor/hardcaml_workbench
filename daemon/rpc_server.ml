@@ -2,6 +2,7 @@ open! Core
 open! Async
 open Hardcaml_workbench_protocol
 module Service = Hardcaml_workbench_backend.Service
+module Execution = Hardcaml_workbench_backend.Execution_module
 
 type t =
   { hello : V1.Hello.Response.t
@@ -43,6 +44,8 @@ let create ~application_version ~instance_id ~service =
             ; "read-log"
             ; "read-artifact"
             ; "read-hierarchy"
+            ; "workspace"
+            ; "asic"
             ]
         }
     ; service
@@ -232,7 +235,7 @@ let handle_post t ~path ~headers ~body =
            boundary_error `Bad_request error.kind "malformed submit-job request"
          | Ok request ->
            operation_response
-             (Service.submit_job t.service request)
+             (Execution.submit (Execution.of_service t.service) request)
              V1.Submit_job.Response.sexp_of_t)
       | Ok body when String.equal path "/api/v1/refresh-integration" ->
         (match decode body V1.Refresh_integration.Request.t_of_sexp with
@@ -256,7 +259,7 @@ let handle_post t ~path ~headers ~body =
            boundary_error `Bad_request error.kind "malformed cancel-job request"
          | Ok request ->
            operation_response
-             (Service.cancel_job t.service request)
+             (Execution.cancel (Execution.of_service t.service) request)
              V1.Cancel_job.Response.sexp_of_t)
       | Ok body when String.equal path "/api/v1/read-log" ->
         (match decode body V1.Read_log.Request.t_of_sexp with
@@ -264,7 +267,7 @@ let handle_post t ~path ~headers ~body =
            boundary_error `Bad_request error.kind "malformed read-log request"
          | Ok request ->
            operation_response
-             (Service.read_log t.service request)
+             (Execution.read_log (Execution.of_service t.service) request)
              V1.Read_log.Response.sexp_of_t)
       | Ok body when String.equal path "/api/v1/read-artifact" ->
         (match decode body V1.Read_artifact.Request.t_of_sexp with
@@ -282,6 +285,19 @@ let handle_post t ~path ~headers ~body =
            operation_response
              (Service.read_hierarchy t.service request)
              V1.Read_hierarchy.Response.sexp_of_t)
+      | Ok body when String.equal path "/api/v1/workspace" ->
+        (match decode body Workspace.Request.t_of_sexp with
+         | Error error ->
+           boundary_error `Bad_request error.kind "malformed workspace request"
+         | Ok request ->
+           operation_response
+             (Service.workspace t.service request)
+             Workspace.Response.sexp_of_t)
+      | Ok body when String.equal path "/api/v1/asic" ->
+        (match decode body Asic.Request.t_of_sexp with
+         | Error error -> boundary_error `Bad_request error.kind "malformed ASIC request"
+         | Ok request ->
+           operation_response (Service.asic t.service request) Asic.Response.sexp_of_t)
       | Ok _ -> boundary_error `Not_found Not_found "unknown operation")
   | _ ->
     boundary_error
@@ -314,7 +330,9 @@ let callback t ~body _peer request =
          | "/api/v1/cancel-job"
          | "/api/v1/read-log"
          | "/api/v1/read-artifact"
-         | "/api/v1/read-hierarchy" ) ) -> handle_post t ~path ~headers ~body
+         | "/api/v1/read-hierarchy"
+         | "/api/v1/workspace"
+         | "/api/v1/asic" ) ) -> handle_post t ~path ~headers ~body
      | _ -> boundary_error `Not_found Not_found "unknown endpoint or protocol version")
 ;;
 

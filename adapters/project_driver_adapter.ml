@@ -7,6 +7,7 @@ let describe_invocation ~root ~environment ~driver =
     ~root
     environment
     [ "exec"
+    ; "-j20"
     ; "--root"
     ; root
     ; "--no-buffer"
@@ -23,6 +24,7 @@ let generate_rtl_invocation ~root ~environment ~driver ~target ~configuration ~o
     ~root
     environment
     [ "exec"
+    ; "-j20"
     ; "--root"
     ; root
     ; "--no-buffer"

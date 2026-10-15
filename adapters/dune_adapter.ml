@@ -146,7 +146,13 @@ let action_invocation
   ~environment
   = function
   | V1.Dune_action.Build ->
-    invocation ~root environment [ "build"; "--root"; root; "--no-buffer"; build_alias ]
+    invocation
+      ~root
+      environment
+      [ "build"; "-j20"; "--root"; root; "--no-buffer"; build_alias ]
   | Test ->
-    invocation ~root environment [ "build"; "--root"; root; "--no-buffer"; test_alias ]
+    invocation
+      ~root
+      environment
+      [ "build"; "-j20"; "--root"; root; "--no-buffer"; test_alias ]
 ;;

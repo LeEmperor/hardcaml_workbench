@@ -81,13 +81,13 @@ trap cleanup EXIT
 
 (
   cd "$repo_root"
-  opam exec --switch="$switch" -- dune build -p hardcaml_workbench @install
-  opam exec --switch="$switch" -- dune install --prefix "$prefix" hardcaml_workbench
+  opam exec --switch="$switch" -- dune build -j20 -p hardcaml_workbench @install
+  opam exec --switch="$switch" -- dune install -j20 --prefix "$prefix" hardcaml_workbench
 )
 
 # The copied project remains a normal external Dune workspace.
-opam exec --switch="$switch" -- dune build --root "$fixture"
-opam exec --switch="$switch" -- dune runtest --root "$fixture"
+opam exec --switch="$switch" -- dune build -j20 --root "$fixture"
+opam exec --switch="$switch" -- dune runtest -j20 --root "$fixture"
 opam exec --switch="$switch" -- dune clean --root "$fixture"
 
 (
@@ -107,13 +107,14 @@ grep -Fq "Jobs: 0" "$outside/first.txt"
 
 XDG_RUNTIME_DIR="$runtime" \
   "$repo_root/scripts/test-terminal-resize.py" "$client" \
-  --project-root "$fixture" --environment "opam:$switch"
+  --project-root "$fixture" --environment "opam:$switch" \
+  --expect-project-name hardcaml_workbench_fixture
 
 # A single attached terminal session must consume discovery events and render the result.
 XDG_RUNTIME_DIR="$runtime" \
   "$repo_root/scripts/test-terminal-resize.py" "$client" \
   --project-root "$integrated_fixture" --environment "opam:$switch" \
-  --expect-live-discovery
+  --expect-live-discovery --expect-project-name hardcaml-counter-fixture
 
 XDG_RUNTIME_DIR="$explicit_runtime" "$client" --plain --connect "$first_endpoint" \
   --project-root "$fixture" --environment "opam:$switch" \
@@ -291,7 +292,7 @@ grep -Fq 'u_counter_1 : counter [/11:u_counter_1]' "$work_root/reconnected-hiera
 XDG_RUNTIME_DIR="$runtime" \
   "$repo_root/scripts/test-terminal-resize.py" "$client" \
   --project-root "$integrated_fixture" --environment "opam:$switch" \
-  --expect-hierarchy
+  --expect-hierarchy --expect-project-name hardcaml-counter-fixture
 
 # Missing and invalid optional integration remain actionable without disabling generic jobs.
 XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$missing_driver_fixture" \

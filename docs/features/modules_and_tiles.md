@@ -1,6 +1,10 @@
 # F02 — Providers, modules and tiles
 
-Status: requested extraction over working backend services and terminal reducers.
+Status (2026-10-15): **FS0 execution boundary, daemon ASIC service and tile host
+delivered**. See [Execution](../fs0_execution_module.md), [terminal](../fs0_terminal.md)
+and the [plan](../construction_phase_plan.md) for implementation/evidence and gaps.
+Requirements below remain normative; fully reactive publication/redraw and measured
+high-tile-count scaling remain followups (current redraw is clock-driven).
 
 ## Ownership
 

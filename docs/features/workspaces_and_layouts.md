@@ -1,7 +1,10 @@
 # F04 — Named workspaces, tiles and saved layouts
 
-Status: requested; current renderer is fixed. Vocabulary and shared-selection
-behavior accepted in D1 on 2026-10-15; implementation pending.
+Status (2026-10-15): **FS0 named workspace/tile host and autosaved session restoration
+delivered** with Main/independent contexts and pins. See [terminal](../fs0_terminal.md)
+and [acceptance](../fs0_acceptance.md). Requirements below remain normative: current
+geometry is shelf-based, template export/clone is absent, local chrome/header
+preferences do not persist, and multi-monitor adoption acceptance remains later.
 
 ## User outcome
 
@@ -58,10 +61,18 @@ exist in the fixed application and must be built once, not independently per ski
 
 ## First demo / later
 
+Usability correction (2026-10-15): the real host now defaults to Fit, distributing
+visible tiles across available cells with compact focused-tile fallback. Requested
+sizes remain available through a separate layout command; appearance switches do
+not alter either mode. The additive Overview preset includes honest stage views
+even when synthesis is the only requested operation. Empty saved arrangements
+remain explicit and recoverable, not silently overwritten.
+
 First: at least two named arrangements on one surface sharing Main, differently
 sized run selectors, unlink/relink and basic tile manipulation. Save/restore follows
 in M3; multiple monitor windows and cross-window movement follow in M5.
 Starter templates reduce visible complexity without disabling backend capabilities.
 
 Dependencies: F02 host/tile contracts; F05 evidence; F10 contexts. Fixture data
-permits early work. D1 is accepted; D2/D3 remaining policy does not block host geometry.
+supports independent verification. D1 and D2/D3 FS0 defaults are accepted; later
+snapshot/retention policy does not block host geometry.

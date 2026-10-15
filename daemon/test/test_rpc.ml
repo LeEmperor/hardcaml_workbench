@@ -137,6 +137,8 @@ let run () =
            ; "read-log"
            ; "read-artifact"
            ; "read-hierarchy"
+           ; "workspace"
+           ; "asic"
            ])
         "hello did not advertise the complete V1 capability set";
       let snapshot = Rpc.snapshot rpc { instance_id } in

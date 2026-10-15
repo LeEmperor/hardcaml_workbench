@@ -5,9 +5,10 @@ Updated 2026-10-15. This is the central product and system design document.
 **Active review:** the [feature inventory](feature_list.md) records the October 15
 scope, and the [demo plan](construction_phase_plan.md) supersedes P0–P7. Named
 i3-style arrangements, a command palette and snapshot-aware references are now
-explicit requirements. [D1](decisions.md) is accepted: workspaces follow shared run
-contexts by default and can detach for independent inspection. D2 command policy
-and D3 exact-snapshot scope retain open questions. Provider descriptions below are dated source
+explicit requirements. D1 and the bounded D2/D3 FS0 defaults are accepted in the
+[decision log](decisions.md). Workspaces follow shared run contexts and can detach
+for independent inspection; immutable snapshot support remains later scope.
+Provider descriptions below are dated source
 reviews; the current native/named-flow/observation foundation must be assessed at
 the adopted version rather than assumed absent.
 The [construction plan](construction_phase_plan.md) owns phase order and evidence;
@@ -48,8 +49,14 @@ Settled direction:
 Implemented today: installed native daemon/client, generic Dune operations,
 supervision/cancellation/logs, manifest/driver discovery, RTL/artifact/provenance
 handling and elaborated hierarchy inspection. These are the former 1A–1C milestones.
-The module/provider APIs, persistent run catalog and multi-window tile workspace
-below are architectural requirements, not claims of delivered functionality.
+FS0 now adds typed workspace/ASIC endpoints, persisted run contexts/layouts, a
+palette/tile host, generic test module boundary, synthesis-only installed-provider
+integration, explicit-reference run registration and L1/L2 summaries. Actual HTTP,
+PTY and two-profile real synthesis acceptance is in the [plan](construction_phase_plan.md).
+The richer contracts below remain design requirements where not covered by that
+bounded implementation: full store discovery, typed timing details, arbitrary
+layout/templates, multi-window adoption and fully reactive publication are not
+established merely by the FS0 demos.
 
 ## 2. Runtime and dependency boundaries
 
@@ -106,9 +113,9 @@ Here **module** means a feature subsystem, not an OCaml language module.
 | Run context | Shared selected-run identity/revision, independent of selector tile lifetime |
 | Project session | Associated project/catalog, modules, windows and context registry |
 
-The planned daemon owns the authoritative semantic registry of open session/window/
-workspace/tile instances and run-context bindings. This is not yet implemented by
-the existing project/job/artifact service. Clients mirror that registry, send typed
+The daemon owns the authoritative semantic registry of session/window/workspace/tile
+instances and run-context bindings through `Workspace_service`; FS0 persists this
+registry alongside the existing project/job/artifact service. Clients mirror it, send typed
 intents and retain local presentation state: dimensions, active-workspace display,
 focus, scroll, open overlays and effective clamped geometry. Persist requested
 layouts/preferences through UI-configuration services without making live terminal

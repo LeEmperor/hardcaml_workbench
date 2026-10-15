@@ -1,0 +1,17 @@
+(test
+ (name test_asic)
+ (deps fake_provider.py)
+ (libraries
+  async
+  core
+  core_unix
+  core_unix.command_unix
+  hardcaml_workbench_adapters
+  hardcaml_workbench_backend
+  hardcaml_workbench_protocol
+  hardcaml_workbench_project_integration
+  yojson)
+ (preprocess
+  (pps ppx_jane))
+ (lint
+  (pps ppx_js_style)))

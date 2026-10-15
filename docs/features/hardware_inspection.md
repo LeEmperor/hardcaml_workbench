@@ -1,7 +1,10 @@
 # F06 — Hardware and stage evidence inspection
 
-Status: RTL/artifact/provenance and elaborated hierarchy implemented. ASIC domain
-views below are requested; provider availability must be checked per adopted version.
+Status (2026-10-15): RTL/artifact/provenance, elaborated hierarchy and **FS0 synthesis
+cell count/breakdown with evidence context delivered**. [Acceptance](../fs0_acceptance.md)
+records real 673/685 counts, completed execution and `not_evaluated` acceptance.
+Timing is unsupported (`[]`), not zero slack. Requirements below remain normative;
+rich timing/check/physical/clock views (FS1) are not implemented.
 
 ## Feature slices
 
@@ -38,6 +41,11 @@ evidence; similar instance names are not sufficient proof of correspondence.
   Declare viewer host/location; remote paths are not automatically local files.
 - Preserve original reports and producer context. Carried-forward metrics must not
   be relabeled as newly measured at the current stage.
+- Overview provenance uses short, meaningful producer/stage/source labels with
+  explicit detail inspection for complete structured records and absolute paths.
+  Do not dump serialized JSON into normal metric rows or discard original evidence
+  to shorten a label. Owner review (2026-10-15) identified the current raw producer/
+  source display as a presentation followup, not an FS0 functionality blocker.
 - Source jumps use file/range and source identity where supplied. Generated RTL
   locations are useful even when no reliable OCaml source mapping exists.
 - F12's Overview/Timing gallery uses synthetic metrics, paths, diagnostics and source

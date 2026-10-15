@@ -24,7 +24,13 @@ they do not require every future set to finish.
 FS5 can run alongside FS0 after common host/component seams; its number does not
 place it after FS4. A complete gallery is not an FS0 exit criterion.
 
-## FS0 — Initial functional demos (active target)
+## FS0 — Initial functional demos (delivered with bounded followups)
+
+**Current status:** Demos A–C delivered. The lists below describe the intended
+slices, not unchecked implementation tasks. The [active plan](construction_phase_plan.md)
+splits completed conditions from remaining gaps and consolidates exact candidate
+paths/hashes and [acceptance](fs0_acceptance.md) / [installed-check](fs0_install_checks.md)
+evidence. FS0 does not complete the full normative specs.
 
 ### FS0a: provider-independent shell
 
@@ -41,8 +47,11 @@ place it after FS4. A complete gallery is not an FS0 exit criterion.
   Inspect/adapt Ches primitives before writing new overlay machinery. A provisional
   skin is sufficient; no final aesthetic selection or five-candidate gallery gate.
 
-**Can start now:** pure context state and generic module extraction. D2 policy is
-needed before palette dispatch hardens; physical tools are not a prerequisite.
+**Delivered:** daemon-routed Execution module over the existing supervisor,
+project-scoped test/log tiles, palette, Main/independent contexts and shelf tile
+host. Generic HTTP and installed tests pass; RTL/hierarchy and legacy captures
+remain covered. D2/D3 FS0 defaults were explicitly approved. Redraw remains
+clock-driven; no full reactive-publication or high-tile-count benchmark is claimed.
 
 ### FS0b: bounded ASIC synthesis integration
 
@@ -54,9 +63,14 @@ needed before palette dispatch hardens; physical tools are not a prerequisite.
   correctly and measure warm switching with real summaries. Record the adapter's
   freshness strategy and distinguish lightweight validation from materialization.
 
-**Dependency:** verified public project/provider interfaces. Fixture integration
-and real synthesis acceptance are recorded separately; missing rich timing or
-fine-grained internal-step APIs do not block this slice.
+**Delivered:** exact installed candidate and public interfaces verified; actual
+HTTP/PTY fixtures and strictly serial real balanced/synth_delay synthesis passed,
+**673/685 cells**, completion `completed`, acceptance `not_evaluated`. Early
+allocation and submission-client detach are proven. Live cached real UI shows
+673→685 and pinned 673 beside following 685. Timing is unsupported (`[]`).
+Ordinary switching reuses summaries; explicit Refresh is needed for current
+validation because the provider has no cheap revision query. Broader interactive
+launch-and-view/reconnect/cancellation coverage remains a followup.
 
 ### FS0c: reusable session
 
@@ -67,7 +81,14 @@ fine-grained internal-step APIs do not block this slice.
   re-materializing unchanged large reports, and expose pending/unavailable source
   validation. Exercise corruption/schema rebuild and eviction without provider edits.
 
-**Exit:** Demos A–C in the active plan, including a real bounded synthesis path and
+**Delivered:** named workspace/context/pin/geometry state autosaves and restores;
+bounded L2 summaries reopen after restart as `Cached_unverified`, preserving exact
+real report identity and original observation time. Fixture report calls stay 2→2
+through warm switching and restart. No template export/clone or persisted local
+chrome/header preferences exists; shelf geometry is not freeform placement.
+Cold/L1/L2 performance/size measurements remain open.
+
+**Exit scope:** Demos A–C in the active plan, including a real bounded synthesis path and
 real PDK-free tests, with fixture-backed failure/race coverage. Generic test-history
 restart persistence is not implied by provider-result reopening. Exact immutable
 snapshot support is governed by D3 and must not be claimed from run pinning.
@@ -77,6 +98,8 @@ large-detail indexes can follow measured need in later feature-set slices.
 
 ## FS1 — ASIC evidence investigation
 
+Status: **not started**; FS0 synthesis summaries do not implement this set.
+
 Timing summaries/path detail, checks, clocks and physical/resource slices with
 original evidence and context. Full physical operation/cancellation acceptance
 belongs here. Adopt fields actually provided; put missing extraction semantics in
@@ -84,6 +107,8 @@ the provider rather than reverse-engineering tool reports in tiles. Detailed pat
 intermediate snapshots and fine-grained progress may depend on further ASIC work.
 
 ## FS2 — Simulation helpers and test views
+
+Status: **not started**; FS0's generic test attempts do not implement structured suites.
 
 Extend FS0's generic test runner with project-declared suites, cases, seeds,
 structured progress/outcomes, targeted reruns and failure/trace artifacts. Rich
@@ -109,6 +134,12 @@ remains provider-owned. This set is a grouping of future work, not a commitment 
 ship every extension together.
 
 ## FS5 — Appearance experiments and candidate gallery
+
+Status: **first appearance slice delivered**. All five thin skins, independent
+color/off-ASCII-Unicode/density controls and synthetic frame captures are available
+in the real host. See [preset guide/evidence](appearance_presets.md). Rich Timing
+fixtures, reusable tab groups, source/help overlay showcases and owner default review
+remain; this is not completion of every gallery requirement below.
 
 Implement F12's theme/components/layout boundaries over the same host contracts;
 use injected synthetic Overview and Timing fixtures to compare A Instrument,

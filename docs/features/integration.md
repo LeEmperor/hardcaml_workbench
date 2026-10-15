@@ -1,6 +1,10 @@
 # F01 — Project integration and capabilities
 
-Status: existing generic Dune and driver integration; ASIC adaptation requested.
+Status (2026-10-15): **FS0 configured public ASIC adapter delivered**, alongside
+generic Dune and driver integration. Installed real synthesis passed with the exact
+candidate in the [plan](../construction_phase_plan.md#evidence-and-candidate-baseline).
+See [integration limits](../fs0_provider_integration.md) and [acceptance](../fs0_acceptance.md).
+Requirements below remain normative; broader provider-store discovery is absent.
 
 ## User outcome
 

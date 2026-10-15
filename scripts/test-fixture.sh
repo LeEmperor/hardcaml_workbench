@@ -18,10 +18,10 @@ trap 'rm -rf "$external_root"' EXIT
 cp -R "$repo_root/test/fixtures/example_project/." "$external_root/"
 printf 'Fixture root: %s\n' "$external_root"
 printf 'Fixture opam switch: %s\n' "$FIXTURE_OPAM_SWITCH"
-opam exec --switch="$FIXTURE_OPAM_SWITCH" -- dune build --root "$external_root"
-opam exec --switch="$FIXTURE_OPAM_SWITCH" -- dune runtest --root "$external_root"
+opam exec --switch="$FIXTURE_OPAM_SWITCH" -- dune build -j20 --root "$external_root"
+opam exec --switch="$FIXTURE_OPAM_SWITCH" -- dune runtest -j20 --root "$external_root"
 driver_output="$(opam exec --switch="$FIXTURE_OPAM_SWITCH" -- \
-  dune exec --root "$external_root" ./workbench/project_driver.exe -- \
+  dune exec -j20 --root "$external_root" ./workbench/project_driver.exe -- \
   describe --protocol-version 1)"
 grep -Fq '(key counter)' <<<"$driver_output"
 grep -Fq '(key four-bit)' <<<"$driver_output"
@@ -32,11 +32,11 @@ four_dir="$external_root/direct-four"
 eight_dir="$external_root/direct-eight"
 mkdir "$four_dir" "$eight_dir"
 four_result="$(opam exec --switch="$FIXTURE_OPAM_SWITCH" -- \
-  dune exec --root "$external_root" ./workbench/project_driver.exe -- \
+  dune exec -j20 --root "$external_root" ./workbench/project_driver.exe -- \
   generate-rtl --protocol-version 1 --target counter --configuration four-bit \
   --output-dir "$four_dir")"
 eight_result="$(opam exec --switch="$FIXTURE_OPAM_SWITCH" -- \
-  dune exec --root "$external_root" ./workbench/project_driver.exe -- \
+  dune exec -j20 --root "$external_root" ./workbench/project_driver.exe -- \
   generate-rtl --protocol-version 1 --target counter --configuration eight-bit \
   --output-dir "$eight_dir")"
 grep -Fq '(configuration four-bit)' <<<"$four_result"

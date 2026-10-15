@@ -1,8 +1,10 @@
 # Product decisions and design intake
 
-Updated 2026-10-15. **D1 accepted; D2 open; D3 partially settled.** Accepted choices
-below are architectural requirements, not implementation claims. Architecture,
-rendering, features and the demo plan are synchronized with D1.
+Updated 2026-10-15. **D1 and D2/D3 FS0 defaults accepted.** The owner explicitly
+approved the bounded defaults in the initial tool question, **Approve scope**.
+Later command grammar, immutable snapshots and retention policy remain unresolved.
+These are product decisions; delivered behavior and gaps are tracked in the
+[construction plan](construction_phase_plan.md) and [acceptance](fs0_acceptance.md).
 
 ## D1 — Workspace vocabulary and selection ownership
 
@@ -47,12 +49,11 @@ groups can follow Main/independent support; no concrete serialization/API is imp
 
 ## D2 — Command and context semantics
 
-Status: **open**. D1 settles the target vocabulary but does not approve all palette
-execution/default-selection policy below.
+Status: **FS0 defaults accepted** by the owner's **Approve scope** answer.
 
 **Need:** `Space c c`, `run synth`, remembered flow/profile, and shared button/CLI APIs.
 
-Recommendation:
+Accepted defaults:
 
 - Stable command IDs and typed arguments; fuzzy strings/keys are presentation.
 - Remember launch flow/profile per project, separately from inspected run.
@@ -61,18 +62,24 @@ Recommendation:
 - Show effective flow/profile/endpoint; provider preview identity guards launch.
 - Prefer explicit command names for “run through stage” versus “continue from
   checkpoint”; expose only supported provider operations.
+- A missing remembered flow/profile requires explicit selection; never substitute
+  the first catalog entry or current project default.
+- Ordinary launch does not select its allocated run. Explicit **Launch and view**
+  selects only when the captured workspace/context binding and selection revisions
+  still match. Navigation or a newer selection must not be overwritten.
 
-Questions: accept these defaults? Should a missing remembered flow require a new
-selection (recommended) or explicitly offer the current project default? Numeric
-flow aliases and richer command grammar can follow after the basic palette.
+Delivered FS0 includes the palette, target revalidation, exact preview launch and
+persisted client-local remembered Plan inputs; see [terminal policy](fs0_terminal.md).
+Later policy: numeric flow aliases, richer grammar and shared preference services.
 
 Unlocks F03 registry/context tests and consistent palette/button/automation behavior.
 
 ## D3 — Run-versus-snapshot binding
 
-Status: **partially settled**. Follow-workspace-context and per-tile pinned-run
-references are accepted as part of D1. Exact immutable-snapshot UX, first-demo
-scope and missing-evidence retention policy remain open.
+Status: **FS0 scope accepted**: follow-workspace-context and per-tile pinned-run
+references first; exact immutable snapshots deferred. The owner approved this
+first-demo scope in **Approve scope**. Later immutable-snapshot UX and archival/
+missing-evidence retention policy remain open.
 
 **Need:** following the selector, reference comparisons, and saved stage captures.
 
@@ -82,15 +89,16 @@ Binding distinctions:
 | --- | --- |
 | Follow workspace context (accepted) | Bound context's selected run and relevant latest evidence |
 | Pin run (accepted) | Named run; later published evidence can update the tile |
-| Pin result snapshot (scope open) | Exact immutable observation, if supported and retained |
+| Pin result snapshot (deferred beyond FS0) | Exact immutable observation, if supported and retained |
 
-Recommendation: model all three distinctions now; deliver follow + pin-run first,
-and enable exact snapshot pinning only when adopted provider references guarantee
-it. Labels distinguish a live run reference from a frozen observation.
+Accepted FS0 delivery: follow + pin-run, with labels distinguishing a live run
+reference from a frozen observation. Enable exact snapshot pinning later only when
+adopted provider references guarantee it; the current wire binding has no snapshot mode.
 
-Questions: is a first-demo live reference sufficient, or must the first comparison
-freeze a synthesis snapshot? What should a saved capture retain when canonical
-evidence disappears: explicit unavailable, or a clearly labeled cached copy?
+Later questions: snapshot identity/retention guarantees and what an archival saved
+capture retains when canonical evidence disappears. FS0 already labels L2 data
+`Cached_unverified`, refresh failure and missing source explicitly; cached bytes
+are not an authoritative frozen observation.
 
 Unlocks F05 binding identities, persistence and revision tests. A layout template
 should not accidentally capture an experiment-specific run unless explicitly saved
@@ -109,9 +117,9 @@ visual default or delivered UI. See [source interpretation](design/README.md).
   density stay independent. A provisional demo skin does not choose the final default.
 - Navigation/status/legend chrome is generally mountable tiles, most headers are
   configurable/default-on, and thin host input/recovery works even with chrome hidden.
-- Planned daemon registry owns semantic instances and run-context linkage; clients
-  own local presentation. The export's “already implemented” wording is corrected
-  by source review. Implement the registry once in the main host workstream.
+- The delivered daemon registry owns semantic instances and run-context linkage;
+  clients own local presentation. The imported export was not implementation
+  evidence; FS0 now supplies the single registry used by the host.
 - Inspect/adapt Ches single-transient-float APIs before overlay work; do not infer
   arbitrary stacking, nonmodal peeks or reusable editor embedding from them.
 - FS0/M2 gets structural seams and legibility. FS5/V1 gets the actual five-candidate

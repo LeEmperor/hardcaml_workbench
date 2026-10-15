@@ -1,7 +1,11 @@
 # F09 — Simulation and test module, runner and tiles
 
-Status: **requested 2026-10-15**. Generic supervised Dune test jobs already exist;
-the semantic simulation/test module and tile are not implemented.
+Status (2026-10-15): **FS0 generic execution/test module and project-scoped tile
+delivered** over the existing supervisor, with attempts/status/log/cancel and no
+second scheduler. See [Execution](../fs0_execution_module.md),
+[installed checks](../fs0_install_checks.md) and [acceptance](../fs0_acceptance.md).
+Requirements remain normative: structured cases/seeds/regressions/traces (FS2) and
+generic test-history restart persistence are not implemented.
 
 ## User outcome
 

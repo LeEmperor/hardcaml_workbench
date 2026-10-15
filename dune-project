@@ -32,6 +32,7 @@
    async
    cohttp-async
    cryptokit
+   yojson
    ; Repository development tools.
   (ppx_js_style :with-dev-setup)
   (ocamlformat :with-dev-setup)

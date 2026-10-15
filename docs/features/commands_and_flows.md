@@ -1,6 +1,10 @@
 # F03 — Command palette and project-owned flows
 
-Status: existing fixed build/test/RTL controls; palette and ASIC commands requested.
+Status (2026-10-15): **FS0 palette, typed captured/revalidated commands, remembered
+Plan inputs and exact-preview synthesis launch delivered**. [D2](../decisions.md)
+FS0 defaults are accepted. See [terminal policy/limits](../fs0_terminal.md) and
+[acceptance](../fs0_acceptance.md). Requirements remain normative; richer grammar,
+capability forms and broader interactive launch-and-view coverage remain open.
 
 ## User outcome
 
@@ -19,10 +23,10 @@ shortcuts and automation invoke the same semantic operation.
   start with a single transient capture. Do not assume every future peek is modal.
   `Ctrl+K` in the gallery browser is not an accepted Workbench binding change.
 - Capture/revalidate the intended target; a background update must not retarget an
-  accepted action. Exact context policy is open in [D2](../decisions.md#d2--command-and-context-semantics).
+  accepted action. FS0 context policy is accepted in [D2](../decisions.md#d2--command-and-context-semantics).
 - Workspace run selectors act on the workspace's bound context (F10), including
   other linked workspaces. Provide make-independent/link-to-context actions.
-  A normal run launch need not change selection; any explicit launch-and-view
+  A normal run launch does not change selection; any explicit launch-and-view
   command must identify its target context and therefore its shared effect (D2).
 - Discover project-owned flow IDs, profiles, supported endpoints and parameters.
 - Preview the provider-prepared plan and launch using its expected identity.

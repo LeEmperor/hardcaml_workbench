@@ -2,8 +2,10 @@
 
 **2026-10-15 accepted direction:** named workspaces follow shared run contexts by
 default, with independent-context and per-tile reference options (D1/F10). Palette
-policy (D2) and exact-snapshot scope (D3) retain open questions. These are planned
-behaviors; the fixed renderer has not yet been migrated.
+defaults (D2) are approved for FS0; immutable-snapshot detail (D3) remains later.
+The new host now delivers a provisional shelf layout and palette, preserving the
+legacy RTL/hierarchy inspectors. See [FS0 controls](fs0_terminal.md) and the delivery
+plan for implemented behavior; the complete appearance/gallery design remains pending.
 
 **Appearance sources:** the newer [candidate gallery handoff](design/tui_candidate_gallery_handoff.md)
 supersedes the [older design handoff](design/tui_design_system_handoff.md). See
@@ -124,6 +126,12 @@ secondary details rather than sophisticated automatic responsive rearrangement.
 Keep project/run identity and connection health easy to find, but move full IDs,
 paths and environment details to inspection. A compact overview may remain visible
 in the default preset; users are not forced into one global persistent dashboard.
+
+Owner review (2026-10-15) confirmed that Overview contents render correctly; the
+row/grid arrangement remains provisional. Current producer/source rows expose raw
+JSON and long absolute paths. Replace these with concise semantic labels plus
+detail inspection, preserving full evidence references. This information-density
+cleanup is distinct from selecting a final skin or layout.
 
 ## 4. Focus and commands
 

@@ -3,15 +3,41 @@ open! Async
 module Runtime_error = Error
 open Hardcaml_workbench_protocol
 
-type t = { endpoint : Uri.t }
+type t =
+  { endpoint : Uri.t
+  ; timeout : Time_float.Span.t
+  }
 
-let create endpoint = { endpoint = Uri.of_string endpoint }
+let create ?(timeout = Time_float.Span.of_sec 35.) endpoint =
+  { endpoint = Uri.of_string endpoint; timeout }
+;;
+
 let endpoint t = Uri.to_string t.endpoint
 let uri t path = Uri.with_path t.endpoint path
 
 let read_body response body =
-  let%map body = Cohttp_async.Body.to_string body in
+  let pipe = Cohttp_async.Body.to_pipe body in
+  let rec loop chunks bytes =
+    match%bind Pipe.read pipe with
+    | `Eof -> return (String.concat (List.rev chunks))
+    | `Ok chunk ->
+      let bytes = bytes + String.length chunk in
+      if bytes > 32 * 1024 * 1024
+      then (
+        Pipe.close_read pipe;
+        failwith "Workbench response exceeded 32 MiB");
+      loop (chunk :: chunks) bytes
+  in
+  let%map body = loop [] 0 in
   Cohttp.Response.status response, body
+;;
+
+let bounded t f =
+  let interrupt = Clock.after t.timeout in
+  Clock.with_timeout t.timeout (Monitor.try_with_or_error (fun () -> f interrupt))
+  >>| function
+  | `Timeout -> Or_error.error_string "Workbench HTTP request timed out"
+  | `Result result -> Or_error.join result
 ;;
 
 let request_error status body =
@@ -23,30 +49,36 @@ let request_error status body =
 ;;
 
 let hello t =
-  let%bind response, body = Cohttp_async.Client.get (uri t "/api/hello") in
-  let%map status, body = read_body response body in
-  if Cohttp.Code.code_of_status status = 200
-  then
-    V1.Codec.decode V1.Hello.Response.t_of_sexp body
-    |> Result.map_error ~f:(fun error -> Runtime_error.create_s [%message error.message])
-  else request_error status body
+  bounded t (fun interrupt ->
+    let%bind response, body = Cohttp_async.Client.get ~interrupt (uri t "/api/hello") in
+    let%map status, body = read_body response body in
+    if Cohttp.Code.code_of_status status = 200
+    then
+      V1.Codec.decode V1.Hello.Response.t_of_sexp body
+      |> Result.map_error ~f:(fun error ->
+        Runtime_error.create_s [%message error.message])
+    else request_error status body)
 ;;
 
 let post t ~path ~sexp_of_request ~response_of_sexp request =
-  let headers =
-    Cohttp.Header.of_list
-      [ "content-type", V1.content_type
-      ; String.lowercase V1.protocol_header, Int.to_string V1.version
-      ]
-  in
-  let body = V1.Codec.encode sexp_of_request request |> Cohttp_async.Body.of_string in
-  let%bind response, body = Cohttp_async.Client.post ~headers ~body (uri t path) in
-  let%map status, body = read_body response body in
-  if Cohttp.Code.code_of_status status = 200
-  then
-    V1.Codec.decode response_of_sexp body
-    |> Result.map_error ~f:(fun error -> Runtime_error.create_s [%message error.message])
-  else request_error status body
+  bounded t (fun interrupt ->
+    let headers =
+      Cohttp.Header.of_list
+        [ "content-type", V1.content_type
+        ; String.lowercase V1.protocol_header, Int.to_string V1.version
+        ]
+    in
+    let body = V1.Codec.encode sexp_of_request request |> Cohttp_async.Body.of_string in
+    let%bind response, body =
+      Cohttp_async.Client.post ~interrupt ~headers ~body (uri t path)
+    in
+    let%map status, body = read_body response body in
+    if Cohttp.Code.code_of_status status = 200
+    then
+      V1.Codec.decode response_of_sexp body
+      |> Result.map_error ~f:(fun error ->
+        Runtime_error.create_s [%message error.message])
+    else request_error status body)
 ;;
 
 let snapshot t request =
@@ -136,5 +168,23 @@ let read_hierarchy t request =
     ~path:"/api/v1/read-hierarchy"
     ~sexp_of_request:V1.Read_hierarchy.Request.sexp_of_t
     ~response_of_sexp:V1.Read_hierarchy.Response.t_of_sexp
+    request
+;;
+
+let workspace t request =
+  post
+    t
+    ~path:"/api/v1/workspace"
+    ~sexp_of_request:Workspace.Request.sexp_of_t
+    ~response_of_sexp:Workspace.Response.t_of_sexp
+    request
+;;
+
+let asic t request =
+  post
+    t
+    ~path:"/api/v1/asic"
+    ~sexp_of_request:Asic.Request.sexp_of_t
+    ~response_of_sexp:Asic.Response.t_of_sexp
     request
 ;;

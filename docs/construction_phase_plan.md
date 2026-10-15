@@ -1,329 +1,280 @@
 # Hardcaml Workbench — Demo construction plan
 
-Updated 2026-10-15. This is the active implementation queue, replacing October 12
-P0–P7 (preserved in the [archive](archive/construction_phase_plan_2026_10_12.md)).
-The [feature inventory](feature_list.md) owns product scope; the [decision log](decisions.md)
-records accepted D1 run contexts and remaining D2/D3 questions. Phase IDs use **M0–M5** to avoid
-confusion with ASIC's phases and the archived Workbench plan.
+Updated 2026-10-15. **FS0 Demos A–C delivered with bounded limitations.** This is
+the active status/checklist, replacing the October 12 P0–P7 plan in the
+[archive](archive/construction_phase_plan_2026_10_12.md). The
+[feature inventory](feature_list.md) owns product scope; the
+[decision log](decisions.md) owns accepted D1/D2/D3 defaults and later policy.
+M0–M5 are implementation phases, distinct from feature sets and ASIC phases.
 
-**Active product target: [FS0 — initial functional demos](feature_sets.md).** FS0
-groups M0–M3; FS1/FS2 split M4 into ASIC inspection and simulation themes, and FS3
-groups workspace/setup adoption. Feature sets are product groupings; phases below
-remain the single ordered implementation/evidence checklist.
+FS0 covers M0–M3's functional slices, not every normative feature requirement.
+FS1/FS2 map to richer M4 evidence and simulation; FS3 maps to M5 adoption.
+FS5/V1 is an independent appearance gallery, not a functional-demo gate.
+No FS1/FS2 implementation is claimed. The first FS5 appearance slice is recorded below.
 
-F12's minimal appearance seams belong to FS0/M2. **FS5/V1** below is an independent
-comparative-gallery track, not a gate on the functional demos. The imported visual
-handoff's gallery phases apply to that track; they do not reorder the main plan.
+## Evidence and candidate baseline
 
-**Status: planning only. No new Workbench implementation or test pass is claimed.**
-Delivered foundations remain native daemon/client, generic Dune operations,
-supervision/logs/cancellation, integration discovery, RTL/artifacts/provenance and
-elaborated hierarchy. Preserve their existing behavior through extraction.
+Use these records together rather than interpreting an old audit as current status:
 
-## What changed since the previous plan
+| Record | Scope / retained evidence |
+| --- | --- |
+| [Environment inventory](fs0_environment_inventory.md#ready-executable-pair) | Exact executable paths, SHA-256 inventory, capture receipts, tools and wire versions; historical audit, whose pending-wiring/test notes are superseded below |
+| [Provider integration](fs0_provider_integration.md) | Implemented API/configuration, supervision, summary identities, budgets and freshness limits |
+| [Execution module](fs0_execution_module.md) | Protocol projection and daemon routing over the existing generic supervisor |
+| [Terminal host](fs0_terminal.md) | Controls, ownership, launch policy, renderer coverage and known UI limits |
+| [Installed checks](fs0_install_checks.md) | Native installed workflow, external fixture, legacy capture checks: all passed |
+| [Native acceptance](fs0_acceptance.md) | Actual HTTP/PTY fixtures, real serial synthesis, allocation/detach, warm/restart identity and live cached UI reopening |
 
-The sibling `hardcaml_asic_example` now supplies a controlled FIFO specimen and
-public named-flow discovery/description/preview/launch. Newer ASIC development
-provides native execution, durable observation/watch and report references. The
-standalone headless client demonstrates the candidate boundary. These findings
-replace the old assumption that the entire observation interface is still missing.
+Exact accepted candidate (not an assertion that today's sibling HEAD was linked):
 
-The October 15 source review included uncommitted provider development. Latest
-named-flow integration evidence uses installed native orchestration with a fixture
-external backend; earlier real physical evidence is separate. Neither is proof of
-Workbench integration or of real acceptance for the newest named-flow path.
+```text
+project  /home/wayne/devel/jane/hardcaml_asic_example/_build_namedflow_real/default/bin/project.exe
+SHA-256  5e8bdaab7dc4a5f5dbda8dae22a3e9946c4db09bf16951381d125a418d3a49b1
+provider /tmp/opencode/namedflow-real-20261015/provider/bin/hardcaml-asic-flow
+SHA-256  2c6604d355b819ee5cec8f731b4ba810ea9415ebf56f24ebac798a8d346bcdd5
+tools    /home/wayne/devel/jane/hardcaml_asic_example/_flow_tools
+```
 
-Useful sibling references (checkout locations, not installed runtime dependencies):
+Provider package `0.1.0`, CLI contract **4**, `namedflow1=true`; observation reads
+v2, allocation v1, reports/historical methodology v1. Source stamping is absent.
+The inventory records captured source checksum
+`a12a763f842f283ab31649e8ded40786b304277f8e572d0f68e500e1fdc1686d`
+and receipts under `/tmp/opencode/namedflow-real-20261015/`; package version alone
+does not identify the linked source. The normal `.dev/asic/current` installation
+is distinct from this explicitly selected pair.
 
-- `../hardcaml_asic_example/docs/headless_flow.md`
-- `../hardcaml_asic/docs/development/project-flow-catalog-progress.md`
-- `../hardcaml_asic/docs/development/flow-infrastructure-progress.md`
+Primary Workbench acceptance roots:
 
-Review current public contracts and pin a candidate. Do not implement the obsolete
-Python-specific upstream handoff verbatim or assume every catalog/artifact/fine-step
-capability is now present.
+- `/tmp/opencode/workbench-fs0-91em64rl/`: fixtures plus real balanced **673** /
+  synth_delay **685**, both completed, acceptance **`not_evaluated`**; early
+  allocation while launcher executing, submission-client detach, durable contexts,
+  pins and L2 identity. `real/verified.json` and `outcome.json` retain results.
+- `/tmp/opencode/workbench-fs0-unzwt0kn/`: actual 120×40 cached real UI reopening;
+  **673 → 685**, pin back to **673**, then **pinned 673 beside following 685**;
+  current-screen assertions, unchanged run registry and restart restoration.
+- `/tmp/opencode/workbench-fs0-etbs6c68/`: strengthened fixture-only verification.
+- `/tmp/opencode/workbench-fs0-6_1ymcsd/`: initial fixtures and preserved real
+  preallocation timeout-CLI failure; successful rerun preserved its configured
+  `results/` root. The authorized config correction sets stage timeout to `()`.
+
+Exact run/report paths, plan identities and normalized report digests are in
+[acceptance](fs0_acceptance.md#successful-real-rerun). Real report-call counts are
+not instrumented; fixture warm/restart report calls remain **2 → 2**. Timing `[]`
+means unsupported, and synthesis counts are checkpoint-boundary measurements,
+not signoff acceptance or per-step attribution.
+
+Final parent validation passed, serially: `dune build -j20 @fmt @lint`,
+`dune runtest -j20`, `dune build -j20`, then current HTTP/PTY fixture acceptance
+(`/tmp/opencode/workbench-fs0-botbl2jn`), installed native application checks and
+legacy baseline checks. The installed PTY test now selects attempts by their exact
+submitted IDs and checks full repaints, not incidental ANSI delta retransmission.
+External counter fixture acceptance also passed. No additional real EDA was needed
+after the recorded two-profile acceptance and real cached-screen verification.
 
 ## M0 — Decisions, provider baseline and demo fixtures
 
-Features: F01–F06, F09–F11. Status: in progress (documentation decision only);
-provider baseline and implementation fixtures remain pending.
+Features: F01–F06, F09–F11. **Delivered baseline; remaining coverage is explicit.**
 
-- [x] Record accepted D1: project session → windows → workspaces → tiles; default
-  shared Main run context, multiple selector instances, independent/relink and
-  per-tile pinned references. Architecture/rendering/specs synchronized 2026-10-15.
-- [x] Import both aesthetic handoffs and reconcile their precedence/scope in
-  `docs/design/README.md` (2026-10-15). Gallery v0.5 is newer; registry and general
-  float-manager claims are qualified against current code. No visual implementation.
-- [ ] Settle remaining D2 command capture/default-selection policy and D3 exact
-  snapshot demo/retention scope before those specific contracts harden.
-- [ ] Record configured specimen path, provider revision or immutable installation
-  identity, project executable, environment and supported protocol versions.
-- [ ] Verify the public discover/describe/plan/run/observe/report sequence, using
-  explicit paths. Record gaps in run-store listing, snapshot identity/retention,
-  detailed timing data, artifact access and cancellation separately.
-- [ ] Retain two distinguishable run fixtures with original context, plus pending,
-  preallocation failure, failed execution, late response and missing-evidence cases.
-  Label synthetic/replayed/real evidence. Keep the existing counter fixture.
-- [ ] Choose a bounded synthesis demo and inventory available cell/resource and
-  diagnostic fields; unavailable metrics remain explicit.
-- [ ] Specify F11 cache source identity/freshness examples, including later result
-  revision, missing source and adapter/schema changes. Identify provider revision
-  validation separately from potentially expensive report materialization.
-- [ ] Identify the existing generic Dune test command and deterministic success,
-  failure/cancellation fixtures for F09; this path requires no ASIC provider.
-
-**Exit:** remaining command/binding scope settled and versioned examples available.
-Accepted D1 plus generic test fixtures already define an independent first slice;
-host/context reducers and generic runner extraction need not wait for ASIC or
-exact-snapshot work. Real EDA is not required for fixture-backed implementation.
+- [x] D1: shared Main contexts, independent/relink, multiple selectors and tile pins.
+- [x] D2/D3 FS0 defaults approved by the owner's initial **Approve scope** answer:
+  captured/revalidated targets, no missing-flow fallback, ordinary launch does not
+  select, launch-and-view selects only matching captured revisions; follow/pin-run
+  first, immutable snapshots deferred.
+- [x] Record explicit candidate executables, hashes, tools and supported wire versions.
+- [x] Verify discover/describe/plan/run/observe/report through fixtures and actual
+  installed-provider HTTP synthesis. Use returned exact allocation/report references.
+- [x] Retain two distinguishable fixture and real runs; backend fixtures cover
+  preallocation failure, malformed output, timeout, cancellation, changed/missing
+  evidence and cache races. Existing counter fixture remains available.
+- [x] Bound the demo to synthesis; expose cell count/breakdown, provenance,
+  completion, acceptance and freshness; mark unsupported timing honestly.
+- [x] Specify cache keys, source/revision invalidation, missing-source and
+  schema/corruption behavior. No cheap provider revision query is available.
+- [x] Generic project-scoped Dune test path and deterministic supervisor fixtures;
+  installed counter tests and actual HTTP generic test pass without ASIC tools.
+- [ ] Complete a single end-to-end matrix for late-response, reconnect, failure and
+  cancellation cases across interactive and concurrent clients. Existing focused
+  tests cover subsets, not every permutation.
 
 ## M1 — Module/command contracts and headless ASIC path
 
-Features: F01, F02, F03, F05, F09/F11, first F06 slice. Depends on relevant M0 examples.
+Features: F01/F02/F03/F05/F06/F09/F11. **Demo A delivered.**
 
-- [ ] Extract execution/log access into a typed module over existing supervision.
-  Specify scope, revisions, bounded updates, queries, commands and evidence refs.
-- [ ] Establish daemon-owned asynchronous query coordination: shared cache and
-  equivalent in-flight fetches, bounded provider reads and one-reader fan-out.
-  Separate safe read scheduling from long-lived execution queues; keep provider
-  locking rules. No tile-owned processes or query-triggered EDA execution.
-- [ ] Implement F11 L1 typed summary caching, versioned keys/current-observation
-  index and bounded active/recent retention. Share data across contexts/tiles;
-  separate large detail. Map provider invalidation so late fetches cannot regress
-  newer summaries and completed runs can acquire later revisions.
-- [ ] Define command IDs/arguments/availability/context once; adapt existing
-  build/test/cancel/RTL actions without losing submission deduplication.
-- [ ] Expose the generic simulation/test module over existing Dune test supervision:
-  typed attempts/status/log access and cancellation, no invented case counts or ASIC
-  run association. Verify fixtures and one real PDK-free project test invocation.
-- [ ] Implement the configured ASIC adapter: discovery, flow/profile selection,
-  preview identity, launch and early allocation. No fabricated run IDs.
-- [ ] Consume durable observation with stream/cursor reconnect; drain launcher
-  output without confusing query success with execution or acceptance success.
-- [ ] Use returned exact report/artifact references and validate context. Project
-  commands retain tool/flow semantics; Workbench does not become a scheduler inside
-  the provider. Validate descendant cancellation for the adopted execution path.
-- [ ] Project synthesis resources and available diagnostics into shared module
-  data. Preserve original reports and source/stage identity.
+- [x] `protocol/execution.ml` projects exact project Build/Test attempts;
+  `backend/execution_module.ml` delegates to `Service`. Daemon submit/cancel/log
+  handlers route through it; no second scheduler, job store or inferred test cases.
+- [x] Daemon-owned ASIC service: four bounded public queries, one launcher,
+  coalesced cold reads, automatic reader after persisted allocation, cursor fences.
+- [x] L1 decoded summaries (32), L2 indexed summaries (128), bounded payloads and
+  explicit retention limits; tiles do not own provider processes or execute EDA on read.
+- [x] Typed terminal command catalog, captured target/revalidation, availability,
+  shared Build/Test/RTL/cancel actions, exact preview and launch idempotency keys.
+- [x] Generic test attempts/status/log/cancel retain project scope, submission
+  identity and the existing supervisor's process lifecycle.
+- [x] ASIC discovery, description, explicit flow/profile/endpoint preview, exact
+  identity-guarded synthesis launch and early allocation without fabricated IDs.
+- [x] Durable observation/read-updates and exact report references; distinguish
+  command state, execution completion and acceptance. Client detach preserves work.
+- [x] Project synthesis resources into shared summaries with checkpoint origin.
+- [x] Fixture-owned process cancellation/deadline/output bounds; generic supervisor
+  retains descendant cancellation coverage.
+- [ ] Broader real provider/container descendant termination acceptance. ASIC
+  process cleanup signals only owned PIDs; stopping a reader is not producer
+  termination. Full physical-operation acceptance belongs to FS1.
 
-**Demo A:** plain/headless Workbench discovers the specimen, previews and launches
-synthesis, observes allocation/progress, reconnects and reads a contextual report.
-Run fixture acceptance first; record actual synthesis acceptance separately when
-the chosen provider/tool environment is ready. Client detach leaves work running.
-**Independent early check:** generic tests work through the new module API before
-the ASIC adapter, retaining explicit project scope and submission identity.
+**Demo A:** native HTTP client discovers/previews/runs both real synthesis profiles,
+observes allocation before launcher completion, detaches, and retrieves exact reports.
 
 ## M2 — Tile host, named arrangements and palette
 
-Features: F02–F05, F09–F11. Depends on accepted D1 and relevant M1 contract shapes; fixtures allow
-parallel progress before the live adapter is finished.
-Also includes F12's minimal host/component seams, not full gallery acceptance.
+Features: F02–F06/F09–F12 (minimal F12 seams). **Demo B delivered.**
 
-- [ ] Separate transport/server data from host context, tile-local state and render.
-  Preserve existing event sequencing and stale-response rejection.
-- [ ] Implement stable workspace/tile/context identities and at least two named
-  workspaces linked to Main. Add differently sized run selectors with shared selected
-  run but local focus/filter/scroll; Overview has no privileged ownership.
-- [ ] Establish one daemon-owned semantic session/window/workspace/tile registry and
-  client projections. Keep local dimensions/focus/scroll/overlays/effective geometry
-  separate; do not implement a competing registry for a skin or gallery.
-- [ ] Implement make-independent initialized from the current run, link-to-context,
-  and revisioned invalidation across selection/rebinding. Moving a workspace retains
-  its binding; moving a following tile adopts its destination workspace's context.
-- [ ] Implement shared shell/focus/input capture and move/reorder, resize,
-  hide/restore and zoom. No backend lifecycle side effects from tile manipulation.
-- [ ] F12 minimum: semantic tokens, replaceable skin, configurable mostly-on headers,
-  reusable tabs and explicit layout geometry. Navigation/status/help-legend tiles
-  are mountable; essential commands/recovery work when all such chrome is hidden.
-- [ ] Inspect installed Bonsai Term APIs and Ches float placement/capture/release
-  implementation; select a thin adapter or bounded shared extraction for the
-  single-transient palette. Record reuse limits instead of adding a general float
-  manager or mandatory editor dependency. Preserve return focus/paste ownership.
-- [ ] Add palette (`Space c c` intended), command availability and effective target
-  labels; derive help/shortcut hints from the command registry.
-- [ ] Add run selector, execution/log/synthesis tiles, following and reference
-  bindings accepted in D1/D3. Preserve useful RTL/hierarchy/artifact inspection while
-  migrating it into tile-compatible boundaries.
-- [ ] Add a project-scoped simulation/test tile over F09: run, list/select attempts,
-  inspect logs/status and cancel. It works without a selected ASIC run and never
-  relabels generic test evidence after a context switch.
-- [ ] Test actual frontend events with controlled transport/time/dimensions:
-  execute once, switch A→B with A responses pending, pin A, move/hide, change
-  arrangement, modal capture and compact-size recovery. Select from either linked
-  selector, hide the other, detach/relink Timing and verify local navigation/pins.
-- [ ] Exercise many tiles over a few shared queries: measure provider-call counts,
-  bounded concurrency and warm-cache switching; accept results independently while
-  input stays responsive. Test obsolete reads and shared/pinned consumers surviving
-  context changes without cancellation of their jobs or required readers.
-- [ ] F11 warm-switch acceptance: load R1/R2 with different cell counts, then select
-  R1→R2→R1 while unchanged/resident and assert correct values with zero additional
-  summary/report materialization queries. Account separately for freshness checks;
-  exercise source revision updates, stale responses and bounded-memory eviction.
-- [ ] Verify styling/density/icon changes preserve IDs, bindings and local state,
-  cause no provider fetches for existing data and retain meaning without color or
-  special fonts. Capture one provisional skin at wide/narrow terminal cell grids;
-  sensible scroll/hide/tab fallback is enough, no pixel-responsive layout gate.
+- [x] Separate transport ownership, pure host reducer/local state and typed rendering.
+  Daemon/project/request-order and binding/selection guards reject stale responses.
+- [x] One daemon-owned semantic registry: stable session/window/workspace/tile/context
+  IDs, Overview/Timing linked to Main, independent/relink and exact per-tile pins.
+- [x] Selectors share selected run, retaining local cursor/filter/scroll/focus.
+  Moving following tiles adopts the destination context; pins remain exact.
+- [x] Tile add/hide/restore/move/reorder/resize/zoom; shelf order/preferred sizes,
+  compact focused-tile fallback, with no backend lifecycle side effects.
+- [ ] Freeform x/y placement and richer geometry interaction. Stored geometry fields
+  do not make the shelf renderer a free-positioned layout system.
+- [x] Provisional semantic-role skin, configurable local headers/chrome, mountable
+  navigation/status, commands/recovery without chrome, clipped narrow rendering.
+- [x] Ches single-transient lifecycle reviewed; bounded palette capture/return focus
+  and paste suppression implemented locally. No general float manager claimed.
+- [x] `Space c c` palette with effective targets, typed actions and availability;
+  remembered explicit launch inputs are persisted independently of inspected runs.
+- [x] Run selector, execution/log/project-test/synthesis/evidence tiles and preserved
+  legacy RTL/artifact/hierarchy inspector with return to host.
+- [x] Reducer/renderer tests cover modal input, delayed-view guards, linkage/pins,
+  switching, clipping and local state. Native PTY checks cover real host transport,
+  installed discovery/hierarchy and resize down to 1×1.
+- [x] Fixture warm A/B switching uses no new report calls; actual cached real UI
+  shows 673→685 and pinned 673 beside following 685 with explicit scope/freshness.
+- [ ] Expand actual frontend concurrent-client, pending-response, reconnect-during-
+  allocation and interactive launch-and-view/cancellation coverage. HTTP Run and
+  RPC-driven live selection do not prove every interactive launch path.
+- [ ] Measure high-tile-count fan-out, responsiveness, latency and memory/disk use.
+- [ ] Fully reactive publication/redraw and richer capability-aware endpoint forms.
+  Current refresh/repaint is clock-driven; assignments are whitespace-separated.
 
-**Demo B:** from the palette launch synthesis; select A/B and see following tiles
-change; keep a labeled A synthesis reference beside B; switch arrangements and
-return without losing context or stopping execution. Linked selectors agree; an
-independent workspace retains its run until relinked. Run/inspect a generic test
-through the simulation tile. Multiple views share module data, not local scroll.
+**Demo B:** linked/independent workspaces, following/pinned synthesis comparison,
+palette operations and project-scoped tests/logs are delivered. Synthetic renderer
+fixtures (50/73) and actual real UI evidence (673/685) are separately labeled.
 
-## M3 — Historical reopening and saved layouts
+## M3 — Historical reopening and saved arrangements
 
-Features: F04/F05/F10/F11. Depends on M1 identities and M2 host model. Storage prototyping
-may proceed alongside M2 once identities are stable.
+Features: F04/F05/F10/F11. **Demo C delivered via autosaved session state.**
 
-- [ ] Persist a rebuildable provider-result index and bounded revision-keyed cache.
-  Start with explicit known references if provider store discovery is unavailable;
-  record that limitation rather than guessing the newest directory.
-- [ ] Implement F11 L2 normalized summary storage outside canonical run results.
-  Choose location/format/budgets and writer ownership; publish complete entries
-  atomically, reject incompatible/corrupt entries and rebuild without provider edits.
-- [ ] Reopen historical results after daemon restart without tool execution.
-  Distinguish missing canonical evidence from labeled cached evidence.
-- [ ] Verify L2 reopening avoids re-materializing unchanged large reports after
-  restart. Show cached/unverified while validation is pending and source-unavailable
-  on missing records; test refresh failure and schema/adapter changes. Measure cold,
-  L1 and L2 latency/query counts and memory/disk sizes before setting speed targets.
-- [ ] Persist named layouts/templates and session references with schema versions;
-  keep project-shared templates separate from personal/machine session state.
-- [ ] Keep functional workspace definitions, appearance choices and requested
-  geometry distinct in saved config. Restyling does not recreate tile IDs or runs;
-  changing suggested layout is explicit and clamping stays local to each surface.
-- [ ] Preserve context identities and workspace linkage on restoration: Main-linked
-  workspaces must not restore as independent copies of the selected run. Preserve
-  independent contexts and pinned references separately from geometry.
-- [ ] Refresh later result revisions correctly. Implement immutable snapshot pinning
-  only to the extent selected in D3 and supported by provider guarantees.
-- [ ] Restore the existing hierarchy/evidence context accurately; a stale result
-  must not become an apparent view of a newly selected build/run.
+- [x] Persist bounded run registry/index and versioned normalized L2 summaries
+  outside provider results; atomic publication, corrupt/incompatible handling.
+- [x] Reopen explicit known provider references after restart without tool execution.
+  Broad provider-store discovery is unavailable; no guessed newest directory.
+- [x] L2 loads avoid public report materialization and show `Cached_unverified`.
+  Fixture refresh/missing/corrupt/eviction tests exist; real warm/restart summaries
+  preserve every field except freshness, including original observation time.
+- [x] Autosave named workspaces, tile order/hidden/size/zoom/bindings, Main linkage,
+  independent contexts and selected exact run references. Actual restart restores
+  the full workspace snapshot, including the two-tile real demo.
+- [x] Separate semantic registry from client focus/filter/scroll/dimensions; clamping
+  stays local. Interactive launch inputs have a separate client preference store.
+- [ ] Template export/clone and project-shared template versus personal session UX.
+  Autosaved named arrangements are not a template library.
+- [ ] Persist local chrome/header preferences and other deliberately local appearance
+  choices if selected for adoption; they currently reset with the client.
+- [x] Later observations invalidate freshness; explicit Refresh materializes current
+  public reports. Missing-source/refresh-failed data remains labeled.
+- [ ] Benchmark cold/L1/L2 latency and sizes; expand full missing-reference and
+  schema-change interactive restoration coverage. No speed target is asserted.
+- [x] Preserve existing hierarchy current/historical evidence labeling in installed
+  checks rather than relabeling old hierarchy as a newly selected run.
 
-**Demo C:** save a layout/reference, restart the daemon/client, reopen the same
-identified results and restore the arrangement. Missing references remain explicit;
-unchanged summaries do not trigger tool execution or repeated large-report parsing.
+**Demo C:** daemon restart restores contexts/pins/arrangement and reopens exact
+cached real summaries without EDA. Immutable snapshots/archival retention are
+deferred by accepted D3 scope, not missing FS0 implementation.
 
-## M4 — Rich evidence and live acceptance
+## Remaining FS0 followups
 
-Features: F06/F09 plus execution/regression extensions. Depends on M1–M3 and actual
-provider data availability; deliver individual useful slices rather than all at once.
+Dashboard usability correction (2026-10-15): the saved acceptance state's empty
+Overview was traced to its selector-movement test. Startup now distinguishes loading
+from an empty saved arrangement. Fit-to-window is the default local layout mode;
+the additive Overview preset supplies 13 views including honest unrequested/
+unsupported stages. Requested shelf sizes remain selectable and persisted pins
+unchanged. Actual PTY reproduction over a private state copy passed with real
+cached 673/685 evidence, all five skins and no provider/result changes:
+`scripts/test-fs0-dashboard.py`, `/tmp/opencode/workbench-fs0-dashboard-52akmtcc/`.
+Terminal tests, format/lint, installed workflow and legacy baselines passed.
 
-- [ ] Add one timing/check drilldown with setup/hold and measurement context;
-  paginate paths/details if supplied. Explain unavailable detailed-path data.
-- [ ] Add bounded placement/resource/clock views using actual provider fields.
-- [ ] Extend F09 with project-declared simulation/regression cases, seeds and failure
-  artifacts where supported. Trace artifacts do not require an embedded waveform UI.
-- [ ] Add explicit external artifact/source viewer actions with host/path handling.
-- [ ] Demonstrate a real supported physical run, failure/cancellation cases and
-  observation freshness. Preserve earlier measurements after later-stage failure.
+**Owner review, 2026-10-15:** the user reports the Overview works and content renders
+correctly inside its tiles. The row/grid arrangement and visual styling are accepted
+only as provisional demo presentation, not the intended final layout/aesthetic.
+Raw JSON and absolute paths in producer/source provenance are too verbose for the
+overview. Follow up with concise semantic labels and an inspectable full reference
+(F06/rendering); this does not block the next domain slice. This feedback records
+human functional acceptance of the viewed Overview, not broader flow/signoff coverage.
 
-**Exit:** trace a real issue from a summary to its supporting report. Fixture and
-real-tool acceptance are recorded separately. Full timing exploration can continue
-after the first useful drilldown.
+The unchecked M0–M3 items are bounded followups, not grounds to label delivered
+demos “not started.” Final parent-wide checks passed. Prioritize missing interactive
+race/reconnect/launch-and-view/cancellation coverage, then measured scaling and
+adoption choices. Template export/clone, freeform geometry, persisted local chrome
+and richer endpoint forms remain explicit gaps; clock-driven redraw remains current.
 
-## M5 — Multi-window polish and adoption
+## M4 — Rich evidence and live acceptance (FS1/FS2)
 
-Features: F04/F07/F08/F10 selective slices. Depends on working demos above.
+**Not started.** Real bounded synthesis acceptance above does not implement these
+richer sets. Features: F06/F09 and execution/regression extensions.
 
-- [ ] Attach two monitor surfaces with shared Main selectors plus independent-context
-  support and local focus/scroll. Verify context changes converge across surfaces
-  and implement documented cross-window workspace/tile movement semantics.
-- [ ] Provide useful starter templates and initialization of an existing project;
-  decide configuration-directory naming and root-manifest migration explicitly.
-- [ ] Measure responsiveness under bounded high-volume logs/events; review visual
-  comfort and help/palette discoverability.
-- [ ] Adopt reviewed F12 presets where available without requiring FS5's entire
-  experiment matrix for functional adoption. Validate SSH/tmux controls and glyph
-  fallbacks on a modest grid; do not assume monitor pixels determine cell sizes.
-- [ ] Validate format/lint/unit/build plus affected fixture/install/PTY checks;
-  adopt a verified provider version deliberately before production use.
+- [ ] Timing/check drilldown with setup/hold, units/corner/measurement context.
+- [ ] Placement/resource/clock views backed by actual provider fields.
+- [ ] Project-declared simulation/regression cases, seeds and failure/trace artifacts.
+- [ ] External source/artifact viewer actions and host/path handling.
+- [ ] Full physical-run failure/cancellation/observation acceptance; preserve earlier
+  measurements after later-stage failure. No placement/signoff run is claimed here.
 
-Later independent features: full project creation, Ches summary integration,
-MCP/automation adapters, embedded editor, dedicated comparator, rich graphical
-views and live third-party/FPGA integrations. Their requirements are retained in
-feature specs/backlog, not prerequisites for Demos A–C.
+## M5 — Multi-window polish and adoption (FS3)
 
-## Dependency and acceptance summary
+**Later scope; shared registry primitives exist, adoption acceptance pending.**
 
-### V1 — Independent appearance gallery track (FS5)
+- [ ] Two attached monitor surfaces, convergence/local navigation and cross-window
+  workspace/tile movement acceptance.
+- [ ] Starter templates, existing-project initialization and explicit config migration.
+- [ ] High-volume log/event responsiveness and help/discoverability measurements.
+- [ ] Reviewed appearance presets, SSH/tmux controls and glyph fallback validation.
+- [ ] Final adopted-scope checks and deliberate provider-version adoption.
 
-Status: not started. Feature: F12. Depends on enough M2 host/component contracts
-to reuse them, with injected mock state allowed. This is a visual-workstream task
-ID, unrelated to application wire protocol V1. It does not block Demos A–C.
+## V1 — Independent appearance gallery (FS5)
 
-- [ ] Confirm reusable installed rendering APIs and Ches float seams; keep generic
-  theme/component/layout code free of ASIC I/O and editor-primary assumptions.
-- [ ] Add only components needed for the comparison: configurable tile header,
-  panel/tabs, metrics, tree/table, inspector, utility status/navigation and overlays.
-- [ ] Render A Instrument, B Structured, C Minimal, D Studio and E Structured Studio
-  using identical labeled synthetic Overview and Timing data. Retain C; E must be
-  a real B+D composition. Neither fixture chooses a mandatory workspace style.
-- [ ] Expose independent vivid/selective/restrained color, none/ascii/unicode/
-  nerd-font icon modes with fallbacks, and compact/comfortable density. Reuse tabs
-  across skins; preserve semantic selection and local state across changes.
-- [ ] Showcase movable/hidden utility chrome, configurable/headerless tiles and
-  palette/help/mock source-peek surfaces. Use real adapted lifecycle where available
-  or label the mock; do not claim stacked/nonmodal or Ches editor integration.
-- [ ] Capture actual terminal-cell wide and modest/narrow frames and test geometry,
-  glyph widths, focus versus selection, tab semantics, input recovery and no domain
-  effects on restyling. Review variants with the owner before choosing defaults.
+**First skin slice delivered; richer gallery/review pending.** See
+[appearance presets](appearance_presets.md) for controls, captures and tests.
+This is a reusable renderer over actual FS0 tiles, not a selected final aesthetic.
 
-**Exit:** comparative terminal gallery and bounded component/input evidence; source
-panes and engineering fixtures remain explicitly synthetic. Record visual feedback
-in the current gallery handoff, not a new sequence of exported versions. Later
-defaults, richer floating behaviors and cross-project UI packaging need their own
-reviewed scope.
+- [ ] Reuse installed rendering/Ches seams and the existing semantic registry.
+- [x] Implement A–E thin skins using shared host rendering, semantic colors, optional
+  frames/headers, focus treatments and small-tile fallback. Independent color,
+  off/ASCII/Unicode and density controls are available in the actual palette.
+- [x] Capture identical synthesis/timing-unavailable/pinned/palette fixtures at wide
+  and modest cell grids. Test 90 combinations and actual PTY switching without
+  registry changes or provider calls; installed workflows/legacy captures pass.
+- [ ] Compare A Instrument, B Structured, C Minimal, D Studio and E Structured Studio
+  over identical labeled synthetic Overview/Timing data.
+- [ ] Independent color/icon/density axes, reusable tabs and configurable chrome.
+  Color/density/basic icon axes are delivered; reusable tab groups and Nerd Font
+  mode remain. Studio title badges do not pretend to be navigation tabs.
+- [ ] Actual wide/narrow terminal captures, focus/input/glyph/geometry checks and
+  owner review before selecting defaults. Mock peeks remain labeled mock.
 
-### Functional dependency graph
+## Phase summary
 
-```text
-M0 decisions/examples ──→ M1 headless adapter ──→ Demo A
-         └──────────────→ M2 host/palette ──────→ Demo B (with M1)
-                  M1 identities + M2 host ─────→ M3 → Demo C
-                  M1–M3 + real evidence ────────→ M4 → M5
-```
+| Phase | Current status |
+| --- | --- |
+| M0 | Accepted FS0 defaults and candidate/fixture baseline delivered; broader matrix remains |
+| M1 | Headless Demo A delivered; full physical/container cancellation acceptance later |
+| M2 | Tile-host Demo B delivered; bounded UI/coverage/performance gaps above |
+| M3 | Autosaved-session/L2 Demo C delivered; templates and appearance persistence gaps above |
+| M4 | FS1/FS2 not started |
+| M5 | Later adoption scope; no full multi-monitor acceptance claim |
+| V1 | A–E skins/axes/captures delivered; rich gallery and default review pending |
 
-| Phase | Status | Completion evidence |
-| --- | --- | --- |
-| M0 | In progress (docs) | D1 accepted and synchronized 2026-10-15; D2/D3 and baseline pending |
-| M1 | Not started | Existing supervisor/driver foundation; ASIC adapter absent |
-| M2 | Not started | Existing fixed renderer; new host/palette absent |
-| M3 | Not started | Provider reference foundations; Workbench catalog/layout storage absent |
-| M4 | Not started | Existing RTL/hierarchy; richer ASIC views pending |
-| M5 | Not started | Depends on demos |
-| V1 (FS5) | Not started | Imported visual handoffs and API inspection only |
-
-Record new acceptance here: exact revisions/environment, command/test, outcome,
-evidence path, fixture versus real-tool scope, and remaining limitations. Existing
-historical acceptance stays archived. Run Dune checks serially per the repository
-README. Documentation updates alone do not complete implementation checkboxes.
-
-## Decision/feature update — 2026-10-15
-
-Owner accepted shared Main run contexts, multiple selector instances, workspace
-independence/relink and per-tile references (D1/F10). Added F09 simulation/tests
-with a generic supervised test runner first. Specs, architecture, rendering and
-demo tasks are updated; no new application implementation or runtime acceptance.
-
-**Immediate implementation entry:** F10 pure context state/reducers and F02/F09
-execution/test module extraction over existing supervision, using deterministic
-fixtures. Settle D2 before palette dispatch semantics and D3 before exact-snapshot
-support; establish M0's provider baseline for the separate ASIC adapter track.
-
-Feature-set organization and asynchronous access clarification (2026-10-15): FS0
-is the current target; F02 specifies daemon-coordinated reads/subscriptions and
-reactive tile rendering. This documents intended behavior, not a new implementation
-or concurrency benchmark.
-
-Tiered run caching update (2026-10-15): F11 belongs to FS0a–c, delivering L1 memory,
-provider revision/invalidation and L2 persistence respectively. Fast switching uses
-normalized summaries, not reparsing full result entries or caching rendered tiles.
-The source of truth remains provider-owned; exact snapshot retention stays D3 scope.
-
-Appearance intake (2026-10-15): copied the two owner exports under `docs/design/`;
-gallery v0.5 takes precedence. F12 records composable utility tiles, configurable
-headers, independent axes and A–E candidates. Minimal structural requirements are
-in M2/FS0; the comparative gallery is V1/FS5. Source review confirmed Ches single-
-float placement/lifecycle seams and that Workbench's semantic workspace registry is
-still planned. No UI implementation, browser/gallery execution or EDA acceptance.
+Keep acceptance records authoritative for exact commands/results. New provider
+capabilities or normative feature requirements alone do not check a delivery box.

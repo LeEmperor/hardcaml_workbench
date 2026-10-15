@@ -1,6 +1,10 @@
 # F05 — Run selection, references and historical evidence
 
-Status: backend build/run references exist; catalog, persistence and bindings pending.
+Status (2026-10-15): **FS0 exact registered runs, follow/pin-run bindings and durable
+reopening delivered**. [Acceptance](../fs0_acceptance.md) proves real 673/685 switching,
+simultaneous pinned/following UI and restart identity. Requirements below remain
+normative: broad store discovery is absent; immutable snapshots/archival retention
+are deferred by accepted [D3](../decisions.md), not FS0 blockers.
 
 ## Requirements
 
@@ -33,7 +37,8 @@ Desired behaviors include following the current run, keeping another run visible
 and saving a capture of a particular stage result. These are not necessarily the
 same operation. Following the workspace context and per-tile pinned-run references
 are accepted. [D3](../decisions.md#d3--run-versus-snapshot-binding) retains the open
-exact-snapshot scope and missing-evidence retention questions.
+later exact-snapshot and archival/missing-evidence retention questions; follow +
+pin-run first and snapshot deferral are accepted FS0 scope.
 
 A pinned run can acquire later results. An exact immutable result reference can
 freeze an observation only if the provider guarantees its identity/retention.

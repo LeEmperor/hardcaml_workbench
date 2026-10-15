@@ -1,6 +1,10 @@
 # F10 — Shared run contexts and linked selectors
 
-Status: **accepted product behavior, 2026-10-15; implementation pending** (D1).
+Status (2026-10-15): **FS0 D1 contexts implemented and persisted**: shared Main,
+multiple selectors, independent/relink, revision fences and per-tile run pins.
+[Acceptance](../fs0_acceptance.md) covers real switching and exact context/pin
+restoration; [terminal](../fs0_terminal.md) documents controls. Requirements below
+remain normative; full multi-monitor convergence/adoption acceptance is later.
 
 ## User outcome
 

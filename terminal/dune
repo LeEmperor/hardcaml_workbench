@@ -1,7 +1,22 @@
 (library
  (name terminal_presentation)
- (modules baseline_fixture presentation state)
- (libraries core hardcaml_workbench_protocol)
+ (modules
+  baseline_fixture
+  fs0_fixture
+  appearance
+  presentation
+  state
+  workspace_host
+  host_view
+  plain_rpc
+  launch_preferences
+  asic_intents)
+ (libraries
+  core
+  hardcaml_workbench_protocol
+  bonsai_term
+  notty-community
+  cryptokit)
  (preprocess
   (pps ppx_jane))
  (inline_tests

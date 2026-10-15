@@ -28,7 +28,7 @@ let%expect_test "selected environments produce complete argv" =
      (environment Inherit_daemon))
     ((executable dune)
      (argv
-      (dune exec --root /work/project --no-buffer ./workbench/driver.exe --
+      (dune exec -j20 --root /work/project --no-buffer ./workbench/driver.exe --
        generate-rtl --protocol-version 1 --target counter --configuration
        eight-bit --output-dir /private/job-output))
      (cwd /work/project) (environment Inherit_daemon))
@@ -101,12 +101,12 @@ let%expect_test "typed actions translate without a shell" =
     {|
     ((executable opam)
      (argv
-      (opam exec --switch=project-switch --set-switch -- dune build --root
+      (opam exec --switch=project-switch --set-switch -- dune build -j20 --root
        /work/project --no-buffer @all))
      (cwd /work/project) (environment (Opam_switch project-switch)))
     ((executable opam)
      (argv
-      (opam exec --switch=project-switch --set-switch -- dune build --root
+      (opam exec --switch=project-switch --set-switch -- dune build -j20 --root
        /work/project --no-buffer @runtest))
      (cwd /work/project) (environment (Opam_switch project-switch)))
     |}]
@@ -132,11 +132,11 @@ let%expect_test "manifest aliases and driver remain individual argv values" =
   [%expect
     {|
     ((executable dune)
-     (argv (dune build --root /work/project --no-buffer checks/@run))
+     (argv (dune build -j20 --root /work/project --no-buffer checks/@run))
      (cwd /work/project) (environment Inherit_daemon))
     ((executable opam)
      (argv
-      (opam exec --switch=project-switch --set-switch -- dune exec --root
+      (opam exec --switch=project-switch --set-switch -- dune exec -j20 --root
        /work/project --no-buffer ./workbench/driver.exe -- describe
        --protocol-version 1))
      (cwd /work/project) (environment (Opam_switch project-switch))) |}]

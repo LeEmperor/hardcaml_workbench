@@ -1,6 +1,10 @@
 # F12 — Composable appearance system and candidate gallery
 
-Status: **requested from owner exports, 2026-10-15; implementation pending**.
+Status (2026-10-15): **FS0 seams plus first A–E skins delivered**. The palette switches
+preset, vivid/selective/restrained color, off/ASCII/Unicode markers and compact/
+comfortable density. [Controls/captures](../appearance_presets.md) record tested scope.
+Choices remain client-local/unpersisted. This starts FS5; rich Timing fixtures,
+reusable tab groups, Nerd Font mode, source peeks and final default review remain.
 Sources: [newer gallery](../design/tui_candidate_gallery_handoff.md) supersedes the
 [older handoff](../design/tui_design_system_handoff.md). See the
 [interpretation notes](../design/README.md) for implementation corrections.
@@ -23,7 +27,7 @@ before selecting a default; retain alternate candidates.
 | Host | Input/cursor/focus, overlay lifecycle, recovery and workspace attachment |
 | Daemon | Authoritative session/window/workspace/tile identities, context bindings and domain data |
 
-The daemon-side registry is planned, not currently delivered. Client-local active
+The daemon-side registry is delivered by FS0. Client-local active
 workspace presentation, focus, dimensions, scroll, open overlay and effective geometry
 are not global singleton state. Saved requested layouts can be daemon-managed UI
 configuration; effective clamping stays local. Clients can cache/project registry

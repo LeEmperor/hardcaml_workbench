@@ -36,11 +36,17 @@ def read_available(fd: int, duration: float = 0.5) -> bytes:
     return b"".join(chunks)
 
 
+def terminal_text(output: bytes) -> bytes:
+    """Strip CSI styling/cursor controls from a captured full repaint or notice."""
+    return re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", output)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("client")
     parser.add_argument("--project-root")
     parser.add_argument("--environment", default="inherited")
+    parser.add_argument("--expect-project-name")
     parser.add_argument("--expect-live-discovery", action="store_true")
     parser.add_argument("--expect-hierarchy", action="store_true")
     args = parser.parse_args()
@@ -69,14 +75,27 @@ def main() -> None:
         initial = read_available(master, 2.0)
         if not initial:
             raise RuntimeError("client produced no initial terminal frame")
-        if b"PROJECT / GENERIC DUNE" not in initial:
-            raise RuntimeError("initial frame did not contain the bounded project pane")
+        if b"PROJECT / GENERIC DUNE" not in initial and b"Overview |" not in initial:
+            raise RuntimeError("initial frame did not contain the project or workspace host")
         if b"Daemon instance:" in initial:
             raise RuntimeError("verbose daemon identity leaked into the default project view")
         if args.expect_live_discovery or args.expect_hierarchy:
-            discovery = initial
+            # The host exposes discovery as an execution attempt and exposes the
+            # resulting targets/configurations as commands, not an old left pane.
+            # Find execution by identity, independent of the preset's tile order,
+            # select the attempt,
+            # then wait for its event-driven completion without further input.
+            for _ in range(16):
+                os.write(master, b"\t")
+                focused = read_available(master, 0.2)
+                if b"> execution [PROJECT]" in focused:
+                    break
+            else:
+                raise RuntimeError("could not focus the execution tile")
+            os.write(master, b"j")
+            discovery = focused + read_available(master)
             deadline = time.monotonic() + 60
-            expected = (b"Integration: Driver", b"Four-bit counter")
+            expected = (b"> execution [PROJECT]", b"STATUS: Complete")
             while time.monotonic() < deadline and not all(value in discovery for value in expected):
                 if process.poll() is not None:
                     raise RuntimeError("client exited while waiting for live discovery")
@@ -84,18 +103,70 @@ def main() -> None:
             missing = [value for value in expected if value not in discovery]
             if missing:
                 raise RuntimeError(
-                    f"attached client did not render live discovery without input: {missing!r}"
+                    f"attached client did not render live discovery without input: {missing!r}; "
+                    f"recent output: {discovery[-4096:]!r}"
                 )
+            os.write(master, b" ccGenerate RTL")
+            commands = read_available(master)
+            for label in (
+                b"Generate RTL: Four-bit counter / 4-bit counter",
+                b"Generate RTL: Four-bit counter / 8-bit counter",
+            ):
+                if label not in commands:
+                    raise RuntimeError(f"discovery did not populate host commands: {label!r}")
+            os.write(master, b"\x1b")
+            read_available(master)
         if args.expect_hierarchy:
+            # The Fit dashboard intentionally clips long job IDs in small cards.
+            # Zoom the focused execution tile before asserting the exact ID below.
+            os.write(master, b" ccZoom focused tile")
+            read_available(master)
+            os.write(master, b"\r")
+            read_available(master)
             os.write(master, b"g")
-            generation = b""
+            submission = read_available(master)
             deadline = time.monotonic() + 60
-            while time.monotonic() < deadline and b"Hardware hierarchy output from" not in generation:
+            submitted = re.search(rb"Submitted RTL as ([-a-zA-Z0-9]+-job-[0-9]+)",
+                                  terminal_text(submission))
+            while submitted is None and time.monotonic() < deadline:
+                if process.poll() is not None:
+                    raise RuntimeError("client exited while submitting RTL generation")
+                submission += read_available(master)
+                submitted = re.search(rb"Submitted RTL as ([-a-zA-Z0-9]+-job-[0-9]+)",
+                                      terminal_text(submission))
+            if submitted is None:
+                raise RuntimeError(f"no RTL submission identity received: {submission!r}")
+            generation_id = submitted.group(1)
+            # The submission notice is emitted after the exact job is added.
+            # Move from discovery to that newer job, and check its identity,
+            # rather than inferring selection from a status shared by both jobs.
+            os.write(master, b"k")
+            selection = read_available(master)
+            # Notty emits changed cells, not complete frames. If both jobs are
+            # already Complete, selection need not repaint STATUS at all. A
+            # deterministic resize requests a full current-state projection; it
+            # neither changes the selected job nor waits for generation to finish.
+            set_size(master, initial_size[0] + 1, initial_size[1])
+            os.kill(process.pid, signal.SIGWINCH)
+            generation = read_available(master)
+            selected_identity = b"> " + generation_id + b" "
+            if selected_identity not in terminal_text(generation):
+                raise RuntimeError(
+                    f"execution tile did not select submitted RTL job {generation_id!r}; "
+                    f"submission: {submission!r}; selection: {selection!r}; "
+                    f"current repaint: {generation!r}"
+                )
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and b"STATUS: Complete" not in terminal_text(generation):
                 if process.poll() is not None:
                     raise RuntimeError("client exited while waiting for hierarchy generation")
                 generation += read_available(master)
-            if b"Hardware hierarchy output from" not in generation:
-                raise RuntimeError("attached client did not observe hierarchy availability")
+            if b"STATUS: Complete" not in terminal_text(generation):
+                raise RuntimeError(
+                    f"attached client did not observe RTL completion for {generation_id!r}; "
+                    f"submission: {submission!r}; selection: {selection!r}; "
+                    f"current repaint/updates: {generation!r}"
+                )
             os.write(master, b"h")
             hierarchy = b""
             deadline = time.monotonic() + 10
@@ -150,6 +221,19 @@ def main() -> None:
         details = read_available(master)
         if b"CONNECTION DETAILS" not in details or b"Daemon instance:" not in details:
             raise RuntimeError("connection details view did not expose daemon diagnostics")
+        # Dimension diagnostics belong to the legacy inspector renderer. Exercise
+        # its resize path as well as the default workspace host above, rather than
+        # assuming the host emits those legacy-only diagnostic records.
+        for columns, rows in stages:
+            set_size(master, columns, rows)
+            os.kill(process.pid, signal.SIGWINCH)
+            output = read_available(master)
+            if process.poll() is not None or not output:
+                raise RuntimeError(
+                    f"connection details did not survive/repaint at {columns}x{rows}"
+                )
+            evidence.append(f"details-{columns}x{rows}:{len(output)}")
+            details += output
         scrolled_details = details
         for _ in range(30):
             os.write(master, b"]")
@@ -159,9 +243,17 @@ def main() -> None:
                 raise RuntimeError(f"scrolled connection details did not expose {label!r}")
         os.write(master, b"d")
         project = read_available(master)
-        expected_pane = b"HARDWARE HIERARCHY" if args.expect_hierarchy else b"PROJECT / GENERIC DUNE"
-        if expected_pane not in project:
-            raise RuntimeError("left pane did not recover after closing connection details")
+        if args.expect_hierarchy:
+            expected_restored = (b"HARDWARE HIERARCHY",)
+        else:
+            identity = (args.expect_project_name or "Workbench").encode()
+            expected_restored = (identity, b"Overview", b"Linked: Main", b"run none")
+        missing = [value for value in expected_restored if value not in project]
+        if missing:
+            raise RuntimeError(
+                f"workspace/inspector did not recover after closing connection details: "
+                f"{missing!r}; terminal output: {project!r}"
+            )
         if args.expect_hierarchy:
             scrolled_hierarchy = project
             for _ in range(20):

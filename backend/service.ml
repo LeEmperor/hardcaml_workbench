@@ -101,6 +101,8 @@ type t =
   ; log_dir : string
   ; artifact_dir : string
   ; output_dir : string
+  ; workspace_service : Workspace_service.t
+  ; asic_service : Asic_service.t
   ; projects_by_key : (string, project_session) Hashtbl.t
   ; projects : (Project_id.t, project_session) Hashtbl.t
   ; root_queues : (string, job_entry Queue.t) Hashtbl.t
@@ -146,6 +148,7 @@ let check_instance t instance_id =
 ;;
 
 let create
+  ?state_dir
   ?(kill_after = Time_float.Span.of_sec 2.)
   ?action_invocation
   ?(driver_invocation = Driver_adapter.describe_invocation)
@@ -156,6 +159,7 @@ let create
   =
   let artifact_dir = log_dir ^ "-artifacts" in
   let output_dir = Filename.concat artifact_dir "job-output" in
+  let state_dir = Option.value state_dir ~default:(log_dir ^ "-state") in
   let%map result =
     Monitor.try_with_or_error (fun () ->
       In_thread.run (fun () ->
@@ -172,6 +176,8 @@ let create
     ; log_dir
     ; artifact_dir
     ; output_dir
+    ; workspace_service = Workspace_service.create ~state_dir
+    ; asic_service = Asic_service.create ~state_dir
     ; projects_by_key = Hashtbl.create (module String)
     ; projects = Project_id.Table.create ()
     ; root_queues = Hashtbl.create (module String)
@@ -1870,8 +1876,39 @@ let read_hierarchy t ({ instance_id; artifact } : V1.Read_hierarchy.Request.t) =
           return (Ok { V1.Read_hierarchy.Payload.hierarchy = entry.hierarchy })))
 ;;
 
+let workspace t (request : Workspace.Request.t) =
+  match check_instance t request.instance_id with
+  | Error error -> return (Error error)
+  | Ok () ->
+    (match Hashtbl.find t.projects request.project with
+     | None -> return (error Not_found "Unknown project")
+     | Some session ->
+       Workspace_service.handle
+         t.workspace_service
+         ~project_key:session.key
+         request.operation)
+;;
+
+let asic t (request : Asic.Request.t) =
+  match check_instance t request.instance_id with
+  | Error error -> return (Error error)
+  | Ok () ->
+    if t.shutting_down
+    then return (error Conflict "Daemon is shutting down")
+    else (
+      match Hashtbl.find t.projects request.project with
+      | None -> return (error Not_found "Unknown project")
+      | Some session ->
+        Asic_service.handle
+          t.asic_service
+          ~root:session.root
+          ~environment:session.environment
+          request.operation)
+;;
+
 let shutdown t =
   t.shutting_down <- true;
+  let%bind () = Asic_service.shutdown t.asic_service in
   let%bind () =
     Hashtbl.data t.jobs |> Deferred.List.iter ~how:`Parallel ~f:(cancel_entry t)
   in

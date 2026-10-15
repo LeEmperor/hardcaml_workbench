@@ -9,12 +9,18 @@ references. Simulation/testing starts with a generic supervised test runner. ASI
 flow ownership stays with the project and `hardcaml_asic`; development uses the
 sibling FIFO specimen and headless tests.
 
-The existing daemon, Dune jobs, RTL/artifact and hierarchy workflows are
-implemented. The provider/catalog and multi-window tile design is planned.
+**FS0 demos are implemented and exercised:** workspace/run-context persistence,
+palette and generic test/log tiles, synthesis views, installed ASIC discovery/plan/
+launch/observation, and L1/L2 summary reuse. Two real synthesis profiles produced
+673 and 685 cells; physical acceptance remains `not_evaluated`. Existing Dune,
+RTL/artifact and hierarchy workflows remain covered by installed tests.
+Rich timing/simulation helpers, multi-window product polish and the appearance
+gallery remain later scope. See the [delivery record](docs/construction_phase_plan.md).
 
 ## Documentation
 
 - [Documentation index](docs/README.md) — orientation and reading routes.
+- [FS0 controls](docs/fs0_terminal.md) and [acceptance](docs/fs0_acceptance.md) — run the demo and inspect its evidence.
 - [Feature list](docs/feature_list.md) — concise scope/status and focused feature specs.
 - [Feature sets](docs/feature_sets.md) — FS0 initial demos and later themed work groups.
 - [Decision log](docs/decisions.md) — accepted run contexts; remaining command/snapshot policy.
@@ -23,6 +29,7 @@ implemented. The provider/catalog and multi-window tile design is planned.
 - [Construction plan](docs/construction_phase_plan.md) — active demo phases M0–M5 and progress.
 - [Rendering](docs/rendering.md) — styles, layout, interaction and headless UI testing.
 - [Appearance handoffs](docs/design/README.md) — imported aesthetic sources and F12/FS5 interpretation.
+- [Try the appearance presets](docs/appearance_presets.md) — A–E skins and independent color/icon/density controls.
 - [Formatting guide](docs/formatting_guide.md) — retained source conventions.
 - [Backlog](docs/backlog/README.md) — explicitly deferred ideas and reactivation triggers.
 - [Archive](docs/archive/README.md) — earlier designs, plans and completion evidence.
@@ -44,32 +51,98 @@ comes from `dune-project`. The native package is separate from optional web tool
 Build and launch the current client against an independent project:
 
 ```sh
-./scripts/with-switch.sh dune build terminal/main.exe daemon/main.exe
+./scripts/with-switch.sh dune build -j20 terminal/main.exe daemon/main.exe
 HARDCAML_WORKBENCH_DAEMON="$PWD/_build/default/daemon/main.exe" \
-  ./scripts/with-switch.sh dune exec hardcaml-workbench -- \
+  ./scripts/with-switch.sh dune exec -j20 hardcaml-workbench -- \
   --project-root /absolute/path/to/project --environment opam:PROJECT_SWITCH
 ```
 
 Use the project's actual switch. `--environment inherited` means the daemon's
 startup environment, not necessarily the current client's shell. Add `--plain`
 for noninteractive use. The current `b`/`t` controls submit build/test; `q` exits
-the client while the daemon stays alive. Separate foreground startup is:
+the client while the daemon stays alive.
+
+The palette (**Space c c**) also offers **Appearance: A - Instrument**, **B - Structured**,
+**C - Minimal**, **D - Studio**, and **E - Structured studio**, plus separate color,
+icon and density controls. These experimental client-local choices preserve run
+contexts and pins; see the [preset guide](docs/appearance_presets.md).
+
+Separate foreground startup is:
 
 ```sh
-./scripts/with-switch.sh dune exec hardcaml-workbench-daemon -- --port 8080
+./scripts/with-switch.sh dune exec -j20 hardcaml-workbench-daemon -- --port 8080
 # In another terminal:
-./scripts/with-switch.sh dune exec hardcaml-workbench -- \
+./scripts/with-switch.sh dune exec -j20 hardcaml-workbench -- \
   --connect http://127.0.0.1:8080 --project-root /absolute/path/to/project \
   --environment opam:PROJECT_SWITCH
 ```
 
+### Open the accepted real synthesis demo
+
+The retained FS0 state includes real completed synthesis summaries: **balanced
+673 cells**, **synth_delay 685 cells**. Acceptance is **`not_evaluated`**; cached
+evidence is labeled **`Cached_unverified`** after restart. Open it using the
+already compiled binaries, from this checkout, with no build or EDA:
+
+```sh
+# Terminal 1: one daemon owns this saved Workbench state.
+_build/default/daemon/main.exe --port 41733 \
+  --state-dir /tmp/opencode/workbench-fs0-91em64rl/real/state
+
+# Terminal 2: use a 120-column × 40-row terminal.
+_build/default/terminal/main.exe --connect http://127.0.0.1:41733 \
+  --project-root /home/wayne/devel/jane/hardcaml_asic_example \
+  --environment inherited
+```
+
+Use the printed daemon URL if you choose a different port.
+
+**For a full dashboard:** press **Space c c → Switch to Overview**, then
+**Apply default layout (add missing tiles)**. The old acceptance state deliberately
+moved Overview's only selector into Timing, so it can initially be empty. This
+additive action supplies a run selector, synthesis, placement, CTS, routing, timing,
+checks, finalization, ASIC controls, execution/tests/logs and navigation. Existing
+tiles, pins and contexts are preserved. Unsupported/not-requested stages are labeled;
+no tool execution occurs merely from adding their views.
+
+**Layout: Fit tiles to window** (the new client default) fills the available surface.
+**Layout: Requested tile sizes** restores the earlier shelf sizing. Layout commands
+are separate from Appearance commands. At small sizes the focused tile is shown
+with a compact-mode notice; use Tab/zoom or hide tiles to inspect them.
+
+**For the focused two-run comparison:** in the client, press
+**Space c c**, type **Switch to FS0 Real Demo 1792063225057192206**, and press
+**Enter**. This saved workspace shows a **pinned balanced synthesis tile (673)**
+beside a **following synthesis tile (685)** linked to Main. The active workspace
+is client-local, so choose it again when starting a new client. Tab changes tile
+focus; the palette provides **Zoom focused tile** and **Unzoom workspace**. To
+add a synthesis view elsewhere, use the palette's **Add synthesis tile**. This saved
+workspace intentionally contains only two synthesis tiles; Fit expands them across
+the surface without adding stages or changing the saved 56×14 preferred sizes.
+
+Both tiles use real retained evidence. Opening them loads Workbench's cached
+summaries; it does not rerun synthesis. Keep the example configuration and retained
+`/tmp/opencode/workbench-fs0-6_1ymcsd/results` provider evidence in place. Exit the
+client with `q`; stop the foreground daemon with Ctrl-C before another daemon uses
+the same state directory.
+
+Reproduce the automated cached-data HTTP/PTY check with:
+
+```sh
+python3 -B scripts/test-fs0.py --reopen-real /tmp/opencode/workbench-fs0-91em64rl
+```
+
+It creates a new dedicated demo workspace in that state and fresh retained screen
+evidence, without EDA or builds. See [FS0 acceptance](docs/fs0_acceptance.md) for
+exact run identities, successful screens and limitations.
+
 Run repository checks serially because they share Dune's build lock:
 
 ```sh
-./scripts/with-switch.sh dune build @fmt
-./scripts/with-switch.sh dune build @lint
-./scripts/with-switch.sh dune runtest
-./scripts/with-switch.sh dune build
+./scripts/with-switch.sh dune build -j20 @fmt
+./scripts/with-switch.sh dune build -j20 @lint
+./scripts/with-switch.sh dune runtest -j20
+./scripts/with-switch.sh dune build -j20
 ```
 
 Relevant integration checks, when changing those boundaries:
@@ -78,10 +151,12 @@ Relevant integration checks, when changing those boundaries:
 FIXTURE_OPAM_SWITCH=5.2.0+ox ./scripts/test-fixture.sh
 ./scripts/test-native-application.sh
 ./scripts/capture-terminal-baseline.sh --check
+python3 -B scripts/test-fs0.py
 ```
 
 The fixture uses an explicitly selected compatible switch. The installed-application
-script tests an isolated install; capture checks concern the current renderer, not
-the planned tile UI. Historical toolchain investigations and detailed acceptance
+script tests an isolated install; legacy capture checks retain the original inspector
+baselines, while `--capture-fs0 DIR` captures the new host with synthetic fixtures.
+Historical toolchain investigations and detailed acceptance
 records remain in the [archive](docs/archive/README.md). Record new phase evidence
 in the construction plan rather than starting another general development diary.

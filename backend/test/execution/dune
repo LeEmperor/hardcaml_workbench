@@ -1,0 +1,7 @@
+(test
+ (name test_execution)
+ (libraries core hardcaml_workbench_protocol)
+ (preprocess
+  (pps ppx_jane))
+ (lint
+  (pps ppx_js_style)))

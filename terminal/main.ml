@@ -5,6 +5,13 @@ module Http = Hardcaml_workbench_native_http
 module Baseline_fixture = Terminal_presentation.Baseline_fixture
 module Presentation = Terminal_presentation.Presentation
 module State = Terminal_presentation.State
+module Host = Terminal_presentation.Workspace_host
+module Host_view = Terminal_presentation.Host_view
+module Appearance = Terminal_presentation.Appearance
+module Plain_rpc = Terminal_presentation.Plain_rpc
+module Launch_preferences = Terminal_presentation.Launch_preferences
+module Asic_intents = Terminal_presentation.Asic_intents
+module Fs0_fixture = Terminal_presentation.Fs0_fixture
 
 let console_limit = 500
 let minimum_width = 68
@@ -57,6 +64,16 @@ type session =
   ; mutable last_dimensions : Bonsai_term.Dimensions.t option
   ; mutable show_connection_details : bool
   ; mutable connection_details_scroll : int
+  ; mutable host : Host.t
+  ; mutable registry_busy : bool
+  ; mutable asic : Asic.Snapshot.t option
+  ; mutable asic_request_id : int
+  ; mutable asic_applied_id : int
+  ; mutable view_on_allocation : (string * Host.launch_target) option
+  ; mutable remembered_selection : Asic.Selection.t option
+  ; mutable preferences_loaded : bool
+  ; mutable preference_saves : unit Deferred.t
+  ; mutable asic_reads : Asic_intents.t
   }
 
 let append_diagnostic file message =
@@ -209,6 +226,16 @@ let create_session
       ; last_dimensions = None
       ; show_connection_details = false
       ; connection_details_scroll = 0
+      ; host = Host.empty
+      ; registry_busy = false
+      ; asic = None
+      ; asic_request_id = 0
+      ; asic_applied_id = 0
+      ; view_on_allocation = None
+      ; remembered_selection = None
+      ; preferences_loaded = false
+      ; preference_saves = Deferred.unit
+      ; asic_reads = Asic_intents.empty
       }
     in
     session)
@@ -343,8 +370,8 @@ let log_state session job =
     { next_offset = 0; records = []; fetch = Presentation.Log_fetch.Not_requested })
 ;;
 
-let read_selected_log session =
-  match selected_job session with
+let read_job_log session (job : Job.t option) =
+  match job with
   | None -> return ()
   | Some job ->
     let state = log_state session job.id in
@@ -381,6 +408,8 @@ let read_selected_log session =
           state.fetch <- Presentation.Log_fetch.Received { eof = payload.eof }))
 ;;
 
+let read_selected_log session = read_job_log session (selected_job session)
+
 let updates_request diagnostics thunk =
   Monitor.try_with_or_error thunk
   >>| Or_error.join
@@ -393,6 +422,252 @@ let updates_request diagnostics thunk =
 let snapshot_request session ~instance_id =
   request session.diagnostics_file (fun () ->
     Http.Client.snapshot session.client { instance_id })
+;;
+
+let preference_location session =
+  let opened = Option.value_exn session.opened in
+  let project_key =
+    Sexp.to_string_mach
+      (Sexp.List
+         [ Atom (Project_root.to_absolute_path opened.project.root)
+         ; V1.Environment_selection.sexp_of_t opened.environment.selection
+         ])
+  in
+  let state_directory =
+    match Sys.getenv "XDG_STATE_HOME", Sys.getenv "HOME" with
+    | Some directory, _ when not (String.is_empty directory) -> directory
+    | _, Some home -> Filename.concat home ".local/state"
+    | _ -> failwith "No XDG_STATE_HOME or HOME for terminal preferences"
+  in
+  let state_directory = Filename.concat state_directory "hardcaml-workbench/terminal" in
+  project_key, Launch_preferences.path ~state_directory ~project_key
+;;
+
+let load_preferences session =
+  if session.preferences_loaded || Option.is_none session.opened
+  then return ()
+  else (
+    session.preferences_loaded <- true;
+    let%map result =
+      In_thread.run (fun () ->
+        Or_error.try_with (fun () ->
+          let project_key, path = preference_location session in
+          match Sys_unix.file_exists path with
+          | `No -> None
+          | `Unknown -> failwith ("Cannot inspect terminal preferences: " ^ path)
+          | `Yes ->
+            let content = In_channel.read_all path in
+            if String.length content > 64 * 1024
+            then failwith "Terminal preference size limit exceeded";
+            Some (Launch_preferences.decode ~project_key (Sexp.of_string content))))
+    in
+    match result with
+    | Ok selection -> session.remembered_selection <- selection
+    | Error error ->
+      append_diagnostic
+        session.diagnostics_file
+        ("preference load: " ^ Error.to_string_hum error))
+;;
+
+let save_preferences session selection =
+  session.remembered_selection <- Some selection;
+  let previous = session.preference_saves in
+  let finished = Ivar.create () in
+  session.preference_saves <- Ivar.read finished;
+  Monitor.protect
+    ~finally:(fun () ->
+      Ivar.fill_exn finished ();
+      Deferred.unit)
+    (fun () ->
+      let%bind () = previous in
+      let%map result =
+        In_thread.run (fun () ->
+          Or_error.try_with (fun () ->
+            let project_key, path = preference_location session in
+            let directory = Filename.dirname path in
+            Core_unix.mkdir_p directory ~perm:0o700;
+            let temp = Filename_unix.temp_file ~in_dir:directory ".launch-" ".tmp" in
+            Exn.protect
+              ~finally:(fun () ->
+                if Poly.equal (Sys_unix.file_exists temp) `Yes then Core_unix.unlink temp)
+              ~f:(fun () ->
+                Out_channel.write_all
+                  temp
+                  ~data:
+                    (Sexp.to_string_hum
+                       (Launch_preferences.sexp_of_t
+                          (Launch_preferences.create ~project_key selection))
+                     ^ "\n");
+                Core_unix.rename ~src:temp ~dst:path)))
+      in
+      match result with
+      | Ok () -> ()
+      | Error error ->
+        session.host
+        <- { session.host with
+             notice = "Could not save launch preferences: " ^ Error.to_string_hum error
+           })
+;;
+
+let workspace_request session operation =
+  match current_project session with
+  | None -> return ()
+  | Some project ->
+    let instance_id = session.hello.instance_id in
+    let%map response =
+      request session.diagnostics_file (fun () ->
+        Http.Client.workspace
+          session.client
+          { instance_id; project = project.id; operation })
+    in
+    if V1.Daemon_instance_id.equal instance_id session.hello.instance_id
+       && Option.value_map (current_project session) ~default:false ~f:(fun p ->
+         Project_id.equal p.id project.id)
+    then (
+      match response with
+      | Error message ->
+        session.host <- { session.host with notice = "Workspace: " ^ message }
+      | Ok snapshot -> session.host <- Host.receive session.host snapshot)
+;;
+
+let mutate_workspace session mutation =
+  match session.host.registry with
+  | None -> return ()
+  | Some snapshot ->
+    if session.registry_busy
+    then (
+      session.host
+      <- { session.host with notice = "Workspace update pending; retry deliberately" };
+      return ())
+    else (
+      session.registry_busy <- true;
+      Monitor.protect
+        ~finally:(fun () ->
+          session.registry_busy <- false;
+          return ())
+        (fun () ->
+          let%bind () =
+            workspace_request
+              session
+              (Mutate { expected_revision = snapshot.revision; mutation })
+          in
+          (* Refresh after a conflict, but never silently retry the captured mutation. *)
+          let notice = session.host.notice in
+          let%map () = workspace_request session Get in
+          if not (String.is_empty notice)
+          then session.host <- { session.host with notice }))
+;;
+
+let asic_request session operation =
+  match current_project session with
+  | None -> return ()
+  | Some project ->
+    let instance_id = session.hello.instance_id in
+    session.asic_request_id <- session.asic_request_id + 1;
+    let request_id = session.asic_request_id in
+    let%map response =
+      request session.diagnostics_file (fun () ->
+        Http.Client.asic session.client { instance_id; project = project.id; operation })
+    in
+    let current =
+      V1.Daemon_instance_id.equal instance_id session.hello.instance_id
+      && Option.value_map (current_project session) ~default:false ~f:(fun p ->
+        Project_id.equal p.id project.id)
+    in
+    (* A rejected/timed-out launch must release its pending view even when a newer Get
+       snapshot has already arrived. Never retry a potentially accepted launch. *)
+    if current
+    then (
+      match operation, response, session.view_on_allocation with
+      | Asic.Operation.Run { key; _ }, Error message, Some (pending, _)
+        when String.equal key pending ->
+        session.view_on_allocation <- None;
+        session.host
+        <- { session.host with notice = "ASIC launch not confirmed: " ^ message }
+      | _ -> ());
+    if request_id >= session.asic_applied_id && current
+    then (
+      match response with
+      | Error message -> session.host <- { session.host with notice = "ASIC: " ^ message }
+      | Ok snapshot ->
+        session.asic_applied_id <- request_id;
+        session.asic <- Some snapshot)
+;;
+
+let add_default_tiles session (registry : Workspace.Snapshot.t) workspace =
+  Deferred.List.iter
+    (Host.missing_default_tiles registry workspace)
+    ~how:`Sequential
+    ~f:(fun mutation ->
+      match mutation, session.host.registry with
+      | Workspace.Mutation.Create_tile { workspace; kind; _ }, Some current ->
+        if List.exists current.tiles ~f:(fun tile ->
+             Workspace.Workspace_id.equal tile.workspace workspace
+             && String.equal tile.kind kind)
+        then return ()
+        else mutate_workspace session mutation
+      | _ -> return ())
+;;
+
+let initialize_host_layout session =
+  match session.host.registry with
+  | Some registry when registry.revision = 0 ->
+    Deferred.List.iter registry.workspaces ~how:`Sequential ~f:(fun workspace ->
+      let%bind () =
+        match
+          List.find registry.tiles ~f:(fun tile ->
+            Workspace.Workspace_id.equal tile.workspace workspace.id
+            && String.equal tile.kind "run-selector")
+        with
+        | None -> return ()
+        | Some tile ->
+          let width, height =
+            if String.equal workspace.name "Timing" then 28, 6 else 32, 12
+          in
+          mutate_workspace
+            session
+            (Resize_tile { tile = tile.id; geometry = { x = 0; y = 0; width; height } })
+      in
+      add_default_tiles session registry workspace)
+  | _ -> return ()
+;;
+
+let refresh_host session =
+  let%bind () = load_preferences session in
+  let%bind () = workspace_request session Get in
+  let%bind () = initialize_host_layout session in
+  let%bind () = asic_request session Get in
+  let%bind () =
+    match session.view_on_allocation, session.host.registry, session.asic with
+    | Some (key, target), Some registry, Some asic ->
+      (match Asic_intents.allocation ~key asic with
+       | Allocated run ->
+         session.view_on_allocation <- None;
+         (match Host.selection_after_allocation registry target run with
+          | Some mutation -> mutate_workspace session mutation
+          | _ ->
+            session.host
+            <- { session.host with
+                 notice = "Run allocated; launch-and-view skipped because context changed"
+               };
+            return ())
+       | Allocation_failed error ->
+         session.view_on_allocation <- None;
+         session.host <- { session.host with notice = error };
+         return ()
+       | Awaiting -> return ())
+    | _ -> return ()
+  in
+  (* One bounded read intent per distinct visible run, shared by all its tiles. *)
+  let runs = Host.evidence_runs session.host in
+  match session.asic with
+  | None -> return ()
+  | Some snapshot ->
+    let state, intents =
+      Asic_intents.plan session.asic_reads ~now:(Time_ns.now ()) snapshot ~visible:runs
+    in
+    session.asic_reads <- state;
+    Deferred.List.iter intents ~how:`Sequential ~f:(asic_request session)
 ;;
 
 let apply_updates session ~instance_id updates =
@@ -476,7 +751,18 @@ let rec refresh session =
           <- (match update with
               | `Resynced -> "connected; update cursor recovered from snapshot"
               | `Applied | `Stale -> "connected");
-          read_selected_log session))
+          let%bind () = refresh_host session in
+          let%bind () = read_selected_log session in
+          Host.tiles session.host
+          |> List.filter ~f:(fun tile ->
+            String.equal tile.kind "logs" || String.equal tile.kind "project-tests")
+          |> List.filter_map ~f:(fun tile -> (Host.local session.host tile.id).cursor)
+          |> List.dedup_and_sort ~compare:String.compare
+          |> Deferred.List.iter ~how:`Sequential ~f:(fun id ->
+            read_job_log
+              session
+              (List.find (project_jobs session) ~f:(fun job ->
+                 String.equal (Job_id.to_string job.id) id)))))
 
 and reconnect session =
   let selected_job_id = Option.map (selected_job session) ~f:(fun job -> job.id) in
@@ -503,6 +789,18 @@ and reconnect session =
     session.hello <- hello;
     session.opened <- opened;
     session.snapshot <- snapshot;
+    session.host
+    <- { session.host with
+         registry = None
+       ; palette = None
+       ; prefix = 0
+       ; editing_filter = false
+       };
+    session.asic <- None;
+    if instance_changed
+    then (
+      session.view_on_allocation <- None;
+      session.asic_reads <- Asic_intents.empty);
     if instance_changed
     then (
       session.hierarchy_view <- None;
@@ -1218,7 +1516,7 @@ let connection_detail_lines session ~width =
     @ field "Driver integration:" (component project.integration.driver)
 ;;
 
-let render session ({ Bonsai_term.Dimensions.width; height } as dimensions) =
+let render_legacy session ({ Bonsai_term.Dimensions.width; height } as dimensions) =
   let open Bonsai_term in
   if not (Option.equal Dimensions.equal session.last_dimensions (Some dimensions))
   then (
@@ -1409,6 +1707,93 @@ let render session ({ Bonsai_term.Dimensions.width; height } as dimensions) =
   View.zcat [ content; background ]
 ;;
 
+let host_data session : Host_view.data =
+  let runs =
+    Option.value_map session.asic ~default:[] ~f:(fun asic ->
+      List.map asic.runs ~f:(fun run -> run.run, run.status))
+  in
+  let log_lines id =
+    let state = log_state session id in
+    let rows =
+      List.concat_map state.records ~f:(fun record ->
+        let tag =
+          match record.stream with
+          | V1.Read_log.Stream.Stdout -> "[stdout] "
+          | Stderr -> "[stderr] "
+        in
+        String.split_lines record.data |> List.map ~f:(fun line -> tag ^ line))
+    in
+    if not (List.is_empty rows)
+    then (
+      match state.fetch with
+      | Presentation.Log_fetch.Error error -> rows @ [ "[log retrieval failed] " ^ error ]
+      | _ -> rows)
+    else (
+      let job_state =
+        List.find (project_jobs session) ~f:(fun job -> Job_id.equal job.id id)
+        |> Option.value_map ~default:Job.State.Queued ~f:(fun job -> job.state)
+      in
+      Presentation.empty_log_notice ~job_state ~fetch:state.fetch |> Option.to_list)
+  in
+  let run_lines = Host_view.run_lines session.asic in
+  let asic_lines =
+    match session.asic with
+    | None -> [ "ASIC provider not loaded — palette: Discover ASIC" ]
+    | Some asic ->
+      [ (if asic.configured
+         then "Project-owned ASIC flows (Space c c: discover / describe / plan / launch)"
+         else "No ASIC provider configured for this project")
+      ]
+      @ List.map asic.operations ~f:(fun op ->
+        sprintf
+          "%s: %s %s%s"
+          op.kind
+          op.state
+          (Option.value_map
+             op.run
+             ~default:
+               (if String.equal op.kind "run"
+                then
+                  if String.equal op.state "executing" || String.equal op.state "queued"
+                  then "(awaiting allocation — no run ID yet)"
+                  else "(no allocated run reference)"
+                else "(project/read operation)")
+             ~f:Host_view.run_label)
+          (Option.value_map op.error ~default:"" ~f:(fun e -> " — " ^ e)))
+      @ Option.value_map asic.preview ~default:[] ~f:(fun p ->
+        [ "PREVIEW " ^ p.plan_identity
+        ; "Selection: " ^ Sexp.to_string_hum (Asic.Selection.sexp_of_t p.selection)
+        ]
+        @ String.split_lines p.plan_json)
+      @ Option.value_map asic.description_json ~default:[] ~f:(fun json ->
+        "FLOW CAPABILITIES" :: String.split_lines json)
+      @ Option.to_list asic.cache_error
+  in
+  { project = current_project session
+  ; jobs = project_jobs session
+  ; runs
+  ; log_lines
+  ; run_lines
+  ; status = session.status
+  ; environment = session.environment_label
+  ; asic_lines
+  }
+;;
+
+let render session dimensions =
+  match session.host.registry with
+  | None
+    when Option.is_some session.opened
+         && List.mem session.hello.capabilities "workspace" ~equal:String.equal ->
+    Host_view.render session.host (host_data session) dimensions
+  | None -> render_legacy session dimensions
+  | Some _
+    when Option.is_some session.hierarchy_view
+         || Option.is_some session.artifact_view
+         || session.show_connection_details -> render_legacy session dimensions
+  | Some _ -> Host_view.render session.host (host_data session) dimensions
+;;
+
 (* Baseline capture.
 
    This is a development hook, not a second UI. It builds a [session] directly from a
@@ -1441,6 +1826,16 @@ let session_of_baseline_fixture (fixture : Baseline_fixture.t) =
     ; last_dimensions = None
     ; show_connection_details = fixture.show_connection_details
     ; connection_details_scroll = 0
+    ; host = Host.empty
+    ; registry_busy = false
+    ; asic = None
+    ; asic_request_id = 0
+    ; asic_applied_id = 0
+    ; view_on_allocation = None
+    ; remembered_selection = None
+    ; preferences_loaded = true
+    ; preference_saves = Deferred.unit
+    ; asic_reads = Asic_intents.empty
     }
   in
   reconcile_selection session;
@@ -1522,6 +1917,601 @@ let key_is char = function
   | _ -> false
 ;;
 
+let host_catalog session =
+  Host.catalog
+    session.host
+    ~project:(current_project session)
+    ~jobs:(project_jobs session)
+  @ Option.value_map session.remembered_selection ~default:[] ~f:(fun selection ->
+    let available =
+      Option.value_map session.asic ~default:false ~f:(fun asic ->
+        Launch_preferences.available selection asic.flows)
+    in
+    [ Host.command
+        ?unavailable:
+          (if available
+           then None
+           else
+             Some
+               "Remembered flow/profile is not currently discovered; discover it \
+                explicitly")
+        "asic.plan-remembered"
+        (sprintf
+           "Plan remembered inputs: %s / %s → %s"
+           selection.flow
+           selection.profile
+           selection.endpoint)
+        "run synth last used"
+        (Asic (Plan selection))
+    ])
+  @ Option.value_map session.asic ~default:[] ~f:(fun asic ->
+    List.concat_map asic.flows ~f:(fun flow ->
+      Host.command
+        ("asic.describe." ^ flow.id)
+        ("Describe ASIC flow " ^ flow.id)
+        "endpoints parameters"
+        (Asic (Describe flow.id))
+      :: List.map flow.profiles ~f:(fun profile ->
+        Host.command
+          ("asic.plan." ^ flow.id ^ "." ^ profile)
+          ("Plan ASIC " ^ flow.id ^ " / " ^ profile ^ " (enter endpoint)")
+          "run synth preview"
+          (Edit_plan (flow.id, profile))))
+    @ Option.value_map asic.preview ~default:[] ~f:(fun preview ->
+      let label =
+        sprintf
+          "%s / %s → %s [%s]"
+          preview.selection.flow
+          preview.selection.profile
+          preview.selection.endpoint
+          preview.plan_identity
+      in
+      [ Host.command
+          "asic.launch"
+          ("Launch " ^ label)
+          "run synth"
+          (Launch_asic (preview, false))
+      ; Host.command
+          ?unavailable:
+            (if Option.is_some session.view_on_allocation
+             then Some "Another launch-and-view is awaiting allocation"
+             else None)
+          "asic.launch-view"
+          ("Launch and view in captured context: " ^ label)
+          "run select"
+          (Launch_asic (preview, true))
+      ])
+    @ Host.asic_cancel_commands asic
+    @ List.concat_map asic.runs ~f:(fun run ->
+      [ Host.command
+          ("asic.refresh." ^ Host_view.run_label run.run)
+          ("Refresh evidence " ^ Host_view.run_label run.run)
+          "validate source"
+          (Asic (Refresh run.run))
+      ]))
+;;
+
+let execute_host session captured action ~exit =
+  let open Bonsai_term in
+  let async f =
+    Effect.of_deferred_thunk (fun () ->
+      if Host.current session.host captured
+      then f ()
+      else (
+        session.host
+        <- { session.host with
+             notice = "Command target changed before dispatch; reopen palette"
+           };
+        return ()))
+  in
+  if not (Host.current session.host captured)
+  then (
+    session.host
+    <- { session.host with notice = "Command target changed; reopen palette" };
+    Effect.Ignore)
+  else (
+    match action with
+    | Host.Registry mutation -> async (fun () -> mutate_workspace session mutation)
+    | Switch id ->
+      session.host <- Host.switch session.host id;
+      Effect.Ignore
+    | Apply_default_layout ->
+      async (fun () ->
+        match session.host.registry with
+        | None -> return ()
+        | Some registry ->
+          add_default_tiles
+            session
+            registry
+            (Workspace.workspace registry captured.workspace))
+    | Build -> async (fun () -> submit session `Build)
+    | Test -> async (fun () -> submit session `Test)
+    | Cancel id ->
+      async (fun () ->
+        let requested_instance = session.hello.instance_id in
+        let%map result =
+          request session.diagnostics_file (fun () ->
+            Http.Client.cancel_job
+              session.client
+              { instance_id = requested_instance; job = id })
+        in
+        if V1.Daemon_instance_id.equal requested_instance session.hello.instance_id
+        then (
+          match result with
+          | Error message -> session.host <- { session.host with notice = message }
+          | Ok payload ->
+            session.snapshot <- State.add_job_if_absent session.snapshot payload.job))
+    | Refresh_integration -> async (fun () -> refresh_integration session)
+    | Generate_rtl (target, configuration) ->
+      (* The captured IDs are revalidated against discovery, never replaced by the
+         currently highlighted target or a first-flow fallback. *)
+      let valid =
+        Option.value_map (current_project session) ~default:false ~f:(fun project ->
+          List.exists project.targets ~f:(fun t -> Target_id.equal t.id target)
+          && List.exists project.configurations ~f:(fun c ->
+            Configuration_id.equal c.id configuration && Target_id.equal c.target target))
+      in
+      if valid
+      then (
+        session.selected_target <- Some target;
+        session.selected_configuration <- Some configuration;
+        async (fun () ->
+          match current_project session with
+          | None -> return ()
+          | Some project ->
+            let instance_id = session.hello.instance_id in
+            let%map result =
+              request session.diagnostics_file (fun () ->
+                Http.Client.generate_rtl
+                  session.client
+                  { instance_id
+                  ; project = project.id
+                  ; target
+                  ; configuration
+                  ; submission_key = submission_key "generate-rtl"
+                  })
+            in
+            if V1.Daemon_instance_id.equal instance_id session.hello.instance_id
+            then (
+              match result with
+              | Error message ->
+                session.host
+                <- { session.host with notice = "RTL generation failed: " ^ message }
+              | Ok payload ->
+                session.snapshot <- State.add_job_if_absent session.snapshot payload.job;
+                session.host
+                <- { session.host with
+                     notice = "Submitted RTL as " ^ Job_id.to_string payload.job.id
+                   })))
+      else (
+        session.host
+        <- { session.host with notice = "Captured RTL target is no longer available" };
+        Effect.Ignore)
+    | Inspect_artifact -> async (fun () -> inspect_artifact session)
+    | Inspect_hierarchy -> async (fun () -> inspect_hierarchy session)
+    | Discover_asic -> async (fun () -> asic_request session Discover)
+    | Asic (Plan selection as operation) ->
+      async (fun () ->
+        let%bind () = save_preferences session selection in
+        asic_request session operation)
+    | Asic (Cancel key as operation) ->
+      async (fun () ->
+        if Option.value_map session.asic ~default:false ~f:(fun snapshot ->
+             List.exists snapshot.operations ~f:(fun operation ->
+               String.equal operation.key key && Asic_intents.cancellable operation))
+        then asic_request session operation
+        else (
+          session.host
+          <- { session.host with
+               notice = "ASIC operation is no longer active and owned: " ^ key
+             };
+          return ()))
+    | Asic operation -> async (fun () -> asic_request session operation)
+    | Edit_plan (flow, profile) ->
+      let query =
+        Option.value_map session.remembered_selection ~default:"" ~f:(fun selection ->
+          if String.equal selection.flow flow && String.equal selection.profile profile
+          then String.concat (selection.endpoint :: selection.assignments) ~sep:" "
+          else "")
+      in
+      session.host
+      <- { session.host with
+           palette =
+             Some
+               { capture = captured
+               ; commands = []
+               ; query
+               ; index = 0
+               ; argument = Some (flow, profile)
+               }
+         ; notice =
+             "Enter ENDPOINT [name=value ...]; Describe flow lists capabilities. No \
+              fallback."
+         };
+      Effect.Ignore
+    | Launch_asic (preview, view) ->
+      if not
+           (Option.value_map session.asic ~default:false ~f:(fun asic ->
+              Option.equal Asic.Preview.equal asic.preview (Some preview)))
+      then (
+        session.host
+        <- { session.host with
+             notice = "ASIC preview invalidated; prepare the plan again"
+           };
+        Effect.Ignore)
+      else (
+        let key = submission_key "asic-run" in
+        async (fun () ->
+          if view && Option.is_some session.view_on_allocation
+          then (
+            session.host
+            <- { session.host with
+                 notice = "Another launch-and-view is awaiting allocation"
+               };
+            return ())
+          else (
+            if view
+            then
+              Option.iter (Host.launch_target session.host) ~f:(fun target ->
+                session.view_on_allocation <- Some (key, target));
+            asic_request session (Run { key; preview }))))
+    | Local_headers | Resume_log ->
+      Option.iter session.host.focus ~f:(fun id ->
+        let local = Host.local session.host id in
+        let local =
+          match action with
+          | Local_headers -> { local with headers = not local.headers }
+          | _ -> { local with follow = true; scroll = 0 }
+        in
+        session.host <- Host.set_local session.host id local);
+      Effect.Ignore
+    | Toggle_chrome ->
+      session.host <- { session.host with chrome = not session.host.chrome };
+      Effect.Ignore
+    | Set_appearance appearance ->
+      session.host <- Host.set_appearance session.host appearance;
+      Effect.Ignore
+    | Set_layout_mode layout_mode ->
+      session.host <- { session.host with layout_mode };
+      Effect.Ignore
+    | Exit -> exit ())
+;;
+
+let browse_host session delta =
+  Option.filter (Host.focused session.host) ~f:(fun tile ->
+    String.equal tile.kind "run-selector" || Host.job_attempt_kind tile.kind)
+  |> Option.iter ~f:(fun tile ->
+    let local = Host.local session.host tile.id in
+    let values =
+      if String.equal tile.kind "run-selector"
+      then
+        (host_data session).runs
+        |> List.filter ~f:(fun (r, label) ->
+          String.is_substring
+            (String.lowercase (Host_view.run_label r ^ " " ^ label))
+            ~substring:(String.lowercase local.filter))
+        |> List.map ~f:(fun (run, _) -> Host_view.run_label run)
+      else
+        project_jobs session
+        |> List.filter ~f:(fun job ->
+          (not (String.equal tile.kind "project-tests"))
+          || (String.equal job.kind.namespace "dune" && String.equal job.kind.name "test"))
+        |> List.map ~f:(fun job -> Job_id.to_string job.id)
+    in
+    let index =
+      Option.bind local.cursor ~f:(fun cursor ->
+        List.findi values ~f:(fun _ value -> String.equal cursor value)
+        |> Option.map ~f:fst)
+      |> Option.value ~default:(if delta > 0 then -1 else 1)
+    in
+    let index = Int.max 0 (Int.min (List.length values - 1) (index + delta)) in
+    let cursor = List.nth values index in
+    let visible = Int.max 1 (tile.requested_geometry.height - 2) in
+    let scroll =
+      if String.equal tile.kind "run-selector"
+      then
+        if index < local.scroll
+        then index
+        else if index >= local.scroll + visible
+        then index - visible + 1
+        else local.scroll
+      else 0
+    in
+    session.host <- Host.set_local session.host tile.id { local with cursor; scroll })
+;;
+
+let host_handler session event ~exit : unit Bonsai_term.Effect.t option =
+  let open Bonsai_term in
+  let modal =
+    Option.is_some session.host.palette
+    || session.host.editing_filter
+    || session.host.paste
+  in
+  let input = Host.decode_event event in
+  let prefix = session.host.prefix > 0 in
+  let captured = Host.capture session.host in
+  let host, effect =
+    Option.value_map input ~default:(session.host, Host.No_effect) ~f:(fun input ->
+      Host.input session.host input ~commands:(host_catalog session))
+  in
+  session.host <- host;
+  match effect with
+  | Host.Execute (capture, action) -> Some (execute_host session capture action ~exit)
+  | Host.Activate ->
+    Option.iter (Host.focused host) ~f:(fun tile ->
+      if String.equal tile.kind "run-selector"
+      then (
+        let local = Host.local host tile.id in
+        let run =
+          Option.bind session.asic ~f:(fun asic ->
+            List.find asic.runs ~f:(fun r ->
+              Option.equal String.equal local.cursor (Some (Host_view.run_label r.run))))
+        in
+        Option.iter run ~f:(fun r ->
+          Option.iter (Host.select_run host (Some r.run)) ~f:(fun mutation ->
+            don't_wait_for (mutate_workspace session mutation)))));
+    Some Effect.Ignore
+  | Host.No_effect
+    when modal
+         || prefix
+         || Option.is_some host.palette
+         || host.editing_filter
+         || host.prefix > 0 -> Some Effect.Ignore
+  | Host.No_effect ->
+    let dispatch id =
+      Option.bind captured ~f:(fun capture ->
+        List.find (host_catalog session) ~f:(fun command -> String.equal command.id id)
+        |> Option.map ~f:(fun command ->
+          execute_host session capture command.action ~exit))
+    in
+    (match input with
+     | Some (Character 'b') -> dispatch "project.build"
+     | Some (Character 't') -> dispatch "project.test"
+     | Some (Character 'i') -> dispatch "project.discover"
+     | Some (Character 'g') ->
+       Option.bind session.selected_configuration ~f:(fun id ->
+         dispatch ("rtl." ^ Configuration_id.to_string id))
+       |> Option.value ~default:Effect.Ignore
+       |> Option.some
+     | Some (Character 'h') ->
+       Option.iter (Host.focused session.host) ~f:(fun tile ->
+         Option.iter (Host.local session.host tile.id).cursor ~f:(fun id ->
+           Option.iter
+             (List.findi (project_jobs session) ~f:(fun _ job ->
+                String.equal (Job_id.to_string job.id) id))
+             ~f:(fun (index, _) -> session.selected <- index)));
+       dispatch "hierarchy.inspect"
+     | Some (Character 'c') ->
+       (match Host.focused session.host with
+        | None -> Some Effect.Ignore
+        | Some tile when not (Host.job_attempt_kind tile.kind) -> Some Effect.Ignore
+        | Some tile ->
+          Option.bind (Host.local session.host tile.id).cursor ~f:(fun id ->
+            dispatch ("job.cancel." ^ id))
+          |> Option.value ~default:Effect.Ignore
+          |> Option.some)
+     | Some (Character 'j') | Some Next ->
+       browse_host session 1;
+       Some Effect.Ignore
+     | Some (Character 'k') | Some Previous ->
+       browse_host session (-1);
+       Some Effect.Ignore
+     | Some (Character (('1' | '2') as ch)) ->
+       let name = if Char.equal ch '1' then "Overview" else "Timing" in
+       Option.bind session.host.registry ~f:(fun s ->
+         List.find s.workspaces ~f:(fun w -> String.equal w.name name))
+       |> Option.iter ~f:(fun w -> session.host <- Host.switch session.host w.id);
+       Some Effect.Ignore
+     | Some (Character (('[' | ']') as ch)) ->
+       Option.iter session.host.focus ~f:(fun id ->
+         let l = Host.local session.host id in
+         session.host
+         <- Host.set_local
+              session.host
+              id
+              { l with
+                follow = false
+              ; scroll = Int.max 0 (l.scroll + if Char.equal ch '[' then -1 else 1)
+              });
+       Some Effect.Ignore
+     | Some Focus -> Some Effect.Ignore
+     | _ -> None)
+;;
+
+let fs0_fixture scenario =
+  (* Explicit synthetic data, only reachable from the capture hook. Production startup
+     always obtains both registry and runs from their daemon services. *)
+  let session = session_of_baseline_fixture (List.hd_exn Baseline_fixture.all) in
+  let a = Fs0_fixture.run_a
+  and b = Fs0_fixture.run_b in
+  session.asic <- Some Fs0_fixture.snapshot;
+  let registry =
+    Workspace.initial
+      ~session_id:(Workspace.Session_id.of_string "explicit-synthetic-fs0")
+  in
+  let overview = List.hd_exn registry.workspaces
+  and timing = List.last_exn registry.workspaces in
+  let apply s mutation =
+    Workspace.apply
+      s
+      (Mutate { expected_revision = s.Workspace.Snapshot.revision; mutation })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let registry =
+    List.fold registry.tiles ~init:registry ~f:(fun s tile ->
+      let width, height =
+        if Workspace.Workspace_id.equal tile.workspace timing.id then 28, 6 else 32, 8
+      in
+      apply s (Resize_tile { tile = tile.id; geometry = { x = 0; y = 0; width; height } }))
+  in
+  let registry =
+    List.fold
+      [ overview.id, "synthesis", 64, 10
+      ; overview.id, "execution", 48, 8
+      ; overview.id, "project-tests", 48, 8
+      ; overview.id, "logs", 64, 8
+      ; overview.id, "navigation", 64, 6
+      ; timing.id, "timing", 64, 10
+      ; timing.id, "logs", 64, 8
+      ]
+      ~init:registry
+      ~f:(fun s (workspace, kind, width, height) ->
+        apply
+          s
+          (Create_tile { workspace; kind; geometry = { x = 0; y = 0; width; height } }))
+  in
+  let registry =
+    apply
+      registry
+      (Select_run
+         { workspace = overview.id
+         ; context = registry.main_context
+         ; expected_selection_revision = 0
+         ; run = Some a
+         })
+  in
+  let registry =
+    if String.equal scenario "independent"
+    then apply registry (Make_independent timing.id)
+    else registry
+  in
+  let registry =
+    if String.equal scenario "pinned" || String.equal scenario "pinned-synthesis"
+    then (
+      let registry =
+        List.filter registry.tiles ~f:(fun tile ->
+          String.equal tile.kind "timing" || String.equal tile.kind "synthesis")
+        |> List.fold ~init:registry ~f:(fun registry tile ->
+          apply registry (Set_tile_binding { tile = tile.id; binding = Pin_run a }))
+      in
+      apply
+        registry
+        (Select_run
+           { workspace = overview.id
+           ; context = registry.main_context
+           ; expected_selection_revision = 1
+           ; run = Some b
+           }))
+    else if String.equal scenario "synthesis-b"
+    then
+      apply
+        registry
+        (Select_run
+           { workspace = overview.id
+           ; context = registry.main_context
+           ; expected_selection_revision = 1
+           ; run = Some b
+           })
+    else registry
+  in
+  session.host <- Host.receive Host.empty registry;
+  List.iter registry.tiles ~f:(fun tile ->
+    if String.equal tile.kind "logs"
+       || String.equal tile.kind "project-tests"
+       || String.equal tile.kind "execution"
+    then
+      session.host
+      <- Host.set_local
+           session.host
+           tile.id
+           { Host.default_local with
+             cursor =
+               Option.map (selected_job session) ~f:(fun job -> Job_id.to_string job.id)
+           });
+  if String.equal scenario "timing"
+     || String.equal scenario "independent"
+     || String.equal scenario "pinned"
+  then session.host <- Host.switch session.host timing.id;
+  let focus_kind =
+    match scenario with
+    | "timing" | "pinned" -> Some "timing"
+    | "synthesis-a" | "synthesis-b" | "pinned-synthesis" -> Some "synthesis"
+    | "tests" -> Some "project-tests"
+    | "logs" -> Some "logs"
+    | _ -> None
+  in
+  Option.iter focus_kind ~f:(fun kind ->
+    Option.iter
+      (List.find (Host.tiles session.host) ~f:(fun tile -> String.equal tile.kind kind))
+      ~f:(fun tile -> session.host <- { session.host with focus = Some tile.id }));
+  if String.equal scenario "palette"
+  then
+    List.iter [ ' '; 'c'; 'c' ] ~f:(fun ch ->
+      let host, _ =
+        Host.input session.host (Character ch) ~commands:(host_catalog session)
+      in
+      session.host <- host);
+  session.status <- "SYNTHETIC FS0 FIXTURE — no tool evidence";
+  session
+;;
+
+let capture_fs0_frames ~directory =
+  Core_unix.mkdir_p directory;
+  List.iter
+    [ "overview"
+    ; "timing"
+    ; "independent"
+    ; "pinned"
+    ; "palette"
+    ; "tests"
+    ; "logs"
+    ; "synthesis-a"
+    ; "synthesis-b"
+    ; "pinned-synthesis"
+    ]
+    ~f:(fun scenario ->
+      List.iter
+        (capture_dimensions @ [ { Bonsai_term.Dimensions.width = 32; height = 8 } ])
+        ~f:(fun dimensions ->
+          List.iter
+            [ "txt", Notty.Cap.dumb; "ansi", Notty.Cap.ansi ]
+            ~f:(fun (extension, cap) ->
+              let file =
+                sprintf
+                  "fs0-%s.%dx%d.%s"
+                  scenario
+                  dimensions.width
+                  dimensions.height
+                  extension
+              in
+              Out_channel.write_all
+                (Filename.concat directory file)
+                ~data:(render_to_string (fs0_fixture scenario) dimensions ~cap ^ "\n"))))
+;;
+
+let capture_appearance_frames ~directory =
+  Core_unix.mkdir_p directory;
+  List.iter Appearance.Preset.all ~f:(fun preset ->
+    List.iter
+      [ "synthesis-a"; "timing"; "pinned-synthesis"; "palette" ]
+      ~f:(fun scenario ->
+        List.iter Appearance.Density.all ~f:(fun density ->
+          List.iter capture_dimensions ~f:(fun dimensions ->
+            List.iter
+              [ "txt", Notty.Cap.dumb; "ansi", Notty.Cap.ansi ]
+              ~f:(fun (extension, cap) ->
+                let session = fs0_fixture scenario in
+                session.host
+                <- Host.set_appearance
+                     session.host
+                     { Appearance.default with preset; density; icons = Unicode };
+                let name =
+                  sprintf
+                    "%s-%s-%s.%dx%d.%s"
+                    (Appearance.Preset.key preset)
+                    (Appearance.Density.key density)
+                    scenario
+                    dimensions.width
+                    dimensions.height
+                    extension
+                in
+                Out_channel.write_all
+                  (Filename.concat directory name)
+                  ~data:(render_to_string session dimensions ~cap ^ "\n"))))));
+  printf "Captured experimental A-E skins (synthetic data) in %s\n%!" directory
+;;
+
 let tui session ~exit ~dimensions graph =
   let open Bonsai_term in
   let poll = Effect.of_deferred_thunk (fun () -> refresh session) in
@@ -1539,72 +2529,83 @@ let tui session ~exit ~dimensions graph =
   in
   let handler =
     Bonsai.return (fun (event : Event.t) ->
-      match event with
-      | Key_press { key; mods = [] } when key_is 'q' key -> exit ()
-      | Key_press { key; mods = [ Ctrl ] } when key_is 'c' key || key_is 'C' key ->
-        exit ()
-      | Key_press { key; mods = [] } when key_is 'b' key ->
-        Effect.of_deferred_thunk (fun () -> submit session `Build)
-      | Key_press { key; mods = [] } when key_is 't' key ->
-        Effect.of_deferred_thunk (fun () -> submit session `Test)
-      | Key_press { key; mods = [] } when key_is 'c' key ->
-        Effect.of_deferred_thunk (fun () -> cancel_selected session)
-      | Key_press { key; mods = [] } when key_is 'i' key ->
-        Effect.of_deferred_thunk (fun () -> refresh_integration session)
-      | Key_press { key; mods = [] } when key_is 'n' key ->
-        cycle_target session;
-        Effect.Ignore
-      | Key_press { key; mods = [] } when key_is 'm' key ->
-        cycle_configuration session;
-        Effect.Ignore
-      | Key_press { key; mods = [] } when key_is 'g' key ->
-        Effect.of_deferred_thunk (fun () -> generate_rtl session)
-      | Key_press { key; mods = [] } when key_is 'a' key ->
-        cycle_artifact session;
-        Effect.Ignore
-      | Key_press { key; mods = [] } when key_is 'v' key ->
-        Effect.of_deferred_thunk (fun () -> inspect_artifact session)
-      | Key_press { key; mods = [] } when key_is 'h' key ->
-        Effect.of_deferred_thunk (fun () -> inspect_hierarchy session)
-      | Key_press { key; mods = [] } when key_is 'u' key ->
-        move_hierarchy_selection session (-1);
-        Effect.Ignore
-      | Key_press { key; mods = [] } when key_is 'o' key ->
-        move_hierarchy_selection session 1;
-        Effect.Ignore
-      | Key_press { key; mods = [] } when key_is 'e' key ->
-        toggle_hierarchy_expansion session;
-        Effect.Ignore
-      | Key_press { key; mods = [] } when key_is 'j' key ->
-        let count = List.length (project_jobs session) in
-        session.selected <- Int.min (Int.max 0 (count - 1)) (session.selected + 1);
-        Effect.Ignore
-      | Key_press { key; mods = [] } when key_is 'k' key ->
-        session.selected <- Int.max 0 (session.selected - 1);
-        Effect.Ignore
-      | Key_press { key; mods = [] } when key_is 'd' key ->
-        session.show_connection_details <- not session.show_connection_details;
-        session.connection_details_scroll <- 0;
-        Effect.Ignore
-      | Key_press { key; mods = [] } when key_is '[' key ->
-        if session.show_connection_details
-        then
-          session.connection_details_scroll
-          <- Int.max 0 (session.connection_details_scroll - 1)
-        else
-          Option.iter session.hierarchy_view ~f:(fun view ->
-            view.pane_scroll <- Int.max 0 (view.pane_scroll - 1));
-        Effect.Ignore
-      | Key_press { key; mods = [] } when key_is ']' key ->
-        if session.show_connection_details
-        then session.connection_details_scroll <- session.connection_details_scroll + 1
-        else
-          Option.iter session.hierarchy_view ~f:(fun view ->
-            view.pane_scroll <- view.pane_scroll + 1);
-        Effect.Ignore
-      | Key_press { key; mods = [] } when key_is 'r' key ->
-        Effect.of_deferred_thunk (fun () -> reconnect session)
-      | _ -> Effect.Ignore)
+      let hosted =
+        if Option.is_some session.host.registry
+           && Option.is_none session.hierarchy_view
+           && Option.is_none session.artifact_view
+           && not session.show_connection_details
+        then host_handler session event ~exit
+        else None
+      in
+      match hosted with
+      | Some effect -> effect
+      | None ->
+        (match event with
+         | Key_press { key; mods = [] } when key_is 'q' key -> exit ()
+         | Key_press { key; mods = [ Ctrl ] } when key_is 'c' key || key_is 'C' key ->
+           exit ()
+         | Key_press { key; mods = [] } when key_is 'b' key ->
+           Effect.of_deferred_thunk (fun () -> submit session `Build)
+         | Key_press { key; mods = [] } when key_is 't' key ->
+           Effect.of_deferred_thunk (fun () -> submit session `Test)
+         | Key_press { key; mods = [] } when key_is 'c' key ->
+           Effect.of_deferred_thunk (fun () -> cancel_selected session)
+         | Key_press { key; mods = [] } when key_is 'i' key ->
+           Effect.of_deferred_thunk (fun () -> refresh_integration session)
+         | Key_press { key; mods = [] } when key_is 'n' key ->
+           cycle_target session;
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'm' key ->
+           cycle_configuration session;
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'g' key ->
+           Effect.of_deferred_thunk (fun () -> generate_rtl session)
+         | Key_press { key; mods = [] } when key_is 'a' key ->
+           cycle_artifact session;
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'v' key ->
+           Effect.of_deferred_thunk (fun () -> inspect_artifact session)
+         | Key_press { key; mods = [] } when key_is 'h' key ->
+           Effect.of_deferred_thunk (fun () -> inspect_hierarchy session)
+         | Key_press { key; mods = [] } when key_is 'u' key ->
+           move_hierarchy_selection session (-1);
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'o' key ->
+           move_hierarchy_selection session 1;
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'e' key ->
+           toggle_hierarchy_expansion session;
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'j' key ->
+           let count = List.length (project_jobs session) in
+           session.selected <- Int.min (Int.max 0 (count - 1)) (session.selected + 1);
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'k' key ->
+           session.selected <- Int.max 0 (session.selected - 1);
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'd' key ->
+           session.show_connection_details <- not session.show_connection_details;
+           session.connection_details_scroll <- 0;
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is '[' key ->
+           if session.show_connection_details
+           then
+             session.connection_details_scroll
+             <- Int.max 0 (session.connection_details_scroll - 1)
+           else
+             Option.iter session.hierarchy_view ~f:(fun view ->
+               view.pane_scroll <- Int.max 0 (view.pane_scroll - 1));
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is ']' key ->
+           if session.show_connection_details
+           then session.connection_details_scroll <- session.connection_details_scroll + 1
+           else
+             Option.iter session.hierarchy_view ~f:(fun view ->
+               view.pane_scroll <- view.pane_scroll + 1);
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'r' key ->
+           Effect.of_deferred_thunk (fun () -> reconnect session)
+         | _ -> Effect.Ignore))
   in
   ~view, ~handler
 ;;
@@ -1959,7 +2960,7 @@ let parse_action = function
   | Some _ -> Or_error.error_string "--action must be build, test, or generate-rtl"
 ;;
 
-let run
+let run_legacy
   ~endpoint
   ~project_root
   ~environment
@@ -2054,6 +3055,229 @@ let run
             error))
 ;;
 
+type plain_operation =
+  | Asic_operation of Asic.Operation.t
+  | Workspace_operation of Workspace.Operation.t
+
+let rpc_call session thunk =
+  Monitor.try_with_or_error thunk
+  >>| Or_error.join
+  >>| function
+  | Ok response -> response
+  | Error error ->
+    let message = "Terminal transport failure: " ^ Error.to_string_hum error in
+    append_diagnostic session.diagnostics_file message;
+    Error (V1.Error.create Internal_failure message)
+;;
+
+let run_plain_asic session operation ~wait ~timeout_seconds =
+  let project = (Option.value_exn session.opened).project.id in
+  let instance_id = session.hello.instance_id in
+  let call operation =
+    rpc_call session (fun () ->
+      Http.Client.asic session.client { instance_id; project; operation })
+  in
+  let last = ref None in
+  let finish response failure = Asic.Response.sexp_of_t response, failure in
+  let rec poll keys response =
+    match response with
+    | Error error -> return (finish response (Some (protocol_error error)))
+    | Ok snapshot ->
+      last := Some snapshot;
+      let keys = Plain_rpc.watched_keys operation keys snapshot in
+      (match Plain_rpc.progress ~wait keys snapshot with
+       | Failed message -> return (finish response (Some message))
+       | Complete ->
+         let failure =
+           match operation with
+           | Asic.Operation.Plan selection when wait ->
+             if Option.value_map snapshot.preview ~default:false ~f:(fun preview ->
+                  Asic.Selection.equal preview.selection selection)
+             then None
+             else
+               Some
+                 "Requested ASIC plan completed but its preview is absent or superseded"
+           | _ -> None
+         in
+         return (finish response failure)
+       | Pending ->
+         let%bind () = Clock.after (Time_float.Span.of_ms 200.) in
+         let%bind response = call Get in
+         poll keys response)
+  in
+  let perform () =
+    let%bind response = call operation in
+    let keys =
+      Result.ok response |> Option.value_map ~default:[] ~f:(Plain_rpc.keys operation)
+    in
+    poll keys response
+  in
+  if not wait
+  then perform ()
+  else (
+    match%map
+      Clock.with_timeout (Time_float.Span.of_sec timeout_seconds) (perform ())
+    with
+    | `Result result -> result
+    | `Timeout ->
+      let message =
+        sprintf
+          "ASIC operation wait timed out after %g seconds; daemon work was not cancelled"
+          timeout_seconds
+      in
+      let response =
+        Option.value_map
+          !last
+          ~default:(Error (V1.Error.create Internal_failure message))
+          ~f:(fun snapshot -> Ok snapshot)
+      in
+      finish response (Some message))
+;;
+
+let run_plain_workspace session operation =
+  let project = (Option.value_exn session.opened).project.id in
+  let%map response =
+    rpc_call session (fun () ->
+      Http.Client.workspace
+        session.client
+        { instance_id = session.hello.instance_id; project; operation })
+  in
+  ( Workspace.Response.sexp_of_t response
+  , match response with
+    | Ok _ -> None
+    | Error error -> Some (protocol_error error) )
+;;
+
+let run
+  ~endpoint
+  ~project_root
+  ~environment
+  ~plain
+  ~api
+  ~asic_operation
+  ~workspace_operation
+  ~wait_timeout_seconds
+  ~action
+  ~target
+  ~configuration
+  ~artifact
+  ~hierarchy
+  ~refresh_integration
+  ~wait
+  ~diagnostics_file
+  ()
+  =
+  let fail message =
+    if api
+    then
+      printf
+        "%s\n%!"
+        (Sexp.to_string_mach
+           (Workspace.Response.sexp_of_t
+              (Error (V1.Error.create Invalid_request message))));
+    return (Or_error.error_string message)
+  in
+  let has_operation =
+    Option.is_some asic_operation || Option.is_some workspace_operation
+  in
+  if not has_operation
+  then
+    if api
+    then fail "--api requires --asic-operation or --workspace-operation"
+    else if Option.is_some wait_timeout_seconds
+    then fail "--wait-timeout-seconds requires an ASIC operation and --wait"
+    else
+      run_legacy
+        ~endpoint
+        ~project_root
+        ~environment
+        ~plain
+        ~action
+        ~target
+        ~configuration
+        ~artifact
+        ~hierarchy
+        ~refresh_integration
+        ~wait
+        ~diagnostics_file
+        ()
+  else if List.count
+            [ Option.is_some asic_operation
+            ; Option.is_some workspace_operation
+            ; Option.is_some action
+            ; Option.is_some artifact
+            ; Option.is_some hierarchy
+            ; refresh_integration
+            ]
+            ~f:Fn.id
+          <> 1
+  then
+    fail
+      "Choose exactly one operation: --asic-operation, --workspace-operation, --action, \
+       --artifact, --hierarchy, or --refresh-integration"
+  else if not (plain || api)
+  then fail "Typed operations require --plain or --api"
+  else if Option.is_none project_root
+  then fail "Typed operations require --project-root"
+  else if Option.is_some target || Option.is_some configuration
+  then fail "--target/--configuration apply only to --action generate-rtl"
+  else if Option.is_some workspace_operation && wait
+  then fail "Workspace operations are synchronous; omit --wait"
+  else if Option.is_some wait_timeout_seconds
+          && ((not wait) || Option.is_none asic_operation)
+  then fail "--wait-timeout-seconds requires an ASIC operation and --wait"
+  else (
+    let timeout_seconds = Option.value wait_timeout_seconds ~default:60. in
+    if not (Float.is_finite timeout_seconds && Float.(timeout_seconds > 0.))
+    then fail "Wait timeout must be a finite positive number of seconds"
+    else (
+      let decoded =
+        Or_error.try_with (fun () ->
+          match asic_operation, workspace_operation with
+          | Some sexp, None ->
+            Asic_operation (Asic.Operation.t_of_sexp (Sexp.of_string sexp))
+          | None, Some sexp ->
+            Workspace_operation (Workspace.Operation.t_of_sexp (Sexp.of_string sexp))
+          | _ -> assert false)
+      in
+      match decoded, parse_environment environment with
+      | Error error, _ | _, Error error -> fail (Error.to_string_hum error)
+      | Ok operation, Ok (environment_selection, environment_label) ->
+        let diagnostics_file =
+          Option.first_some diagnostics_file (Sys.getenv "HARDCAML_WORKBENCH_DIAGNOSTICS")
+        in
+        let%bind created =
+          create_session
+            ~endpoint
+            ~project_root
+            ~environment_selection
+            ~environment_label
+            ~diagnostics_file
+        in
+        (match created with
+         | Error message ->
+           if api
+           then
+             printf
+               "%s\n%!"
+               (Sexp.to_string_mach
+                  (Workspace.Response.sexp_of_t
+                     (Error (V1.Error.create Internal_failure message))));
+           return (Or_error.error_string message)
+         | Ok session ->
+           if not api then print_opened session;
+           let%map sexp, failure =
+             match operation with
+             | Asic_operation operation ->
+               run_plain_asic session operation ~wait ~timeout_seconds
+             | Workspace_operation operation -> run_plain_workspace session operation
+           in
+           printf "%s\n%!" (Sexp.to_string_mach sexp);
+           (match failure with
+            | None -> Ok ()
+            | Some message -> Or_error.error_string message))))
+;;
+
 let command =
   Command.async_or_error
     ~summary:"Connect to Hardcaml Workbench"
@@ -2067,6 +3291,28 @@ let command =
          (optional_with_default "inherited" string)
          ~doc:"inherited|opam:SWITCH project command environment (default: inherited)"
      and plain = flag "--plain" no_arg ~doc:" print status without terminal control"
+     and api =
+       flag
+         "--api"
+         no_arg
+         ~doc:" emit exactly one typed RPC response sexp; no status preamble"
+     and asic_operation =
+       flag
+         "--asic-operation"
+         (optional string)
+         ~doc:"SEXP typed Asic.Operation; requires --project-root and --plain or --api"
+     and workspace_operation =
+       flag
+         "--workspace-operation"
+         (optional string)
+         ~doc:
+           "SEXP typed Workspace.Operation; requires --project-root and --plain or --api"
+     and wait_timeout_seconds =
+       flag
+         "--wait-timeout-seconds"
+         (optional float)
+         ~doc:
+           "SECONDS bounded ASIC --wait budget (default 60); does not cancel daemon work"
      and action =
        flag
          "--action"
@@ -2093,7 +3339,11 @@ let command =
          "--refresh-integration"
          no_arg
          ~doc:" queue project-driver discovery refresh in plain mode"
-     and wait = flag "--wait" no_arg ~doc:" wait for a plain-mode action and stream logs"
+     and wait =
+       flag
+         "--wait"
+         no_arg
+         ~doc:" wait for a plain action, or bounded typed ASIC operation completion"
      and diagnostics_file =
        flag
          "--diagnostics-file"
@@ -2106,20 +3356,52 @@ let command =
          ~doc:
            "DIR render the deterministic UI fixtures into DIR and exit (development \
             baseline capture; no daemon or project needed)"
+     and capture_fs0 =
+       flag
+         "--capture-fs0"
+         (optional string)
+         ~doc:
+           "DIR capture actual workspace renderer with explicitly synthetic FS0 fixtures"
+     and capture_appearance =
+       flag
+         "--capture-appearance"
+         (optional string)
+         ~doc:"DIR capture experimental A-E skins over identical synthetic fixtures"
      in
-     match capture_baseline with
-     | Some directory ->
+     match capture_appearance, capture_fs0, capture_baseline with
+     | (Some _, _, _ | _, Some _, _ | _, _, Some _) when api ->
+       fun () ->
+         let message = "--api cannot be combined with capture hooks" in
+         printf
+           "%s\n%!"
+           (Sexp.to_string_mach
+              (Workspace.Response.sexp_of_t
+                 (Error (V1.Error.create Invalid_request message))));
+         return (Or_error.error_string message)
+     | Some directory, _, _ ->
+       fun () ->
+         capture_appearance_frames ~directory;
+         return (Ok ())
+     | None, Some directory, _ ->
+       fun () ->
+         capture_fs0_frames ~directory;
+         return (Ok ())
+     | None, None, Some directory ->
        (* The capture renders fixtures; it neither connects to a daemon nor opens a
           project, so it never enters [run] and none of the session flags apply. *)
        fun () ->
        capture_baseline_frames ~directory;
        return (Ok ())
-     | None ->
+     | None, None, None ->
        run
          ~endpoint
          ~project_root
          ~environment
          ~plain
+         ~api
+         ~asic_operation
+         ~workspace_operation
+         ~wait_timeout_seconds
          ~action
          ~target
          ~configuration
