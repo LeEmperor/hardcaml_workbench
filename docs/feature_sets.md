@@ -121,6 +121,11 @@ is a separately activated extension, not an automatic FS2 prerequisite.
 
 ## FS3 — Workspace adoption and project setup
 
+**First adoption slice delivered:** existing-project initializer using the current
+manifest, portable CLI workspace templates (export/import/clone and starters), and
+persistent local presentation choices. See [guide and verification](fs3_adoption.md).
+Multi-monitor acceptance and configuration-location migration remain later work.
+
 Multiple attached windows, shared/independent contexts across them, preset/layout
 comfort, responsiveness and existing-project initialization. Full project creation
 is a later F07 slice after configuration/templates are proven. Saved single-window

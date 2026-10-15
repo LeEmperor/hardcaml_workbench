@@ -436,12 +436,16 @@ let body_geometry host tile ~width ~height =
   let inner_width = Int.max 0 (width - (2 * border)) in
   let inner_height = Int.max 0 (height - (2 * border)) in
   let padding =
-    if width >= 40 && height > 8
+    if width >= 40
+       && height > 8
        && Appearance.Density.equal appearance.density Comfortable
-    then 1 else 0
+    then 1
+    else 0
   in
   let body_width = Int.max 0 (inner_width - (2 * padding)) in
-  let body_height = Int.max 0 (inner_height - (2 * padding) - if local.headers then 1 else 0) in
+  let body_height =
+    Int.max 0 (inner_height - (2 * padding) - if local.headers then 1 else 0)
+  in
   inner_width, inner_height, padding, body_width, body_height
 ;;
 
@@ -599,40 +603,68 @@ end
 
 (** The same outer and inner geometry is used by rendering and page navigation. *)
 let tile_layout host ({ Dimensions.width; height } : Dimensions.t) =
-  let width = Int.max 1 width and height = Int.max 1 height in
-  let available = Int.max 1
-      (height - (if host.H.chrome then 1 else 0)
-       - if host.chrome || host.editing_filter || host.paste then 1 else 0) in
+  let width = Int.max 1 width
+  and height = Int.max 1 height in
+  let available =
+    Int.max
+      1
+      (height
+       - (if host.H.chrome then 1 else 0)
+       - if host.chrome || host.editing_filter || host.paste then 1 else 0)
+  in
   let tiles = H.tiles host in
-  let zoomed = Option.value_map (H.active host) ~default:false ~f:(fun w -> Option.is_some w.zoomed_tile) in
+  let zoomed =
+    Option.value_map (H.active host) ~default:false ~f:(fun w ->
+      Option.is_some w.zoomed_tile)
+  in
   let fit = Fit_layout.compute ~width ~height:available ~count:(List.length tiles) in
-  let compact = not zoomed && (match host.layout_mode, fit with H.Fit, Fit_layout.Compact -> true | _ -> false) in
+  let compact =
+    (not zoomed)
+    &&
+    match host.layout_mode, fit with
+    | H.Fit, Fit_layout.Compact -> true
+    | _ -> false
+  in
   let focused () =
-    let tile = Option.filter (H.focused host) ~f:(fun tile -> List.exists tiles ~f:(fun t -> W.Tile_id.equal t.id tile.id))
-      |> fun focused -> Option.first_some focused (List.hd tiles) in
-    Option.to_list tile |> List.map ~f:(fun tile -> tile, { W.Geometry.x = 0; y = 0; width; height = available })
+    let tile =
+      Option.filter (H.focused host) ~f:(fun tile ->
+        List.exists tiles ~f:(fun t -> W.Tile_id.equal t.id tile.id))
+      |> fun focused -> Option.first_some focused (List.hd tiles)
+    in
+    Option.to_list tile
+    |> List.map ~f:(fun tile ->
+      tile, { W.Geometry.x = 0; y = 0; width; height = available })
   in
   let layout =
-    if zoomed || compact then focused () else
-    match host.layout_mode, fit with
-    | H.Fit, Fit_layout.Grid cells -> List.zip_exn tiles cells
-    | H.Fit, Fit_layout.Compact -> focused ()
-    | H.Preferred, _ ->
-      let rec pack pending x y row_height acc =
-        match pending with
-        | [] -> List.rev acc, y + row_height
-        | tile :: rest ->
-          let g = tile.W.Tile.requested_geometry in
-          let tw = Int.min width (Int.max 8 g.width) in
-          let th = Int.min available (Int.max 3 g.height) in
-          let gap = if x = 0 then 0 else 1 in
-          if x + gap + tw > width && x > 0
-          then pack pending 0 (y + row_height) 0 acc
-          else pack rest (x + gap + tw) y (Int.max row_height th)
-              ((tile, { W.Geometry.x = x + gap; y; width = tw; height = th }) :: acc)
-      in
-      let packed, total_height = pack tiles 0 0 0 [] in
-      if total_height > available && Option.is_some (H.focused host) then focused () else packed
+    if zoomed || compact
+    then focused ()
+    else (
+      match host.layout_mode, fit with
+      | H.Fit, Fit_layout.Grid cells -> List.zip_exn tiles cells
+      | H.Fit, Fit_layout.Compact -> focused ()
+      | H.Preferred, _ ->
+        let rec pack pending x y row_height acc =
+          match pending with
+          | [] -> List.rev acc, y + row_height
+          | tile :: rest ->
+            let g = tile.W.Tile.requested_geometry in
+            let tw = Int.min width (Int.max 8 g.width) in
+            let th = Int.min available (Int.max 3 g.height) in
+            let gap = if x = 0 then 0 else 1 in
+            if x + gap + tw > width && x > 0
+            then pack pending 0 (y + row_height) 0 acc
+            else
+              pack
+                rest
+                (x + gap + tw)
+                y
+                (Int.max row_height th)
+                ((tile, { W.Geometry.x = x + gap; y; width = tw; height = th }) :: acc)
+        in
+        let packed, total_height = pack tiles 0 0 0 [] in
+        if total_height > available && Option.is_some (H.focused host)
+        then focused ()
+        else packed)
   in
   available, compact, layout
 ;;
@@ -641,21 +673,45 @@ let scroll_focused host data dimensions ~delta =
   let _, _, layout = tile_layout host dimensions in
   match H.focused host, host.H.registry with
   | Some tile, Some registry ->
-    (match List.find layout ~f:(fun (visible, _) -> W.Tile_id.equal visible.id tile.id),
-           W.resolve_tile registry tile.id |> Result.ok |> Option.bind ~f:(fun reference -> reference.run) with
+    (match
+       ( List.find layout ~f:(fun (visible, _) -> W.Tile_id.equal visible.id tile.id)
+       , W.resolve_tile registry tile.id
+         |> Result.ok
+         |> Option.bind ~f:(fun reference -> reference.run) )
+     with
      | Some (_, g), Some run ->
-       let _, _, _, width, height = body_geometry host tile ~width:g.width ~height:g.height in
+       let _, _, _, width, height =
+         body_geometry host tile ~width:g.width ~height:g.height
+       in
        let local = H.local host tile.id in
        let local =
-         if String.equal tile.kind "synthesis" then
-           { local with synthesis = Synthesis_view.scroll local.synthesis
-               ~summary:(data.summary run) ~filter:local.filter ~width
-               ~height:(Int.max 0 (height - 1)) ~delta }
-         else if Terminal_result_view.supports tile.kind then
-           { local with terminal_result = Terminal_result_view.scroll
-               ~fallback:(("Run: " ^ run_label run) :: data.run_lines run tile.kind)
-               ~request_context:(data.run_context run) local.terminal_result
-               ~run ~summary:(data.summary run) ~kind:tile.kind ~width ~height ~delta }
+         if String.equal tile.kind "synthesis"
+         then
+           { local with
+             synthesis =
+               Synthesis_view.scroll
+                 local.synthesis
+                 ~summary:(data.summary run)
+                 ~filter:local.filter
+                 ~width
+                 ~height:(Int.max 0 (height - 1))
+                 ~delta
+           }
+         else if Terminal_result_view.supports tile.kind
+         then
+           { local with
+             terminal_result =
+               Terminal_result_view.scroll
+                 ~fallback:(("Run: " ^ run_label run) :: data.run_lines run tile.kind)
+                 ~request_context:(data.run_context run)
+                 local.terminal_result
+                 ~run
+                 ~summary:(data.summary run)
+                 ~kind:tile.kind
+                 ~width
+                 ~height
+                 ~delta
+           }
          else local
        in
        H.set_local host tile.id local
@@ -709,8 +765,7 @@ let render host data ({ Dimensions.width; height } as dimensions) =
         ]
     else
       List.map layout ~f:(fun (tile, (g : W.Geometry.t)) ->
-        tile_view host data tile ~width:g.width ~height:g.height
-        |> View.pad ~l:g.x ~t:g.y)
+        tile_view host data tile ~width:g.width ~height:g.height |> View.pad ~l:g.x ~t:g.y)
       |> View.zcat
   in
   let footer =
@@ -743,12 +798,12 @@ let render host data ({ Dimensions.width; height } as dimensions) =
           ~role:Muted
           ~width
           ~height:1
-          [ (if compact
+          [ (if not (String.is_empty host.notice)
+             then host.notice
+             else if compact
              then
                "Compact: focused tile only | Tab: next tile | enlarge terminal for grid"
-             else if String.is_empty host.notice
-             then "Space c c commands | Tab focus | j/k browse | Enter select | q exit"
-             else host.notice)
+             else "Space c c commands | Tab focus | j/k browse | Enter select | q exit")
           ]
       ]
   in

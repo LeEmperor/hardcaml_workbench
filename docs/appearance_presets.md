@@ -32,8 +32,10 @@ Provider text is preserved, so icon mode does not transliterate source/log conte
 
 Changes affect only this client. They retain workspace, selected run, pinned tile
 references, focus, filters, scroll and requested layout. They do not submit provider
-work or change the daemon registry. Preferences currently reset when the client
-restarts; persistence remains a later small extension.
+work or change the daemon registry. FS3 now saves explicit presentation choices for
+the next client restart, scoped to project/environment; see
+[presentation persistence](fs3_adoption.md#persistent-presentation-preferences).
+Other attached clients retain their current choices until restarted or changed.
 
 Frames/padding degrade on small tiles to protect evidence rows. Comfortable density
 adds inner padding when space permits. Appearance does not populate workspaces or

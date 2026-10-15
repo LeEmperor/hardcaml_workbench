@@ -14,6 +14,7 @@ Project/provider commands remain useful without the application.
 | [Decision log](decisions.md) | Accepted D1/D2/D3 FS0 defaults and later command/snapshot policy |
 | [FS0 acceptance](fs0_acceptance.md) | Actual HTTP/PTY fixtures, real 673/685 synthesis and live cached UI reopening |
 | [Installed checks](fs0_install_checks.md) | Passed native installed workflow, external fixture and legacy captures |
+| [FS3 adoption](fs3_adoption.md) | Existing-project initializer, portable workspace templates and persistent presentation preferences |
 | [Provider integration](fs0_provider_integration.md) | Implemented public API, configuration, cache and supervision limits |
 | [Terminal host](fs0_terminal.md) / [Execution module](fs0_execution_module.md) | Current UI controls and daemon-routed generic execution boundary |
 | [Architecture](hardcaml_workbench_architecture.md) | Runtime, ownership, data and integration boundaries |
@@ -61,8 +62,9 @@ of an implemented Workbench feature.
   utility chrome mountable and headers configurable. FS5/V1's first A–E skins and
   independent color/icon/density controls are delivered; richer gallery fixtures,
   reusable tabs and final aesthetic review remain pending. No embedded editor is selected.
-- Limits: shelf layout rather than freeform geometry; no template export/clone;
-  local chrome/header preferences do not persist; clock-driven redraw and a basic
+- FS3's [first adoption slice](fs3_adoption.md) delivers existing-project initialization,
+  CLI template export/import/clone and persistent client appearance/header choices.
+- Limits: shelf layout rather than freeform geometry; clock-driven redraw and a basic
   endpoint/assignment form; timing unsupported. Remaining frontend race/reconnect/
   cancellation coverage and scaling measurements are explicit in M0–M3.
 - FS1's first [synthesis inspector](synthesis_inspection.md) is delivered over cached

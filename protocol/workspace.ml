@@ -168,6 +168,10 @@ module Mutation = struct
         { workspace : Workspace_id.t
         ; tile : Tile_id.t option
         }
+    | Instantiate_template of
+        { window : Window_id.t
+        ; template : Workspace_template.t
+        }
   [@@deriving bin_io, compare, equal, sexp]
 end
 
@@ -241,6 +245,12 @@ let valid_name name = require (not (String.is_empty (String.strip name))) "Empty
 let valid_run (run : Run_ref.t) =
   valid_name (Backend_id.to_string run.backend);
   valid_name run.id
+;;
+
+let valid_template template =
+  match Workspace_template.validate template with
+  | Ok () -> ()
+  | Error error -> reject Invalid_request (Error.to_string_hum error)
 ;;
 
 let validate (s : Snapshot.t) =
@@ -359,6 +369,32 @@ let allocate (s : Snapshot.t) prefix =
   in
   let id, next_id = loop s.next_id in
   id, { s with next_id }
+;;
+
+(** Export only the ordered layout. Pins, selections, context identities and zoom never
+    cross this boundary. Import always creates a new Main-linked workspace. *)
+let export_template (s : Snapshot.t) id =
+  Result.bind (validate s) ~f:(fun () ->
+    protect (fun () ->
+      let w = workspace s id in
+      let template : Workspace_template.t =
+        { version = Workspace_template.version
+        ; name = w.name
+        ; views =
+            List.filter_map s.tiles ~f:(fun t ->
+              if not (Workspace_id.equal t.workspace id)
+              then None
+              else (
+                let g = t.requested_geometry in
+                Some
+                  { Workspace_template.View.kind = t.kind
+                  ; hidden = t.hidden
+                  ; geometry = { x = g.x; y = g.y; width = g.width; height = g.height }
+                  }))
+        }
+      in
+      valid_template template;
+      template))
 ;;
 
 let apply_mutation (s : Snapshot.t) (mutation : Mutation.t) =
@@ -489,6 +525,41 @@ let apply_mutation (s : Snapshot.t) (mutation : Mutation.t) =
         (Workspace_id.equal t.workspace id && not t.hidden)
         "Zoom requires a visible tile in this workspace");
     update_workspace s id ~f:(fun w -> { w with zoomed_tile })
+  | Instantiate_template { window = window_id; template } ->
+    valid_template template;
+    ignore (window s window_id : Window.t);
+    let id, s = allocate s "workspace" in
+    let id = Workspace_id.of_string id in
+    let s =
+      { s with
+        workspaces =
+          s.workspaces
+          @ [ { id
+              ; window = window_id
+              ; name = template.name
+              ; context = s.main_context
+              ; binding_revision = s.revision
+              ; zoomed_tile = None
+              }
+            ]
+      }
+    in
+    List.fold template.views ~init:s ~f:(fun s view ->
+      let fresh, s = allocate s "tile" in
+      let g = view.geometry in
+      { s with
+        tiles =
+          s.tiles
+          @ [ { id = Tile_id.of_string fresh
+              ; workspace = id
+              ; kind = view.kind
+              ; binding = Follow
+              ; hidden = view.hidden
+              ; requested_geometry =
+                  { x = g.x; y = g.y; width = g.width; height = g.height }
+              }
+            ]
+      })
 ;;
 
 (** Pure CAS reducer. Invalid snapshots/references and stale writes are explicit errors;

@@ -160,7 +160,19 @@ let receive t (s : W.Snapshot.t) =
       |> fun selected ->
       Option.first_some selected (Option.map (List.hd s.workspaces) ~f:(fun w -> w.id))
     in
-    let t = { t with registry = Some s; active; notice = "" } in
+    (* Tile IDs may be reused by a replacement registry session. Drop old local state on
+       replacement and prune removed/retyped tiles on ordinary refresh. *)
+    let locals =
+      match t.registry with
+      | Some previous when W.Session_id.equal previous.session_id s.session_id ->
+        List.filter t.locals ~f:(fun (id, _) ->
+          List.exists s.tiles ~f:(fun tile ->
+            String.equal id (W.Tile_id.to_string tile.id)
+            && List.exists previous.tiles ~f:(fun old ->
+              W.Tile_id.equal old.id tile.id && String.equal old.kind tile.kind)))
+      | _ -> []
+    in
+    let t = { t with registry = Some s; active; locals; notice = "" } in
     let focus =
       Option.filter t.focus ~f:(fun id ->
         List.exists (tiles t) ~f:(fun tile -> W.Tile_id.equal tile.id id))
@@ -175,6 +187,34 @@ let capture t =
   | Some s, Some w ->
     Some { session = s.session_id; revision = s.revision; workspace = w.id }
   | _ -> None
+;;
+
+let%test_unit "local tile state survives refresh but not replacement identities" =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "local-state-session") in
+  let tile = List.hd_exn registry.tiles in
+  let host = receive empty registry in
+  let host =
+    set_local host tile.id { default_local with headers = false; filter = "browsing" }
+  in
+  let refreshed = receive host { registry with revision = registry.revision + 1 } in
+  assert (not (local refreshed tile.id).headers);
+  assert (String.equal (local refreshed tile.id).filter "browsing");
+  let replacement =
+    receive host { registry with session_id = W.Session_id.of_string "new-local-session" }
+  in
+  assert (local replacement tile.id).headers;
+  assert (String.is_empty (local replacement tile.id).filter);
+  let removed = receive host { registry with tiles = [] } in
+  assert (List.is_empty removed.locals);
+  let retyped =
+    receive
+      host
+      { registry with
+        tiles =
+          List.map registry.tiles ~f:(fun tile -> { tile with kind = "different-kind" })
+      }
+  in
+  assert (local retyped tile.id).headers
 ;;
 
 let switch t id =

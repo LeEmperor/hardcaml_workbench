@@ -22,6 +22,7 @@ gallery remain later scope. See the [delivery record](docs/construction_phase_pl
 - [Documentation index](docs/README.md) — orientation and reading routes.
 - [FS0 controls](docs/fs0_terminal.md) and [acceptance](docs/fs0_acceptance.md) — run the demo and inspect its evidence.
 - [Synthesis inspection](docs/synthesis_inspection.md) — FS1 cell tables, sorting/filtering and evidence drilldown.
+- [FS3 adoption](docs/fs3_adoption.md) — initialize existing projects, import/export/clone layouts and retain presentation preferences.
 - [Feature list](docs/feature_list.md) — concise scope/status and focused feature specs.
 - [Feature sets](docs/feature_sets.md) — FS0 initial demos and later themed work groups.
 - [Decision log](docs/decisions.md) — accepted run contexts; remaining command/snapshot policy.

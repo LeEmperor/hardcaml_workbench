@@ -145,3 +145,18 @@ let parse_string contents =
   | Error error -> Error (Error.to_string_hum error)
   | Ok sexps -> parse_sexps sexps
 ;;
+
+(* This is the on-disk, versioned format, not [sexp_of_t]'s record encoding. *)
+let to_string t =
+  let field name value = Sexp.List [ Atom name; Atom value ] in
+  let forms =
+    [ Sexp.List [ Atom "lang"; Atom "hardcaml-workbench"; Atom (Int.to_string version) ]
+    ; Sexp.List [ Atom "project"; field "name" t.project_name ]
+    ; Sexp.List
+        (Atom "dune"
+         :: (Option.to_list (Option.map t.driver ~f:(field "driver"))
+             @ [ field "build_alias" t.build_alias; field "test_alias" t.test_alias ]))
+    ]
+  in
+  String.concat ~sep:"\n" (List.map forms ~f:Sexp.to_string_hum) ^ "\n"
+;;

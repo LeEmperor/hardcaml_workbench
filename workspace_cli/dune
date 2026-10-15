@@ -1,0 +1,14 @@
+(executable
+ (name main)
+ (public_name hardcaml-workbench-workspace)
+ (package hardcaml_workbench)
+ (libraries
+  async
+  core
+  core_unix.command_unix
+  hardcaml_workbench_native_http
+  hardcaml_workbench_protocol)
+ (preprocess
+  (pps ppx_jane))
+ (lint
+  (pps ppx_js_style)))
