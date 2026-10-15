@@ -3,5 +3,6 @@
  (libraries core)
  (preprocess
   (pps ppx_jane))
+ (inline_tests)
  (lint
   (pps ppx_js_style)))

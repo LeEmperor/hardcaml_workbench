@@ -6,6 +6,13 @@ records real 673/685 counts, completed execution and `not_evaluated` acceptance.
 Timing is unsupported (`[]`), not zero slack. Requirements below remain normative;
 rich timing/check/physical/clock views (FS1) are not implemented.
 
+**FS1/F06 synthesis inspection slice delivered:** sortable/filterable cell table,
+stable row selection, count/share detail and full evidence inspection over existing
+cached summaries. Normal views use concise provenance; full producer records/paths
+are inspectable. Actual PTY cached-run isolation and switching tests passed; see
+[controls and acceptance](../synthesis_inspection.md). This does not add timing,
+area/latch diagnosis or new provider extraction.
+
 ## Feature slices
 
 | View | Desired evidence and interactions |

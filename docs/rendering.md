@@ -140,6 +140,12 @@ picker/help surface captures input before tiles and global actions. Text entry
 must not accidentally trigger build/cancel shortcuts. Keep focus/selection stable
 when jobs, logs or results arrive. Select list items by identity, not row index.
 
+Ctrl-C is the global client-exit escape route and precedes all modal/paste capture.
+Raw terminal mode disables keyboard-generated OS signals, so checking it only in
+a fallback keymap is insufficient. Filters and unfinished paste capture remain
+visibly marked even with ordinary chrome hidden; abort restores terminal settings
+without cancelling daemon-owned work. PTY interrupt regression covers each mode.
+
 Define command identity, availability/reason, bindings and description once; derive
 dispatch, help and hints from that definition. Exact keys are settled during M2;
 `Space c c` is the intended palette binding.

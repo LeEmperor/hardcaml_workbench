@@ -159,6 +159,7 @@ type data =
   ; runs : (Run_ref.t * string) list
   ; log_lines : Job_id.t -> string list
   ; run_lines : Run_ref.t -> string -> string list
+  ; summary : Run_ref.t -> Asic.Summary.t option
   ; status : string
   ; environment : string
   ; asic_lines : string list
@@ -265,8 +266,10 @@ let run_lines snapshot run kind =
               ^ " | acceptance: "
               ^ summary.acceptance
             ; "Observed execution: " ^ execution.status
-            ; "Producer: " ^ summary.producer ^ " | observed " ^ summary.observed_at
-            ; "Source: " ^ summary.execution_file
+            ; "Producer: provider checkpoint (inspect synthesis evidence)"
+            ; "Source: "
+              ^ Filename.basename summary.execution_file
+              ^ " (inspect for full path)"
             ]
           @ Option.to_list execution.error
           @
@@ -297,7 +300,7 @@ let wrap_cells ~width text =
   loop 0 0 0 []
 ;;
 
-let rows host data tile ~width =
+let rows host data tile ~width ~height =
   let local = H.local host tile.W.Tile.id in
   let scope =
     match host.H.registry with
@@ -382,12 +385,23 @@ let rows host data tile ~width =
       ; data.status
       ]
     | "asic" -> List.concat_map data.asic_lines ~f:(wrap_cells ~width)
+    | "synthesis" ->
+      (match scope with
+       | None -> [ "No run selected — use a run selector" ]
+       | Some run ->
+         ("Run: " ^ run_label run)
+         :: Synthesis_view.rows
+              local.synthesis
+              ~summary:(data.summary run)
+              ~filter:local.filter
+              ~width
+              ~height:(Int.max 0 (height - 1)))
     | kind ->
       (match scope with
        | None -> [ "No run selected — use a run selector" ]
        | Some run -> ("Run: " ^ run_label run) :: data.run_lines run kind)
   in
-  if String.equal tile.kind "logs" && local.follow
+  if String.equal tile.kind "synthesis" || (String.equal tile.kind "logs" && local.follow)
   then rows
   else if String.equal tile.kind "run-selector"
   then (
@@ -425,7 +439,7 @@ let tile_view host data tile ~width ~height =
   let body_height =
     Int.max 0 (inner_height - (2 * padding) - if local.headers then 1 else 0)
   in
-  let rows = rows host data tile ~width:body_width in
+  let rows = rows host data tile ~width:body_width ~height:body_height in
   let rows =
     if String.equal tile.kind "logs" && local.follow
     then
@@ -446,7 +460,17 @@ let tile_view host data tile ~width ~height =
   in
   let header =
     if local.headers
-    then
+    then (
+      let title =
+        if not (String.equal tile.kind "synthesis")
+        then tile.kind
+        else (
+          match Synthesis_view.State.mode local.synthesis with
+          | Summary -> "synthesis"
+          | Cells -> "synthesis/cells"
+          | Details -> "synthesis/detail"
+          | Evidence -> "synthesis/evidence")
+      in
       (* A tile-title badge indicates real tile focus, not a navigation tab. *)
       [ lines
           ~appearance
@@ -462,15 +486,15 @@ let tile_view host data tile ~width ~height =
               "%s%s [%s] %s%s"
               (focus_marker appearance focused)
               (if studio appearance
-               then "[ " ^ tile.kind ^ " ]"
+               then "[ " ^ title ^ " ]"
                else if Appearance.Preset.equal appearance.preset Instrument
-               then String.uppercase tile.kind
-               else tile.kind)
+               then String.uppercase title
+               else title)
               binding
               (W.Tile_id.to_string tile.id)
               (if String.is_empty local.filter then "" else " filter=" ^ local.filter)
           ]
-      ]
+      ])
     else []
   in
   let body =
@@ -579,7 +603,11 @@ let render host data ({ Dimensions.width; height } as dimensions) =
       ]
   in
   let available =
-    Int.max 1 (height - List.length header - if host.chrome then 1 else 0)
+    Int.max
+      1
+      (height
+       - List.length header
+       - if host.chrome || host.editing_filter || host.paste then 1 else 0)
   in
   let tiles = H.tiles host in
   let zoomed =
@@ -661,7 +689,28 @@ let render host data ({ Dimensions.width; height } as dimensions) =
       | Some tile -> tile_view host data tile ~width ~height:available)
   in
   let footer =
-    if not host.chrome
+    if host.paste
+    then
+      [ lines
+          ~appearance
+          ~role:Warning
+          ~width
+          ~height:1
+          [ "PASTE CAPTURE | content ignored until end marker | Ctrl-C exits client" ]
+      ]
+    else if host.editing_filter
+    then (
+      let filter =
+        Option.value_map host.focus ~default:"" ~f:(fun id -> (H.local host id).filter)
+      in
+      [ lines
+          ~appearance
+          ~role:Focus
+          ~width
+          ~height:1
+          [ "FILTER INPUT | Enter/Esc finish | Ctrl-U clear | query: " ^ filter ]
+      ])
+    else if not host.chrome
     then []
     else
       [ lines
@@ -848,6 +897,7 @@ let%test_unit "fit renders all thirteen tiles across skins and distinguishes loa
     ; runs = []
     ; log_lines = (fun _ -> [])
     ; run_lines = (fun _ _ -> [])
+    ; summary = (fun _ -> None)
     ; status = "fixture"
     ; environment = "fixture"
     ; asic_lines = []
@@ -895,6 +945,7 @@ let%test_unit "actual renderer clips cell geometry and distinguishes run and pro
     ; runs = []
     ; log_lines = (fun _ -> [])
     ; run_lines = (fun _ _ -> [ "No measurement" ])
+    ; summary = (fun _ -> None)
     ; status = "fixture"
     ; environment = "test"
     ; asic_lines = [ "Explicit synthetic rendering fixture" ]
@@ -947,6 +998,31 @@ let%test_unit "actual renderer clips cell geometry and distinguishes run and pro
   List.iter wrapped ~f:(fun line -> assert (View.width (View.text line) <= 3))
 ;;
 
+let%test_unit "filter input remains visible after polling and with chrome hidden" =
+  let snapshot = W.initial ~session_id:(W.Session_id.of_string "filter-visible") in
+  let tile = List.hd_exn snapshot.tiles in
+  let host = H.receive H.empty snapshot in
+  let host = H.set_local host tile.id { H.default_local with filter = "no-match" } in
+  let host = H.receive { host with editing_filter = true; chrome = false } snapshot in
+  assert (String.is_empty host.notice);
+  let data =
+    { project = None
+    ; jobs = []
+    ; runs = []
+    ; log_lines = (fun _ -> [])
+    ; run_lines = (fun _ _ -> [])
+    ; summary = (fun _ -> None)
+    ; status = "connected"
+    ; environment = "fixture"
+    ; asic_lines = []
+    }
+  in
+  let text = render host data { width = 120; height = 40 } |> plain_text in
+  List.iter
+    [ "FILTER INPUT"; "Enter/Esc finish"; "Ctrl-U clear"; "no-match" ]
+    ~f:(fun label -> assert (String.is_substring text ~substring:label))
+;;
+
 let%test_unit "warm synthesis run switch renders 73 while pinned reference retains 50, \
                including compact frames"
   =
@@ -977,6 +1053,9 @@ let%test_unit "warm synthesis run switch renders 73 while pinned reference retai
     ; runs = List.map Fs0_fixture.snapshot.runs ~f:(fun run -> run.run, run.status)
     ; log_lines = (fun _ -> [])
     ; run_lines = run_lines (Some Fs0_fixture.snapshot)
+    ; summary =
+        (fun run ->
+          List.find Fs0_fixture.snapshot.summaries ~f:(fun s -> Run_ref.equal s.run run))
     ; status = "SYNTHETIC FIXTURE"
     ; environment = "fixture"
     ; asic_lines = []
@@ -999,8 +1078,9 @@ let%test_unit "warm synthesis run switch renders 73 while pinned reference retai
   let before = frame host 32 8 in
   assert (has before "Cell count: 50");
   assert (has before "Freshness: Cached_unverified");
-  assert (has before "Cells: NAND2=35, DFF=15");
-  assert (has before "Evidence: execution.sexp");
+  assert (has before "Count  Cell type");
+  assert (has before "35  NAND2");
+  assert (not (has before "/explicit/synthetic"));
   let host = select host Fs0_fixture.run_b in
   let registry_before = Option.value_exn host.registry |> W.Snapshot.sexp_of_t in
   List.iter appearance_cases ~f:(fun appearance ->
@@ -1011,8 +1091,9 @@ let%test_unit "warm synthesis run switch renders 73 while pinned reference retai
     let small = frame host 32 8 in
     assert (has small "Cell count: 73");
     assert (has small "Freshness: Cached_unverified");
-    assert (has small "Cells: NAND2=50, DFF=23");
-    assert (has small "Evidence: execution.sexp");
+    assert (has small "Count  Cell type");
+    assert (has small "50  NAND2");
+    assert (not (has small "/explicit/synthetic"));
     let pinned_frame = frame { host with focus = Some pinned } 32 8 in
     assert (has pinned_frame "Cell count: 50");
     assert (not (has pinned_frame "Cell count: 73"));

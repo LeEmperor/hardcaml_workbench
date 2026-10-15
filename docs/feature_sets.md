@@ -98,6 +98,11 @@ large-detail indexes can follow measured need in later feature-set slices.
 
 ## FS1 — ASIC evidence investigation
 
+**In progress:** first F06 slice is the [cached synthesis inspector](synthesis_inspection.md):
+cell table sorting/filtering, row detail and evidence drilldown. It consumes FS0
+summaries without changing provider contracts or invoking tools. Rich timing,
+checks, clocks and physical views below remain subsequent work.
+
 Status: **not started**; FS0 synthesis summaries do not implement this set.
 
 Timing summaries/path detail, checks, clocks and physical/resource slices with

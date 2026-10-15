@@ -10,7 +10,8 @@ M0–M5 are implementation phases, distinct from feature sets and ASIC phases.
 FS0 covers M0–M3's functional slices, not every normative feature requirement.
 FS1/FS2 map to richer M4 evidence and simulation; FS3 maps to M5 adoption.
 FS5/V1 is an independent appearance gallery, not a functional-demo gate.
-No FS1/FS2 implementation is claimed. The first FS5 appearance slice is recorded below.
+FS1's first cached synthesis inspection slice and FS5's first appearance slice are
+recorded below. No FS2 structured simulation implementation is claimed.
 
 ## Evidence and candidate baseline
 
@@ -222,8 +223,29 @@ and richer endpoint forms remain explicit gaps; clock-driven redraw remains curr
 
 ## M4 — Rich evidence and live acceptance (FS1/FS2)
 
-**Not started.** Real bounded synthesis acceptance above does not implement these
-richer sets. Features: F06/F09 and execution/regression extensions.
+**FS1 in progress: synthesis inspection delivered. FS2 remains unstarted.**
+Features: F06/F09 and execution/regression extensions.
+
+- [x] F06 synthesis inspection over existing cache: count/name sorting, literal
+  filtering, stable selected row, count/share detail and full evidence inspection.
+  Concise summary labels replace raw producer JSON/absolute-path dumps.
+- [x] Validate local state across sort/filter and run/digest changes, missing/zero/
+  mismatched totals, overflow handling and independent pinned views. Actual 120×40
+  PTY uses real cached 685/673 totals and checks a cell count changing 58→56.
+- [x] Verify no provider work is caused by inspection: private-daemon syscall trace
+  after cached load has no subprocess launches or provider-result access; original
+  state/config/results unchanged. Evidence:
+  `/tmp/opencode/workbench-synthesis-inspector-pmzn1twc/`.
+  Format/lint, repository unit tests and full build passed serially at `-j20`.
+  [Controls/test command](synthesis_inspection.md).
+- [x] Hidden-filter recovery followup: persistent filter-input indicator, displayed
+  query/match count and Ctrl-U clear, verified through actual PTY after polling.
+  The reported apparent crash was not confirmed as process termination: live client/
+  daemon remained running and hello responded. See synthesis inspection evidence.
+- [x] Subsequent input-hang report reproduced a real Ctrl-C routing defect in raw
+  mode. Interrupt now precedes filter/palette/paste capture. Actual PTY before/after
+  matrix verifies all five cases exit and restore terminal settings while the daemon
+  remains alive. `scripts/test-terminal-interrupt.py`; details in synthesis inspection.
 
 - [ ] Timing/check drilldown with setup/hold, units/corner/measurement context.
 - [ ] Placement/resource/clock views backed by actual provider fields.
@@ -272,7 +294,7 @@ This is a reusable renderer over actual FS0 tiles, not a selected final aestheti
 | M1 | Headless Demo A delivered; full physical/container cancellation acceptance later |
 | M2 | Tile-host Demo B delivered; bounded UI/coverage/performance gaps above |
 | M3 | Autosaved-session/L2 Demo C delivered; templates and appearance persistence gaps above |
-| M4 | FS1/FS2 not started |
+| M4 | FS1 synthesis inspection delivered; timing/physical and FS2 slices pending |
 | M5 | Later adoption scope; no full multi-monitor acceptance claim |
 | V1 | A–E skins/axes/captures delivered; rich gallery and default review pending |
 

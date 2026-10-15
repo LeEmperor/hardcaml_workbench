@@ -10,6 +10,7 @@ type local =
   ; scroll : int
   ; follow : bool
   ; headers : bool
+  ; synthesis : Synthesis_view.State.t
   }
 
 type layout_mode =
@@ -37,6 +38,10 @@ type action =
   | Toggle_chrome
   | Set_appearance of Appearance.t
   | Set_layout_mode of layout_mode
+  | Synthesis_mode of Synthesis_view.Mode.t
+  | Synthesis_sort of Synthesis.Sort.t
+  | Synthesis_cycle_sort
+  | Synthesis_clear_filter
   | Exit
 
 type command =
@@ -95,7 +100,13 @@ let empty =
 ;;
 
 let default_local =
-  { cursor = None; filter = ""; scroll = 0; follow = true; headers = true }
+  { cursor = None
+  ; filter = ""
+  ; scroll = 0
+  ; follow = true
+  ; headers = true
+  ; synthesis = Synthesis_view.State.empty
+  }
 ;;
 
 let local t id =
@@ -516,6 +527,53 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
       ; command "tile.headers" "Toggle focused tile header" "appearance" Local_headers
       ; command "logs.follow" "Resume log follow" "tail" Resume_log
       ]
+      @ (if not (String.equal tile.kind "synthesis")
+         then []
+         else
+           [ command
+               "synthesis.summary"
+               "Synthesis: Summary"
+               "cells overview"
+               (Synthesis_mode Summary)
+           ; command
+               "synthesis.cells"
+               "Synthesis: Browse cell table"
+               "resources breakdown inspect"
+               (Synthesis_mode Cells)
+           ; command
+               "synthesis.details"
+               "Synthesis: Inspect selected cell"
+               "resource row detail"
+               (Synthesis_mode Details)
+           ; command
+               "synthesis.evidence"
+               "Synthesis: Inspect full evidence"
+               "producer source provenance report path json"
+               (Synthesis_mode Evidence)
+           ; command
+               "synthesis.clear-filter"
+               "Synthesis: Clear cell filter"
+               "reset search"
+               Synthesis_clear_filter
+           ; command
+               "synthesis.cycle-sort"
+               "Synthesis: Cycle table sort"
+               "order count name"
+               Synthesis_cycle_sort
+           ]
+           @ List.map Synthesis.Sort.all ~f:(fun sort ->
+             let key, title =
+               match sort with
+               | Count_desc -> "count-desc", "count descending"
+               | Count_asc -> "count-asc", "count ascending"
+               | Name_asc -> "name-asc", "name ascending"
+               | Name_desc -> "name-desc", "name descending"
+             in
+             command
+               ("synthesis.sort." ^ key)
+               ("Synthesis: Sort " ^ title)
+               "cells table order"
+               (Synthesis_sort sort)))
       @ List.filter_map s.workspaces ~f:(fun destination ->
         if W.Workspace_id.equal destination.id w.id
         then None
@@ -545,6 +603,7 @@ type input =
   | Enter
   | Escape
   | Backspace
+  | Clear_filter
   | Next
   | Previous
   | Focus
@@ -556,10 +615,40 @@ type effect =
   | Activate
   | No_effect
 
+(* Notty's raw mode disables ISIG. This escape route must run BEFORE any modal or
+   bracketed-paste capture, including capture waiting for a missing end marker. *)
+let is_interrupt (event : Bonsai_term.Event.t) =
+  match event with
+  | Key_press { key; mods } ->
+    List.exists mods ~f:(function
+      | Ctrl -> true
+      | _ -> false)
+    &&
+      (match key with
+      | ASCII ('c' | 'C') -> true
+      | Uchar value ->
+        Uchar.equal value (Uchar.of_char 'c') || Uchar.equal value (Uchar.of_char 'C')
+      | _ -> false)
+  | _ -> false
+;;
+
+let%test_unit "interrupt is independent of filter/palette/paste state and key encoding" =
+  let open Bonsai_term.Event in
+  List.iter
+    [ Key.ASCII 'c'; ASCII 'C'; Uchar (Uchar.of_char 'c') ]
+    ~f:(fun key -> assert (is_interrupt (Key_press { key; mods = [ Ctrl ] })));
+  assert (not (is_interrupt (Key_press { key = ASCII 'c'; mods = [] })));
+  assert (not (is_interrupt (Paste `Start)))
+;;
+
 let decode_event (event : Bonsai_term.Event.t) : input option =
   match event with
   | Paste `Start -> Some Paste_start
   | Paste `End -> Some Paste_end
+  | Key_press { key = ASCII ('u' | 'U'); mods = [ Ctrl ] } -> Some Clear_filter
+  | Key_press { key = Uchar value; mods = [ Ctrl ] }
+    when Uchar.equal value (Uchar.of_char 'u') || Uchar.equal value (Uchar.of_char 'U') ->
+    Some Clear_filter
   | Key_press { key; mods = [] } ->
     (match key with
      | ASCII ch -> Some (Character ch)
@@ -583,6 +672,9 @@ let input t event ~commands : t * effect =
   | _ when t.editing_filter ->
     (match event, t.focus with
      | (Escape | Enter), _ -> { t with editing_filter = false }, No_effect
+     | Clear_filter, Some id ->
+       let l = local t id in
+       set_local t id { l with filter = ""; scroll = 0 }, No_effect
      | Character ch, Some id ->
        let l = local t id in
        ( set_local t id { l with filter = l.filter ^ String.of_char ch; scroll = 0 }
@@ -596,6 +688,8 @@ let input t event ~commands : t * effect =
     (match t.palette with
      | Some p ->
        (match event with
+        | Clear_filter ->
+          { t with palette = Some { p with query = ""; index = 0 } }, No_effect
         | Escape -> { t with palette = None; prefix = 0 }, No_effect
         | Character ch ->
           ( { t with
@@ -647,6 +741,13 @@ let input t event ~commands : t * effect =
         | _ -> t, No_effect)
      | None ->
        (match event, t.prefix with
+        | Clear_filter, _ ->
+          let t =
+            Option.value_map t.focus ~default:t ~f:(fun id ->
+              let l = local t id in
+              set_local t id { l with filter = ""; scroll = 0 })
+          in
+          { t with prefix = 0 }, No_effect
         | Character ' ', _ -> { t with prefix = 1 }, No_effect
         | Character 'c', 1 -> { t with prefix = 2 }, No_effect
         | Character 'c', 2 ->
@@ -694,6 +795,31 @@ let select_run t run =
          ; run
          })
   | _ -> None
+;;
+
+let%test_unit "Ctrl-U clears focused filters without submitting or touching other tiles" =
+  let snapshot = W.initial ~session_id:(W.Session_id.of_string "filter-recovery") in
+  let host = receive empty snapshot in
+  let first = List.hd_exn snapshot.tiles
+  and other = List.last_exn snapshot.tiles in
+  let host = set_local host first.id { default_local with filter = "no-match" } in
+  let host = set_local host other.id { default_local with filter = "keep" } in
+  let recover editing_filter =
+    let before = { host with editing_filter } in
+    let after, effect = input before Clear_filter ~commands:[] in
+    assert (String.is_empty (local after first.id).filter);
+    assert (String.equal (local after other.id).filter "keep");
+    assert (phys_equal before.registry after.registry);
+    assert (Bool.equal after.editing_filter editing_filter);
+    match effect with
+    | No_effect -> ()
+    | _ -> assert false
+  in
+  recover true;
+  recover false;
+  match decode_event (Key_press { key = ASCII 'u'; mods = [ Ctrl ] }) with
+  | Some Clear_filter -> ()
+  | _ -> assert false
 ;;
 
 type launch_target =

@@ -20,6 +20,7 @@ Project/provider commands remain useful without the application.
 | [Rendering](rendering.md) | Presentation, input, layout and headless interaction requirements |
 | [Appearance handoffs](design/README.md) | Imported older design doc, newer gallery and implementation qualifications |
 | [Appearance presets](appearance_presets.md) | Try the implemented A–E skins and independent presentation controls |
+| [Synthesis inspection](synthesis_inspection.md) | FS1/F06 cell table, filter/sort, row detail and evidence controls |
 | [Formatting](formatting_guide.md) | Source conventions |
 | [Backlog](backlog/README.md) | Deferred work and reactivation triggers |
 | [Archive](archive/README.md) | Superseded plans and historical acceptance evidence |

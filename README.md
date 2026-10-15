@@ -21,6 +21,7 @@ gallery remain later scope. See the [delivery record](docs/construction_phase_pl
 
 - [Documentation index](docs/README.md) — orientation and reading routes.
 - [FS0 controls](docs/fs0_terminal.md) and [acceptance](docs/fs0_acceptance.md) — run the demo and inspect its evidence.
+- [Synthesis inspection](docs/synthesis_inspection.md) — FS1 cell tables, sorting/filtering and evidence drilldown.
 - [Feature list](docs/feature_list.md) — concise scope/status and focused feature specs.
 - [Feature sets](docs/feature_sets.md) — FS0 initial demos and later themed work groups.
 - [Decision log](docs/decisions.md) — accepted run contexts; remaining command/snapshot policy.
@@ -121,7 +122,10 @@ workspace intentionally contains only two synthesis tiles; Fit expands them acro
 the surface without adding stages or changing the saved 56×14 preferred sizes.
 
 Both tiles use real retained evidence. Opening them loads Workbench's cached
-summaries; it does not rerun synthesis. Keep the example configuration and retained
+summaries. Focus either synthesis tile and press **Enter** for its cell table;
+`/` filters, `s` cycles sort, Enter inspects the selected row, `e` shows full evidence,
+and Esc returns. These inspection controls are local and do not launch provider work.
+Keep the example configuration and retained
 `/tmp/opencode/workbench-fs0-6_1ymcsd/results` provider evidence in place. Exit the
 client with `q`; stop the foreground daemon with Ctrl-C before another daemon uses
 the same state directory.

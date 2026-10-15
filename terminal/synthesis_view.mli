@@ -1,0 +1,50 @@
+open! Core
+open Hardcaml_workbench_protocol
+
+module Mode : sig
+  type t =
+    | Summary
+    | Cells
+    | Details
+    | Evidence
+  [@@deriving equal, sexp]
+end
+
+module State : sig
+  type t
+
+  val empty : t
+  val mode : t -> Mode.t
+  val sort : t -> Synthesis.Sort.t
+  val selected : t -> string option
+
+  (** Reconcile against the exact cached run/digest. A replacement or missing summary
+      invalidates selection and leaves Details; the next row is selected only on a
+      subsequent reconciliation/navigation. Filter lives in the caller. The first summary
+      selects its first matching row. Call before handling navigation and persist the
+      returned state. Projection and filtered/sorted rows are cached persistently by
+      run/digest, cell data, filter, and sort; metadata-only updates reuse them, while
+      same-digest cell updates invalidate. *)
+  val reconcile : t -> summary:Asic.Summary.t option -> filter:string -> t
+
+  val move : t -> summary:Asic.Summary.t option -> filter:string -> delta:int -> t
+  val set_mode : t -> Mode.t -> t
+  val back : t -> t
+  val set_sort : t -> Synthesis.Sort.t -> t
+  val cycle_sort : t -> t
+
+  (** Scroll wrapped Details/Evidence lines; rendering clamps the offset to the current
+      page. Cells navigation uses [move], keeping selection visible. *)
+  val scroll : t -> delta:int -> t
+end
+
+(** Pure, cell-width-bounded strings, at most [height] rows. No host dependency, provider
+    effects, JSON parsing, or inferred cell semantics. Rendering also reconciles
+    defensively, but does not persist that reconciled state. *)
+val rows
+  :  State.t
+  -> summary:Asic.Summary.t option
+  -> filter:string
+  -> width:int
+  -> height:int
+  -> string list

@@ -63,6 +63,7 @@ startup treatment, not an accepted final aesthetic.
 | `c` | Cancel the focused tile's browsed job, if cancellable |
 | `i` | Refresh hardware integration |
 | `q` | Exit outside text-entry/modal capture |
+| Ctrl-C | Exit client from every view, including filters, palette and incomplete paste; daemon work continues |
 
 The palette includes add/hide/restore/move/resize/reorder-to-end/zoom/unzoom,
 pin-run/follow, independent/relink-Main, header/chrome toggles, resume-log-follow,
@@ -78,6 +79,17 @@ shortcut characters, and bracketed paste is suppressed rather than dispatched as
 commands.
 
 ## ASIC path
+
+Synthesis views now support the first FS1/F06 inspection slice: Enter opens the
+cell table; `/` filters, `s` cycles sort, Enter opens row details, `e` opens full
+evidence and Esc returns. `j`/`k` selects rows or scrolls details. See
+[synthesis inspection](synthesis_inspection.md) for exact semantics and acceptance.
+The underlying ASIC wire/storage schema and cached summaries are unchanged.
+
+Filter entry is explicitly marked by a persistent footer. Ctrl-U clears the focused
+filter even outside entry mode (or clears the palette query when the palette is
+open). A no-match synthesis table is not a failed provider query; clear the filter
+to recover the cached rows.
 
 1. Palette: **Discover ASIC flows and runs**.
 2. **Describe ASIC flow …** publishes provider capability JSON in an ASIC tile.

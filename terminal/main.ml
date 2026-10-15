@@ -8,6 +8,7 @@ module State = Terminal_presentation.State
 module Host = Terminal_presentation.Workspace_host
 module Host_view = Terminal_presentation.Host_view
 module Appearance = Terminal_presentation.Appearance
+module Synthesis_view = Terminal_presentation.Synthesis_view
 module Plain_rpc = Terminal_presentation.Plain_rpc
 module Launch_preferences = Terminal_presentation.Launch_preferences
 module Asic_intents = Terminal_presentation.Asic_intents
@@ -509,6 +510,41 @@ let save_preferences session selection =
            })
 ;;
 
+let synthesis_summary session tile =
+  Option.bind session.host.registry ~f:(fun registry ->
+    Workspace.resolve_tile registry tile.Workspace.Tile.id
+    |> Result.ok
+    |> Option.bind ~f:(fun reference -> reference.run)
+    |> Option.bind ~f:(fun run ->
+      Option.bind session.asic ~f:(fun asic ->
+        List.find asic.summaries ~f:(fun summary ->
+          Run_ref.equal summary.Asic.Summary.run run))))
+;;
+
+let reconcile_synthesis session =
+  Option.iter session.host.registry ~f:(fun registry ->
+    List.iter registry.tiles ~f:(fun tile ->
+      if String.equal tile.kind "synthesis"
+      then (
+        let local = Host.local session.host tile.id in
+        let synthesis =
+          Synthesis_view.State.reconcile
+            local.synthesis
+            ~summary:(synthesis_summary session tile)
+            ~filter:local.filter
+        in
+        session.host <- Host.set_local session.host tile.id { local with synthesis })))
+;;
+
+let change_synthesis session f =
+  reconcile_synthesis session;
+  Option.iter (Host.focused session.host) ~f:(fun tile ->
+    if String.equal tile.kind "synthesis"
+    then (
+      let local = Host.local session.host tile.id in
+      session.host <- Host.set_local session.host tile.id (f tile local)))
+;;
+
 let workspace_request session operation =
   match current_project session with
   | None -> return ()
@@ -527,7 +563,9 @@ let workspace_request session operation =
       match response with
       | Error message ->
         session.host <- { session.host with notice = "Workspace: " ^ message }
-      | Ok snapshot -> session.host <- Host.receive session.host snapshot)
+      | Ok snapshot ->
+        session.host <- Host.receive session.host snapshot;
+        reconcile_synthesis session)
 ;;
 
 let mutate_workspace session mutation =
@@ -591,7 +629,8 @@ let asic_request session operation =
       | Error message -> session.host <- { session.host with notice = "ASIC: " ^ message }
       | Ok snapshot ->
         session.asic_applied_id <- request_id;
-        session.asic <- Some snapshot)
+        session.asic <- Some snapshot;
+        reconcile_synthesis session)
 ;;
 
 let add_default_tiles session (registry : Workspace.Snapshot.t) workspace =
@@ -1774,6 +1813,11 @@ let host_data session : Host_view.data =
   ; runs
   ; log_lines
   ; run_lines
+  ; summary =
+      (fun run ->
+        Option.bind session.asic ~f:(fun asic ->
+          List.find asic.summaries ~f:(fun summary ->
+            Run_ref.equal summary.Asic.Summary.run run)))
   ; status = session.status
   ; environment = session.environment_label
   ; asic_lines
@@ -2174,10 +2218,39 @@ let execute_host session captured action ~exit =
     | Set_layout_mode layout_mode ->
       session.host <- { session.host with layout_mode };
       Effect.Ignore
+    | Synthesis_mode mode ->
+      change_synthesis session (fun _ local ->
+        { local with synthesis = Synthesis_view.State.set_mode local.synthesis mode });
+      Effect.Ignore
+    | Synthesis_sort sort ->
+      change_synthesis session (fun _ local ->
+        { local with synthesis = Synthesis_view.State.set_sort local.synthesis sort });
+      Effect.Ignore
+    | Synthesis_cycle_sort ->
+      change_synthesis session (fun _ local ->
+        { local with synthesis = Synthesis_view.State.cycle_sort local.synthesis });
+      Effect.Ignore
+    | Synthesis_clear_filter ->
+      change_synthesis session (fun _ local -> { local with filter = "" });
+      reconcile_synthesis session;
+      Effect.Ignore
     | Exit -> exit ())
 ;;
 
 let browse_host session delta =
+  change_synthesis session (fun tile local ->
+    let synthesis =
+      match Synthesis_view.State.mode local.synthesis with
+      | Details | Evidence -> Synthesis_view.State.scroll local.synthesis ~delta
+      | Summary | Cells ->
+        Synthesis_view.State.move
+          local.synthesis
+          ~summary:(synthesis_summary session tile)
+          ~filter:local.filter
+          ~delta
+        |> fun state -> Synthesis_view.State.set_mode state Cells
+    in
+    { local with synthesis });
   Option.filter (Host.focused session.host) ~f:(fun tile ->
     String.equal tile.kind "run-selector" || Host.job_attempt_kind tile.kind)
   |> Option.iter ~f:(fun tile ->
@@ -2235,9 +2308,23 @@ let host_handler session event ~exit : unit Bonsai_term.Effect.t option =
       Host.input session.host input ~commands:(host_catalog session))
   in
   session.host <- host;
+  if host.editing_filter
+  then
+    change_synthesis session (fun _ local ->
+      { local with synthesis = Synthesis_view.State.set_mode local.synthesis Cells });
+  reconcile_synthesis session;
   match effect with
   | Host.Execute (capture, action) -> Some (execute_host session capture action ~exit)
   | Host.Activate ->
+    change_synthesis session (fun _ local ->
+      let mode =
+        match Synthesis_view.State.mode local.synthesis with
+        | Summary -> Synthesis_view.Mode.Cells
+        | Cells -> Details
+        | Details -> Details
+        | Evidence -> Evidence
+      in
+      { local with synthesis = Synthesis_view.State.set_mode local.synthesis mode });
     Option.iter (Host.focused host) ~f:(fun tile ->
       if String.equal tile.kind "run-selector"
       then (
@@ -2268,6 +2355,12 @@ let host_handler session event ~exit : unit Bonsai_term.Effect.t option =
      | Some (Character 'b') -> dispatch "project.build"
      | Some (Character 't') -> dispatch "project.test"
      | Some (Character 'i') -> dispatch "project.discover"
+     | Some (Character 's') -> dispatch "synthesis.cycle-sort"
+     | Some (Character 'e') -> dispatch "synthesis.evidence"
+     | Some Escape ->
+       change_synthesis session (fun _ local ->
+         { local with synthesis = Synthesis_view.State.back local.synthesis });
+       Some Effect.Ignore
      | Some (Character 'g') ->
        Option.bind session.selected_configuration ~f:(fun id ->
          dispatch ("rtl." ^ Configuration_id.to_string id))
@@ -2303,16 +2396,26 @@ let host_handler session event ~exit : unit Bonsai_term.Effect.t option =
        |> Option.iter ~f:(fun w -> session.host <- Host.switch session.host w.id);
        Some Effect.Ignore
      | Some (Character (('[' | ']') as ch)) ->
-       Option.iter session.host.focus ~f:(fun id ->
-         let l = Host.local session.host id in
-         session.host
-         <- Host.set_local
-              session.host
-              id
-              { l with
-                follow = false
-              ; scroll = Int.max 0 (l.scroll + if Char.equal ch '[' then -1 else 1)
-              });
+       (match Host.focused session.host with
+        | Some tile when String.equal tile.kind "synthesis" ->
+          change_synthesis session (fun _ local ->
+            { local with
+              synthesis =
+                Synthesis_view.State.scroll
+                  local.synthesis
+                  ~delta:(if Char.equal ch '[' then -1 else 1)
+            })
+        | _ ->
+          Option.iter session.host.focus ~f:(fun id ->
+            let l = Host.local session.host id in
+            session.host
+            <- Host.set_local
+                 session.host
+                 id
+                 { l with
+                   follow = false
+                 ; scroll = Int.max 0 (l.scroll + if Char.equal ch '[' then -1 else 1)
+                 }));
        Some Effect.Ignore
      | Some Focus -> Some Effect.Ignore
      | _ -> None)
@@ -2529,83 +2632,87 @@ let tui session ~exit ~dimensions graph =
   in
   let handler =
     Bonsai.return (fun (event : Event.t) ->
-      let hosted =
-        if Option.is_some session.host.registry
-           && Option.is_none session.hierarchy_view
-           && Option.is_none session.artifact_view
-           && not session.show_connection_details
-        then host_handler session event ~exit
-        else None
-      in
-      match hosted with
-      | Some effect -> effect
-      | None ->
-        (match event with
-         | Key_press { key; mods = [] } when key_is 'q' key -> exit ()
-         | Key_press { key; mods = [ Ctrl ] } when key_is 'c' key || key_is 'C' key ->
-           exit ()
-         | Key_press { key; mods = [] } when key_is 'b' key ->
-           Effect.of_deferred_thunk (fun () -> submit session `Build)
-         | Key_press { key; mods = [] } when key_is 't' key ->
-           Effect.of_deferred_thunk (fun () -> submit session `Test)
-         | Key_press { key; mods = [] } when key_is 'c' key ->
-           Effect.of_deferred_thunk (fun () -> cancel_selected session)
-         | Key_press { key; mods = [] } when key_is 'i' key ->
-           Effect.of_deferred_thunk (fun () -> refresh_integration session)
-         | Key_press { key; mods = [] } when key_is 'n' key ->
-           cycle_target session;
-           Effect.Ignore
-         | Key_press { key; mods = [] } when key_is 'm' key ->
-           cycle_configuration session;
-           Effect.Ignore
-         | Key_press { key; mods = [] } when key_is 'g' key ->
-           Effect.of_deferred_thunk (fun () -> generate_rtl session)
-         | Key_press { key; mods = [] } when key_is 'a' key ->
-           cycle_artifact session;
-           Effect.Ignore
-         | Key_press { key; mods = [] } when key_is 'v' key ->
-           Effect.of_deferred_thunk (fun () -> inspect_artifact session)
-         | Key_press { key; mods = [] } when key_is 'h' key ->
-           Effect.of_deferred_thunk (fun () -> inspect_hierarchy session)
-         | Key_press { key; mods = [] } when key_is 'u' key ->
-           move_hierarchy_selection session (-1);
-           Effect.Ignore
-         | Key_press { key; mods = [] } when key_is 'o' key ->
-           move_hierarchy_selection session 1;
-           Effect.Ignore
-         | Key_press { key; mods = [] } when key_is 'e' key ->
-           toggle_hierarchy_expansion session;
-           Effect.Ignore
-         | Key_press { key; mods = [] } when key_is 'j' key ->
-           let count = List.length (project_jobs session) in
-           session.selected <- Int.min (Int.max 0 (count - 1)) (session.selected + 1);
-           Effect.Ignore
-         | Key_press { key; mods = [] } when key_is 'k' key ->
-           session.selected <- Int.max 0 (session.selected - 1);
-           Effect.Ignore
-         | Key_press { key; mods = [] } when key_is 'd' key ->
-           session.show_connection_details <- not session.show_connection_details;
-           session.connection_details_scroll <- 0;
-           Effect.Ignore
-         | Key_press { key; mods = [] } when key_is '[' key ->
-           if session.show_connection_details
-           then
-             session.connection_details_scroll
-             <- Int.max 0 (session.connection_details_scroll - 1)
-           else
-             Option.iter session.hierarchy_view ~f:(fun view ->
-               view.pane_scroll <- Int.max 0 (view.pane_scroll - 1));
-           Effect.Ignore
-         | Key_press { key; mods = [] } when key_is ']' key ->
-           if session.show_connection_details
-           then session.connection_details_scroll <- session.connection_details_scroll + 1
-           else
-             Option.iter session.hierarchy_view ~f:(fun view ->
-               view.pane_scroll <- view.pane_scroll + 1);
-           Effect.Ignore
-         | Key_press { key; mods = [] } when key_is 'r' key ->
-           Effect.of_deferred_thunk (fun () -> reconnect session)
-         | _ -> Effect.Ignore))
+      if Host.is_interrupt event
+      then exit ()
+      else (
+        let hosted =
+          if Option.is_some session.host.registry
+             && Option.is_none session.hierarchy_view
+             && Option.is_none session.artifact_view
+             && not session.show_connection_details
+          then host_handler session event ~exit
+          else None
+        in
+        match hosted with
+        | Some effect -> effect
+        | None ->
+          (match event with
+           | Key_press { key; mods = [] } when key_is 'q' key -> exit ()
+           | Key_press { key; mods = [ Ctrl ] } when key_is 'c' key || key_is 'C' key ->
+             exit ()
+           | Key_press { key; mods = [] } when key_is 'b' key ->
+             Effect.of_deferred_thunk (fun () -> submit session `Build)
+           | Key_press { key; mods = [] } when key_is 't' key ->
+             Effect.of_deferred_thunk (fun () -> submit session `Test)
+           | Key_press { key; mods = [] } when key_is 'c' key ->
+             Effect.of_deferred_thunk (fun () -> cancel_selected session)
+           | Key_press { key; mods = [] } when key_is 'i' key ->
+             Effect.of_deferred_thunk (fun () -> refresh_integration session)
+           | Key_press { key; mods = [] } when key_is 'n' key ->
+             cycle_target session;
+             Effect.Ignore
+           | Key_press { key; mods = [] } when key_is 'm' key ->
+             cycle_configuration session;
+             Effect.Ignore
+           | Key_press { key; mods = [] } when key_is 'g' key ->
+             Effect.of_deferred_thunk (fun () -> generate_rtl session)
+           | Key_press { key; mods = [] } when key_is 'a' key ->
+             cycle_artifact session;
+             Effect.Ignore
+           | Key_press { key; mods = [] } when key_is 'v' key ->
+             Effect.of_deferred_thunk (fun () -> inspect_artifact session)
+           | Key_press { key; mods = [] } when key_is 'h' key ->
+             Effect.of_deferred_thunk (fun () -> inspect_hierarchy session)
+           | Key_press { key; mods = [] } when key_is 'u' key ->
+             move_hierarchy_selection session (-1);
+             Effect.Ignore
+           | Key_press { key; mods = [] } when key_is 'o' key ->
+             move_hierarchy_selection session 1;
+             Effect.Ignore
+           | Key_press { key; mods = [] } when key_is 'e' key ->
+             toggle_hierarchy_expansion session;
+             Effect.Ignore
+           | Key_press { key; mods = [] } when key_is 'j' key ->
+             let count = List.length (project_jobs session) in
+             session.selected <- Int.min (Int.max 0 (count - 1)) (session.selected + 1);
+             Effect.Ignore
+           | Key_press { key; mods = [] } when key_is 'k' key ->
+             session.selected <- Int.max 0 (session.selected - 1);
+             Effect.Ignore
+           | Key_press { key; mods = [] } when key_is 'd' key ->
+             session.show_connection_details <- not session.show_connection_details;
+             session.connection_details_scroll <- 0;
+             Effect.Ignore
+           | Key_press { key; mods = [] } when key_is '[' key ->
+             if session.show_connection_details
+             then
+               session.connection_details_scroll
+               <- Int.max 0 (session.connection_details_scroll - 1)
+             else
+               Option.iter session.hierarchy_view ~f:(fun view ->
+                 view.pane_scroll <- Int.max 0 (view.pane_scroll - 1));
+             Effect.Ignore
+           | Key_press { key; mods = [] } when key_is ']' key ->
+             if session.show_connection_details
+             then
+               session.connection_details_scroll <- session.connection_details_scroll + 1
+             else
+               Option.iter session.hierarchy_view ~f:(fun view ->
+                 view.pane_scroll <- view.pane_scroll + 1);
+             Effect.Ignore
+           | Key_press { key; mods = [] } when key_is 'r' key ->
+             Effect.of_deferred_thunk (fun () -> reconnect session)
+           | _ -> Effect.Ignore)))
   in
   ~view, ~handler
 ;;
