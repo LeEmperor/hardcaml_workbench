@@ -57,6 +57,126 @@ archived run; the provider exposes the same data without Workbench. Two timing
 consumers share data without repeating parsing/extraction. Early run identity is
 observable before the physical process finishes, not only in its final stdout.
 
+### ASIC provider handoff within Workbench P1
+
+**Proposal after source review, 2026-10-12; not yet adopted into ASIC's own plan.**
+This section records upstream deliverables needed by Workbench P1, not a second
+ASIC phase-numbering scheme. Prefix existing task IDs with `ASIC` or `Workbench`.
+The ASIC owner should incorporate the agreed sequence into its authoritative
+architecture/phase plan before implementation. No ASIC files were changed by this
+review. Source baseline: clean `hardcaml_asic` at `f6e8fd7`.
+
+#### Existing work and dependency triage
+
+| Foundation / track | Finding and integration consequence |
+| --- | --- |
+| ASIC P0–P5 / M3 | Completed project/build/bundle and execution/result foundation; reuse it |
+| ASIC P6.1–P6.3, P6.4a/b | Reporting/archive policies, dispatcher, installed package and per-operation tests are recorded delivered; do not repackage or duplicate them |
+| ASIC P6.5a | Source-artifact identity is still explicitly unknown in `identity.py`; finish this existing next slice for reliable generator/executor provenance |
+| ASIC P6.5b/c and P6.6 | Dependency/waiver/provisioning and independent-installation gates remain; carry them toward a dependable pinned release, while observation prototypes proceed |
+| ASIC P7 | Old protemu/scaf consumer migration; it is not a dependency of a new test-asic consumer or Workbench observation |
+| ASIC S-series / T-series | SRAM and specific external-tool fixes remain independent unless the chosen specimen actually needs them |
+
+Some README/status headers describe an earlier state than the detailed P6.4b
+evidence. `p6-status.md` also records an old dirty HEAD, not the current clean
+checkout. Reconcile those descriptions during the next ASIC planning update;
+do not rerun completed packaging work based only on a stale header. Its old
+handoff's mandatory scaf lookup is not applicable to the absent worktree.
+
+#### Ordered upstream slices
+
+1. **Run-domain contract and a narrow adapter feasibility probe.** Define build,
+   run, outer operation, implementation step occurrence, attempt, result snapshot
+   and artifact identities. Preserve existing `run`/`execute` semantics and final
+   JSON stdout. Write two-run recorded examples with skipped/failed/interrupted
+   steps and late result publication. Inspect the pinned LibreLane entry path and
+   demonstrate how actual step boundaries can be observed; select a supported hook,
+   structured-state observer with known limits, or bounded upstream change. Do not
+   assume overriding `Flow.start_step` observes the sequential flow, which calls
+   `step.start` directly. **Exit:** a tested observation seam and concrete contract
+   examples without Workbench or a general orchestration rewrite.
+
+2. **Durable catalog and outer-operation observation.** Expose explicit run-store
+   listing/inspection, early run allocation with request correlation, and recorded
+   updates plus a recoverable current snapshot. Instrument the existing runner and
+   dispatcher once. Define writer serialization, cursor/snapshot consistency,
+   partial writes, retention, stale observation and interrupted-writer behavior.
+   Keep legacy records readable. **Exit:** a standalone CLI observer attaches late,
+   disconnects/reconnects and inspects two runs; allocation is visible while the
+   process is still running. This enables Workbench's run selector, but is not yet
+   fine-grained physical progress.
+
+3. **Actual implementation-step lifecycle.** Use the proven seam inside the
+   LibreLane adapter to expose the actual step plan and started/completed/failed/
+   skipped states, including repeated step identities and deferred errors. Keep
+   raw logs as diagnostics. Cover the real Dockerized path and cancellation of its
+   descendants; avoid inferring success from directory existence or silence.
+   **Exit:** a bounded flow shows earlier steps completed while a later step is
+   still executing; its status is available without Workbench.
+
+4. **Incremental result publication and evidence preservation.** Refactor collection
+   into reusable step-aware extraction plus final aggregation, keeping current
+   reporter acceptance. Start with synthesis resources and one intermediate timing
+   snapshot, then physical checks. Publish complete versioned snapshots before
+   events reference them; retain producer provenance for cumulative/inherited
+   metrics. Replace fragile fixed step-directory assumptions behind the adapter,
+   not inside Workbench. Preserve snapshots, event history and referenced evidence
+   through archive/restoration; decide a separate explicit policy for failed-run
+   diagnostic exports. **Exit:** inspect earlier measurements during a later step,
+   after a later failure, and from preserved evidence after scratch cleanup.
+
+5. **Installed standalone acceptance and test-asic handoff.** Extend the existing
+   installed-prefix tests for all public observation operations and compatible
+   legacy behavior. Demonstrate cancellation, duplicate/partial updates, independent
+   readers, later standalone postcheck/collect revisions and no-UI operation. Use
+   one small real test-asic flow to validate internal-step/result evidence; fixtures
+   cover the broader failure matrix. Finish applicable P6 identity/installation
+   gates and record the exact candidate revision for deliberate adoption.
+   **Exit:** a usable provider release and replay fixtures, with no Workbench
+   import, source-checkout requirement or background UI service.
+
+#### Files and tests to build on
+
+- `lib/build.mli`, `lib/bundle.ml`: immutable intent/input identity. Export declared
+  clock/constraint facts as needed rather than duplicating editable configuration
+  in Workbench. Generated-clock/CTS analytics are later capability slices; the
+  current clock/timing declaration API is narrower.
+- `flow/hardcaml_asic_flow/cli.py`: installed operation dispatch and fixed sequence.
+- `phase4.py`: allocation, atomic JSON replacement, execution, postchecks and
+  collection. Existing collection uses fixed synthesis paths and final metrics;
+  adapt it for step snapshots rather than create a competing report parser.
+- `report.py`: operation-aware acceptance. New progress must not weaken its policy.
+- `archive.py`: explicit artifact selection and integrity-preserving publication.
+  Its current keep-list does not preserve every intermediate result automatically.
+- `test/test_phase4.py`, `test/test_flow_cli.py`, `test/test_report.py`,
+  `test/test_archive.py`: existing injected-process/fixture regression seams.
+- `test/test_packaging.py`, `test/test_installed_prefix.py`: install boundary.
+  The latter builds/installs with Dune and is intentionally run separately from
+  `dune runtest`, not nested inside it.
+
+#### What Workbench can do before upstream completion
+
+| Available upstream slice | Workbench work unlocked |
+| --- | --- |
+| Contract examples / archived records | Feature reducers, adapter decoders, P3 headless window/tile tests |
+| Catalog + outer observation | P2 catalog/cache, run selector, early run display, coarse progress |
+| Internal step lifecycle | Live per-step execution tiles |
+| Incremental results | Timing/PD/check tiles updating before run completion |
+| Installed real-flow acceptance | P4 live integration and provider pin for release |
+
+No ASIC work is needed for moving a tile, selecting a window's run, pinning a
+reference tile or composing two typed feature views. Those remain Workbench UI
+state. ASIC supports multiple independent readers of run evidence; it never stores
+their window selections. The sibling test-asic owns declaration, source pins,
+testbench/regression semantics and ordinary command entry points.
+
+**Recommended immediate order:** complete the already-scoped ASIC P6.5a identity
+slice, settle the run-domain examples and adapter probe, then implement catalog/
+outer observation. P6.5b/c/P6.6 can progress alongside the new observation work;
+do not require all ASIC roadmap items or old consumer migration before starting
+Workbench's fixture-backed UI work. No EDA execution or new test pass is claimed
+by this source/planning review.
+
 ## P2 — Persistent run catalog and bounded summary cache
 
 **Depends on:** P1 identities/revisions; archived fixtures allow early work.

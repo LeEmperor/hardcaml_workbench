@@ -168,6 +168,94 @@ For future FPGA work, Vivado is an expected tool provider; project-side
 have Dune/tests/simulation/artifact providers, not only Vivado. Live FPGA integration
 is deferred; shared contracts are exercised with fixtures first.
 
+### Provider integration review — 2026-10-12
+
+Source review at ASIC commit `f6e8fd7` (clean checkout) confirms three existing
+layers: OCaml project/build/bundle generation in `lib/`, the installed Python
+dispatcher in `flow/hardcaml_asic_flow/`, and the external LibreLane/tool processes.
+Keep those layers; this integration does not require rewriting the runner in OCaml.
+Structured provider events can be decoded into typed OCaml values by Workbench.
+
+The main missing layer is a durable **run observation interface** over the
+existing runner and result collector, not another scheduler or a UI-aware router.
+ASIC-side records know nothing about workspace, window, tile or selection IDs.
+They expose facts that any number of independent observers can consume.
+
+There are two levels of steps to expose: outer operations such as preflight,
+implementation, postcheck and collection, and the actual implementation steps
+inside LibreLane. Instrumenting only `execute_sequence` leaves placement/routing/
+Magic/KLayout activity hidden inside one long operation. The provider describes
+step hierarchy, stable occurrence/attempt identities, requested extent and actual
+skip/gating decisions; Workbench can group those for display without inventing a
+fixed seven-step execution model.
+
+The local LibreLane distribution reports version `3.1.0.dev3`, matching the flow
+pin. Its sequential flow calls `step.start` directly, and `Step.start` is marked
+final; merely overriding `Flow.start_step` is not a proven interception strategy.
+It writes per-step input/output state and metrics, but directly rather than by
+atomic replacement. These are promising observation sources, not a validated
+callback API. This source copy is under a Python 3.12 venv while the bundle requests
+3.11; inspecting it does not validate the intended execution/container environment.
+
+Prototype and choose a version-pinned integration seam inside `hardcaml_asic`:
+supported lifecycle hooks if available, otherwise validated structured-state
+observation with explicit limits, or a narrowly scoped upstream instrumentation
+change. Avoid copying the flow engine's sequencing or guessing failures/skips from
+missing directories. Test the actual container/native path to which support applies.
+
+### Durable observation and result snapshots
+
+The proposed public boundary supplies:
+
+| Capability | Consumer-visible information |
+| --- | --- |
+| Describe | Contract versions, operations, observation/result capabilities and limitations |
+| List / inspect runs | Explicit configured store, run/build identity, requested scope, status, timestamps and revisions |
+| Inspect step plan/state | Parent/child steps, stable occurrence and attempt IDs, status/reason and known times |
+| Observe updates | Early allocation, step state changes, result availability and execution/operation outcomes with a replay cursor |
+| Read results / artifacts | Bounded snapshots and evidence references with producing step, source context and version |
+
+These are conceptual operations, not committed CLI spellings. Preserve the current
+one-final-JSON stdout contract of existing commands; an explicit observation mode,
+separate journal or read/watch operation can expose updates without breaking it.
+The early allocation record carries request correlation for the launching client;
+the same run is discoverable when launched outside Workbench.
+
+Prefer durable recorded updates with a current-state projection over an ephemeral
+stdout-only stream. Define one authoritative write path, ordering/revisions,
+single-writer or lock policy across standalone postcheck/collect operations,
+snapshot-to-cursor consistency and recovery from a truncated update. Polling and
+streaming are delivery choices over that same record. Readers must tolerate
+duplicates and reconnect; absent observers must not block flow execution. An
+observation failure must be explicit, never a fabricated successful stage.
+
+Publish result data completely before advertising its reference. A result snapshot
+is evidence at a step, not necessarily a restartable physical checkpoint. Retain
+earlier snapshots when later steps fail or produce newer measurements. Separate
+step completion from result publication so collection failures remain visible.
+
+LibreLane state metrics are cumulative. An output state after step N may contain
+timing measured at step N-2. Track the actual producer/measurement context and
+distinguish inherited from newly generated values; numeric equality alone cannot
+decide whether a metric was remeasured. Never relabel carried-forward values as
+fresh post-route timing merely because they appear in a routing output state.
+
+Keep legacy `run.json` status semantics intact during migration: currently a run
+can be marked completed when physical execution finishes, before `execute` performs
+postchecks/reporting. An observation summary separately exposes implementation
+status, requested-operation status and check/goal outcomes. It does not reinterpret
+the old field as "all requested work and signoff succeeded."
+
+Finalization/archive support must preserve the step/result history advertised to
+clients. Existing archives deliberately omit most intermediate state and require
+completed runs. Extend preservation with explicit policy for observation snapshots
+and diagnostic evidence from failed runs; do not silently relax the existing
+completed-run archive or acceptance contract. Legacy records remain readable with
+step history explicitly unavailable rather than reconstructed as fiction.
+
+The bounded provider handoff and its relation to ASIC's existing P6 work are in
+the [construction plan](construction_phase_plan.md#asic-provider-handoff-within-workbench-p1).
+
 ## 5. Builds, runs, operations and jobs
 
 | Identity | Meaning and owner |
