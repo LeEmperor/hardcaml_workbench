@@ -14,14 +14,23 @@ palette and generic test/log tiles, synthesis views, installed ASIC discovery/pl
 launch/observation, and L1/L2 summary reuse. Two real synthesis profiles produced
 673 and 685 cells; physical acceptance remains `not_evaluated`. Existing Dune,
 RTL/artifact and hierarchy workflows remain covered by installed tests.
-Rich timing/simulation helpers, multi-window product polish and the appearance
-gallery remain later scope. See the [delivery record](docs/construction_phase_plan.md).
+**FS1 now adds** synthesis resource/check metrics and explicit finalization import
+with aggregate timing, physical resources, check verdicts and declared-clock context.
+Workbench can also launch collection/acceptance, observe and cancel its owned
+finalization, and browse bounded report/artifact text with optional terminal-host
+external text opening.
+Real physical completion, external acceptance pass/fail inspection and owned-container
+cancellation are exercised. Rich timing paths, measured CTS/congestion, simulation
+helpers and appearance-gallery polish remain open. See the
+[FS1 evidence and limits](docs/fs1_acceptance.md) and [delivery record](docs/construction_phase_plan.md).
 
 ## Documentation
 
 - [Documentation index](docs/README.md) — orientation and reading routes.
 - [FS0 controls](docs/fs0_terminal.md) and [acceptance](docs/fs0_acceptance.md) — run the demo and inspect its evidence.
 - [Synthesis inspection](docs/synthesis_inspection.md) — FS1 cell tables, sorting/filtering and evidence drilldown.
+- [FS1 physical inspection](docs/fs1_acceptance.md) — metrics, timing/check/resource views, exact finalization import, real acceptance and limits.
+- [Finalization and reports](docs/fs1_lifecycle_and_artifacts.md) — collect/accept palette commands, reconnect/cancel, paged artifact reading and configured external text viewing.
 - [Feature list](docs/feature_list.md) — concise scope/status and focused feature specs.
 - [Feature sets](docs/feature_sets.md) — FS0 initial demos and later themed work groups.
 - [Decision log](docs/decisions.md) — accepted run contexts; remaining command/snapshot policy.

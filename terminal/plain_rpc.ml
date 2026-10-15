@@ -35,9 +35,17 @@ let keys (operation : Asic.Operation.t) (snapshot : Asic.Snapshot.t) =
   | Refresh run -> [ "refresh:" ^ run.id ]
   | Inspect_finalization { run; attempt } ->
     [ "finalization:" ^ run.id ^ ":" ^ digest attempt ]
+  | Finalize { key; _ } -> [ "finalize:" ^ key ]
+  | Observe_finalization key -> [ "finalize-observe:" ^ key ]
+  | List_artifacts run -> [ "artifacts:" ^ run.id ]
+  | Read_artifact { run; artifact_id; offset; limit } ->
+    [ Asic_artifact.read_key ~run ~artifact_id ~offset ~limit ]
   | Cancel key ->
     [ (if List.exists snapshot.operations ~f:(fun op -> String.equal op.key key)
        then key
+       else if List.exists snapshot.operations ~f:(fun op ->
+                 String.equal op.key ("finalize:" ^ key))
+       then "finalize:" ^ key
        else "run:" ^ key)
     ]
 ;;
@@ -59,10 +67,51 @@ let watched_keys operation keys (snapshot : Asic.Snapshot.t) =
   | _ -> keys
 ;;
 
+let%test_unit "artifact waits distinguish offset and byte budget with the shared key" =
+  let run = Fs0_fixture.run_a in
+  let key offset limit =
+    keys
+      (Read_artifact { run; artifact_id = "exact-report"; offset; limit })
+      Fs0_fixture.snapshot
+    |> List.hd_exn
+  in
+  assert (
+    String.equal
+      (key 0 4096)
+      (Asic_artifact.read_key ~run ~artifact_id:"exact-report" ~offset:0 ~limit:4096));
+  assert (not (String.equal (key 0 4096) (key 0 65536)));
+  assert (not (String.equal (key 0 4096) (key 4096 4096)))
+;;
+
 type progress =
   | Pending
   | Complete
   | Failed of string
+
+let finalization_error key (snapshot : Asic.Snapshot.t) =
+  let identity =
+    Option.first_some
+      (String.chop_prefix key ~prefix:"finalize:")
+      (String.chop_prefix key ~prefix:"finalize-observe:")
+  in
+  Option.bind identity ~f:(fun identity ->
+    List.find snapshot.finalizations ~f:(fun f -> String.equal f.key identity)
+    |> Option.bind ~f:(fun f ->
+      Option.first_some
+        f.error
+        (if List.exists [ Some f.state; f.operation_status; f.acceptance ] ~f:(function
+              | Some ("failed" | "interrupted" | "fail" | "rejected" | "error") -> true
+              | _ -> false)
+         then
+           Some
+             ("Finalization reported "
+              ^ f.state
+              ^ "; operation="
+              ^ Option.value f.operation_status ~default:"unreported"
+              ^ "; acceptance="
+              ^ Option.value f.acceptance ~default:"unreported")
+         else None)))
+;;
 
 let progress ~wait keys (snapshot : Asic.Snapshot.t) =
   List.fold keys ~init:Complete ~f:(fun progress key ->
@@ -74,7 +123,11 @@ let progress ~wait keys (snapshot : Asic.Snapshot.t) =
        | Some { error = Some error; _ } -> Failed (key ^ ": " ^ error)
        | Some op ->
          (match op.state with
-          | "completed" -> progress
+          | "completed" ->
+            Option.value_map
+              (finalization_error key snapshot)
+              ~default:progress
+              ~f:(fun error -> Failed (key ^ ": " ^ error))
           | "pending" | "executing" -> if wait then Pending else progress
           | "failed" | "detached" -> Failed (key ^ ": " ^ op.state)
           | state -> Failed ("Unknown ASIC operation state for " ^ key ^ ": " ^ state))))
@@ -106,6 +159,70 @@ let%test_unit "documented typed operation sexps decode without a shell or human-
     | _ -> false)
 ;;
 
+let%test_unit "lifecycle wait keys distinguish collection, reconnect, and acceptance \
+               failure"
+  =
+  let run = Fs0_fixture.run_a in
+  let key = "exact-finalization-key" in
+  let finalization : Asic.Finalization.t =
+    { key
+    ; run
+    ; execution_file = "/daemon/execution"
+    ; acceptance_requested = true
+    ; attempt = Some "/daemon/operation"
+    ; state = "completed"
+    ; phase = Some "acceptance"
+    ; operation_status = Some "completed"
+    ; acceptance = Some "fail"
+    ; error = None
+    ; owned = false
+    }
+  in
+  let pending key : Asic.Pending.t =
+    { key; kind = "finalize"; state = "completed"; run = Some run; error = None }
+  in
+  let snapshot =
+    { Fs0_fixture.snapshot with
+      finalizations = [ finalization ]
+    ; operations = [ pending ("finalize:" ^ key); pending ("finalize-observe:" ^ key) ]
+    }
+  in
+  assert (
+    List.equal
+      String.equal
+      (keys
+         (Finalize
+            { key; run; execution_file = finalization.execution_file; acceptance = None })
+         snapshot)
+      [ "finalize:" ^ key ]);
+  assert (
+    List.equal
+      String.equal
+      (keys (Observe_finalization key) snapshot)
+      [ "finalize-observe:" ^ key ]);
+  List.iter
+    [ "finalize:" ^ key; "finalize-observe:" ^ key ]
+    ~f:(fun key ->
+      match progress ~wait:true [ key ] snapshot with
+      | Failed _ -> ()
+      | _ -> assert false);
+  let snapshot =
+    { snapshot with finalizations = [ { finalization with acceptance = Some "pass" } ] }
+  in
+  (match progress ~wait:true [ "finalize:" ^ key ] snapshot with
+   | Complete -> ()
+   | _ -> assert false);
+  (* Reported producer status never masquerades as a Pending machine state. *)
+  let snapshot =
+    { snapshot with
+      operations = [ { (pending ("finalize:" ^ key)) with state = "executing" } ]
+    }
+  in
+  match progress ~wait:true [ "finalize:" ^ key ] snapshot with
+  | Pending -> ()
+  | _ -> assert false
+;;
+
 let%test_unit "Observe waits for its read, independently of a long execution" =
   let run : Run_ref.t =
     { backend = Backend_id.of_string "asic"; id = "fixture"; build = None; label = None }
@@ -125,6 +242,9 @@ let%test_unit "Observe waits for its read, independently of a long execution" =
         ]
     ; summaries = []
     ; cache_error = None
+    ; finalizations = []
+    ; artifacts = []
+    ; artifact_pages = []
     }
   in
   let watched = keys (Observe run) snapshot in
@@ -200,6 +320,9 @@ let%test_unit "Observe does not await the lifetime of a coalesced automatic obse
     ; operations = [ observer ]
     ; summaries = []
     ; cache_error = None
+    ; finalizations = []
+    ; artifacts = []
+    ; artifact_pages = []
     }
   in
   assert (List.is_empty (keys (Observe run) snapshot));
@@ -229,6 +352,9 @@ let%test_unit "a targeted operation failure fails without treating historical fa
     ; operations = [ failed ]
     ; summaries = []
     ; cache_error = None
+    ; finalizations = []
+    ; artifacts = []
+    ; artifact_pages = []
     }
   in
   assert (

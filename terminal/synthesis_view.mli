@@ -58,7 +58,7 @@ val rows
 
 (** Navigate a wrapped page using its actual viewport, including after resize. *)
 val scroll
-  : State.t
+  :  State.t
   -> summary:Asic.Summary.t option
   -> filter:string
   -> width:int

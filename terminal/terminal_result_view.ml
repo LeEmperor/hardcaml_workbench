@@ -38,7 +38,8 @@ module State = struct
   let scroll t ~delta ~max_offset =
     let current = Int.min t.offset (Int.max 0 max_offset) in
     let offset =
-      Int64.(max zero (min (of_int (Int.max 0 max_offset)) (of_int current + of_int delta)))
+      Int64.(
+        max zero (min (of_int (Int.max 0 max_offset)) (of_int current + of_int delta)))
     in
     { t with offset = Int64.to_int_exn offset }
   ;;
@@ -225,11 +226,34 @@ let rows ?(fallback = []) ?(request_context = []) state ~run ~summary ~kind ~wid
     List.take (List.drop wrapped offset) height)
 ;;
 
-let scroll ?(fallback = []) ?(request_context = []) state ~run ~summary ~kind ~width ~height ~delta =
+let scroll
+  ?(fallback = [])
+  ?(request_context = [])
+  state
+  ~run
+  ~summary
+  ~kind
+  ~width
+  ~height
+  ~delta
+  =
   let state = State.reconcile state ~run ~summary in
-  let content = rows ~fallback ~request_context { state with offset = 0 }
-      ~run ~summary ~kind ~width ~height:Int.max_value in
-  State.scroll state ~delta ~max_offset:(if height <= 0 || width <= 0 then 0 else Int.max 0 (List.length content - height))
+  let content =
+    rows
+      ~fallback
+      ~request_context
+      { state with offset = 0 }
+      ~run
+      ~summary
+      ~kind
+      ~width
+      ~height:Int.max_value
+  in
+  State.scroll
+    state
+    ~delta
+    ~max_offset:
+      (if height <= 0 || width <= 0 then 0 else Int.max 0 (List.length content - height))
 ;;
 
 module%test Tests = struct
@@ -403,5 +427,43 @@ module%test Tests = struct
         (rows state ~run:s.run ~summary:(Some s) ~kind:"timing" ~width:0 ~height:3));
     assert ((State.scroll state ~delta:Int.min_value ~max_offset:100).offset = 0);
     assert (not (State.back state).detail)
+  ;;
+
+  let%test_unit "bottom paging reverses immediately, including after viewport resize" =
+    let s =
+      { (List.hd_exn Fs0_fixture.snapshot.summaries) with terminal = Some terminal }
+    in
+    let initial =
+      State.reconcile State.empty ~run:s.run ~summary:(Some s) |> State.inspect
+    in
+    let move state ~width ~height delta =
+      scroll state ~run:s.run ~summary:(Some s) ~kind:"finalization" ~width ~height ~delta
+    in
+    let view state ~width ~height =
+      rows state ~run:s.run ~summary:(Some s) ~kind:"finalization" ~width ~height
+    in
+    let bottom =
+      List.fold (List.init 100 ~f:Fn.id) ~init:initial ~f:(fun state _ ->
+        move state ~width:20 ~height:3 1)
+    in
+    let bottom = move bottom ~width:20 ~height:3 Int.max_value in
+    let still_bottom = move bottom ~width:20 ~height:3 100 in
+    assert (still_bottom.offset = bottom.offset);
+    let reverse = move still_bottom ~width:20 ~height:3 (-1) in
+    assert (reverse.offset = bottom.offset - 1);
+    assert (
+      List.equal
+        String.equal
+        (List.drop (view reverse ~width:20 ~height:3) 1)
+        (List.take (view bottom ~width:20 ~height:3) 2));
+    let resized_bottom = view bottom ~width:100 ~height:8 in
+    let resized_reverse = move bottom ~width:100 ~height:8 (-1) in
+    assert (
+      List.equal
+        String.equal
+        (List.drop (view resized_reverse ~width:100 ~height:8) 1)
+        (List.take resized_bottom 7));
+    assert (resized_reverse.offset < bottom.offset);
+    assert (initial.offset = 0)
   ;;
 end

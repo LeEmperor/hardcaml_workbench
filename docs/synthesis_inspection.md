@@ -4,6 +4,12 @@ This is **FS1's first F06 slice**, reusing FS0/F11 cached summaries and extendin
 the F12 table/inspector presentation. It is not a new standalone feature set or
 a claim that timing/physical inspection is complete.
 
+The later [FS1 metrics/physical extension](fs1_acceptance.md) adds `m` / **Synthesis:
+Inspect metrics**, synthesis diagnostic counters and explicitly imported terminal
+results. Its wire/cache additions and real physical evidence supersede the
+unchanged-schema statement below for that later implementation. Cell browsing
+controls and the original cached-run acceptance remain preserved.
+
 ## Use it in Workbench
 
 Reopen the updated client, focus a synthesis tile with Tab, and optionally use

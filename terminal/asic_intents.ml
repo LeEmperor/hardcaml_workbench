@@ -169,6 +169,9 @@ let fixture_snapshot ?(operations = []) ?(summaries = []) runs : Asic.Snapshot.t
   ; runs
   ; operations
   ; summaries
+  ; finalizations = []
+  ; artifacts = []
+  ; artifact_pages = []
   ; cache_error = None
   }
 ;;

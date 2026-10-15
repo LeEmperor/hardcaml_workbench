@@ -148,9 +148,11 @@ module State = struct
 
   let set_sort t sort = { t with sort; offset = 0 }
   let cycle_sort t = set_sort t (Synthesis.Sort.next t.sort)
+
   let scroll t ~delta ~max_offset =
     let maximum = Int.max 0 max_offset in
     { t with offset = Int.min maximum (shift (Int.min maximum t.offset) delta) }
+  ;;
 end
 
 (** Decode UTF-8 only to ask Bonsai/Notty for terminal cell widths. No byte-based
@@ -495,9 +497,14 @@ let scroll state ~summary ~filter ~width ~height ~delta =
   match State.mode state with
   | Summary | Cells -> state
   | Details | Metrics | Evidence ->
-    let content = rows { state with offset = 0 } ~summary ~filter ~width ~height:Int.max_value in
-    State.scroll state ~delta
-      ~max_offset:(if width <= 0 || height <= 0 then 0 else Int.max 0 (List.length content - height))
+    let content =
+      rows { state with offset = 0 } ~summary ~filter ~width ~height:Int.max_value
+    in
+    State.scroll
+      state
+      ~delta
+      ~max_offset:
+        (if width <= 0 || height <= 0 then 0 else Int.max 0 (List.length content - height))
 ;;
 
 module%test Tests = struct
@@ -530,6 +537,34 @@ module%test Tests = struct
   let ready summary =
     State.reconcile State.empty ~summary:(Some summary) ~filter:""
     |> fun t -> State.reconcile t ~summary:(Some summary) ~filter:""
+  ;;
+
+  let%test_unit "evidence paging stores the viewport bound and reverses after resize" =
+    let s = summary () in
+    let initial = State.set_mode (ready s) Evidence in
+    let move state ~width ~height delta =
+      scroll state ~summary:(Some s) ~filter:"" ~width ~height ~delta
+    in
+    let view state ~width ~height =
+      rows state ~summary:(Some s) ~filter:"" ~width ~height
+    in
+    let bottom = move initial ~width:20 ~height:3 Int.max_value in
+    let stopped = move bottom ~width:20 ~height:3 100 in
+    assert (stopped.offset = bottom.offset);
+    let reverse = move stopped ~width:20 ~height:3 (-1) in
+    assert (reverse.offset = bottom.offset - 1);
+    assert (
+      List.equal
+        String.equal
+        (List.drop (view reverse ~width:20 ~height:3) 1)
+        (List.take (view bottom ~width:20 ~height:3) 2));
+    let resized_reverse = move bottom ~width:100 ~height:8 (-1) in
+    assert (
+      List.equal
+        String.equal
+        (List.drop (view resized_reverse ~width:100 ~height:8) 1)
+        (List.take (view bottom ~width:100 ~height:8) 7));
+    assert (initial.offset = 0)
   ;;
 
   let metric
@@ -704,7 +739,9 @@ module%test Tests = struct
   let%test_unit "metrics paging is local and same-digest metric refresh renders new data" =
     let s = summary () in
     let cells = ready s |> fun t -> State.set_mode t Cells in
-    let metrics = State.set_mode cells Metrics |> fun t -> State.scroll t ~delta:2 ~max_offset:10 in
+    let metrics =
+      State.set_mode cells Metrics |> fun t -> State.scroll t ~delta:2 ~max_offset:10
+    in
     assert (Mode.equal (State.mode cells) Cells);
     [%test_result: int] cells.State.offset ~expect:0;
     [%test_result: string option] (State.selected metrics) ~expect:(State.selected cells);
@@ -930,7 +967,9 @@ module%test Tests = struct
       (rows t ~summary:(Some s) ~filter:"" ~width:0 ~height:4)
       ~expect:[];
     let evidence =
-      State.set_mode t Evidence |> fun t -> scroll t ~summary:(Some s) ~filter:"" ~width:80 ~height:3 ~delta:Int.max_value
+      State.set_mode t Evidence
+      |> fun t ->
+      scroll t ~summary:(Some s) ~filter:"" ~width:80 ~height:3 ~delta:Int.max_value
     in
     let output = rows evidence ~summary:(Some s) ~filter:"" ~width:80 ~height:3 in
     [%test_result: int] (List.length output) ~expect:3;

@@ -4,20 +4,32 @@ Recorded 2026-10-15 from current Workbench code and retained evidence.
 **FS1 is substantially delivered, with bounded aggregate investigation and real
 physical/acceptance/cancellation evidence; the full normative FS1/F06 scope is
 not complete.** Rich timing paths, measured clock/CTS investigation, congestion,
-routing/artifact viewers and lifecycle-integrated finalization remain gaps.
+and richer routing/binary artifact investigation remain gaps.
+
+**Later followup:** [finalization lifecycle and bounded artifact viewing](fs1_lifecycle_and_artifacts.md)
+are now implemented and verified. The original read-only-import scope described
+below is retained as the evidence record for that earlier slice; it is no longer
+the only way to operate finalization or view its reports in Workbench.
 
 This record extends [FS0 acceptance](fs0_acceptance.md) and the
 [cached synthesis inspector](synthesis_inspection.md). The desired scope remains
 [FS1](feature_sets.md#fs1--asic-evidence-investigation) and
 [F06](features/hardware_inspection.md); the delivered slices below do not replace
-those requirements. Earlier status paragraphs in those documents predate this
-metrics/terminal-result work.
+those requirements.
 
-This documentation pass read `../AGENTS.md`, implementation, scripts and existing
-evidence. It ran no builds, tests, provider commands or Git commands. Historical
-targeted fixture tests passed; a new full-suite parent run is upcoming and is not
-claimed here. The separate synthesis-metrics acceptance parent rerun is also
-upcoming; terminal-result acceptance does not stand in for that rerun.
+Final parent verification passed: serialized format/lint, full build, full
+`dune runtest -j20`, and installed native lifecycle/discovery/RTL/hierarchy/resize
+checks. The full suite's existing Git provenance fixture operates only in its
+new temporary project; inherited Git selectors/configuration were cleared before
+running it. No live-checkout Git mutation was performed.
+
+Latest actual frontend results: synthesis metrics
+`/tmp/opencode/workbench-fs1-metrics-c00xpq9e`, accepted physical import
+`/tmp/opencode/workbench-fs1-terminal-results-5yvke5ek`, existing synthesis inspector
+`/tmp/opencode/workbench-synthesis-inspector-xf0ihqfd`, and all five interrupt modes
+`/tmp/opencode/workbench-terminal-interrupt-rxwy7wd1` passed. The latest physical
+PTY adds Unicode input/backspace, bracketed reference paste, and immediate reverse
+scrolling after overscrolling the bottom.
 
 ## Delivered implementation
 
@@ -76,6 +88,11 @@ the explicit operation and verifies referenced execution/results bytes. In
 
 - Absolute attempt (at most 4096 bytes), exact execution path, raw-byte SHA-256
   and implementation stream/attempt identity.
+- Structural equality of report execution and hashed execution contents, independent
+  of JSON object-member order. Direct file reads open nonblocking, validate the
+  opened descriptor as a regular file, and read bounded bytes from that descriptor.
+  This avoids a pathname replacement with a FIFO blocking import. These are local
+  regular-file reads, not a hard deadline guarantee for stalled remote filesystems.
 - Terminal operation status and end time; `completed` iff exit code is zero.
 - Ordered selected checkpoint path/identity/boundary agreement between receipt,
   stage report and hashed execution artifacts.
@@ -165,6 +182,7 @@ the desired kind, Tab to focus, and **Zoom focused tile** for long evidence.
 | **Inspect finalization for asic/… (enter exact attempt)** | Open `INSPECT FINALIZATION` argument form for that captured run |
 | Enter in that form | Dispatch the exact attempt text; blank input is rejected |
 | Esc in the form | Dismiss without import |
+| UTF-8 typing / bracketed paste in the form | Enter printable exact path text; Backspace removes a codepoint; Enter after paste submits |
 | **Refresh evidence asic/…** | Explicit read-only source revalidation, including adopted attempt |
 
 The form captures project/workspace/context/run targeting and rejects stale
@@ -173,6 +191,10 @@ requires an absolute reference. Enter the returned **attempt directory**, not a
 guessed execution/results path. Terminal detail/scroll state is local to each
 tile and reconciles when run, summary digest or terminal result identity changes.
 Pinned tiles retain their run while following tiles respond to context selection.
+Reference input is bounded to 4096 bytes at UTF-8 boundaries; newline/control input
+is rejected. Ordinary tile paste still suppresses commands, and Ctrl-C precedes all
+modal/paste handling. Scrolling clamps stored offsets to current viewport geometry,
+so reversing at the bottom moves immediately, including after resize.
 
 The native API exposes the same operation through `--asic-operation`. For an
 attached daemon, first use Get to obtain the exact current registered `Run_ref`;
@@ -364,6 +386,7 @@ or execution itself is failed:
 | `/tmp/opencode/workbench-fs1-terminal-results-0xggpftj` | Failed physical execution, earlier synthesis retained, no terminal import |
 | `/tmp/opencode/workbench-fs1-terminal-results-nlpv5k0x` | Successful external acceptance imported as `pass` |
 | `/tmp/opencode/workbench-fs1-terminal-results-eovlncjw` | Failed external acceptance imported as `fail` |
+| `/tmp/opencode/workbench-fs1-terminal-results-5yvke5ek` | Final accepted-result candidate, Unicode/paste and overscroll recovery |
 
 Each `result.json` says `status: passed` and `input_files_unchanged: true`.
 The failed-execution test logged four exact-reference read-only provider calls;
@@ -439,10 +462,10 @@ wait and tile-local controls. Reusable focused and full-suite commands are:
 scripts/with-switch.sh timeout 600s dune build -j20 \
   @protocol/test/runtest @backend/test/asic/runtest @terminal/runtest
 
-# Parent full-suite rerun: upcoming, not recorded as passed here.
+# Parent full-suite rerun passed; isolate inherited Git environment for its disposable fixture.
 scripts/with-switch.sh timeout 900s dune runtest -j20
 
-# Separate synthesis-metrics acceptance rerun: upcoming.
+# Separate synthesis-metrics acceptance also passed.
 scripts/with-switch.sh timeout --signal=TERM --kill-after=20s 600s \
   python3 -B scripts/test-fs1-metrics.py --outer-timeout 90
 
@@ -481,7 +504,8 @@ The existing metrics attempts `workbench-fs1-metrics-x_0w82ok`,
 historical harness runs (PTY readiness; overly strict equality of dynamic run
 fields after Refresh; outdated Checks wording). Current harness code checks raw
 input readiness, exact allowed cursor/status/error evolution and revised Checks
-wording. **No passing separate metrics rerun is claimed yet.**
+wording. The subsequent separate metrics run **passed** at
+`/tmp/opencode/workbench-fs1-metrics-c00xpq9e`.
 
 Parent-owned physical/acceptance commands, when a fresh specimen is wanted:
 
@@ -536,15 +560,12 @@ not repository-distributed fixtures.
   measured CTS trees, insertion/skew and achieved-clock evidence. The single
   verified declared period is a useful delivered slice, not this full scope.
 - Stage-specific placement quality, die/core/macro investigation and congestion;
-  rich routing evidence, routing/congestion exploration and dedicated physical
-  artifact viewers/external-viewer actions. Raw artifact references in evidence
-  do not supply those viewers.
-- Lifecycle-integrated Workbench finalize/accept launch, progress, reconnect and
-  cancellation. Current collection/acceptance production is external and import
-  is explicit/read-only; one real cancellation specimen does not cover every
-  boundary or lifecycle race.
-- The pending parent full-suite and separate metrics acceptance reruns must be
-  recorded only after their actual outcomes are available.
+  rich routing evidence, routing/congestion exploration and binary/graphical
+  artifact viewers. The subsequent bounded text catalog/viewer and explicit
+  terminal-host text handoff do not implement those richer viewers.
+- Cancellation at every physical boundary and broader lifecycle races. The
+  subsequent Workbench-owned finalize/accept lifecycle includes live progress,
+  read-only reconnect, detach and actual external-postcheck cancellation coverage.
 
 The defensible acceptance statement is therefore: **substantial FS1 aggregate
 evidence investigation delivered, with real physical completion, explicit

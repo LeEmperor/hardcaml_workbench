@@ -346,6 +346,12 @@ def exercise(args):
             terminal.key(b'j' * 20)
             page = terminal.capture(label + '-%03d' % i)
             if page == pages[-1]:
+                terminal.key(b'j' * 100)
+                bottom = terminal.capture(label + '-overscroll')
+                terminal.key(b'k')
+                reverse = terminal.capture(label + '-reverse')
+                check(bottom != reverse, 'First reverse key moves immediately after bottom overscroll: ' + label)
+                terminal.key(b'j')
                 return pages
             pages.append(page)
         raise AssertionError(label + ': scroll did not reach end within budget')
@@ -415,7 +421,10 @@ def exercise(args):
             # Exercise the real command and argument form, not just the RPC path.
             terminal.palette('Inspect finalization for asic/' + field(run, 'id') + ' (enter exact attempt)')
             terminal.capture('02-exact-reference-form', ['INSPECT FINALIZATION', 'exact'])
-            terminal.key(inputs['operation_attempt'].encode())
+            terminal.key('é界'.encode())
+            terminal.capture('02-unicode-input', ['é界'])
+            terminal.key(b'\x7f\x7f')
+            terminal.key(b'\x1b[200~' + inputs['operation_attempt'].encode() + b'\x1b[201~')
             terminal.capture('02-exact-reference-input', ['INSPECT FINALIZATION'])
             def inspection_count():
                 return sum(json.loads(line)['argv'][0] == 'finalization-inspect' for line in calls().splitlines())

@@ -6,6 +6,8 @@
   appearance
   synthesis_view
   terminal_result_view
+  artifact_view
+  artifact_export
   presentation
   state
   workspace_host
@@ -14,7 +16,10 @@
   launch_preferences
   asic_intents)
  (libraries
+  async
   core
+  core_unix
+  core_unix.filename_unix
   hardcaml_workbench_protocol
   bonsai_term
   notty-community

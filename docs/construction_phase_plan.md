@@ -10,8 +10,10 @@ M0–M5 are implementation phases, distinct from feature sets and ASIC phases.
 FS0 covers M0–M3's functional slices, not every normative feature requirement.
 FS1/FS2 map to richer M4 evidence and simulation; FS3 maps to M5 adoption.
 FS5/V1 is an independent appearance gallery, not a functional-demo gate.
-FS1's first cached synthesis inspection slice and FS5's first appearance slice are
-recorded below. No FS2 structured simulation implementation is claimed.
+FS1's synthesis and aggregate terminal/physical investigation slices and FS5's
+first appearance slice are recorded below. FS1 remains open for richer paths,
+measured CTS, stage-specific physical/routing investigation and artifact viewers.
+No FS2 structured simulation implementation is claimed.
 
 ## Evidence and candidate baseline
 
@@ -91,6 +93,10 @@ state and daemon under a new evidence root; it submits no jobs and performs no G
 operations. This is actual frontend/HTTP behavior over a disposable fixture, not
 real synthesis evidence or a full tmux/concurrent-client responsiveness acceptance.
 Earlier full-suite and real-tool results above remain historical evidence.
+
+During FS1 integration the owner advanced HEAD to `1a3df25` ("Staging for fs3
+parallelization"). Integration preserved that current tree; no agent-created
+commit, staging or other mutative Git operation was performed on a live checkout.
 
 ## M0 — Decisions, provider baseline and demo fixtures
 
@@ -243,7 +249,8 @@ and richer endpoint forms remain explicit gaps; clock-driven redraw remains curr
 
 ## M4 — Rich evidence and live acceptance (FS1/FS2)
 
-**FS1 in progress: synthesis inspection delivered. FS2 remains unstarted.**
+**FS1 in progress: synthesis and aggregate physical/terminal inspection delivered.
+FS2 remains unstarted.** Exact commands/results are in [FS1 acceptance](fs1_acceptance.md).
 Features: F06/F09 and execution/regression extensions.
 
 - [x] F06 synthesis inspection over existing cache: count/name sorting, literal
@@ -267,16 +274,72 @@ Features: F06/F09 and execution/regression extensions.
   matrix verifies all five cases exit and restore terminal settings while the daemon
   remains alive. `scripts/test-terminal-interrupt.py`; details in synthesis inspection.
 
-- [ ] Timing/check drilldown with setup/hold, units/corner/measurement context.
-- [ ] Placement/resource/clock views backed by actual provider fields.
+- [x] Synthesis area and diagnostic counters with explicit units, availability and
+  checkpoint references; choose the explicit synthesis boundary even after later
+  physical failure. Old cache versions remain readable with semantic repair.
+- [x] Explicit finalization import validates execution/results hashes, structural
+  execution identity and selected checkpoints. Persist the exact operation for
+  Refresh; ordinary viewing/restart uses the bounded shared cache.
+- [x] Aggregate setup/hold, final physical area/utilization, reported DRC/LVS/antenna
+  statuses and full source/context inspection. Preserve distinct execution,
+  collection, timing-goal, postcheck and acceptance facts.
+- [x] Verified historical declared-clock configuration, not measured CTS or coverage.
+- [x] Actual native HTTP/PTY import of collection-only, accepted and rejected
+  operations; independent tiles/pins, exact reference form, restart/L2, no warm
+  provider reads, Unicode/paste entry and bottom/reverse-scroll recovery.
+- [ ] Rich timing path/corner/group exploration, measured CTS/skew/coverage and
+  stage-specific placement/routing/congestion views.
 - [ ] Project-declared simulation/regression cases, seeds and failure/trace artifacts.
-- [ ] External source/artifact viewer actions and host/path handling.
-- [ ] Full physical-run failure/cancellation/observation acceptance; preserve earlier
-  measurements after later-stage failure. No placement/signoff run is claimed here.
+- [x] Bounded terminal-result report/artifact catalog and text paging, exact
+  run/attempt/hash/offset/limit identity and explicit stale/expired-page recovery.
+  Optional external text opening exports verified sanitized text to the terminal
+  host before invoking a configured executable, never opening a daemon path locally.
+- [ ] General source viewers, binary/graphical artifact rendering and provenance
+  navigation beyond the selected adopted terminal result.
+- [x] Real synthesis→floorplan→placement→CTS→routing→signoff completion; separate
+  external precheck/gate-level acceptance pass. Earlier 600-second signoff timeout
+  remains retained, with earlier synthesis evidence visible through Workbench.
+- [x] Actual Workbench signoff launch/client detach/cancel of a confirmed active owned
+  container. Launcher stop grace increased from 5 to 15 seconds so provider cleanup
+  and terminal publication finish. No owned survivors or later-stage launch.
+- [x] Finalization/acceptance producer lifecycle inside Workbench: explicit collateral,
+  persistent exact-key reservation, early allocation, phase/status, client detach,
+  owned cancellation, automatic validated result import and restart without replay.
+- [ ] Cancellation coverage at every physical boundary and broader concurrent
+  reconnect/publication race combinations.
 
-### Next bounded slice — proposed execution inspection
+**Parent verification:** format/lint, full build, full `runtest -j20` and installed
+native lifecycle/RTL/hierarchy/resize checks passed serially. Latest retained real
+UI tests: metrics `workbench-fs1-metrics-c00xpq9e`, accepted physical import
+`workbench-fs1-terminal-results-5yvke5ek`, original synthesis inspector
+`workbench-synthesis-inspector-xf0ihqfd`, interrupt matrix
+`workbench-terminal-interrupt-rxwy7wd1` (all under `/tmp/opencode`). Real owned
+cancellation passed at `workbench-fs1-cancellation-nyiu2n23`.
 
-Prefer an identity-safe selected-attempt detail view before timing adoption. This
+**Provider/flow evidence:** unchanged installed provider; only the example launcher
+was rebuilt in `/tmp/opencode/fs1-timeout-project-SAuuX0/build` to expose its existing
+stage-timeout flag. Successful physical evidence is
+`/tmp/opencode/workbench-fs1-physical-w0rftdi0`; setup **11.67551954830797 ns**, hold
+**0.12502899069955042 ns**, final area **18916.9 µm²**, utilization **0.0209625**.
+Collection acceptance is `not_evaluated`; the separate explicit acceptance operation
+at `/tmp/opencode/workbench-fs1-acceptance-5oa67d8u` reports **pass**, with TT precheck
+and gate-level replay passing. This is not a universal signoff assertion. Exact
+identities, failed attempts and remaining scope are in the linked acceptance record.
+
+**Lifecycle/artifact followup delivered:** [controls and evidence](fs1_lifecycle_and_artifacts.md).
+Actual palette→daemon→provider collection, acceptance (**pass**) and cancellation
+during external postcheck passed in separate private evidence directories:
+`/tmp/opencode/workbench-fs1-lifecycle-qkm54grn`, `...-2p10_520`, and `...-wtprmfgc`.
+Each has one producer, unchanged canonical inputs, no owned survivors and restart
+without replay. Artifact reads launch no provider work. External text handoff was
+verified with a local observer executable, not a claim about a real GUI renderer.
+Final format/lint, full build/runtest, installed workflow and five-mode interrupts
+passed after integration. No provider upgrade or new physical implementation run
+was needed for this followup.
+
+### Earlier proposed execution followup — deferred in favor of FS1
+
+The initial takeover review proposed an identity-safe selected-attempt detail view. This
 is a follow-on to F02/F09's existing execution UI within M4, not delivery of FS2
 structured simulation or a new ASIC orchestration engine. **Not implemented yet.**
 
@@ -296,7 +359,8 @@ No historical argv, test cases, progress percentage or ASIC-run association shou
 be inferred from job kind, log text or current project configuration. Existing
 generic supervisor and ASIC process-service boundaries remain separate.
 
-**Timing gate:** `backend/asic_public.ml` explicitly emits `timing = []` because
+**Original timing gate, now superseded for aggregate terminal evidence:** the
+stage-summary adapter still emits `timing = []` because
 CLI4 lacks normalized timing attribution/units. The retained accepted 673/685
 checkpoint metrics contain synthesis/lint measurements, not setup/hold slack;
 `synth_delay` is a profile name, not measured timing improvement. The adopted
@@ -305,8 +369,9 @@ keys with no unit and labels metrics as accumulated boundary snapshots. Its
 separate coarse collector and newer source declarations do not establish timing
 through the adopted named-flow report path. First require timing-bearing evidence
 and a supported units/corner/measurement-origin contract before a timing slice.
-Synthesis area/check counters are another evidence-supported future projection,
-but require explicit adapter/cache evolution; they are not in the current summary.
+The subsequent FS1 implementation uses the existing public finalization-results
+contract for aggregate timing, rather than guessing units in stage metrics.
+Synthesis area/check counters are now projected into the current summary.
 
 ## M5 — Multi-window polish and adoption (FS3)
 
@@ -348,7 +413,7 @@ This is a reusable renderer over actual FS0 tiles, not a selected final aestheti
 | M1 | Headless Demo A delivered; full physical/container cancellation acceptance later |
 | M2 | Tile-host Demo B delivered; bounded UI/coverage/performance gaps above |
 | M3 | Autosaved-session/L2 Demo C delivered; templates and appearance persistence gaps above |
-| M4 | FS1 synthesis inspection delivered; timing/physical and FS2 slices pending |
+| M4 | FS1 synthesis/aggregate terminal timing/check/resources/declared clocks delivered with real physical/acceptance/cancellation evidence; rich explorers and FS2 pending |
 | M5 | Later adoption scope; no full multi-monitor acceptance claim |
 | V1 | A–E skins/axes/captures delivered; rich gallery and default review pending |
 

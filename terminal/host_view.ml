@@ -193,94 +193,114 @@ let stage_lines (execution : Asic.Run.t) kind =
   | _ -> [ "Unsupported evidence kind: " ^ kind; scope ]
 ;;
 
+let finalization_lines (f : Asic.Finalization.t) =
+  [ "Finalization: " ^ f.key
+  ; sprintf "State: %s · owned=%b" f.state f.owned
+  ; "Phase: " ^ Option.value f.phase ~default:"unreported"
+  ; "Reported operation: " ^ Option.value f.operation_status ~default:"unreported"
+  ; "Acceptance: "
+    ^ Option.value
+        f.acceptance
+        ~default:
+          (if f.acceptance_requested then "requested / unreported" else "not requested")
+  ]
+  @ Option.to_list (Option.map f.error ~f:(fun e -> "ERROR: " ^ e))
+  @ [ "Run: " ^ run_label f.run; "Palette: Reconnect finalization (read-only) " ^ f.key ]
+;;
+
 let run_lines snapshot run kind =
   match (snapshot : Asic.Snapshot.t option) with
   | None -> [ "ASIC provider not loaded" ]
   | Some asic ->
-    (match List.find asic.runs ~f:(fun r -> Run_ref.equal r.run run) with
-     | None -> [ "Saved run unavailable; no replacement selected" ]
-     | Some execution ->
-       (match List.find asic.summaries ~f:(fun s -> Run_ref.equal s.run run) with
-        | None ->
-          (if String.equal kind "synthesis" then [] else stage_lines execution kind)
-          @ [ "Loading summary for " ^ run_label run
-            ; "Observed execution: " ^ execution.status
-            ]
-          @ Option.to_list execution.error
-        | Some summary
-          when Terminal_result_view.supports kind && Option.is_some summary.terminal ->
-          Terminal_result_view.lines
-            (Option.value_exn summary.terminal)
-            ~kind
-            ~detail:false
-          @ [ "Freshness: "
-              ^ Sexp.to_string_hum (Asic.Summary.Freshness.sexp_of_t summary.freshness)
-            ; "Observed execution: " ^ execution.status
-            ; request_scope execution
-            ]
-          @ Option.to_list execution.error
-        | Some summary ->
-          let metrics =
-            if String.equal kind "timing"
-            then
-              if List.is_empty summary.timing
-              then stage_lines execution kind
-              else
-                List.map summary.timing ~f:(fun (name, value, unit_) ->
-                  sprintf "%s: %g %s" name value unit_)
-            else if String.equal kind "synthesis"
-            then
-              [ "Cell count: "
-                ^ Option.value_map
-                    summary.cell_count
-                    ~default:"unavailable"
-                    ~f:Int.to_string
-              ]
-            else if String.equal kind "checks"
-            then stage_lines execution kind @ Synthesis_view.checks_lines summary
-            else stage_lines execution kind
-          in
-          let breakdown =
-            if not (String.equal kind "synthesis")
-            then []
-            else
-              [ ("Cells: "
-                 ^
-                 if List.is_empty summary.cells
-                 then "breakdown unavailable"
-                 else
-                   List.map summary.cells ~f:(fun (name, count) ->
-                     sprintf "%s=%d" name count)
-                   |> String.concat ~sep:", ")
-              ]
-          in
-          metrics
-          @ [ "Freshness: "
-              ^ Sexp.to_string_hum (Asic.Summary.Freshness.sexp_of_t summary.freshness)
-            ]
-          @ breakdown
-          @ [ "Evidence: "
-              ^ Filename.basename summary.execution_file
-              ^ " #"
-              ^ String.prefix summary.source_digest 12
-            ; "Run completion: "
-              ^ summary.completion
-              ^ " | acceptance: "
-              ^ summary.acceptance
-            ; "Observed execution: " ^ execution.status
-            ; "Producer: provider checkpoint (inspect synthesis evidence)"
-            ; "Source: "
-              ^ Filename.basename summary.execution_file
-              ^ " (inspect for full path)"
-            ]
-          @ Option.to_list execution.error
-          @
-          if (not (String.equal kind "synthesis")) || List.is_empty summary.cells
-          then []
-          else
-            "CELL BREAKDOWN"
-            :: List.map summary.cells ~f:(fun (name, count) ->
-              sprintf "  %s: %d" name count)))
+    if String.equal kind "finalization-status"
+    then
+      List.filter asic.finalizations ~f:(fun f -> Run_ref.equal f.run run)
+      |> List.concat_map ~f:finalization_lines
+    else (
+      match List.find asic.runs ~f:(fun r -> Run_ref.equal r.run run) with
+      | None -> [ "Saved run unavailable; no replacement selected" ]
+      | Some execution ->
+        (match List.find asic.summaries ~f:(fun s -> Run_ref.equal s.run run) with
+         | None ->
+           (if String.equal kind "synthesis" then [] else stage_lines execution kind)
+           @ [ "Loading summary for " ^ run_label run
+             ; "Observed execution: " ^ execution.status
+             ]
+           @ Option.to_list execution.error
+         | Some summary
+           when Terminal_result_view.supports kind && Option.is_some summary.terminal ->
+           Terminal_result_view.lines
+             (Option.value_exn summary.terminal)
+             ~kind
+             ~detail:false
+           @ [ "Freshness: "
+               ^ Sexp.to_string_hum (Asic.Summary.Freshness.sexp_of_t summary.freshness)
+             ; "Observed execution: " ^ execution.status
+             ; request_scope execution
+             ]
+           @ Option.to_list execution.error
+         | Some summary ->
+           let metrics =
+             if String.equal kind "timing"
+             then
+               if List.is_empty summary.timing
+               then stage_lines execution kind
+               else
+                 List.map summary.timing ~f:(fun (name, value, unit_) ->
+                   sprintf "%s: %g %s" name value unit_)
+             else if String.equal kind "synthesis"
+             then
+               [ "Cell count: "
+                 ^ Option.value_map
+                     summary.cell_count
+                     ~default:"unavailable"
+                     ~f:Int.to_string
+               ]
+             else if String.equal kind "checks"
+             then stage_lines execution kind @ Synthesis_view.checks_lines summary
+             else stage_lines execution kind
+           in
+           let breakdown =
+             if not (String.equal kind "synthesis")
+             then []
+             else
+               [ ("Cells: "
+                  ^
+                  if List.is_empty summary.cells
+                  then "breakdown unavailable"
+                  else
+                    List.map summary.cells ~f:(fun (name, count) ->
+                      sprintf "%s=%d" name count)
+                    |> String.concat ~sep:", ")
+               ]
+           in
+           metrics
+           @ [ "Freshness: "
+               ^ Sexp.to_string_hum (Asic.Summary.Freshness.sexp_of_t summary.freshness)
+             ]
+           @ breakdown
+           @ [ "Evidence: "
+               ^ Filename.basename summary.execution_file
+               ^ " #"
+               ^ String.prefix summary.source_digest 12
+             ; "Run completion: "
+               ^ summary.completion
+               ^ " | acceptance: "
+               ^ summary.acceptance
+             ; "Observed execution: " ^ execution.status
+             ; "Producer: provider checkpoint (inspect synthesis evidence)"
+             ; "Source: "
+               ^ Filename.basename summary.execution_file
+               ^ " (inspect for full path)"
+             ]
+           @ Option.to_list execution.error
+           @
+           if (not (String.equal kind "synthesis")) || List.is_empty summary.cells
+           then []
+           else
+             "CELL BREAKDOWN"
+             :: List.map summary.cells ~f:(fun (name, count) ->
+               sprintf "  %s: %d" name count)))
 ;;
 
 let wrap_cells ~width text =
@@ -300,6 +320,15 @@ let wrap_cells ~width text =
       else loop start (offset + length) (cells + cell_width) output)
   in
   loop 0 0 0 []
+;;
+
+let artifact_inspector host tile =
+  Option.bind (H.local host tile.W.Tile.id).artifacts ~f:(fun view ->
+    Option.bind host.H.registry ~f:(fun registry ->
+      W.resolve_tile registry tile.id
+      |> Result.ok
+      |> Option.bind ~f:(fun reference ->
+        Artifact_view.reconcile_scope view ~scope:reference.run)))
 ;;
 
 let rows host data tile ~width ~height =
@@ -349,75 +378,82 @@ let rows host data tile ~width ~height =
         (Job.Kind.to_string job.kind))
   in
   let rows =
-    match tile.kind with
-    | "run-selector" -> run_rows ()
-    | "execution" | "project-tests" ->
-      [ (if String.equal tile.kind "project-tests"
-         then "Project tests (not ASIC-run scoped)"
-         else "Project execution attempts")
-      ; "Environment: " ^ data.environment
-      ; "Case details / progress: unavailable (generic command runner)"
-      ]
-      @ Option.value_map selected ~default:[] ~f:(fun job ->
-        Presentation.job_outcome_lines job
-        @
-        if String.equal tile.kind "project-tests"
-        then "ATTEMPT OUTPUT" :: List.take (data.log_lines job.id) 4
-        else [])
-      @ job_rows
-    | "logs" ->
-      [ "Project job output: "
-        ^ Option.value local.cursor ~default:"select attempt with j/k"
-      ; (if local.follow then "FOLLOW" else "PAUSED — palette: Resume log follow")
-      ]
-      @ Option.value_map selected ~default:[ "No attempt selected" ] ~f:(fun job ->
-        data.log_lines job.id)
-    | "project" ->
-      Option.value_map data.project ~default:[ "No project open" ] ~f:(fun project ->
-        [ project.name
-        ; Project_root.to_absolute_path project.root
-        ; "Environment: " ^ data.environment
-        ])
-    | "navigation" ->
-      [ "Space c c: searchable commands"
-      ; "Tab: focus tile; j/k: browse; Enter: select run"
-      ; "1/2: Overview / Timing; /: filter focused selector"
-      ; "[ / ]: scroll; palette: resume log follow"
-      ; "Timing/checks/physical/finalization: Enter/e evidence; Esc overview"
-      ; "Palette: add/hide/restore/move/resize/zoom; unlink/relink; pin/follow"
-      ; data.status
-      ]
-    | "asic" -> List.concat_map data.asic_lines ~f:(wrap_cells ~width)
-    | "synthesis" ->
-      (match scope with
-       | None -> [ "No run selected — use a run selector" ]
-       | Some run ->
-         ("Run: " ^ run_label run)
-         :: Synthesis_view.rows
-              local.synthesis
-              ~summary:(data.summary run)
-              ~filter:local.filter
-              ~width
-              ~height:(Int.max 0 (height - 1)))
-    | kind when Terminal_result_view.supports kind ->
-      (match scope with
-       | None -> [ "No run selected — use a run selector" ]
-       | Some run ->
-         Terminal_result_view.rows
-           ~fallback:(("Run: " ^ run_label run) :: data.run_lines run kind)
-           ~request_context:(data.run_context run)
-           local.terminal_result
-           ~run
-           ~summary:(data.summary run)
-           ~kind
-           ~width
-           ~height)
-    | kind ->
-      (match scope with
-       | None -> [ "No run selected — use a run selector" ]
-       | Some run -> ("Run: " ^ run_label run) :: data.run_lines run kind)
+    match artifact_inspector host tile with
+    | Some view -> Artifact_view.rows view ~width ~height
+    | None ->
+      (match tile.kind with
+       | "run-selector" -> run_rows ()
+       | "execution" | "project-tests" ->
+         [ (if String.equal tile.kind "project-tests"
+            then "Project tests (not ASIC-run scoped)"
+            else "Project execution attempts")
+         ; "Environment: " ^ data.environment
+         ; "Case details / progress: unavailable (generic command runner)"
+         ]
+         @ Option.value_map selected ~default:[] ~f:(fun job ->
+           Presentation.job_outcome_lines job
+           @
+           if String.equal tile.kind "project-tests"
+           then "ATTEMPT OUTPUT" :: List.take (data.log_lines job.id) 4
+           else [])
+         @ job_rows
+       | "logs" ->
+         [ "Project job output: "
+           ^ Option.value local.cursor ~default:"select attempt with j/k"
+         ; (if local.follow then "FOLLOW" else "PAUSED — palette: Resume log follow")
+         ]
+         @ Option.value_map selected ~default:[ "No attempt selected" ] ~f:(fun job ->
+           data.log_lines job.id)
+       | "project" ->
+         Option.value_map data.project ~default:[ "No project open" ] ~f:(fun project ->
+           [ project.name
+           ; Project_root.to_absolute_path project.root
+           ; "Environment: " ^ data.environment
+           ])
+       | "navigation" ->
+         [ "Space c c: searchable commands"
+         ; "Tab: focus tile; j/k: browse; Enter: select run"
+         ; "1/2: Overview / Timing; /: filter focused selector"
+         ; "[ / ]: scroll; palette: resume log follow"
+         ; "Timing/checks/physical/finalization: Enter/e evidence; Esc overview"
+         ; "Palette: add/hide/restore/move/resize/zoom; unlink/relink; pin/follow"
+         ; data.status
+         ]
+       | "asic" -> List.concat_map data.asic_lines ~f:(wrap_cells ~width)
+       | "synthesis" ->
+         (match scope with
+          | None -> [ "No run selected — use a run selector" ]
+          | Some run ->
+            ("Run: " ^ run_label run)
+            :: Synthesis_view.rows
+                 local.synthesis
+                 ~summary:(data.summary run)
+                 ~filter:local.filter
+                 ~width
+                 ~height:(Int.max 0 (height - 1)))
+       | kind when Terminal_result_view.supports kind ->
+         (match scope with
+          | None -> [ "No run selected — use a run selector" ]
+          | Some run ->
+            (if String.equal tile.kind "finalization"
+             then data.run_lines run "finalization-status"
+             else [])
+            @ Terminal_result_view.rows
+                ~fallback:(("Run: " ^ run_label run) :: data.run_lines run kind)
+                ~request_context:(data.run_context run)
+                local.terminal_result
+                ~run
+                ~summary:(data.summary run)
+                ~kind
+                ~width
+                ~height)
+       | kind ->
+         (match scope with
+          | None -> [ "No run selected — use a run selector" ]
+          | Some run -> ("Run: " ^ run_label run) :: data.run_lines run kind))
   in
-  if String.equal tile.kind "synthesis"
+  if Option.is_some local.artifacts
+     || String.equal tile.kind "synthesis"
      || Terminal_result_view.supports tile.kind
      || (String.equal tile.kind "logs" && local.follow)
   then rows
@@ -436,12 +472,16 @@ let body_geometry host tile ~width ~height =
   let inner_width = Int.max 0 (width - (2 * border)) in
   let inner_height = Int.max 0 (height - (2 * border)) in
   let padding =
-    if width >= 40 && height > 8
+    if width >= 40
+       && height > 8
        && Appearance.Density.equal appearance.density Comfortable
-    then 1 else 0
+    then 1
+    else 0
   in
   let body_width = Int.max 0 (inner_width - (2 * padding)) in
-  let body_height = Int.max 0 (inner_height - (2 * padding) - if local.headers then 1 else 0) in
+  let body_height =
+    Int.max 0 (inner_height - (2 * padding) - if local.headers then 1 else 0)
+  in
   inner_width, inner_height, padding, body_width, body_height
 ;;
 
@@ -599,40 +639,68 @@ end
 
 (** The same outer and inner geometry is used by rendering and page navigation. *)
 let tile_layout host ({ Dimensions.width; height } : Dimensions.t) =
-  let width = Int.max 1 width and height = Int.max 1 height in
-  let available = Int.max 1
-      (height - (if host.H.chrome then 1 else 0)
-       - if host.chrome || host.editing_filter || host.paste then 1 else 0) in
+  let width = Int.max 1 width
+  and height = Int.max 1 height in
+  let available =
+    Int.max
+      1
+      (height
+       - (if host.H.chrome then 1 else 0)
+       - if host.chrome || host.editing_filter || host.paste then 1 else 0)
+  in
   let tiles = H.tiles host in
-  let zoomed = Option.value_map (H.active host) ~default:false ~f:(fun w -> Option.is_some w.zoomed_tile) in
+  let zoomed =
+    Option.value_map (H.active host) ~default:false ~f:(fun w ->
+      Option.is_some w.zoomed_tile)
+  in
   let fit = Fit_layout.compute ~width ~height:available ~count:(List.length tiles) in
-  let compact = not zoomed && (match host.layout_mode, fit with H.Fit, Fit_layout.Compact -> true | _ -> false) in
+  let compact =
+    (not zoomed)
+    &&
+    match host.layout_mode, fit with
+    | H.Fit, Fit_layout.Compact -> true
+    | _ -> false
+  in
   let focused () =
-    let tile = Option.filter (H.focused host) ~f:(fun tile -> List.exists tiles ~f:(fun t -> W.Tile_id.equal t.id tile.id))
-      |> fun focused -> Option.first_some focused (List.hd tiles) in
-    Option.to_list tile |> List.map ~f:(fun tile -> tile, { W.Geometry.x = 0; y = 0; width; height = available })
+    let tile =
+      Option.filter (H.focused host) ~f:(fun tile ->
+        List.exists tiles ~f:(fun t -> W.Tile_id.equal t.id tile.id))
+      |> fun focused -> Option.first_some focused (List.hd tiles)
+    in
+    Option.to_list tile
+    |> List.map ~f:(fun tile ->
+      tile, { W.Geometry.x = 0; y = 0; width; height = available })
   in
   let layout =
-    if zoomed || compact then focused () else
-    match host.layout_mode, fit with
-    | H.Fit, Fit_layout.Grid cells -> List.zip_exn tiles cells
-    | H.Fit, Fit_layout.Compact -> focused ()
-    | H.Preferred, _ ->
-      let rec pack pending x y row_height acc =
-        match pending with
-        | [] -> List.rev acc, y + row_height
-        | tile :: rest ->
-          let g = tile.W.Tile.requested_geometry in
-          let tw = Int.min width (Int.max 8 g.width) in
-          let th = Int.min available (Int.max 3 g.height) in
-          let gap = if x = 0 then 0 else 1 in
-          if x + gap + tw > width && x > 0
-          then pack pending 0 (y + row_height) 0 acc
-          else pack rest (x + gap + tw) y (Int.max row_height th)
-              ((tile, { W.Geometry.x = x + gap; y; width = tw; height = th }) :: acc)
-      in
-      let packed, total_height = pack tiles 0 0 0 [] in
-      if total_height > available && Option.is_some (H.focused host) then focused () else packed
+    if zoomed || compact
+    then focused ()
+    else (
+      match host.layout_mode, fit with
+      | H.Fit, Fit_layout.Grid cells -> List.zip_exn tiles cells
+      | H.Fit, Fit_layout.Compact -> focused ()
+      | H.Preferred, _ ->
+        let rec pack pending x y row_height acc =
+          match pending with
+          | [] -> List.rev acc, y + row_height
+          | tile :: rest ->
+            let g = tile.W.Tile.requested_geometry in
+            let tw = Int.min width (Int.max 8 g.width) in
+            let th = Int.min available (Int.max 3 g.height) in
+            let gap = if x = 0 then 0 else 1 in
+            if x + gap + tw > width && x > 0
+            then pack pending 0 (y + row_height) 0 acc
+            else
+              pack
+                rest
+                (x + gap + tw)
+                y
+                (Int.max row_height th)
+                ((tile, { W.Geometry.x = x + gap; y; width = tw; height = th }) :: acc)
+        in
+        let packed, total_height = pack tiles 0 0 0 [] in
+        if total_height > available && Option.is_some (H.focused host)
+        then focused ()
+        else packed)
   in
   available, compact, layout
 ;;
@@ -641,21 +709,45 @@ let scroll_focused host data dimensions ~delta =
   let _, _, layout = tile_layout host dimensions in
   match H.focused host, host.H.registry with
   | Some tile, Some registry ->
-    (match List.find layout ~f:(fun (visible, _) -> W.Tile_id.equal visible.id tile.id),
-           W.resolve_tile registry tile.id |> Result.ok |> Option.bind ~f:(fun reference -> reference.run) with
+    (match
+       ( List.find layout ~f:(fun (visible, _) -> W.Tile_id.equal visible.id tile.id)
+       , W.resolve_tile registry tile.id
+         |> Result.ok
+         |> Option.bind ~f:(fun reference -> reference.run) )
+     with
      | Some (_, g), Some run ->
-       let _, _, _, width, height = body_geometry host tile ~width:g.width ~height:g.height in
+       let _, _, _, width, height =
+         body_geometry host tile ~width:g.width ~height:g.height
+       in
        let local = H.local host tile.id in
        let local =
-         if String.equal tile.kind "synthesis" then
-           { local with synthesis = Synthesis_view.scroll local.synthesis
-               ~summary:(data.summary run) ~filter:local.filter ~width
-               ~height:(Int.max 0 (height - 1)) ~delta }
-         else if Terminal_result_view.supports tile.kind then
-           { local with terminal_result = Terminal_result_view.scroll
-               ~fallback:(("Run: " ^ run_label run) :: data.run_lines run tile.kind)
-               ~request_context:(data.run_context run) local.terminal_result
-               ~run ~summary:(data.summary run) ~kind:tile.kind ~width ~height ~delta }
+         if String.equal tile.kind "synthesis"
+         then
+           { local with
+             synthesis =
+               Synthesis_view.scroll
+                 local.synthesis
+                 ~summary:(data.summary run)
+                 ~filter:local.filter
+                 ~width
+                 ~height:(Int.max 0 (height - 1))
+                 ~delta
+           }
+         else if Terminal_result_view.supports tile.kind
+         then
+           { local with
+             terminal_result =
+               Terminal_result_view.scroll
+                 ~fallback:(("Run: " ^ run_label run) :: data.run_lines run tile.kind)
+                 ~request_context:(data.run_context run)
+                 local.terminal_result
+                 ~run
+                 ~summary:(data.summary run)
+                 ~kind:tile.kind
+                 ~width
+                 ~height
+                 ~delta
+           }
          else local
        in
        H.set_local host tile.id local
@@ -709,8 +801,7 @@ let render host data ({ Dimensions.width; height } as dimensions) =
         ]
     else
       List.map layout ~f:(fun (tile, (g : W.Geometry.t)) ->
-        tile_view host data tile ~width:g.width ~height:g.height
-        |> View.pad ~l:g.x ~t:g.y)
+        tile_view host data tile ~width:g.width ~height:g.height |> View.pad ~l:g.x ~t:g.y)
       |> View.zcat
   in
   let footer =
@@ -721,7 +812,12 @@ let render host data ({ Dimensions.width; height } as dimensions) =
           ~role:Warning
           ~width
           ~height:1
-          [ "PASTE CAPTURE | content ignored until end marker | Ctrl-C exits client" ]
+          [ (if H.finalization_form host
+             then
+               "FINALIZATION PASTE | printable path captured; Enter after paste imports \
+                | Ctrl-C exits"
+             else "PASTE CAPTURE | content ignored until end marker | Ctrl-C exits client")
+          ]
       ]
     else if host.editing_filter
     then (
@@ -758,7 +854,18 @@ let render host data ({ Dimensions.width; height } as dimensions) =
     |> colored appearance Background
   in
   match host.palette with
-  | None -> frame
+  | None ->
+    (match Option.bind (H.focused host) ~f:(artifact_inspector host) with
+     | None -> frame
+     | Some view ->
+       lines
+         ~appearance
+         ~role:Surface
+         ~width
+         ~height
+         (Artifact_view.rows view ~width ~height)
+       |> colored appearance Surface
+       |> box ~width:dimensions.width ~height:dimensions.height)
   | Some p ->
     let matches = H.matches p in
     let shown = Int.max 1 (height - 4) in
@@ -787,9 +894,25 @@ let render host data ({ Dimensions.width; height } as dimensions) =
               "INSPECT FINALIZATION for "
               ^ run_label run
               ^ " - exact returned attempt; Enter imports; Esc closes"
+            | Some (H.Acceptance (run, _, _)) ->
+              "FINALIZE AND ACCEPT " ^ run_label run ^ " — Enter submits; Esc closes"
             | None -> "COMMAND PALETTE - Esc closes; Enter executes captured target")
-         ; "> " ^ p.query
          ]
+         @ (match p.argument with
+            | Some (H.Acceptance _) ->
+              wrap_cells ~width ("> " ^ p.query)
+              |> List.rev
+              |> Fn.flip List.take 3
+              |> List.rev
+            | _ -> [ "> " ^ p.query ])
+         @ (match p.argument with
+            | Some (H.Acceptance _) ->
+              [ "Acceptance S-expression (≤4096 UTF-8 bytes; quote paths with spaces):"
+              ; "((support_tools /tools) (precheck_python /python)"
+              ; " (testbench /tb.sv) (testbench_top tb) (replay_trace /trace))"
+              ; "All five values are explicit strings; no shell expansion."
+              ]
+            | _ -> [])
          @ commands
          @ [ host.notice ])
       |> colored appearance Surface
@@ -1151,6 +1274,78 @@ let%test_unit "actual renderer clips cell geometry and distinguishes run and pro
   List.iter wrapped ~f:(fun line -> assert (View.width (View.text line) <= 3))
 ;;
 
+let%test_unit "artifact overlay cannot render retained page after tile binding changes" =
+  let snapshot = W.initial ~session_id:(W.Session_id.of_string "artifact-scope") in
+  let tile = List.hd_exn snapshot.tiles in
+  let bind snapshot run =
+    W.apply
+      snapshot
+      (Mutate
+         { expected_revision = snapshot.W.Snapshot.revision
+         ; mutation = Set_tile_binding { tile = tile.id; binding = Pin_run run }
+         })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let snapshot = bind snapshot Fs0_fixture.run_a in
+  let reference : Asic_artifact.Reference.t =
+    { id = "report"
+    ; run = Fs0_fixture.run_a
+    ; terminal_attempt = "attempt-a"
+    ; label = "Report"
+    ; path = "/daemon/report"
+    ; sha256 = "hash-a"
+    ; size = 24
+    ; kind = "text"
+    }
+  in
+  let page : Asic_artifact.Page.t =
+    { artifact_id = reference.id
+    ; run = reference.run
+    ; terminal_attempt = reference.terminal_attempt
+    ; sha256 = reference.sha256
+    ; offset = 0
+    ; limit = Artifact_view.limit
+    ; next_offset = 24
+    ; eof = true
+    ; text = "PRIVATE-RUN-A-PAGE"
+    ; error = None
+    }
+  in
+  let inspector =
+    { (Artifact_view.create ~scope:reference.run reference.run) with
+      catalog = [ reference ]
+    ; reading = Some { artifact = reference; offset = 0; previous = []; page = Some page }
+    }
+  in
+  let host = H.receive H.empty snapshot in
+  let host =
+    H.set_local
+      { host with focus = Some tile.id }
+      tile.id
+      { H.default_local with artifacts = Some inspector }
+  in
+  let data =
+    { project = None
+    ; jobs = []
+    ; runs = []
+    ; log_lines = (fun _ -> [])
+    ; run_lines = (fun _ _ -> [])
+    ; run_context = (fun _ -> [])
+    ; summary = (fun _ -> None)
+    ; status = "fixture"
+    ; environment = "fixture"
+    ; asic_lines = []
+    }
+  in
+  let frame host = render host data { width = 100; height = 30 } |> plain_text in
+  assert (String.is_substring (frame host) ~substring:page.text);
+  (* Deliberately retain old local state: the renderer independently checks binding. *)
+  let changed = { host with registry = Some (bind snapshot Fs0_fixture.run_b) } in
+  assert (Option.is_none (artifact_inspector changed tile));
+  assert (not (String.is_substring (frame changed) ~substring:page.text))
+;;
+
 let%test_unit "filter input remains visible after polling and with chrome hidden" =
   let snapshot = W.initial ~session_id:(W.Session_id.of_string "filter-visible") in
   let tile = List.hd_exn snapshot.tiles in
@@ -1271,6 +1466,36 @@ let%test_unit "warm synthesis run switch renders 73 while pinned reference retai
       ~visible:(H.evidence_runs host)
   in
   assert (List.is_empty intents);
+  let detail =
+    H.set_local
+      host
+      following
+      { (H.local host following) with
+        synthesis =
+          Synthesis_view.State.set_mode (H.local host following).synthesis Evidence
+      }
+  in
+  List.iter [ H.Fit; H.Preferred ] ~f:(fun layout_mode ->
+    let detail = { detail with layout_mode } in
+    let small = { Dimensions.width = 32; height = 8 } in
+    let large = { Dimensions.width = 128; height = 24 } in
+    let bottom = scroll_focused detail data small ~delta:Int.max_value in
+    let stopped =
+      List.fold (List.init 100 ~f:Fn.id) ~init:bottom ~f:(fun host _ ->
+        scroll_focused host data small ~delta:1)
+    in
+    let reverse = scroll_focused stopped data small ~delta:(-1) in
+    assert (not (String.equal (frame bottom 32 8) (frame reverse 32 8)));
+    let resized = scroll_focused stopped data large ~delta:(-1) in
+    let expected =
+      scroll_focused detail data large ~delta:Int.max_value
+      |> fun host -> scroll_focused host data large ~delta:(-1)
+    in
+    assert (String.equal (frame resized 128 24) (frame expected 128 24));
+    assert (
+      Synthesis_view.Mode.equal
+        (Synthesis_view.State.mode (H.local resized pinned).synthesis)
+        Summary));
   let host = select host Fs0_fixture.run_a in
   assert (has (frame host 32 8) "Cell count: 50")
 ;;

@@ -97,3 +97,29 @@ let report config ~root ~environment execution_file =
 let inspect_finalization config ~root ~environment attempt =
   provider config ~root ~environment [ "finalization-inspect"; attempt; "--json" ]
 ;;
+
+let finalize config ~root ~environment ~execution_file ~acceptance =
+  provider
+    config
+    ~root
+    ~environment
+    ([ "finalize"
+     ; execution_file
+     ; "--operation-store"
+     ; Filename.concat config.Config.results_root "finalizations"
+     ; "--json"
+     ]
+     @ Option.value_map acceptance ~default:[] ~f:(fun (a : Asic.Acceptance.t) ->
+       [ "--accept"
+       ; "--support-tools"
+       ; a.support_tools
+       ; "--precheck-python"
+       ; a.precheck_python
+       ; "--testbench"
+       ; a.testbench
+       ; "--testbench-top"
+       ; a.testbench_top
+       ; "--replay-trace"
+       ; a.replay_trace
+       ]))
+;;

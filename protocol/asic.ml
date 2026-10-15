@@ -142,6 +142,34 @@ module Preview = struct
   [@@deriving bin_io, compare, equal, sexp]
 end
 
+module Acceptance = struct
+  type t =
+    { support_tools : string
+    ; precheck_python : string
+    ; testbench : string
+    ; testbench_top : string
+    ; replay_trace : string
+    }
+  [@@deriving bin_io, compare, equal, sexp]
+end
+
+module Finalization = struct
+  type t =
+    { key : string
+    ; run : Run_ref.t
+    ; execution_file : string
+    ; acceptance_requested : bool
+    ; attempt : string option
+    ; state : string
+    ; phase : string option
+    ; operation_status : string option
+    ; acceptance : string option
+    ; error : string option
+    ; owned : bool
+    }
+  [@@deriving bin_io, compare, equal, sexp]
+end
+
 module Snapshot = struct
   type t =
     { configured : bool
@@ -151,6 +179,9 @@ module Snapshot = struct
     ; runs : Run.t list
     ; operations : Pending.t list
     ; summaries : Summary.t list
+    ; finalizations : Finalization.t list [@sexp.default []]
+    ; artifacts : Asic_artifact.Reference.t list [@sexp.default []]
+    ; artifact_pages : Asic_artifact.Page.t list [@sexp.default []]
     ; cache_error : string option
     }
   [@@deriving bin_io, compare, equal, sexp]
@@ -163,7 +194,9 @@ module Operation = struct
       Summary selection does not launch tools. [Refresh] explicitly validates source
       evidence, including the last explicitly adopted finalization attempt. An ordinary
       [Load_summary] may return cached/unverified evidence. [Inspect_finalization] adopts
-      an existing public operation reference; it never starts finalization. *)
+      an existing public operation reference; it never starts finalization. [Finalize]
+      reserves exact inputs persistently before scheduling the sole owned producer.
+      [Observe_finalization] is read-only and never reacquires process ownership. *)
   type t =
     | Get
     | Discover
@@ -180,6 +213,20 @@ module Operation = struct
     | Inspect_finalization of
         { run : Run_ref.t
         ; attempt : string
+        }
+    | Finalize of
+        { key : string
+        ; run : Run_ref.t
+        ; execution_file : string
+        ; acceptance : Acceptance.t option
+        }
+    | Observe_finalization of string
+    | List_artifacts of Run_ref.t
+    | Read_artifact of
+        { run : Run_ref.t
+        ; artifact_id : string
+        ; offset : int
+        ; limit : int
         }
     | Cancel of string
   [@@deriving bin_io, compare, equal, sexp]

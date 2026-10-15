@@ -21,6 +21,8 @@ Project/provider commands remain useful without the application.
 | [Appearance handoffs](design/README.md) | Imported older design doc, newer gallery and implementation qualifications |
 | [Appearance presets](appearance_presets.md) | Try the implemented A–E skins and independent presentation controls |
 | [Synthesis inspection](synthesis_inspection.md) | FS1/F06 cell table, filter/sort, row detail and evidence controls |
+| [FS1 acceptance](fs1_acceptance.md) | Aggregate timing/resources/checks, declared-clock context, finalization import, real physical/acceptance/cancellation evidence and remaining scope |
+| [Finalization and artifacts](fs1_lifecycle_and_artifacts.md) | Workbench-owned collect/accept, live phases, cancel/reconnect, bounded report paging and explicit external text export |
 | [Formatting](formatting_guide.md) | Source conventions |
 | [Backlog](backlog/README.md) | Deferred work and reactivation triggers |
 | [Archive](archive/README.md) | Superseded plans and historical acceptance evidence |
@@ -63,12 +65,19 @@ of an implemented Workbench feature.
   reusable tabs and final aesthetic review remain pending. No embedded editor is selected.
 - Limits: shelf layout rather than freeform geometry; no template export/clone;
   local chrome/header preferences do not persist; clock-driven redraw and a basic
-  endpoint/assignment form; timing unsupported. Remaining frontend race/reconnect/
+  endpoint/assignment form; rich timing paths and measured CTS remain unsupported. Remaining frontend race/reconnect/
   cancellation coverage and scaling measurements are explicit in M0–M3.
-- FS1's first [synthesis inspector](synthesis_inspection.md) is delivered over cached
-  evidence. FS2 structured simulation remains unstarted. Prior parent format/lint,
-  runtest, build and installed/fixture/capture checks are recorded in the plan.
-  The takeover recheck passed the five-mode raw Ctrl-C PTY matrix against current
-  built binaries; this is frontend fixture evidence, not another real-tool acceptance.
+- FS1 now includes [synthesis metrics and aggregate physical evidence](fs1_acceptance.md),
+  signed timing, check verdicts, verified declared clocks and exact finalization
+  import. Real six-stage execution, external acceptance and owned-container
+  cancellation have separate retained evidence. Full FS1 remains open for richer
+  path/CTS/physical explorers. FS2 structured simulation remains unstarted.
+- Workbench-owned finalization/acceptance and report/artifact text viewing are
+  delivered, with real palette/transport detach, cancellation, idempotency and
+  restart checks. External text opening uses a private terminal-host export,
+  not the daemon's original path; binary viewers remain later work.
+- Parent format/lint, full runtest/build, installed workflow, actual metrics/physical
+  HTTP/PTY/L2 checks, original synthesis inspection and the five-mode interrupt
+  matrix passed. Evidence and limitations are recorded in the active plan.
 
 Build, launch and check commands are in the repository [README](../README.md).

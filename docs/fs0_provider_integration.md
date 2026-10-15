@@ -4,6 +4,13 @@ This slice implements the public named-flow boundary in `protocol/asic.ml`,
 `project_integration/asic_config.ml`, `adapters/asic_adapter.ml` and
 `backend/asic_{service,process,public}.ml`. It does not link `hardcaml_asic`.
 
+**FS1 extension:** the historical synthesis-only launch/cache limits below describe
+FS0. Current code also capability-checks known physical endpoints and supports
+explicit read-only finalization import with aggregate timing/resources/checks and
+declared-clock provenance. Summary blobs now write v4 and read v1–v4; launcher
+stop grace is 15 seconds (queries retain 5). See [FS1 acceptance](fs1_acceptance.md)
+for current contracts, verification, compatibility limits and remaining gaps.
+
 ## Delivered daemon integration
 
 `backend/dune` and package declarations include **`yojson`**. The daemon owns the

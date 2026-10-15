@@ -522,7 +522,9 @@ let terminal_result
      && Poly.equal (field "attempt_id" actual_execution) (`String implementation_id))
     "Finalization execution path/hash/identity mismatch";
   require
-    (Poly.equal (canonical_json (field "execution" report)) (canonical_json actual_execution))
+    (Poly.equal
+       (canonical_json (field "execution" report))
+       (canonical_json actual_execution))
     "Stage report execution differs from hashed finalization execution";
   let operation_status = text (field "status" receipt) in
   require

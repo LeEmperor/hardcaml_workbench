@@ -606,19 +606,30 @@ let terminal_fixtures () =
     require (Result.is_error (Or_error.try_with f)) "Invalid terminal evidence accepted"
   in
   let rec reorder_objects = function
-    | `Assoc fields -> `Assoc (List.rev_map fields ~f:(fun (key, value) -> key, reorder_objects value))
+    | `Assoc fields ->
+      `Assoc (List.rev_map fields ~f:(fun (key, value) -> key, reorder_objects value))
     | `List values -> `List (List.map values ~f:reorder_objects)
     | scalar -> scalar
   in
-  ignore (project ~report:(replace "execution" (reorder_objects execution) report) receipt : Asic.Terminal_result.t);
-  rejected (fun () -> project
-    ~report:(replace "execution" (replace "status" (`String "failed") execution) report) receipt);
+  ignore
+    (project ~report:(replace "execution" (reorder_objects execution) report) receipt
+     : Asic.Terminal_result.t);
+  rejected (fun () ->
+    project
+      ~report:(replace "execution" (replace "status" (`String "failed") execution) report)
+      receipt);
   let changed_occurrences =
     Public.list (Public.field "occurrences" execution)
     |> List.map ~f:(fun occurrence -> replace "status" (`String "failed") occurrence)
   in
-  rejected (fun () -> project
-    ~report:(replace "execution" (replace "occurrences" (`List changed_occurrences) execution) report) receipt);
+  rejected (fun () ->
+    project
+      ~report:
+        (replace
+           "execution"
+           (replace "occurrences" (`List changed_occurrences) execution)
+           report)
+      receipt);
   rejected (fun () -> project ~results_bytes:(results_bytes ^ " ") receipt);
   rejected (fun () -> project ~execution_bytes:(execution_bytes ^ " ") receipt);
   rejected (fun () ->
@@ -741,38 +752,384 @@ let terminal_fixtures () =
 ;;
 
 let evidence_file_fixtures () =
-  let%bind directory = In_thread.run (fun () -> Filename_unix.temp_dir "asic-evidence-" "") in
+  let%bind directory =
+    In_thread.run (fun () -> Filename_unix.temp_dir "asic-evidence-" "")
+  in
   let regular = Filename.concat directory "regular" in
   let fifo = Filename.concat directory "fifo" in
   Monitor.protect
-    ~finally:(fun () -> In_thread.run (fun () ->
-      List.iter [ regular; fifo ] ~f:(fun path ->
-        if Poly.equal (Sys_unix.file_exists path) `Yes then Core_unix.unlink path);
-      Core_unix.rmdir directory))
+    ~finally:(fun () ->
+      In_thread.run (fun () ->
+        List.iter [ regular; fifo ] ~f:(fun path ->
+          if Poly.equal (Sys_unix.file_exists path) `Yes then Core_unix.unlink path);
+        Core_unix.rmdir directory))
     (fun () ->
-      let%bind () = In_thread.run (fun () ->
-        Out_channel.write_all regular ~data:"abc\000";
-        require (String.equal (Evidence_file.read_bounded regular 4) "abc\000")
-          "Regular evidence bytes changed";
-        require (Result.is_error (Or_error.try_with (fun () -> Evidence_file.read_bounded regular 3)))
-          "Oversized regular evidence accepted";
-        Core_unix.mkfifo fifo ~perm:0o600) in
-      let read = In_thread.run (fun () -> Or_error.try_with (fun () -> Evidence_file.read_bounded fifo 16)) in
+      let%bind () =
+        In_thread.run (fun () ->
+          Out_channel.write_all regular ~data:"abc\000";
+          require
+            (String.equal (Evidence_file.read_bounded regular 4) "abc\000")
+            "Regular evidence bytes changed";
+          require
+            (Result.is_error
+               (Or_error.try_with (fun () -> Evidence_file.read_bounded regular 3)))
+            "Oversized regular evidence accepted";
+          Core_unix.mkfifo fifo ~perm:0o600)
+      in
+      let read =
+        In_thread.run (fun () ->
+          Or_error.try_with (fun () -> Evidence_file.read_bounded fifo 16))
+      in
       match%bind Clock.with_timeout (Time_float.Span.of_sec 2.) read with
       | `Result result ->
         require
           (match result with
-           | Error error -> String.is_substring (Error.to_string_hum error) ~substring:"not a regular file"
+           | Error error ->
+             String.is_substring
+               (Error.to_string_hum error)
+               ~substring:"not a regular file"
            | Ok _ -> false)
           "Writerless FIFO was not rejected as nonregular";
         Deferred.unit
       | `Timeout ->
-        (* Release a regressed blocking open before failing the fixture, so the test
-           does not leave an owned worker waiting forever for a FIFO peer. *)
-        let%bind () = In_thread.run (fun () ->
-          let peer = Core_unix.openfile fifo ~mode:[ O_RDWR; O_NONBLOCK; O_CLOEXEC ] in
-          Core_unix.close peer) in
+        (* Release a regressed blocking open before failing the fixture, so the test does
+           not leave an owned worker waiting forever for a FIFO peer. *)
+        let%bind () =
+          In_thread.run (fun () ->
+            let peer = Core_unix.openfile fifo ~mode:[ O_RDWR; O_NONBLOCK; O_CLOEXEC ] in
+            Core_unix.close peer)
+        in
         failwith "Evidence FIFO open blocked waiting for a writer")
+;;
+
+let finalization_lifecycle ~root ~state_dir ~reference =
+  let directory = state_dir ^ "-finalize" in
+  let services = ref [] in
+  let create () =
+    let service = Service.create ~state_dir:directory in
+    services := service :: !services;
+    service
+  in
+  let flag name enabled =
+    In_thread.run (fun () ->
+      let path = Filename.concat root name in
+      if enabled then Out_channel.write_all path ~data:"" else Core_unix.unlink path)
+  in
+  let launches () =
+    In_thread.run (fun () ->
+      In_channel.read_lines (Filename.concat root "calls")
+      |> List.count ~f:(fun line -> String.is_prefix line ~prefix:"[\"finalize\""))
+  in
+  let value (snapshot : Asic.Snapshot.t) key =
+    List.find_exn snapshot.finalizations ~f:(fun f ->
+      String.equal f.Asic.Finalization.key key)
+  in
+  let pending (snapshot : Asic.Snapshot.t) key =
+    List.find_exn snapshot.operations ~f:(fun p -> String.equal p.Asic.Pending.key key)
+  in
+  let rec wait service key predicate remaining =
+    require (remaining > 0) ("Finalization state not delivered: " ^ key);
+    let%bind snapshot = handle service root Get in
+    if predicate (value snapshot key)
+    then return snapshot
+    else (
+      let%bind () = Clock.after (Time_float.Span.of_sec 0.02) in
+      wait service key predicate (remaining - 1))
+  in
+  Monitor.protect
+    ~finally:(fun () -> Deferred.List.iter !services ~how:`Sequential ~f:Service.shutdown)
+    (fun () ->
+      let service = create () in
+      let%bind registered = handle service root (Register reference) in
+      let run = (List.hd_exn registered.runs).run in
+      let%bind loaded = settled service root (Load_summary run) in
+      let execution_file = (summary loaded run.id).execution_file in
+      let finalize key acceptance =
+        Asic.Operation.Finalize { key; run; execution_file; acceptance }
+      in
+      let%bind before = launches () in
+      let%bind wrong_path =
+        settled
+          service
+          root
+          (Finalize
+             { key = "wrong-execution"
+             ; run
+             ; execution_file = execution_file ^ ".other"
+             ; acceptance = None
+             })
+      in
+      require
+        (String.equal (pending wrong_path "finalize:wrong-execution").state "failed")
+        "Mismatched selected execution was not a pending-operation failure";
+      let%bind () = flag "finalize-resumed" true in
+      let%bind resumed = settled service root (finalize "resumed" None) in
+      require
+        (String.equal (value resumed "resumed").state "failed"
+         && Option.is_none (value resumed "resumed").attempt)
+        "A resumed physical execution was eligible for finalization";
+      let%bind () = flag "finalize-resumed" false in
+      let%bind rejected_launches = launches () in
+      require (before = rejected_launches) "Ineligible finalization launched a producer";
+      let%bind () = flag "finalize-late" true in
+      let%bind requests =
+        Deferred.all
+          [ handle service root (finalize "collection" None)
+          ; handle service root (finalize "collection" None)
+          ]
+      in
+      List.iter requests ~f:(fun snapshot ->
+        require
+          (Option.is_none (value snapshot "collection").attempt)
+          "Late allocation fixture was not pending");
+      let%bind collected = settled service root Get in
+      let collection = value collected "collection" in
+      require
+        (String.equal collection.state "completed"
+         && (not collection.owned)
+         && Option.is_some collection.attempt)
+        "Collection lifecycle did not complete";
+      require
+        (String.equal
+           (Option.value_exn (summary collected run.id).terminal).attempt
+           (Option.value_exn collection.attempt))
+        "Collection did not auto-adopt matching terminal result";
+      let%bind after = launches () in
+      require (after = before + 1) "Concurrent/late retry duplicated finalization";
+      let%bind () = flag "finalize-late" false in
+      let%bind catalog = settled service root (List_artifacts run) in
+      require
+        (List.length catalog.artifacts = 1)
+        "Adopted terminal artifact catalog missing";
+      let artifact = List.hd_exn catalog.artifacts in
+      let%bind paged =
+        settled
+          service
+          root
+          (Read_artifact { run; artifact_id = artifact.id; offset = 0; limit = 32 })
+      in
+      let page = List.hd_exn paged.artifact_pages in
+      require
+        (String.equal page.artifact_id artifact.id
+         && Option.is_none page.error
+         && (not (String.is_empty page.text))
+         && page.next_offset <= 32)
+        "Server-authorized artifact page missing";
+      (* Distinct clients issue reads before either request is settled. Both offset and
+         limit belong to the scheduling/page identity, including equal-offset reads. *)
+      let read offset limit =
+        Asic.Operation.Read_artifact { run; artifact_id = artifact.id; offset; limit }
+      in
+      let%bind (_ : Asic.Snapshot.t * Asic.Snapshot.t) =
+        Deferred.both (handle service root (read 16 24)) (handle service root (read 0 16))
+      in
+      let%bind concurrent = settled service root Get in
+      let%bind artifact_bytes =
+        In_thread.run (fun () -> In_channel.read_all artifact.path)
+      in
+      List.iter
+        [ 0, 32; 16, 24; 0, 16 ]
+        ~f:(fun (offset, limit) ->
+          let key = Asic_artifact.read_key ~run ~artifact_id:artifact.id ~offset ~limit in
+          require
+            (String.equal (pending concurrent key).state "completed")
+            "Concurrent artifact read was discarded/coalesced with another page";
+          let page =
+            List.find_exn concurrent.artifact_pages ~f:(fun page ->
+              Run_ref.equal page.run run
+              && String.equal page.artifact_id artifact.id
+              && String.equal page.terminal_attempt artifact.terminal_attempt
+              && String.equal page.sha256 artifact.sha256
+              && page.offset = offset
+              && page.limit = limit)
+          in
+          require
+            (Option.is_none page.error
+             && String.equal page.text (String.sub artifact_bytes ~pos:offset ~len:limit)
+            )
+            "Concurrent artifact read delivered the wrong requested bytes");
+      let%bind repeated = settled service root (read 0 16) in
+      require
+        (List.length repeated.artifact_pages = 3)
+        "Repeated artifact read duplicated a complete page identity";
+      let%bind () =
+        Deferred.List.iter (List.init 10 ~f:Fn.id) ~how:`Sequential ~f:(fun offset ->
+          let%map bounded = settled service root (read offset 8) in
+          require
+            (List.length bounded.artifact_pages <= 8)
+            "Artifact page cache exceeded cap")
+      in
+      let%bind bounded = handle service root Get in
+      require
+        (List.length bounded.artifact_pages = 8)
+        "Artifact page cache did not retain its bounded working set";
+      let acceptance : Asic.Acceptance.t =
+        { support_tools = root
+        ; precheck_python = Filename.concat root "python"
+        ; testbench = Filename.concat root "replay.v"
+        ; testbench_top = "replay"
+        ; replay_trace = Filename.concat root "trace"
+        }
+      in
+      let%bind conflict =
+        Service.handle
+          service
+          ~root
+          ~environment
+          (finalize "collection" (Some acceptance))
+      in
+      require (Result.is_error conflict) "Conflicting finalization inputs accepted";
+      let%bind failed = settled service root (finalize "acceptance" (Some acceptance)) in
+      let failed_value = value failed "acceptance" in
+      require
+        (String.equal failed_value.state "failed"
+         && Option.equal String.equal failed_value.acceptance (Some "fail")
+         && Option.is_some failed_value.error
+         && String.equal (pending failed "finalize:acceptance").state "failed")
+        "Nonzero provider exit lost independent failed acceptance/process outcome";
+      let terminal = Option.value_exn (summary failed run.id).terminal in
+      require
+        (String.equal terminal.acceptance "fail"
+         && String.equal terminal.attempt (Option.value_exn failed_value.attempt))
+        "Nonzero acceptance results were not auto-imported";
+      require
+        (List.is_empty failed.artifacts && List.is_empty failed.artifact_pages)
+        "Terminal adoption retained a stale artifact catalog/page";
+      let%bind stale =
+        settled
+          service
+          root
+          (Read_artifact { run; artifact_id = artifact.id; offset = 0; limit = 32 })
+      in
+      require
+        (List.exists stale.operations ~f:(fun p ->
+           String.equal p.Asic.Pending.kind "artifact-read"
+           && String.equal p.state "failed"))
+        "Stale artifact ID was accepted after terminal adoption";
+      let%bind () = flag "finalize-no-allocation" true in
+      let%bind no_allocation =
+        settled service root (finalize "allocation-failure" None)
+      in
+      require
+        (String.equal (value no_allocation "allocation-failure").state "failed"
+         && Option.is_none (value no_allocation "allocation-failure").attempt)
+        "Allocation failure outcome missing";
+      let%bind () = flag "finalize-no-allocation" false in
+      let%bind () = Service.shutdown service in
+      let restarted = create () in
+      let%bind count = launches () in
+      let%bind retry = settled restarted root (finalize "allocation-failure" None) in
+      require (not (value retry "acceptance").owned) "Restart retained process ownership";
+      let%bind (_ : Asic.Snapshot.t) =
+        settled restarted root (finalize "collection" None)
+      in
+      let%bind () = flag "finalize-inspect-fail" true in
+      let%bind unavailable_collection =
+        settled restarted root (Observe_finalization "collection")
+      in
+      require
+        (Option.is_some (value unavailable_collection "collection").error
+         && String.equal
+              (pending unavailable_collection "finalize-observe:collection").state
+              "failed")
+        "Transient observation failure was not surfaced";
+      let%bind unavailable_acceptance =
+        settled restarted root (Observe_finalization "acceptance")
+      in
+      require
+        (String.is_substring
+           (Option.value_exn (value unavailable_acceptance "acceptance").error)
+           ~substring:"fixture finalization inspection unavailable")
+        "Observation failure did not retain its own diagnostic beside producer failure";
+      let%bind () = Service.shutdown restarted in
+      let restarted = create () in
+      let%bind () = flag "finalize-inspect-fail" false in
+      let%bind recovered_collection =
+        settled restarted root (Observe_finalization "collection")
+      in
+      require
+        (String.equal (value recovered_collection "collection").state "completed"
+         && Option.is_none (value recovered_collection "collection").error
+         && String.equal
+              (pending recovered_collection "finalize-observe:collection").state
+              "completed"
+         && String.equal
+              (Option.value_exn (summary recovered_collection run.id).terminal).attempt
+              (Option.value_exn collection.attempt))
+        "Validated reconnect/import retained a transient observation error after restart";
+      let%bind observed = settled restarted root (Observe_finalization "acceptance") in
+      require
+        (String.equal (value observed "acceptance").state "failed"
+         && (not (value observed "acceptance").owned)
+         && Option.equal
+              String.equal
+              (value observed "acceptance").error
+              failed_value.error
+         && String.equal
+              (pending observed "finalize-observe:acceptance").state
+              "completed")
+        "Read-only observation failed to recover exact failed receipt";
+      let%bind missing =
+        settled restarted root (Observe_finalization "allocation-failure")
+      in
+      require
+        (String.equal
+           (pending missing "finalize-observe:allocation-failure").state
+           "failed")
+        "Missing-reference observation failure was not propagated";
+      let%bind unchanged = launches () in
+      require (count = unchanged) "Restart/retry/observation relaunched finalization";
+      let%bind () = flag "finalize-hold" true in
+      let%bind (_ : Asic.Snapshot.t) = handle restarted root (finalize "cancel" None) in
+      let%bind early =
+        wait
+          restarted
+          "cancel"
+          (fun f -> Option.is_some f.attempt && Option.is_some f.phase && f.owned)
+          200
+      in
+      let attempt = Option.value_exn (value early "cancel").attempt in
+      (* A second daemon object models restart: only the persisted reference survives. It
+         must not signal the original service's still-owned producer. *)
+      let detached = create () in
+      let%bind detached_state = handle detached root Get in
+      require
+        ((not (value detached_state "cancel").owned)
+         && String.equal (value detached_state "cancel").state "unknown")
+        "Restart invented ownership or completion";
+      let%bind historical_cancel =
+        Service.handle detached ~root ~environment (Cancel "finalize:cancel")
+      in
+      require (Result.is_error historical_cancel) "Historical task was cancellable";
+      let%bind (_ : Asic.Snapshot.t) =
+        handle restarted root (finalize "queued-cancel" None)
+      in
+      let%bind (_ : Asic.Snapshot.t) =
+        handle restarted root (Cancel "finalize:queued-cancel")
+      in
+      let%bind (_ : Asic.Snapshot.t) = handle restarted root (Cancel "finalize:cancel") in
+      let%bind cancelled = settled restarted root Get in
+      require
+        (String.equal (value cancelled "cancel").state "interrupted"
+         && (not (value cancelled "cancel").owned)
+         && String.equal (value cancelled "queued-cancel").state "interrupted"
+         && String.equal (pending cancelled "finalize:cancel").state "failed")
+        "Owned/queued cancellation outcome missing";
+      let%bind () =
+        In_thread.run (fun () ->
+          require
+            (Poly.equal
+               (Sys_unix.file_exists (Filename.concat attempt "terminated"))
+               `Yes)
+            "Owned finalize process was not terminated")
+      in
+      let%bind recovered = settled detached root (Observe_finalization "cancel") in
+      require
+        (String.equal (value recovered "cancel").state "interrupted"
+         && not (value recovered "cancel").owned)
+        "Detached read-only observation did not reconcile interruption";
+      let%bind () = flag "finalize-hold" false in
+      Deferred.unit)
 ;;
 
 let main () =
@@ -1043,6 +1400,13 @@ let main () =
       in
       let%bind physical = settled v2 root (Load_summary physical_run) in
       let physical = summary physical physical_run.id in
+      let%bind () =
+        finalization_lifecycle
+          ~root
+          ~state_dir
+          ~reference:
+            { Asic.Reference.attempt = physical_attempt; stream_id = "stream-terminal" }
+      in
       require
         (Option.equal Int.equal physical.cell_count (Some 74)
          && Poly.equal

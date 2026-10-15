@@ -54,5 +54,8 @@ let snapshot : Asic.Snapshot.t =
       ; summary run_b 73 [ "NAND2", 50; "DFF", 23 ]
       ]
   ; cache_error = None
+  ; finalizations = []
+  ; artifacts = []
+  ; artifact_pages = []
   }
 ;;

@@ -3,15 +3,26 @@
 Status (2026-10-15): RTL/artifact/provenance, elaborated hierarchy and **FS0 synthesis
 cell count/breakdown with evidence context delivered**. [Acceptance](../fs0_acceptance.md)
 records real 673/685 counts, completed execution and `not_evaluated` acceptance.
-Timing is unsupported (`[]`), not zero slack. Requirements below remain normative;
-rich timing/check/physical/clock views (FS1) are not implemented.
+The original synthesis-only stage summary has no timing (`[]`), not zero slack.
+Later FS1 terminal-result import supplies aggregate timing with full provenance;
+requirements below remain normative where not covered by the delivered slices.
 
 **FS1/F06 synthesis inspection slice delivered:** sortable/filterable cell table,
 stable row selection, count/share detail and full evidence inspection over existing
 cached summaries. Normal views use concise provenance; full producer records/paths
 are inspectable. Actual PTY cached-run isolation and switching tests passed; see
-[controls and acceptance](../synthesis_inspection.md). This does not add timing,
-area/latch diagnosis or new provider extraction.
+[controls and acceptance](../synthesis_inspection.md).
+
+**Subsequent FS1 slices delivered:** synthesis area/lint/latch/check counters,
+explicit read-only finalization-reference import, signed aggregate setup/hold,
+final area/utilization, reported DRC/LVS/antenna verdicts, verified declared-clock
+configuration and full evidence drilldown. Real physical completion, separate
+acceptance pass/fail imports, cache reopening and active-container cancellation
+are verified in [FS1 acceptance](../fs1_acceptance.md). The followup
+[finalization lifecycle and artifact browser](../fs1_lifecycle_and_artifacts.md)
+adds daemon-owned collection/acceptance, bounded report paging and explicit
+external text opening on the terminal host. Rich paths, measured CTS,
+stage-specific placement/routing/congestion and binary/graphical viewers remain open.
 
 ## Feature slices
 

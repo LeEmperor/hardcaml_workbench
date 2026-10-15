@@ -12,6 +12,8 @@ type local =
   ; headers : bool
   ; synthesis : Synthesis_view.State.t
   ; terminal_result : Terminal_result_view.State.t
+  ; artifacts : Artifact_view.t option
+  ; artifact_generation : int
   }
 
 type layout_mode =
@@ -33,6 +35,9 @@ type action =
   | Asic of Asic.Operation.t
   | Edit_plan of string * string
   | Edit_finalization of Run_ref.t
+  | Edit_acceptance of Run_ref.t * string
+  | Finalize_collect of Run_ref.t * string
+  | Browse_artifacts of Run_ref.t
   | Launch_asic of Asic.Preview.t * bool
   | Apply_default_layout
   | Local_headers
@@ -63,6 +68,7 @@ type capture =
 type argument =
   | Plan_endpoint of string * string
   | Finalization_attempt of Run_ref.t
+  | Acceptance of Run_ref.t * string * string
 
 type palette =
   { capture : capture
@@ -113,6 +119,8 @@ let default_local =
   ; headers = true
   ; synthesis = Synthesis_view.State.empty
   ; terminal_result = Terminal_result_view.State.empty
+  ; artifacts = None
+  ; artifact_generation = 0
   }
 ;;
 
@@ -612,6 +620,7 @@ let matches p =
 
 type input =
   | Character of char
+  | Text of string
   | Enter
   | Escape
   | Backspace
@@ -666,6 +675,7 @@ let decode_event (event : Bonsai_term.Event.t) : input option =
      | ASCII ch -> Some (Character ch)
      | Uchar u when Uchar.to_scalar u < 128 ->
        Some (Character (Char.of_int_exn (Uchar.to_scalar u)))
+     | Uchar u -> Some (Text (Uchar.Utf8.to_string u))
      | Enter -> Some Enter
      | Escape -> Some Escape
      | Backspace -> Some Backspace
@@ -676,11 +686,102 @@ let decode_event (event : Bonsai_term.Event.t) : input option =
   | _ -> None
 ;;
 
+let finalization_form t =
+  Option.exists t.palette ~f:(fun p ->
+    match p.argument with
+    | Some (Finalization_attempt _ | Acceptance _) -> true
+    | _ -> false)
+;;
+
+let printable_utf8 text =
+  let rec loop offset =
+    if offset >= String.length text
+    then true
+    else (
+      let decoded = Stdlib.String.get_utf_8_uchar text offset in
+      let scalar = Stdlib.Uchar.to_int (Stdlib.Uchar.utf_decode_uchar decoded) in
+      Stdlib.Uchar.utf_decode_is_valid decoded
+      && scalar >= 32
+      && (not (scalar >= 127 && scalar < 160))
+      && scalar <> 0x2028
+      && scalar <> 0x2029
+      && loop (offset + Stdlib.Uchar.utf_decode_length decoded))
+  in
+  loop 0
+;;
+
+let reject_reference_text t =
+  ( { t with
+      notice = "Finalization reference rejects newline/control or invalid UTF-8 text"
+    }
+  , No_effect )
+;;
+
+let append_reference t text =
+  if not (printable_utf8 text)
+  then reject_reference_text t
+  else (
+    match t.palette with
+    | None -> t, No_effect
+    | Some p ->
+      let remaining = Int.max 0 (4096 - String.length p.query) in
+      let rec prefix offset =
+        if offset >= String.length text
+        then offset
+        else (
+          let length =
+            Stdlib.Uchar.utf_decode_length (Stdlib.String.get_utf_8_uchar text offset)
+          in
+          if offset + length > remaining then offset else prefix (offset + length))
+      in
+      let length = prefix 0 in
+      let query = p.query ^ String.prefix text length in
+      ( { t with
+          palette = Some { p with query; index = 0 }
+        ; notice =
+            (if length < String.length text
+             then
+               "Finalization reference limited to 4096 bytes; excess text rejected at \
+                UTF-8 boundary"
+             else t.notice)
+        }
+      , No_effect ))
+;;
+
+let drop_last_codepoint text =
+  let rec loop offset previous =
+    if offset >= String.length text
+    then String.prefix text previous
+    else (
+      let length =
+        Stdlib.Uchar.utf_decode_length (Stdlib.String.get_utf_8_uchar text offset)
+      in
+      loop (offset + length) offset)
+  in
+  loop 0 0
+;;
+
 let input t event ~commands : t * effect =
   match event with
   | Paste_start -> { t with paste = true; prefix = 0 }, No_effect
   | Paste_end -> { t with paste = false }, No_effect
-  | _ when t.paste -> t, No_effect
+  | _ when t.paste ->
+    if not (finalization_form t)
+    then t, No_effect
+    else (
+      match event with
+      | Character ch -> append_reference t (String.of_char ch)
+      | Text text -> append_reference t text
+      | _ -> reject_reference_text t)
+  | Character ch when finalization_form t -> append_reference t (String.of_char ch)
+  | Text text when finalization_form t -> append_reference t text
+  | Backspace when finalization_form t ->
+    ( { t with
+        palette =
+          Option.map t.palette ~f:(fun p ->
+            { p with query = drop_last_codepoint p.query; index = 0 })
+      }
+    , No_effect )
   | _ when t.editing_filter ->
     (match event, t.focus with
      | (Escape | Enter), _ -> { t with editing_filter = false }, No_effect
@@ -705,7 +806,8 @@ let input t event ~commands : t * effect =
         | Escape -> { t with palette = None; prefix = 0 }, No_effect
         | Character _
           when match p.argument with
-               | Some (Finalization_attempt _) -> String.length p.query >= 4096
+               | Some (Finalization_attempt _ | Acceptance _) ->
+                 String.length p.query >= 4096
                | None | Some (Plan_endpoint _) -> false ->
           { t with notice = "Finalization reference is limited to 4096 bytes" }, No_effect
         | Character ch ->
@@ -734,6 +836,8 @@ let input t event ~commands : t * effect =
           then
             ( { t with palette = None; notice = "Command target changed; reopen palette" }
             , No_effect )
+          else if finalization_form t && not (printable_utf8 p.query)
+          then reject_reference_text t
           else if String.is_empty (String.strip p.query)
           then
             ( { t with
@@ -741,26 +845,37 @@ let input t event ~commands : t * effect =
               }
             , No_effect )
           else if match p.argument with
-                  | Some (Finalization_attempt _) -> String.length p.query > 4096
+                  | Some (Finalization_attempt _ | Acceptance _) ->
+                    String.length p.query > 4096
                   | None | Some (Plan_endpoint _) -> false
           then
             ( { t with notice = "Finalization reference is limited to 4096 bytes" }
             , No_effect )
           else (
             let operation =
-              match Option.value_exn p.argument with
-              | Finalization_attempt run ->
-                Asic.Operation.Inspect_finalization { run; attempt = p.query }
-              | Plan_endpoint (flow, profile) ->
-                let args =
-                  String.split (String.strip p.query) ~on:' '
-                  |> List.filter ~f:(Fn.non String.is_empty)
-                in
-                let endpoint = List.hd_exn args
-                and assignments = List.tl_exn args in
-                Asic.Operation.Plan { flow; profile; endpoint; assignments }
+              Or_error.try_with (fun () ->
+                match Option.value_exn p.argument with
+                | Finalization_attempt run ->
+                  Asic.Operation.Inspect_finalization { run; attempt = p.query }
+                | Acceptance (run, execution_file, key) ->
+                  let acceptance = Asic.Acceptance.t_of_sexp (Sexp.of_string p.query) in
+                  Asic.Operation.Finalize
+                    { key; run; execution_file; acceptance = Some acceptance }
+                | Plan_endpoint (flow, profile) ->
+                  let args =
+                    String.split (String.strip p.query) ~on:' '
+                    |> List.filter ~f:(Fn.non String.is_empty)
+                  in
+                  let endpoint = List.hd_exn args
+                  and assignments = List.tl_exn args in
+                  Asic.Operation.Plan { flow; profile; endpoint; assignments })
             in
-            { t with palette = None }, Execute (p.capture, Asic operation))
+            match operation with
+            | Ok operation ->
+              { t with palette = None }, Execute (p.capture, Asic operation)
+            | Error error ->
+              ( { t with notice = "Invalid typed input: " ^ Error.to_string_hum error }
+              , No_effect ))
         | Enter ->
           (match List.nth (matches p) p.index with
            | None -> t, No_effect
@@ -883,6 +998,191 @@ let%test_unit "finalization form dispatches only an explicit exact attempt and c
    | _ -> assert false);
   let escaped, effect = input (form "returned-operation-attempt") Escape ~commands:[] in
   assert (Option.is_none escaped.palette);
+  match effect with
+  | No_effect -> ()
+  | _ -> assert false
+;;
+
+let%test_unit "acceptance form is typed bounded collateral captured with run and \
+               execution"
+  =
+  let snapshot = W.initial ~session_id:(W.Session_id.of_string "acceptance-form") in
+  let host = receive empty snapshot in
+  let capture = Option.value_exn (capture host) in
+  let run = Fs0_fixture.run_a in
+  let execution_file = "/daemon/captured execution.json" in
+  let acceptance : Asic.Acceptance.t =
+    { support_tools = "/tools/界"
+    ; precheck_python = "/python"
+    ; testbench = "/explicit/tb with spaces.sv"
+    ; testbench_top = "tb"
+    ; replay_trace = "/explicit/trace"
+    }
+  in
+  let query = Sexp.to_string_mach (Asic.Acceptance.sexp_of_t acceptance) in
+  let form query =
+    { host with
+      palette =
+        Some
+          { capture
+          ; commands = []
+          ; query
+          ; index = 0
+          ; argument = Some (Acceptance (run, execution_file, "captured-key"))
+          }
+    }
+  in
+  let step t event = fst (input t event ~commands:[]) in
+  let pasted = List.fold [ Paste_start; Text query; Paste_end ] ~init:(form "") ~f:step in
+  assert (String.equal (Option.value_exn pasted.palette).query query);
+  (match snd (input pasted Enter ~commands:[]) with
+   | Execute
+       ( _
+       , Asic
+           (Finalize
+             { key
+             ; run = actual
+             ; execution_file = actual_file
+             ; acceptance = Some actual_acceptance
+             }) ) ->
+     assert (String.equal key "captured-key" && Run_ref.equal run actual);
+     assert (String.equal execution_file actual_file);
+     assert (Asic.Acceptance.equal acceptance actual_acceptance)
+   | _ -> assert false);
+  List.iter
+    [ ""; "((testbench /tb))"; String.make 4097 'x' ]
+    ~f:(fun bad ->
+      let after, effect = input (form bad) Enter ~commands:[] in
+      assert (Option.is_some after.palette);
+      match effect with
+      | No_effect -> ()
+      | _ -> assert false);
+  let stale =
+    { pasted with registry = Some { snapshot with revision = snapshot.revision + 1 } }
+  in
+  (match snd (input stale Enter ~commands:[]) with
+   | No_effect -> ()
+   | _ -> assert false);
+  let first = List.hd_exn snapshot.tiles in
+  let second = List.nth_exn snapshot.tiles 1 in
+  let host =
+    set_local
+      host
+      first.id
+      { default_local with artifacts = Some (Artifact_view.create run) }
+  in
+  assert (Option.is_some (local host first.id).artifacts);
+  assert (Option.is_none (local host second.id).artifacts)
+;;
+
+let%test_unit "finalization paths accept UTF-8 and bracketed paste without command \
+               effects"
+  =
+  let snapshot = W.initial ~session_id:(W.Session_id.of_string "utf8-finalization") in
+  let host = receive empty snapshot in
+  let capture = Option.value_exn (capture host) in
+  let form =
+    { host with
+      palette =
+        Some
+          { capture
+          ; commands = []
+          ; query = ""
+          ; index = 0
+          ; argument = Some (Finalization_attempt Fs0_fixture.run_a)
+          }
+    }
+  in
+  let commands = [ command "danger" "Build" "" Build ] in
+  let step host event =
+    let host, effect = input host event ~commands in
+    (match effect with
+     | No_effect -> ()
+     | _ -> assert false);
+    host
+  in
+  let query host = (Option.value_exn host.palette).query in
+  let unicode =
+    decode_event (Key_press { key = Uchar (Uchar.of_scalar_exn 0x754c); mods = [] })
+    |> Option.value_exn
+  in
+  let typed = step (step form (Text "/tmp/")) unicode in
+  assert (String.equal (query typed) "/tmp/界");
+  let erased = step typed Backspace in
+  assert (String.equal (query erased) "/tmp/");
+  let typed = step (step erased unicode) (Text "/résultat.json") in
+  let _, effect = input typed Enter ~commands in
+  (match effect with
+   | Execute (_, Asic (Inspect_finalization { attempt; _ })) ->
+     assert (String.equal attempt "/tmp/界/résultat.json")
+   | _ -> assert false);
+  let pasted =
+    List.fold
+      [ Paste_start; Text "/tmp/界/"; Character 'b'; Text " c c/résultat.json" ]
+      ~init:form
+      ~f:step
+  in
+  assert pasted.paste;
+  assert (Option.is_some pasted.palette);
+  assert (is_interrupt (Key_press { key = ASCII 'c'; mods = [ Ctrl ] }));
+  let rejected = step pasted Enter in
+  assert (String.equal (query rejected) (query pasted));
+  assert (String.is_substring rejected.notice ~substring:"newline/control");
+  let pasted = step rejected Paste_end in
+  assert (not pasted.paste);
+  let _, effect = input pasted Enter ~commands in
+  (match effect with
+   | Execute (_, Asic (Inspect_finalization { attempt; _ })) ->
+     assert (String.equal attempt "/tmp/界/b c c/résultat.json")
+   | _ -> assert false);
+  let ignored =
+    List.fold
+      [ Paste_start; Text "/tmp/界/"; Character 'b'; Enter; Paste_end ]
+      ~init:host
+      ~f:step
+  in
+  assert (Option.is_none ignored.palette);
+  assert (ignored.prefix = 0)
+;;
+
+let%test_unit "finalization text rejects controls and truncates only at UTF-8 boundaries" =
+  let host =
+    receive empty (W.initial ~session_id:(W.Session_id.of_string "bounded-unicode"))
+  in
+  let capture = Option.value_exn (capture host) in
+  let form query =
+    { host with
+      palette =
+        Some
+          { capture
+          ; commands = []
+          ; query
+          ; index = 0
+          ; argument = Some (Finalization_attempt Fs0_fixture.run_a)
+          }
+    }
+  in
+  let query host = (Option.value_exn host.palette).query in
+  List.iter
+    [ "bad\npath"; "bad\rpath"; "bad\tpath"; "bad\000path"; "\255" ]
+    ~f:(fun text ->
+      let after, effect = input (form "/safe/") (Text text) ~commands:[] in
+      assert (String.equal (query after) "/safe/");
+      assert (String.is_substring after.notice ~substring:"newline/control");
+      match effect with
+      | No_effect -> ()
+      | _ -> assert false);
+  let after, _ = input (form (String.make 4094 'x')) (Text "界") ~commands:[] in
+  assert (String.length (query after) = 4094);
+  assert (printable_utf8 (query after));
+  let after, _ = input (form (String.make 4093 'x')) (Text "界é") ~commands:[] in
+  assert (String.length (query after) = 4096);
+  assert (String.is_suffix (query after) ~suffix:"界");
+  assert (printable_utf8 (query after));
+  assert (String.is_substring after.notice ~substring:"UTF-8 boundary");
+  let erased, _ = input after Backspace ~commands:[] in
+  assert (String.length (query erased) = 4093);
+  let _, effect = input (form "/bad\npath") Enter ~commands:[] in
   match effect with
   | No_effect -> ()
   | _ -> assert false
@@ -1064,6 +1364,9 @@ let%test_unit "actual catalog and palette can cancel an allocated owned launch b
         ]
     ; summaries = []
     ; cache_error = None
+    ; finalizations = []
+    ; artifacts = []
+    ; artifact_pages = []
     }
   in
   let commands = asic_cancel_commands snapshot in

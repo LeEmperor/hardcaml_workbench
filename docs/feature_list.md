@@ -16,10 +16,10 @@ land in FS0 without requiring all visual variants before functional demos.
 | --- | --- | --- | --- |
 | [F01 Integration](features/integration.md) | Open generic or hardware-aware projects with only the capabilities they supply | Dune/driver plus configured public ASIC adapter delivered; real synthesis passed | Exact installed candidate, discover/describe/plan/run/observe/report |
 | [F02 Modules and tiles](features/modules_and_tiles.md) | Change presentation without rebuilding domain logic; share data across views | Execution boundary, daemon ASIC service and tile host delivered | Shared execution/log/test/synthesis views; reactive publication refinement remains |
-| [F03 Commands and flows](features/commands_and_flows.md) | Palette/buttons/keys select and launch project-owned flows | Palette, captured/revalidated commands, remembered Plan inputs and named synthesis delivered | Exact-preview launch and guarded launch-and-view; basic endpoint form |
+| [F03 Commands and flows](features/commands_and_flows.md) | Palette/buttons/keys select and launch project-owned flows | Palette, captured/revalidated commands, remembered Plan inputs, named flow launch and finalization/acceptance lifecycle delivered | Exact-preview launch; explicit finalization collateral, durable keys, phase/reconnect/cancel |
 | [F04 Workspaces and layouts](features/workspaces_and_layouts.md) | Switch Overview/Timing/Resources arrangements; save and restore them | Named autosaved workspaces and tile operations delivered; shelf geometry | Main-linked Overview/Timing, independent/relink; template export/clone absent |
 | [F05 Runs and evidence](features/runs_and_evidence.md) | Switch run context, pin references, reopen results and compare evidence | Registered exact references, follow/pin-run, L2 reopening delivered | Real 673/685 switch and pinned/following comparison; broad store discovery absent |
-| [F06 Hardware inspection](features/hardware_inspection.md) | Inspect synthesis, hierarchy, timing, physical evidence and checks | RTL/hierarchy plus FS1 synthesis table/filter/sort/cell detail/evidence inspector delivered | Cached inspection; timing/check/physical slices remain |
+| [F06 Hardware inspection](features/hardware_inspection.md) | Inspect synthesis, hierarchy, timing, physical evidence and checks | RTL/hierarchy, synthesis metrics/diagnostics, aggregate terminal timing/resources/checks, declared clock, bounded report paging and external text export delivered | Real physical/acceptance/cancellation evidence; rich paths, measured CTS, congestion and binary viewers remain |
 | [F07 Project setup](features/project_setup.md) | Initialize existing repositories and offer approachable starter layouts | Root manifest exists; initialization/templates pending | Configure existing specimen; creation later |
 | [F08 External clients](features/external_clients.md) | Ches summaries/source jumps, automation, MCP and eventual embedded editing | Application RPC exists; integrations pending | Keep contracts usable outside the TUI; clients later |
 | [F09 Simulation and tests](features/simulation_and_tests.md) | Run tests/simulations, inspect attempts/logs/failures, later explore structured cases/traces | Project-scoped module/tile, attempts/logs/cancel delivered over existing supervisor | Real PDK-free tests passed; no structured cases/seeds/traces (FS2) |
@@ -80,7 +80,8 @@ launch-and-view and follow/pin-run first; immutable snapshots are deferred.
 The [construction plan](construction_phase_plan.md) records delivered conditions,
 true leftovers and consolidated candidate/evidence links. [Acceptance](fs0_acceptance.md)
 and [installed checks](fs0_install_checks.md) record runtime results. FS1 synthesis
-inspection and FS5's first appearance slice are delivered; FS2 remains unstarted.
-The next proposed execution-inspection slice is scoped in M4, not yet implemented.
+inspection plus aggregate physical/terminal evidence and FS5's first appearance
+slice are delivered; FS2 remains unstarted. [FS1 acceptance](fs1_acceptance.md)
+separates implemented behavior, real evidence and remaining full-set scope.
 Later feature scope remains recorded here without becoming a release
 prerequisite. [Backlog](backlog/README.md) retains unrelated deferred ideas.
