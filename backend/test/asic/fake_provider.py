@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Injected public-boundary fixture: no EDA, provider imports, or shell."""
 import json
+import hashlib
 import os
 import signal
 import sys
@@ -59,7 +60,10 @@ elif args[:2] == ['flow', 'list']:
              profiles=[dict(id='balanced'), dict(id='synth_delay')])],
         default=dict(flow='standard', profile='balanced'))))
 elif args[:2] == ['flow', 'describe']:
-    emit(envelope('flow-describe', id=option('--flow')))
+    emit(envelope('flow-describe', entry=dict(
+        methodology=dict(id=option('--flow'), endpoints=['synthesis', 'signoff']),
+        profiles=[dict(id='balanced'), dict(id='synth_delay')]),
+        capabilities=dict(stage_selection='complete-prefix-through-declared-endpoint')))
 elif args[:2] == ['flow', 'plan']:
     emit(plan())
 elif args[:2] == ['flow', 'run']:
@@ -105,15 +109,53 @@ elif args[:1] == ['report']:
     count = 50 if profile == 'balanced' else 73
     if os.path.exists('revision'):
         count += 1
-    emit(envelope('report', execution=dict(attempt_id=stream, status='completed'),
+    boundary = 'signoff' if profile == 'terminal' else 'synthesis'
+    reference = dict(path=attempt, boundary=boundary, identity=str(count))
+    references = [reference]
+    if profile == 'terminal':
+        references = [dict(path=os.path.join(attempt, 'synthesis'),
+                           boundary='synthesis', identity=str(count)), reference]
+    methodology_reference = dict(attempt_id=stream)
+    if profile == 'terminal':
+        snapshot_path = os.path.join(attempt, 'methodology-plan.json')
+        snapshot_bytes = json.dumps(envelope(
+            'methodology-plan', plan_identity='a' * 64, bundle_identity='b' * 64,
+            configuration_bytes=json.dumps(dict(CLOCK_PORT='clk', CLOCK_PERIOD=20.0)))).encode()
+        if not os.path.exists(snapshot_path):
+            with open(snapshot_path, 'wb') as out:
+                out.write(snapshot_bytes)
+        methodology_reference.update(snapshot_path=snapshot_path,
+                                     snapshot_sha256=hashlib.sha256(snapshot_bytes).hexdigest(),
+                                     plan_identity='a' * 64, bundle_identity='b' * 64)
+    execution = dict(attempt_id=stream, status='completed', artifacts=references,
+                     occurrences=[dict(action_key='implementation.' + boundary,
+                                       status='completed', exit_code=0)])
+    with open(args[1], 'w') as out:
+        json.dump(execution, out)
+    emit(envelope('report', execution=execution,
+                  completion=dict(physical='full' if boundary == 'signoff' else 'synthesis'),
                   acceptance='not_evaluated',
                   methodology=envelope('historical-methodology', state='recorded',
                                        plan_identity='a' * 64, bundle_identity='b' * 64,
-                                       reference=dict(attempt_id=stream)),
-                  checkpoints=[dict(reference=dict(path=attempt, boundary='synthesis', identity=str(count)),
+                                       reference=methodology_reference),
+                  checkpoints=[dict(reference=checkpoint_reference,
                                     metric_origin=dict(scope='boundary_snapshot'),
-                                    metrics=[dict(raw_key='design__instance__count', availability='available', value=count)],
-                                    supplementary=[dict(mapped_cell_types={'cell': count})])]))
+                                    metrics=[dict(raw_key=key, availability='available', value=value, unit=unit,
+                                                  source=dict(path=os.path.join(checkpoint_reference['path'], 'segment.json'),
+                                                              field='metrics.' + key,
+                                                              raw=dict(availability='available', value=value)))
+                                             for key, value, unit in [
+                                                  ('design__instance__count', checkpoint_count, 'cells'),
+                                                 ('design__instance__area', 13041.6048, 'µm²'),
+                                                 ('design__lint_warning__count', 2, 'count'),
+                                                 ('synthesis__check_error__count', 0, 'count')]],
+                                    supplementary=[dict(mapped_cell_types={'cell': checkpoint_count})])
+                               for checkpoint_reference, checkpoint_count in
+                               [(ref, count if ref['boundary'] == 'synthesis' else count + 1000)
+                                for ref in references]]))
+elif args[:1] == ['finalization-inspect']:
+    with open(os.path.join(args[1], 'operation.json')) as src:
+        emit(json.load(src))
 else:
     print('Unsupported fixture argv: ' + repr(args), file=sys.stderr)
     sys.exit(2)

@@ -103,8 +103,6 @@ cell table sorting/filtering, row detail and evidence drilldown. It consumes FS0
 summaries without changing provider contracts or invoking tools. Rich timing,
 checks, clocks and physical views below remain subsequent work.
 
-Status: **not started**; FS0 synthesis summaries do not implement this set.
-
 Timing summaries/path detail, checks, clocks and physical/resource slices with
 original evidence and context. Full physical operation/cancellation acceptance
 belongs here. Adopt fields actually provided; put missing extraction semantics in

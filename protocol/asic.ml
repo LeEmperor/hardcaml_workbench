@@ -28,6 +28,58 @@ module Reference = struct
   [@@deriving bin_io, compare, equal, sexp]
 end
 
+module Metric = struct
+  (** Only explicitly understood public metrics are projected. [source] is JSON: the
+      supplied stage source object, or terminal results path/hash/field plus complete
+      supplied metric context and resolved source, or verified historical snapshot
+      reference/configuration for a declared constraint. Checkpoint-wide stage attribution
+      remains in [Summary.producer]. Unavailable is never zero or a pass. *)
+  type t =
+    { key : string
+    ; label : string
+    ; value : float option
+    ; unit_ : string option
+    ; availability : string
+    ; source : string option
+    }
+  [@@deriving bin_io, compare, equal, sexp]
+
+  let declared_clock_period_key = "declared_clock_period"
+end
+
+module Check = struct
+  type t =
+    { name : string
+    ; status : string
+    ; reason : string option
+    ; source : string option
+    }
+  [@@deriving bin_io, compare, equal, sexp]
+end
+
+module Terminal_result = struct
+  type t =
+    { attempt : string
+    ; results_file : string
+    ; results_digest : string
+    ; operation_status : string
+    ; physical_completion : string
+    ; acceptance : string
+    ; timing_goal : string
+    ; metrics : Metric.t list
+    ; checks : Check.t list
+    ; evidence : string
+    }
+  [@@deriving bin_io, compare, equal, sexp]
+
+  (** A declared constraint, not a measured clock. [None] also covers legacy caches whose
+      terminal projection predates declared-clock evidence. *)
+  let declared_clock_period (t : t) =
+    List.find t.metrics ~f:(fun metric ->
+      String.equal metric.Metric.key Metric.declared_clock_period_key)
+  ;;
+end
+
 module Summary = struct
   module Freshness = struct
     type t =
@@ -45,6 +97,8 @@ module Summary = struct
     ; plan_identity : string option
     ; cell_count : int option
     ; cells : (string * int) list
+    ; metrics : Metric.t list [@sexp.default []]
+    ; terminal : Terminal_result.t option [@sexp.default None]
     ; timing : (string * float * string) list
     ; completion : string
     ; acceptance : string
@@ -107,7 +161,9 @@ module Operation = struct
       Poll [Get] for completion. [Run.key] is an idempotency key; reuse with different
       arguments is an error. Disconnecting a client never cancels daemon-owned work.
       Summary selection does not launch tools. [Refresh] explicitly validates source
-      evidence; an ordinary [Load_summary] may return cached/unverified evidence. *)
+      evidence, including the last explicitly adopted finalization attempt. An ordinary
+      [Load_summary] may return cached/unverified evidence. [Inspect_finalization] adopts
+      an existing public operation reference; it never starts finalization. *)
   type t =
     | Get
     | Discover
@@ -121,6 +177,10 @@ module Operation = struct
     | Observe of Run_ref.t
     | Load_summary of Run_ref.t
     | Refresh of Run_ref.t
+    | Inspect_finalization of
+        { run : Run_ref.t
+        ; attempt : string
+        }
     | Cancel of string
   [@@deriving bin_io, compare, equal, sexp]
 end

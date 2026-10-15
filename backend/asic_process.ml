@@ -2,7 +2,7 @@ open! Core
 open! Async
 module Invocation = Hardcaml_workbench_adapters.Dune_adapter.Invocation
 
-let stop process =
+let stop ?(grace_seconds = 5.) process =
   (* Force Async's owned wait before signalling. Completed children need no signal;
      send_signal itself also guards the wait/PID-reuse race (process.ml). Never replace it
      with a raw PID signal or reap through a second waitpid API. *)
@@ -11,7 +11,7 @@ let stop process =
   then Deferred.unit
   else (
     Process.send_signal process Signal.term;
-    match%bind Clock.with_timeout (Time_float.Span.of_sec 5.) waited with
+    match%bind Clock.with_timeout (Time_float.Span.of_sec grace_seconds) waited with
     | `Result _ -> Deferred.unit
     | `Timeout ->
       if not (Deferred.is_determined waited) then Process.send_signal process Signal.kill;
@@ -20,7 +20,7 @@ let stop process =
 
 (** All output is drained incrementally. A query/launcher has a hard total stdout budget
     and a per-record budget; stderr is drained but only 4KiB retained. *)
-let run ~seconds ~cancel ~on_process ~on_line invocation =
+let run ?(stop_grace_seconds = 5.) ~seconds ~cancel ~on_process ~on_line invocation =
   if Deferred.is_determined cancel then failwith "ASIC operation cancelled";
   let%bind process =
     Process.create_exn
@@ -86,7 +86,7 @@ let run ~seconds ~cancel ~on_process ~on_line invocation =
   in
   Monitor.protect
     ~finally:(fun () ->
-      let%bind () = stop process in
+      let%bind () = stop ~grace_seconds:stop_grace_seconds process in
       let%bind () = Writer.close (Process.stdin process) in
       let%bind () = Reader.close (Process.stdout process) in
       Reader.close (Process.stderr process))

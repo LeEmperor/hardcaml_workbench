@@ -26,7 +26,7 @@ Project/provider commands remain useful without the application.
 | [Archive](archive/README.md) | Superseded plans and historical acceptance evidence |
 
 The feature list is the concise product inventory; feature sets group delivery
-themes (current target: FS0). Focused feature documents record
+themes (FS0 delivered; bounded FS1 and FS5 slices underway). Focused feature documents record
 behavior and boundaries; the construction plan alone owns implementation order and
 completion checklist. Focused acceptance records linked there own exact runtime
 evidence. A feature request or a provider capability is not proof
@@ -58,15 +58,17 @@ of an implemented Workbench feature.
   canonical evidence remains provider-owned. Fixture warm/restart report calls stay
   2→2; real restart preserves exact evidence identity with `Cached_unverified`.
 - [F12 appearance](features/appearance.md) keeps themes/components/layouts separate,
-  utility chrome mountable and headers configurable. FS0 includes minimal seams;
-  FS5/V1's five-candidate gallery has not started. The semantic registry is delivered,
-  but no final aesthetic or embedded editor is selected.
+  utility chrome mountable and headers configurable. FS5/V1's first A–E skins and
+  independent color/icon/density controls are delivered; richer gallery fixtures,
+  reusable tabs and final aesthetic review remain pending. No embedded editor is selected.
 - Limits: shelf layout rather than freeform geometry; no template export/clone;
   local chrome/header preferences do not persist; clock-driven redraw and a basic
   endpoint/assignment form; timing unsupported. Remaining frontend race/reconnect/
   cancellation coverage and scaling measurements are explicit in M0–M3.
-- Parent format/lint, runtest and build checks passed, as did later synthesis-tile
-  terminal checks and installed/fixture/capture scripts. Latest final parent-wide
-  checks are upcoming. No FS1/FS2/FS5 implementation is claimed.
+- FS1's first [synthesis inspector](synthesis_inspection.md) is delivered over cached
+  evidence. FS2 structured simulation remains unstarted. Prior parent format/lint,
+  runtest, build and installed/fixture/capture checks are recorded in the plan.
+  The takeover recheck passed the five-mode raw Ctrl-C PTY matrix against current
+  built binaries; this is frontend fixture evidence, not another real-tool acceptance.
 
 Build, launch and check commands are in the repository [README](../README.md).

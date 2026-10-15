@@ -4,6 +4,7 @@ open Hardcaml_workbench_protocol
 module Service = Hardcaml_workbench_backend.Asic_service
 module Config = Hardcaml_workbench_project_integration.Asic_config
 module Public = Hardcaml_workbench_backend.Asic_public
+module Evidence_file = Hardcaml_workbench_backend.Asic_evidence_file
 module Owned_process = Hardcaml_workbench_backend.Asic_process
 module Adapter = Hardcaml_workbench_adapters.Asic_adapter
 
@@ -45,7 +46,740 @@ let launches root profile =
       && String.is_substring line ~substring:("\"--profile\", \"" ^ profile ^ "\"")))
 ;;
 
+let metric_fixtures () =
+  let source =
+    `Assoc [ "path", `String "/public/segment.json"; "field", `String "metrics.key" ]
+  in
+  let metric ?(availability = "available") ?(unit_ = `String "count") key value =
+    `Assoc
+      [ "raw_key", `String key
+      ; "value", value
+      ; "availability", `String availability
+      ; "unit", unit_
+      ; "source", source
+      ]
+  in
+  let key = "design__lint_warning__count" in
+  let project j = List.hd_exn (Public.project_metrics [ j ]) in
+  List.iter
+    [ metric key (`Int 2), Some 2.
+    ; metric key (`Float 0.), Some 0.
+    ; metric key (`Intlit "3"), Some 3.
+    ; metric key (`Float 0.5), None
+    ; metric key (`Int (-1)), None
+    ; metric key (`Float Float.infinity), None
+    ; metric key (`Float Float.nan), None
+    ; metric key (`String "2"), None
+    ; metric key `Null, None
+    ; metric ~availability:"unavailable" key (`Int 0), None
+    ; metric ~availability:"unknown" key (`Int 0), None
+    ; metric ~unit_:(`String "cells") key (`Int 2), None
+    ; metric ~unit_:`Null key (`Int 2), None
+    ; ( metric ~unit_:(`String "µm²") "design__instance__area" (`Float 13041.6048)
+      , Some 13041.6048 )
+    ]
+    ~f:(fun (raw, expected) ->
+      let m = project raw in
+      require (Option.equal Float.equal m.value expected) "Wrong normalized metric value";
+      require
+        (String.equal
+           m.availability
+           (if Option.is_some expected then "available" else "unavailable"))
+        "Invalid metric claimed availability";
+      require
+        (Option.equal String.equal m.source (Some (Yojson.Safe.to_string source)))
+        "Public metric source lost");
+  require (List.is_empty (Public.project_metrics [])) "Missing metrics fabricated";
+  let absent = project (`Assoc [ "raw_key", `String key ]) in
+  require
+    (Option.is_none absent.value
+     && Option.is_none absent.unit_
+     && Option.is_none absent.source)
+    "Missing metric fields defaulted to evidence";
+  require
+    (Option.equal
+       String.equal
+       (project (metric ~unit_:(`String "ns") key (`Int 2))).unit_
+       (Some "ns"))
+    "Mismatched supplied unit was rewritten";
+  require
+    (List.is_empty (Public.project_metrics [ metric "timing__setup__ws" (`Int 1) ]))
+    "Unknown timing metric inferred";
+  List.iter Public.known_metrics ~f:(fun (key, (_, unit_, _)) ->
+    require
+      (Option.equal
+         Float.equal
+         (project (metric ~unit_:(`String unit_) key (`Int 0))).value
+         (Some 0.))
+      "Recognized public metric omitted");
+  require
+    (Result.is_error
+       (Or_error.try_with (fun () ->
+          Public.project_metrics (List.init 65 ~f:(fun _ -> metric key (`Int 0))))))
+    "Metric budget not enforced";
+  let r : Asic.Run.t =
+    { run =
+        { backend = Backend_id.of_string "asic"
+        ; id = "fixture"
+        ; build = None
+        ; label = None
+        }
+    ; reference = { attempt = "/public/attempt"; stream_id = "fixture" }
+    ; selection = None
+    ; cursor = 0
+    ; status = "completed"
+    ; execution_file = Some "/public/execution.json"
+    ; error = None
+    }
+  in
+  let checkpoint ?(boundary = "synthesis") n =
+    `Assoc
+      [ "reference", `Assoc [ "identity", `Int n; "boundary", `String boundary ]
+      ; "metric_origin", `String "boundary_snapshot"
+      ; ( "metrics"
+        , `List [ metric ~unit_:(`String "cells") "design__instance__count" (`Int n) ] )
+      ; ( "supplementary"
+        , `List [ `Assoc [ "mapped_cell_types", `Assoc [ "cell", `Int n ] ] ] )
+      ]
+  in
+  let report ?(status = "completed") checkpoints =
+    `Assoc
+      [ "contract", `String "hardcaml-asic.report"
+      ; "schema_version", `Int 1
+      ; "execution", `Assoc [ "attempt_id", `String "fixture"; "status", `String status ]
+      ; "acceptance", `String "not_evaluated"
+      ; ( "methodology"
+        , `Assoc
+            [ "contract", `String "hardcaml-asic.historical-methodology"
+            ; "schema_version", `Int 1
+            ; "state", `String "recorded"
+            ; "reference", `Assoc [ "attempt_id", `String "fixture" ]
+            ] )
+      ; "checkpoints", `List checkpoints
+      ]
+  in
+  let summarize ?status checkpoints =
+    Public.summary
+      r
+      ~expected_plan:None
+      ~execution_file:"/public/execution.json"
+      (report ?status checkpoints)
+  in
+  let s =
+    summarize ~status:"failed" [ checkpoint 7; checkpoint ~boundary:"routing" 1042 ]
+  in
+  require
+    (Option.equal Int.equal s.cell_count (Some 7)
+     && Option.equal Float.equal (List.hd_exn s.metrics).value (Some 7.)
+     && Poly.equal
+          (Public.field "reference" (Public.decode s.producer))
+          (`Assoc [ "identity", `Int 7; "boundary", `String "synthesis" ])
+     && List.equal Poly.equal s.cells [ "cell", 7 ]
+     && String.equal s.completion "failed"
+     && String.equal s.acceptance "not_evaluated"
+     && Option.is_none s.terminal)
+    "Metrics/count/producer selected different checkpoints";
+  require (List.is_empty (summarize []).metrics) "Checkpoint absence fabricated metrics";
+  require (List.is_empty (summarize [ `Assoc [] ]).metrics) "Missing metrics fabricated";
+  let missing = summarize ~status:"failed" [ checkpoint ~boundary:"routing" 1042 ] in
+  require
+    (Option.is_none missing.cell_count
+     && List.is_empty missing.cells
+     && List.is_empty missing.metrics
+     && String.equal missing.producer "no synthesis checkpoint"
+     && String.equal missing.completion "failed")
+    "Routing-only evidence was guessed to be synthesis";
+  let missing =
+    summarize
+      [ `Assoc
+          [ ( "metrics"
+            , `List
+                [ metric ~unit_:(`String "cells") "design__instance__count" (`Int 99) ] )
+          ]
+      ]
+  in
+  require
+    (Option.is_none missing.cell_count && List.is_empty missing.metrics)
+    "Missing boundary guessed to be synthesis";
+  require
+    (Result.is_error
+       (Or_error.try_with (fun () -> summarize [ checkpoint 1; checkpoint 7 ])))
+    "Ambiguous synthesis evidence silently selected";
+  let mismatched =
+    summarize
+      [ `Assoc
+          [ "reference", `Assoc [ "boundary", `String "synthesis" ]
+          ; ( "metrics"
+            , `List [ metric ~unit_:(`String "count") "design__instance__count" (`Int 7) ]
+            )
+          ]
+      ]
+  in
+  require
+    (Option.is_none mismatched.cell_count
+     && Option.is_none (List.hd_exn mismatched.metrics).value)
+    "Unit mismatch remained available in cell count"
+;;
+
+(* Recreate the original v1 blob shape and digest without depending on private cache
+   implementation helpers. The normal service read path must reopen this offline. *)
+let downgrade_summary_blob ?(version = 1) filename =
+  match Sexp.of_string (In_channel.read_all filename) with
+  | Sexp.List fields ->
+    let summary =
+      List.find_map_exn fields ~f:(function
+        | Sexp.List [ Atom "summary"; summary ] ->
+          (match Asic.Summary.sexp_of_t (Asic.Summary.t_of_sexp summary) with
+           | Sexp.List fields -> Some fields
+           | _ -> failwith "Expected summary record")
+        | _ -> None)
+      |> List.filter ~f:(function
+        | Sexp.List (Atom "metrics" :: _) when version = 1 -> false
+        | Sexp.List (Atom "terminal" :: _) -> false
+        | _ -> true)
+      |> fun fields -> Sexp.List fields
+    in
+    let digest = Public.digest (Sexp.to_string_mach summary) in
+    let legacy =
+      Sexp.List
+        [ List [ Atom "version"; Atom (Int.to_string version) ]
+        ; List [ Atom "normalized_digest"; Atom digest ]
+        ; List [ Atom "summary"; summary ]
+        ]
+    in
+    Out_channel.write_all filename ~data:(Sexp.to_string legacy)
+  | _ -> failwith "Expected cache blob record"
+;;
+
+let terminal_fixture ~attempt ~execution_file ~execution_bytes ~references =
+  let operation = Filename.concat attempt "operation.json" in
+  let results_file = Filename.concat attempt "published-results.json" in
+  let metric value unit_ =
+    `Assoc
+      [ "value", value
+      ; "unit", `String unit_
+      ; "unavailable_reason", `Null
+      ; "source", `String "evidence/final/metrics.csv"
+      ; "tool", `Assoc [ "name", `String "LibreLane" ]
+      ; "stage", `String "final"
+      ; "corner", `String "slow"
+      ; "mode", `String "setup"
+      ; "origin_boundary", `String "signoff"
+      ]
+  in
+  let results =
+    `Assoc
+      [ "schema_version", `Int 1
+      ; "run_id", `String "operation-1"
+      ; "build_identity", `String (String.make 64 'b')
+      ; ( "provenance"
+        , `Assoc
+            [ "contract", `String "hardcaml-asic.segment-finalization"
+            ; "operation", `String operation
+            ] )
+      ; ( "metrics"
+        , `Assoc
+            [ "setup_slack", metric (`Float (-0.25)) "ns"
+            ; "hold_slack", metric (`Float 0.125) "ns"
+            ; "final_utilization", metric (`Float 0.3) "fraction"
+            ; "mapped_cells", metric (`Float 73.) "cells"
+            ] )
+      ; ( "checks"
+        , `Assoc
+            [ ( "drc"
+              , `Assoc
+                  [ "status", `String "fail"
+                  ; "reason", `String "violations"
+                  ; "raw", `Assoc [ "count", `Int 2 ]
+                  ; "source", `String "evidence/final/metrics.csv"
+                  ] )
+            ; "lvs", `Assoc [ "status", `String "pass"; "reason", `Null ]
+            ] )
+      ; "timing_goal", `String "fail"
+      ; "timing_unconstrained_modes", `List []
+      ; "errors", `List [ `String "retained diagnostic" ]
+      ]
+  in
+  let results_bytes = Yojson.Safe.to_string results in
+  let receipt =
+    `Assoc
+      [ "contract", `String "hardcaml-asic.segment-finalization"
+      ; "schema_version", `Int 1
+      ; "attempt_id", `String "operation-1"
+      ; "status", `String "failed"
+      ; "phase", `String "acceptance"
+      ; "ended_at", `String "recorded"
+      ; "exit_code", `Int 1
+      ; "request", `Assoc [ "accept", `Bool true; "execution", `String execution_file ]
+      ; "external_postcheck", `String "failed"
+      ; "evidence_context", `Assoc [ "build_identity", `String (String.make 64 'b') ]
+      ; "acceptance", `String "fail"
+      ; ( "execution"
+        , `Assoc
+            [ "path", `String execution_file
+            ; "sha256", `String (Public.digest execution_bytes)
+            ; "attempt_id", Public.field "attempt_id" (Public.decode execution_bytes)
+            ] )
+      ; "selected_checkpoints", `List references
+      ; ( "results"
+        , `Assoc
+            [ "path", `String results_file
+            ; "sha256", `String (Public.digest results_bytes)
+            ] )
+      ]
+  in
+  receipt, results_bytes
+;;
+
+let legacy_physical_blob filename ~run_id =
+  match Sexp.of_string (In_channel.read_all filename) with
+  | Sexp.List fields ->
+    let summary =
+      List.find_map_exn fields ~f:(function
+        | Sexp.List [ Atom "summary"; summary ] -> Some (Asic.Summary.t_of_sexp summary)
+        | _ -> None)
+    in
+    if String.equal summary.run.id run_id && Option.is_some summary.terminal
+    then (
+      let summary =
+        { summary with
+          cell_count = Some 1042
+        ; cells = [ "post_routing", 1042 ]
+        ; metrics =
+            List.map summary.metrics ~f:(fun m ->
+              if String.equal m.Asic.Metric.key "design__instance__count"
+              then { m with value = Some 1042. }
+              else m)
+        ; producer =
+            "{\"reference\":{\"boundary\":\"routing\"},\"metric_origin\":\"boundary_snapshot\"}"
+        }
+      in
+      let sexp = Asic.Summary.sexp_of_t summary in
+      Out_channel.write_all
+        filename
+        ~data:
+          (Sexp.to_string
+             (Sexp.List
+                [ List [ Atom "version"; Atom "3" ]
+                ; List
+                    [ Atom "normalized_digest"
+                    ; Atom (Public.digest (Sexp.to_string_mach sexp))
+                    ]
+                ; List [ Atom "summary"; sexp ]
+                ])))
+  | _ -> failwith "Expected summary blob"
+;;
+
+let declared_clock_fixtures () =
+  let plan_identity = String.make 64 'a'
+  and bundle_identity = String.make 64 'b' in
+  let replace key value = function
+    | `Assoc fields ->
+      `Assoc ((key, value) :: List.Assoc.remove fields key ~equal:String.equal)
+    | _ -> failwith "Expected clock fixture object"
+  in
+  let fixture configuration_bytes =
+    let snapshot =
+      `Assoc
+        [ "contract", `String "hardcaml-asic.methodology-plan"
+        ; "schema_version", `Int 1
+        ; "plan_identity", `String plan_identity
+        ; "bundle_identity", `String bundle_identity
+        ; "configuration_bytes", `String configuration_bytes
+        ; "resolved_settings", `Assoc [ "CLOCK_PERIOD", `String "clock" ]
+        ]
+    in
+    let bytes = Yojson.Safe.to_string snapshot in
+    let reference =
+      `Assoc
+        [ "snapshot_path", `String "/historical/plan.json"
+        ; "snapshot_sha256", `String (Public.digest bytes)
+        ; "plan_identity", `String plan_identity
+        ; "bundle_identity", `String bundle_identity
+        ; "attempt_id", `String "implementation"
+        ]
+    in
+    let report =
+      `Assoc
+        [ "execution", `Assoc [ "attempt_id", `String "implementation" ]
+        ; ( "methodology"
+          , `Assoc
+              [ "plan_identity", `String plan_identity
+              ; "bundle_identity", `String bundle_identity
+              ; "reference", reference
+              ] )
+        ]
+    in
+    let receipt =
+      `Assoc
+        [ "execution", `Assoc [ "attempt_id", `String "implementation" ]
+        ; "evidence_context", `Assoc [ "build_identity", `String bundle_identity ]
+        ]
+    in
+    report, receipt, bytes
+  in
+  let project report receipt bytes =
+    Public.declared_clock_metric ~report ~receipt ~snapshot_bytes:(Some bytes)
+  in
+  let report, receipt, bytes = fixture "{\"CLOCK_PORT\":\"clk\",\"CLOCK_PERIOD\":20.0}" in
+  let clock = project report receipt bytes in
+  require
+    (String.equal clock.key "declared_clock_period"
+     && String.equal clock.label "Declared clock clk period"
+     && String.equal clock.availability "available"
+     && Option.equal Float.equal clock.value (Some 20.)
+     && Option.equal String.equal clock.unit_ (Some "ns"))
+    "Declared clock period was not projected as a constraint";
+  let source = Public.decode (Option.value_exn clock.source) in
+  require
+    (Poly.equal (Public.field "snapshot_sha256" source) (`String (Public.digest bytes))
+     && Poly.equal (Public.field "snapshot_path" source) (`String "/historical/plan.json")
+     && Poly.equal (Public.field "plan_identity" source) (`String plan_identity)
+     && Poly.equal (Public.field "bundle_identity" source) (`String bundle_identity)
+     && Poly.equal
+          (Public.field "CLOCK_PORT" (Public.field "fields" source))
+          (`String "clk"))
+    "Declared clock provenance lost";
+  let absent =
+    Public.declared_clock_metric ~report:(`Assoc []) ~receipt ~snapshot_bytes:None
+  in
+  require
+    (Option.is_none absent.value && String.equal absent.availability "unavailable")
+    "Missing historical clock was invented";
+  List.iter
+    [ "{}"
+    ; "not-json"
+    ; "{\"CLOCK_PORT\":\"clk\",\"CLOCK_PERIOD\":0}"
+    ; "{\"CLOCK_PORT\":\"clk\",\"CLOCK_PERIOD\":-1}"
+    ; "{\"CLOCK_PORT\":\"clk\",\"CLOCK_PERIOD\":\"20\"}"
+    ; "{\"CLOCK_PORT\":\"clk\",\"CLOCK_PERIOD\":null}"
+    ; "{\"CLOCK_PORT\":\" \",\"CLOCK_PERIOD\":20}"
+    ; "{\"CLOCK_PERIOD\":20}"
+    ]
+    ~f:(fun configuration ->
+      let report, receipt, bytes = fixture configuration in
+      let clock = project report receipt bytes in
+      require
+        (Option.is_none clock.value && String.equal clock.availability "unavailable")
+        "Invalid declared clock remained available");
+  let rejected f =
+    require (Result.is_error (Or_error.try_with f)) "Uncorrelated clock snapshot accepted"
+  in
+  rejected (fun () -> project report receipt (bytes ^ " "));
+  let methodology = Public.field "methodology" report in
+  rejected (fun () ->
+    project
+      (replace
+         "methodology"
+         (replace "plan_identity" (`String "different") methodology)
+         report)
+      receipt
+      bytes);
+  rejected (fun () ->
+    project
+      (replace
+         "methodology"
+         (replace "bundle_identity" (`String "different") methodology)
+         report)
+      receipt
+      bytes);
+  rejected (fun () ->
+    project
+      report
+      (replace
+         "evidence_context"
+         (`Assoc [ "build_identity", `String "different" ])
+         receipt)
+      bytes);
+  rejected (fun () ->
+    project
+      report
+      (replace "execution" (`Assoc [ "attempt_id", `String "different" ]) receipt)
+      bytes);
+  let reference = Public.field "reference" methodology in
+  let wrong_envelope_bytes =
+    Yojson.Safe.to_string (replace "schema_version" (`Int 2) (Public.decode bytes))
+  in
+  let wrong_envelope_report =
+    replace
+      "methodology"
+      (replace
+         "reference"
+         (replace
+            "snapshot_sha256"
+            (`String (Public.digest wrong_envelope_bytes))
+            reference)
+         methodology)
+      report
+  in
+  rejected (fun () -> project wrong_envelope_report receipt wrong_envelope_bytes);
+  rejected (fun () ->
+    Public.declared_clock_snapshot
+      (replace
+         "methodology"
+         (replace "reference" (replace "snapshot_sha256" `Null reference) methodology)
+         report))
+;;
+
+let terminal_fixtures () =
+  let reference =
+    `Assoc
+      [ "path", `String "/public/checkpoint"
+      ; "identity", `String "identity"
+      ; "boundary", `String "signoff"
+      ]
+  in
+  let execution =
+    `Assoc
+      [ "attempt_id", `String "implementation-1"
+      ; "status", `String "completed"
+      ; "artifacts", `List [ reference ]
+      ; ( "occurrences"
+        , `List
+            [ `Assoc
+                [ "action_key", `String "implementation.signoff"
+                ; "status", `String "completed"
+                ; "exit_code", `Int 0
+                ]
+            ] )
+      ]
+  in
+  let execution_bytes = Yojson.Safe.to_string execution in
+  let report =
+    `Assoc
+      [ "execution", execution
+      ; "completion", `Assoc [ "physical", `String "full" ]
+      ; "checkpoints", `List [ `Assoc [ "reference", reference ] ]
+      ]
+  in
+  let attempt = "/public/finalization"
+  and execution_file = "/public/execution.json" in
+  let receipt, results_bytes =
+    terminal_fixture ~attempt ~execution_file ~execution_bytes ~references:[ reference ]
+  in
+  let project
+    ?(report = report)
+    ?(execution_bytes = execution_bytes)
+    ?(results_bytes = results_bytes)
+    receipt
+    =
+    Public.terminal_result
+      ~attempt
+      ~execution_file
+      ~execution_bytes
+      ~report
+      ~receipt
+      ~results_bytes
+  in
+  let terminal = project receipt in
+  let setup =
+    List.find_exn terminal.metrics ~f:(fun m ->
+      String.equal m.Asic.Metric.key "setup_slack")
+  in
+  require (Option.equal Float.equal setup.value (Some (-0.25))) "Signed slack discarded";
+  require
+    (String.is_substring (Option.value_exn setup.source) ~substring:"slow"
+     && String.is_substring
+          (Option.value_exn setup.source)
+          ~substring:"/public/finalization/evidence/final/metrics.csv"
+     && String.is_substring terminal.evidence ~substring:"retained diagnostic")
+    "Terminal provenance/diagnostics lost";
+  require
+    (String.equal terminal.operation_status "failed"
+     && String.equal terminal.acceptance "fail"
+     && String.equal terminal.physical_completion "full"
+     && String.equal terminal.timing_goal "fail")
+    "Distinct terminal facts conflated";
+  require
+    (String.equal
+       (List.find_exn terminal.checks ~f:(fun c ->
+          String.equal c.Asic.Check.name "antenna"))
+         .status
+       "unknown")
+    "Missing check promoted to pass";
+  let replace key value = function
+    | `Assoc fields ->
+      `Assoc ((key, value) :: List.Assoc.remove fields key ~equal:String.equal)
+    | _ -> failwith "Expected fixture object"
+  in
+  let rejected f =
+    require (Result.is_error (Or_error.try_with f)) "Invalid terminal evidence accepted"
+  in
+  let rec reorder_objects = function
+    | `Assoc fields -> `Assoc (List.rev_map fields ~f:(fun (key, value) -> key, reorder_objects value))
+    | `List values -> `List (List.map values ~f:reorder_objects)
+    | scalar -> scalar
+  in
+  ignore (project ~report:(replace "execution" (reorder_objects execution) report) receipt : Asic.Terminal_result.t);
+  rejected (fun () -> project
+    ~report:(replace "execution" (replace "status" (`String "failed") execution) report) receipt);
+  let changed_occurrences =
+    Public.list (Public.field "occurrences" execution)
+    |> List.map ~f:(fun occurrence -> replace "status" (`String "failed") occurrence)
+  in
+  rejected (fun () -> project
+    ~report:(replace "execution" (replace "occurrences" (`List changed_occurrences) execution) report) receipt);
+  rejected (fun () -> project ~results_bytes:(results_bytes ^ " ") receipt);
+  rejected (fun () -> project ~execution_bytes:(execution_bytes ^ " ") receipt);
+  rejected (fun () ->
+    project (replace "execution" (`Assoc [ "path", `String "/wrong" ]) receipt));
+  rejected (fun () ->
+    project
+      (replace
+         "execution"
+         (replace
+            "attempt_id"
+            (`String "different-implementation")
+            (Public.field "execution" receipt))
+         receipt));
+  rejected (fun () -> project (replace "selected_checkpoints" (`List []) receipt));
+  let with_results results =
+    let results_bytes = Yojson.Safe.to_string results in
+    let receipt =
+      replace
+        "results"
+        (`Assoc
+          [ "path", Public.field "path" (Public.field "results" receipt)
+          ; "sha256", `String (Public.digest results_bytes)
+          ])
+        receipt
+    in
+    project ~results_bytes receipt
+  in
+  let results = Public.decode results_bytes in
+  rejected (fun () ->
+    with_results (replace "run_id" (`String "implementation-1") results));
+  rejected (fun () -> with_results (replace "schema_version" (`Int 2) results));
+  rejected (fun () ->
+    with_results
+      (replace
+         "provenance"
+         (`Assoc [ "operation", `String "/other/operation.json" ])
+         results));
+  let invalid_metric =
+    `Assoc [ "value", `Float (-2.); "unit", `String "um^2"; "unavailable_reason", `Null ]
+  in
+  let invalid =
+    with_results (replace "metrics" (`Assoc [ "setup_slack", invalid_metric ]) results)
+  in
+  require
+    (Option.is_none (List.hd_exn invalid.metrics).value)
+    "Slack unit mismatch accepted";
+  let invalid =
+    with_results (replace "metrics" (`Assoc [ "mapped_area", invalid_metric ]) results)
+  in
+  require (Option.is_none (List.hd_exn invalid.metrics).value) "Negative area accepted";
+  let invalid =
+    with_results
+      (replace
+         "checks"
+         (`Assoc [ "drc", `Assoc [ "status", `String "unrecognized" ] ])
+         results)
+  in
+  require
+    (String.equal (List.hd_exn invalid.checks).status "unknown")
+    "Unknown check invented pass";
+  let unavailable =
+    replace
+      "unavailable_reason"
+      (`String "no constrained timing paths reported")
+      (`Assoc [ "value", `Float 0.; "unit", `String "ns" ])
+  in
+  let invalid =
+    with_results (replace "metrics" (`Assoc [ "setup_slack", unavailable ]) results)
+  in
+  require
+    (Option.is_none (List.hd_exn invalid.metrics).value)
+    "Unconstrained timing displayed zero slack";
+  let invalid =
+    with_results
+      (replace
+         "metrics"
+         (`Assoc
+           [ ( "mapped_cells"
+             , `Assoc
+                 [ "value", `Float 2.5
+                 ; "unit", `String "cells"
+                 ; "unavailable_reason", `Null
+                 ] )
+           ])
+         results)
+  in
+  require
+    (Option.is_none (List.hd_exn invalid.metrics).value)
+    "Fractional terminal cell count accepted";
+  let physical : Asic.Selection.t =
+    { flow = "standard"; profile = "balanced"; endpoint = "signoff"; assignments = [] }
+  in
+  let description =
+    `Assoc
+      [ "contract", `String "hardcaml-asic.flow-describe"
+      ; "schema_version", `Int 1
+      ; ( "entry"
+        , `Assoc
+            [ ( "methodology"
+              , `Assoc
+                  [ "id", `String "standard"; "endpoints", `List [ `String "signoff" ] ] )
+            ; "profiles", `List [ `Assoc [ "id", `String "balanced" ] ]
+            ] )
+      ; ( "capabilities"
+        , `Assoc
+            [ "stage_selection", `String "complete-prefix-through-declared-endpoint" ] )
+      ]
+  in
+  Public.validate_physical_selection physical description;
+  rejected (fun () ->
+    Public.validate_physical_selection { physical with endpoint = "routing" } description);
+  rejected (fun () ->
+    Public.validate_physical_selection
+      { physical with endpoint = "arbitrary" }
+      description);
+  rejected (fun () ->
+    Public.validate_physical_selection
+      physical
+      (replace "capabilities" (`Assoc []) description))
+;;
+
+let evidence_file_fixtures () =
+  let%bind directory = In_thread.run (fun () -> Filename_unix.temp_dir "asic-evidence-" "") in
+  let regular = Filename.concat directory "regular" in
+  let fifo = Filename.concat directory "fifo" in
+  Monitor.protect
+    ~finally:(fun () -> In_thread.run (fun () ->
+      List.iter [ regular; fifo ] ~f:(fun path ->
+        if Poly.equal (Sys_unix.file_exists path) `Yes then Core_unix.unlink path);
+      Core_unix.rmdir directory))
+    (fun () ->
+      let%bind () = In_thread.run (fun () ->
+        Out_channel.write_all regular ~data:"abc\000";
+        require (String.equal (Evidence_file.read_bounded regular 4) "abc\000")
+          "Regular evidence bytes changed";
+        require (Result.is_error (Or_error.try_with (fun () -> Evidence_file.read_bounded regular 3)))
+          "Oversized regular evidence accepted";
+        Core_unix.mkfifo fifo ~perm:0o600) in
+      let read = In_thread.run (fun () -> Or_error.try_with (fun () -> Evidence_file.read_bounded fifo 16)) in
+      match%bind Clock.with_timeout (Time_float.Span.of_sec 2.) read with
+      | `Result result ->
+        require
+          (match result with
+           | Error error -> String.is_substring (Error.to_string_hum error) ~substring:"not a regular file"
+           | Ok _ -> false)
+          "Writerless FIFO was not rejected as nonregular";
+        Deferred.unit
+      | `Timeout ->
+        (* Release a regressed blocking open before failing the fixture, so the test
+           does not leave an owned worker waiting forever for a FIFO peer. *)
+        let%bind () = In_thread.run (fun () ->
+          let peer = Core_unix.openfile fifo ~mode:[ O_RDWR; O_NONBLOCK; O_CLOEXEC ] in
+          Core_unix.close peer) in
+        failwith "Evidence FIFO open blocked waiting for a writer")
+;;
+
 let main () =
+  let%bind () = evidence_file_fixtures () in
+  declared_clock_fixtures ();
+  terminal_fixtures ();
+  metric_fixtures ();
   let rejected f message = require (Result.is_error (Or_error.try_with f)) message in
   rejected
     (fun () -> ignore (Public.decode "{\"cursor\":0,\"cursor\":1}" : Yojson.Safe.t))
@@ -187,6 +921,12 @@ let main () =
       require
         (Option.equal Int.equal (summary first "stream-balanced").cell_count (Some 50))
         "R1 count";
+      let first_metrics = (summary first "stream-balanced").metrics in
+      require (List.length first_metrics = 4) "Synthesis metrics missing";
+      require
+        (String.equal (summary first "stream-balanced").acceptance "not_evaluated"
+         && List.is_empty (summary first "stream-balanced").timing)
+        "Metrics invented acceptance/timing";
       let%bind second = launch "synth_delay" "two" in
       require
         (Option.equal
@@ -219,6 +959,9 @@ let main () =
            (summary restored r1.id).freshness
            Cached_unverified)
         "L2 incorrectly claims source validation";
+      require
+        (List.equal Asic.Metric.equal (summary restored r1.id).metrics first_metrics)
+        "New metric projection lost on cache reopening";
       let%bind restart_reports = reports root in
       require (restart_reports = initial_reports) "L2 rematerialized report";
       let%bind () =
@@ -242,10 +985,179 @@ let main () =
         (Option.equal Int.equal (summary missing r2.id).cell_count (Some 73))
         "Refresh affected another run";
       let%bind () = Service.shutdown restarted in
-      (* Corrupt derived entries rebuild only through the explicit public references. *)
       let%bind () =
         In_thread.run (fun () ->
           Core_unix.unlink (Filename.concat root "missing");
+          List.iter (Sys_unix.ls_dir state_dir) ~f:(fun name ->
+            if String.is_suffix name ~suffix:".summary.sexp"
+            then downgrade_summary_blob (Filename.concat state_dir name)))
+      in
+      let legacy = create () in
+      let%bind before_legacy = reports root in
+      let%bind old = settled legacy root (Load_summary r1) in
+      require
+        (List.is_empty (summary old r1.id).metrics
+         && Option.equal Int.equal (summary old r1.id).cell_count (Some 51)
+         && Asic.Summary.Freshness.equal (summary old r1.id).freshness Cached_unverified)
+        "Old L2 did not reopen with explicitly absent metrics";
+      let%bind after_legacy = reports root in
+      require (before_legacy = after_legacy) "Old L2 implicitly queried provider";
+      let%bind upgraded = settled legacy root (Refresh r1) in
+      require
+        (List.length (summary upgraded r1.id).metrics = 4)
+        "Explicit refresh did not upgrade old projection";
+      let%bind () = Service.shutdown legacy in
+      let%bind () =
+        In_thread.run (fun () ->
+          List.iter (Sys_unix.ls_dir state_dir) ~f:(fun name ->
+            if String.is_suffix name ~suffix:".summary.sexp"
+            then downgrade_summary_blob ~version:2 (Filename.concat state_dir name)))
+      in
+      let v2 = create () in
+      let%bind before_v2 = reports root in
+      let%bind old_v2 = settled v2 root (Load_summary r1) in
+      require
+        (List.length (summary old_v2 r1.id).metrics = 4
+         && Option.is_none (summary old_v2 r1.id).terminal)
+        "v2 projection did not reopen without terminal evidence";
+      let%bind after_v2 = reports root in
+      require (before_v2 = after_v2) "v2 cache implicitly queried provider";
+      let terminal_attempt = Filename.concat root "terminal-operation" in
+      let physical_attempt = Filename.concat root "attempt-terminal" in
+      let%bind () =
+        In_thread.run (fun () ->
+          Core_unix.mkdir_p physical_attempt ~perm:0o700;
+          Core_unix.mkdir_p terminal_attempt ~perm:0o700;
+          Out_channel.write_all (Filename.concat physical_attempt "done") ~data:"")
+      in
+      let%bind registered =
+        handle
+          v2
+          root
+          (Register { attempt = physical_attempt; stream_id = "stream-terminal" })
+      in
+      let physical_run =
+        (List.find_exn registered.runs ~f:(fun r ->
+           String.equal r.Asic.Run.run.id "stream-terminal"))
+          .run
+      in
+      let%bind physical = settled v2 root (Load_summary physical_run) in
+      let physical = summary physical physical_run.id in
+      require
+        (Option.equal Int.equal physical.cell_count (Some 74)
+         && Poly.equal
+              (Public.field
+                 "boundary"
+                 (Public.field "reference" (Public.decode physical.producer)))
+              (`String "synthesis"))
+        "Completed physical run projected final cells as synthesis";
+      let%bind () =
+        In_thread.run (fun () ->
+          let execution_file = physical.execution_file in
+          let execution_bytes = In_channel.read_all execution_file in
+          let references =
+            Public.list (Public.field "artifacts" (Public.decode execution_bytes))
+          in
+          let receipt, results_bytes =
+            terminal_fixture
+              ~attempt:terminal_attempt
+              ~execution_file
+              ~execution_bytes
+              ~references
+          in
+          Out_channel.write_all (Public.terminal_results_file receipt) ~data:results_bytes;
+          Out_channel.write_all
+            (Filename.concat terminal_attempt "operation.json")
+            ~data:(Yojson.Safe.to_string receipt))
+      in
+      let%bind adopted =
+        settled
+          v2
+          root
+          (Inspect_finalization { run = physical_run; attempt = terminal_attempt })
+      in
+      let adopted = summary adopted physical_run.id in
+      let terminal = Option.value_exn adopted.terminal in
+      require
+        (Option.equal
+           Float.equal
+           (List.find_exn terminal.metrics ~f:(fun m ->
+              String.equal m.Asic.Metric.key Public.declared_clock_key))
+             .value
+           (Some 20.))
+        "Terminal adoption omitted historical declared clock";
+      require
+        (String.equal adopted.acceptance "not_evaluated"
+         && String.equal terminal.acceptance "fail"
+         && List.equal Asic.Metric.equal physical.metrics adopted.metrics)
+        "Terminal adoption overwrote stage evidence";
+      let%bind () = Service.shutdown v2 in
+      let%bind () =
+        In_thread.run (fun () ->
+          List.iter (Sys_unix.ls_dir state_dir) ~f:(fun name ->
+            if String.is_suffix name ~suffix:".summary.sexp"
+            then
+              legacy_physical_blob
+                (Filename.concat state_dir name)
+                ~run_id:physical_run.id))
+      in
+      let combined = create () in
+      let%bind before_combined = reports root in
+      let%bind cached = settled combined root (Load_summary physical_run) in
+      require
+        (Option.equal
+           Asic.Terminal_result.equal
+           (summary cached physical_run.id).terminal
+           (Some terminal))
+        "Terminal evidence lost after reopening";
+      let legacy = summary cached physical_run.id in
+      require
+        (Option.is_none legacy.cell_count
+         && List.is_empty legacy.cells
+         && List.is_empty legacy.metrics)
+        "Legacy routing projection reopened as synthesis";
+      let%bind after_combined = reports root in
+      require (before_combined = after_combined) "Combined cache queried provider";
+      let%bind refreshed = settled combined root (Refresh physical_run) in
+      require
+        (Option.equal
+           Asic.Terminal_result.equal
+           (summary refreshed physical_run.id).terminal
+           (Some terminal))
+        "Refresh lost persisted finalization reference";
+      require
+        (List.equal
+           Asic.Metric.equal
+           (summary refreshed physical_run.id).metrics
+           physical.metrics
+         && Option.equal
+              Int.equal
+              (summary refreshed physical_run.id).cell_count
+              physical.cell_count)
+        "Refresh did not recover explicit synthesis evidence from legacy cache";
+      let clock_snapshot = Filename.concat physical_attempt "methodology-plan.json" in
+      let%bind clock_bytes =
+        In_thread.run (fun () ->
+          let bytes = In_channel.read_all clock_snapshot in
+          Out_channel.write_all clock_snapshot ~data:(bytes ^ " ");
+          bytes)
+      in
+      let%bind rejected_clock = settled combined root (Refresh physical_run) in
+      let rejected_clock = summary rejected_clock physical_run.id in
+      require
+        (Option.equal Asic.Terminal_result.equal rejected_clock.terminal (Some terminal)
+         &&
+         match rejected_clock.freshness with
+         | Refresh_failed _ -> true
+         | _ -> false)
+        "Tampered historical clock replaced prior terminal evidence without failure label";
+      let%bind () =
+        In_thread.run (fun () -> Out_channel.write_all clock_snapshot ~data:clock_bytes)
+      in
+      let%bind () = Service.shutdown combined in
+      (* Corrupt derived entries rebuild only through the explicit public references. *)
+      let%bind () =
+        In_thread.run (fun () ->
           List.iter (Sys_unix.ls_dir state_dir) ~f:(fun name ->
             if String.is_suffix name ~suffix:".summary.sexp"
             then Out_channel.write_all (Filename.concat state_dir name) ~data:"partial("))

@@ -79,6 +79,8 @@ windows need not block named workspace switching within one terminal surface.
 launch-and-view and follow/pin-run first; immutable snapshots are deferred.
 The [construction plan](construction_phase_plan.md) records delivered conditions,
 true leftovers and consolidated candidate/evidence links. [Acceptance](fs0_acceptance.md)
-and [installed checks](fs0_install_checks.md) record runtime results. No FS1/FS2/FS5
-implementation is implied. Later feature scope remains recorded here without becoming a release
+and [installed checks](fs0_install_checks.md) record runtime results. FS1 synthesis
+inspection and FS5's first appearance slice are delivered; FS2 remains unstarted.
+The next proposed execution-inspection slice is scoped in M4, not yet implemented.
+Later feature scope remains recorded here without becoming a release
 prerequisite. [Backlog](backlog/README.md) retains unrelated deferred ideas.

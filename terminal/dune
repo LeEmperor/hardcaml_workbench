@@ -5,6 +5,7 @@
   fs0_fixture
   appearance
   synthesis_view
+  terminal_result_view
   presentation
   state
   workspace_host

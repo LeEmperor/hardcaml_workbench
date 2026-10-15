@@ -72,6 +72,26 @@ submitted IDs and checks full repaints, not incidental ANSI delta retransmission
 External counter fixture acceptance also passed. No additional real EDA was needed
 after the recorded two-profile acceptance and real cached-screen verification.
 
+### Takeover reconciliation — 2026-10-15
+
+The checkout was clean at `560ad8f` when inspected; the handoff's uncommitted-work
+description was historical. Read-only execution and adopted-provider reviews found
+stale FS1/FS5 status statements in the documentation index/inventory, corrected to
+match the delivered slices below. No provider adoption or new EDA was performed.
+
+Fresh parent verification, serialized through `scripts/with-switch.sh`:
+
+- `dune build -j20 terminal/main.exe daemon/main.exe` passed.
+- `python3 -B scripts/test-terminal-interrupt.py` passed all five cases, with clean
+  client exit, restored ISIG/ECHO/ICANON, and the private daemon surviving each client.
+  Evidence: `/tmp/opencode/workbench-terminal-interrupt-tb4fj7ht/`.
+
+The inspected regression creates its own metadata-only project, client directories,
+state and daemon under a new evidence root; it submits no jobs and performs no Git
+operations. This is actual frontend/HTTP behavior over a disposable fixture, not
+real synthesis evidence or a full tmux/concurrent-client responsiveness acceptance.
+Earlier full-suite and real-tool results above remain historical evidence.
+
 ## M0 — Decisions, provider baseline and demo fixtures
 
 Features: F01–F06, F09–F11. **Delivered baseline; remaining coverage is explicit.**
@@ -253,6 +273,40 @@ Features: F06/F09 and execution/regression extensions.
 - [ ] External source/artifact viewer actions and host/path handling.
 - [ ] Full physical-run failure/cancellation/observation acceptance; preserve earlier
   measurements after later-stage failure. No placement/signoff run is claimed here.
+
+### Next bounded slice — proposed execution inspection
+
+Prefer an identity-safe selected-attempt detail view before timing adoption. This
+is a follow-on to F02/F09's existing execution UI within M4, not delivery of FS2
+structured simulation or a new ASIC orchestration engine. **Not implemented yet.**
+
+- [ ] Enter/Esc detail navigation over existing `Job.t` identity, kind, state, phase,
+  created/started/finished timestamps and exact outcome, with explicit missing fields.
+- [ ] Tile-local selection and scrolling retain exact job identity through updates;
+  disappearance or daemon-instance replacement must not silently retarget details.
+- [ ] Wire bounded stream-labelled logs through existing job log RPC, deduplicating
+  interest across visible consumers and rejecting stale-instance responses.
+- [ ] Exercise actual HTTP/PTY selection of an earlier attempt, independent tiles,
+  live output and return navigation. Keep the five-mode interrupt regression intact.
+
+Preserve the execution tile's existing RTL/driver-job inspection and hierarchy
+entry points; do not replace its job list with the generic Build/Test-only
+`Execution.attempts` projection. Project-test filtering remains project-scoped.
+No historical argv, test cases, progress percentage or ASIC-run association should
+be inferred from job kind, log text or current project configuration. Existing
+generic supervisor and ASIC process-service boundaries remain separate.
+
+**Timing gate:** `backend/asic_public.ml` explicitly emits `timing = []` because
+CLI4 lacks normalized timing attribution/units. The retained accepted 673/685
+checkpoint metrics contain synthesis/lint measurements, not setup/hold slack;
+`synth_delay` is a profile name, not measured timing improvement. The adopted
+provider's `execution/results/stage_report_service.ml` forwards unknown metric
+keys with no unit and labels metrics as accumulated boundary snapshots. Its
+separate coarse collector and newer source declarations do not establish timing
+through the adopted named-flow report path. First require timing-bearing evidence
+and a supported units/corner/measurement-origin contract before a timing slice.
+Synthesis area/check counters are another evidence-supported future projection,
+but require explicit adapter/cache evolution; they are not in the current summary.
 
 ## M5 — Multi-window polish and adoption (FS3)
 

@@ -11,6 +11,7 @@ type local =
   ; follow : bool
   ; headers : bool
   ; synthesis : Synthesis_view.State.t
+  ; terminal_result : Terminal_result_view.State.t
   }
 
 type layout_mode =
@@ -31,6 +32,7 @@ type action =
   | Discover_asic
   | Asic of Asic.Operation.t
   | Edit_plan of string * string
+  | Edit_finalization of Run_ref.t
   | Launch_asic of Asic.Preview.t * bool
   | Apply_default_layout
   | Local_headers
@@ -58,12 +60,16 @@ type capture =
   ; workspace : W.Workspace_id.t
   }
 
+type argument =
+  | Plan_endpoint of string * string
+  | Finalization_attempt of Run_ref.t
+
 type palette =
   { capture : capture
   ; commands : command list
   ; query : string
   ; index : int
-  ; argument : (string * string) option
+  ; argument : argument option
   }
 
 type t =
@@ -106,6 +112,7 @@ let default_local =
   ; follow = true
   ; headers = true
   ; synthesis = Synthesis_view.State.empty
+  ; terminal_result = Terminal_result_view.State.empty
   }
 ;;
 
@@ -546,6 +553,11 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
                "resource row detail"
                (Synthesis_mode Details)
            ; command
+               "synthesis.metrics"
+               "Synthesis: Inspect metrics"
+               "resources diagnostics counters checkpoint boundary m"
+               (Synthesis_mode Metrics)
+           ; command
                "synthesis.evidence"
                "Synthesis: Inspect full evidence"
                "producer source provenance report path json"
@@ -691,6 +703,11 @@ let input t event ~commands : t * effect =
         | Clear_filter ->
           { t with palette = Some { p with query = ""; index = 0 } }, No_effect
         | Escape -> { t with palette = None; prefix = 0 }, No_effect
+        | Character _
+          when match p.argument with
+               | Some (Finalization_attempt _) -> String.length p.query >= 4096
+               | None | Some (Plan_endpoint _) -> false ->
+          { t with notice = "Finalization reference is limited to 4096 bytes" }, No_effect
         | Character ch ->
           ( { t with
               palette = Some { p with query = p.query ^ String.of_char ch; index = 0 }
@@ -718,17 +735,32 @@ let input t event ~commands : t * effect =
             ( { t with palette = None; notice = "Command target changed; reopen palette" }
             , No_effect )
           else if String.is_empty (String.strip p.query)
-          then { t with notice = "An explicit provider endpoint is required" }, No_effect
+          then
+            ( { t with
+                notice = "An explicit endpoint or exact finalization attempt is required"
+              }
+            , No_effect )
+          else if match p.argument with
+                  | Some (Finalization_attempt _) -> String.length p.query > 4096
+                  | None | Some (Plan_endpoint _) -> false
+          then
+            ( { t with notice = "Finalization reference is limited to 4096 bytes" }
+            , No_effect )
           else (
-            let flow, profile = Option.value_exn p.argument in
-            let args =
-              String.split (String.strip p.query) ~on:' '
-              |> List.filter ~f:(Fn.non String.is_empty)
+            let operation =
+              match Option.value_exn p.argument with
+              | Finalization_attempt run ->
+                Asic.Operation.Inspect_finalization { run; attempt = p.query }
+              | Plan_endpoint (flow, profile) ->
+                let args =
+                  String.split (String.strip p.query) ~on:' '
+                  |> List.filter ~f:(Fn.non String.is_empty)
+                in
+                let endpoint = List.hd_exn args
+                and assignments = List.tl_exn args in
+                Asic.Operation.Plan { flow; profile; endpoint; assignments }
             in
-            let endpoint = List.hd_exn args
-            and assignments = List.tl_exn args in
-            ( { t with palette = None }
-            , Execute (p.capture, Asic (Plan { flow; profile; endpoint; assignments })) ))
+            { t with palette = None }, Execute (p.capture, Asic operation))
         | Enter ->
           (match List.nth (matches p) p.index with
            | None -> t, No_effect
@@ -795,6 +827,121 @@ let select_run t run =
          ; run
          })
   | _ -> None
+;;
+
+let%test_unit "finalization form dispatches only an explicit exact attempt and captured \
+               run"
+  =
+  let snapshot = W.initial ~session_id:(W.Session_id.of_string "finalization-form") in
+  let host = receive empty snapshot in
+  let capture = Option.value_exn (capture host) in
+  let run = Fs0_fixture.run_a in
+  let form query =
+    { host with
+      palette =
+        Some
+          { capture
+          ; commands = []
+          ; query
+          ; index = 0
+          ; argument = Some (Finalization_attempt run)
+          }
+    }
+  in
+  let blank, effect = input (form "") Enter ~commands:[] in
+  assert (Option.is_some blank.palette);
+  (match effect with
+   | No_effect -> ()
+   | _ -> assert false);
+  let bounded, effect =
+    input (form (String.make 4096 'x')) (Character 'x') ~commands:[]
+  in
+  assert (String.length (Option.value_exn bounded.palette).query = 4096);
+  (match effect with
+   | No_effect -> ()
+   | _ -> assert false);
+  let _, effect = input (form (String.make 4097 'x')) Enter ~commands:[] in
+  (match effect with
+   | No_effect -> ()
+   | _ -> assert false);
+  let exact_attempt = "/private/returned operation attempt/operation.json" in
+  let submitted, effect = input (form exact_attempt) Enter ~commands:[] in
+  assert (Option.is_none submitted.palette);
+  (match effect with
+   | Execute (_, Asic (Inspect_finalization { run = actual; attempt })) ->
+     assert (Run_ref.equal actual run);
+     assert (String.equal attempt exact_attempt)
+   | _ -> assert false);
+  let stale =
+    { (form "returned-operation-attempt") with
+      registry = Some { snapshot with revision = snapshot.revision + 1 }
+    }
+  in
+  let _, effect = input stale Enter ~commands:[] in
+  (match effect with
+   | No_effect -> ()
+   | _ -> assert false);
+  let escaped, effect = input (form "returned-operation-attempt") Escape ~commands:[] in
+  assert (Option.is_none escaped.palette);
+  match effect with
+  | No_effect -> ()
+  | _ -> assert false
+;;
+
+let%test_unit "metrics palette mode and scroll state belong to one synthesis tile" =
+  let snapshot = W.initial ~session_id:(W.Session_id.of_string "metrics-local") in
+  let snapshot =
+    W.apply
+      snapshot
+      (Mutate
+         { expected_revision = snapshot.revision
+         ; mutation =
+             Create_tile
+               { workspace = (List.hd_exn snapshot.workspaces).id
+               ; kind = "synthesis"
+               ; geometry = { x = 0; y = 0; width = 64; height = 10 }
+               }
+         })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let host = receive empty snapshot in
+  let synthesis =
+    List.find_exn snapshot.tiles ~f:(fun tile -> String.equal tile.kind "synthesis")
+  in
+  let other =
+    List.find_exn snapshot.tiles ~f:(fun tile ->
+      not (W.Tile_id.equal tile.id synthesis.id))
+  in
+  let host = { host with focus = Some synthesis.id } in
+  let commands = catalog host ~project:None ~jobs:[] in
+  let command =
+    List.find_exn commands ~f:(fun command -> String.equal command.id "synthesis.metrics")
+  in
+  (match command.action with
+   | Synthesis_mode Metrics -> ()
+   | _ -> assert false);
+  let state = Synthesis_view.State.set_mode (local host synthesis.id).synthesis Metrics in
+  let state = Synthesis_view.State.scroll state ~delta:7 ~max_offset:7 in
+  let updated =
+    set_local host synthesis.id { (local host synthesis.id) with synthesis = state }
+  in
+  assert (
+    Synthesis_view.Mode.equal
+      (Synthesis_view.State.mode (local updated synthesis.id).synthesis)
+      Metrics);
+  assert (
+    Synthesis_view.Mode.equal
+      (Synthesis_view.State.mode (local updated other.id).synthesis)
+      Summary);
+  assert (phys_equal host.registry updated.registry);
+  let other_commands =
+    catalog { host with focus = Some other.id } ~project:None ~jobs:[]
+  in
+  assert (
+    not
+      (List.exists other_commands ~f:(fun command ->
+         String.equal command.id "synthesis.metrics")))
 ;;
 
 let%test_unit "Ctrl-U clears focused filters without submitting or touching other tiles" =

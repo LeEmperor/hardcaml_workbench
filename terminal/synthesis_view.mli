@@ -6,6 +6,7 @@ module Mode : sig
     | Summary
     | Cells
     | Details
+    | Metrics
     | Evidence
   [@@deriving equal, sexp]
 end
@@ -33,10 +34,16 @@ module State : sig
   val set_sort : t -> Synthesis.Sort.t -> t
   val cycle_sort : t -> t
 
-  (** Scroll wrapped Details/Evidence lines; rendering clamps the offset to the current
-      page. Cells navigation uses [move], keeping selection visible. *)
-  val scroll : t -> delta:int -> t
+  (** Clamp both the current and resulting offsets to the actual wrapped-page bound. *)
+  val scroll : t -> delta:int -> max_offset:int -> t
 end
+
+(** Synthesis-only diagnostic counters. No physical verification or signoff verdict is
+    inferred from these counts; source references remain in Evidence. *)
+val checks_lines : Asic.Summary.t -> string list
+
+(** Cell-aware wrapping shared by the pure evidence views. *)
+val wrap : width:int -> string -> string list
 
 (** Pure, cell-width-bounded strings, at most [height] rows. No host dependency, provider
     effects, JSON parsing, or inferred cell semantics. Rendering also reconciles
@@ -48,3 +55,13 @@ val rows
   -> width:int
   -> height:int
   -> string list
+
+(** Navigate a wrapped page using its actual viewport, including after resize. *)
+val scroll
+  : State.t
+  -> summary:Asic.Summary.t option
+  -> filter:string
+  -> width:int
+  -> height:int
+  -> delta:int
+  -> State.t

@@ -9,6 +9,7 @@ module Host = Terminal_presentation.Workspace_host
 module Host_view = Terminal_presentation.Host_view
 module Appearance = Terminal_presentation.Appearance
 module Synthesis_view = Terminal_presentation.Synthesis_view
+module Terminal_result_view = Terminal_presentation.Terminal_result_view
 module Plain_rpc = Terminal_presentation.Plain_rpc
 module Launch_preferences = Terminal_presentation.Launch_preferences
 module Asic_intents = Terminal_presentation.Asic_intents
@@ -521,6 +522,14 @@ let synthesis_summary session tile =
           Run_ref.equal summary.Asic.Summary.run run))))
 ;;
 
+let terminal_result_context session tile =
+  Option.bind session.host.registry ~f:(fun registry ->
+    Workspace.resolve_tile registry tile.Workspace.Tile.id
+    |> Result.ok
+    |> Option.bind ~f:(fun reference -> reference.run)
+    |> Option.map ~f:(fun run -> run, synthesis_summary session tile))
+;;
+
 let reconcile_synthesis session =
   Option.iter session.host.registry ~f:(fun registry ->
     List.iter registry.tiles ~f:(fun tile ->
@@ -533,7 +542,30 @@ let reconcile_synthesis session =
             ~summary:(synthesis_summary session tile)
             ~filter:local.filter
         in
-        session.host <- Host.set_local session.host tile.id { local with synthesis })))
+        session.host <- Host.set_local session.host tile.id { local with synthesis })
+      else if Terminal_result_view.supports tile.kind
+      then (
+        let local = Host.local session.host tile.id in
+        let terminal_result =
+          match terminal_result_context session tile with
+          | None -> Terminal_result_view.State.empty
+          | Some (run, summary) ->
+            Terminal_result_view.State.reconcile local.terminal_result ~run ~summary
+        in
+        session.host <- Host.set_local session.host tile.id { local with terminal_result })))
+;;
+
+let change_terminal_result session f =
+  reconcile_synthesis session;
+  Option.iter (Host.focused session.host) ~f:(fun tile ->
+    if Terminal_result_view.supports tile.kind
+    then (
+      let local = Host.local session.host tile.id in
+      session.host
+      <- Host.set_local
+           session.host
+           tile.id
+           { local with terminal_result = f local.terminal_result }))
 ;;
 
 let change_synthesis session f =
@@ -1813,6 +1845,7 @@ let host_data session : Host_view.data =
   ; runs
   ; log_lines
   ; run_lines
+  ; run_context = Host_view.request_context session.asic
   ; summary =
       (fun run ->
         Option.bind session.asic ~f:(fun asic ->
@@ -1825,17 +1858,21 @@ let host_data session : Host_view.data =
 ;;
 
 let render session dimensions =
+  let render_host () =
+    session.last_dimensions <- Some dimensions;
+    Host_view.render session.host (host_data session) dimensions
+  in
   match session.host.registry with
   | None
     when Option.is_some session.opened
          && List.mem session.hello.capabilities "workspace" ~equal:String.equal ->
-    Host_view.render session.host (host_data session) dimensions
+    render_host ()
   | None -> render_legacy session dimensions
   | Some _
     when Option.is_some session.hierarchy_view
          || Option.is_some session.artifact_view
          || session.show_connection_details -> render_legacy session dimensions
-  | Some _ -> Host_view.render session.host (host_data session) dimensions
+  | Some _ -> render_host ()
 ;;
 
 (* Baseline capture.
@@ -2032,6 +2069,13 @@ let host_catalog session =
           ("Refresh evidence " ^ Host_view.run_label run.run)
           "validate source"
           (Asic (Refresh run.run))
+      ; Host.command
+          ("asic.inspect-finalization." ^ Host_view.run_label run.run)
+          ("Inspect finalization for "
+           ^ Host_view.run_label run.run
+           ^ " (enter exact attempt)")
+          "import terminal results timing physical checks read-only"
+          (Edit_finalization run.run)
       ]))
 ;;
 
@@ -2166,11 +2210,27 @@ let execute_host session captured action ~exit =
                ; commands = []
                ; query
                ; index = 0
-               ; argument = Some (flow, profile)
+               ; argument = Some (Host.Plan_endpoint (flow, profile))
                }
          ; notice =
              "Enter ENDPOINT [name=value ...]; Describe flow lists capabilities. No \
               fallback."
+         };
+      Effect.Ignore
+    | Edit_finalization run ->
+      session.host
+      <- { session.host with
+           palette =
+             Some
+               { capture = captured
+               ; commands = []
+               ; query = ""
+               ; index = 0
+               ; argument = Some (Host.Finalization_attempt run)
+               }
+         ; notice =
+             "Enter the exact returned finalization operation attempt; no reference is \
+              guessed"
          };
       Effect.Ignore
     | Launch_asic (preview, view) ->
@@ -2237,11 +2297,18 @@ let execute_host session captured action ~exit =
     | Exit -> exit ())
 ;;
 
+let scroll_host session delta =
+  reconcile_synthesis session;
+  Option.iter session.last_dimensions ~f:(fun dimensions ->
+    session.host <- Host_view.scroll_focused session.host (host_data session) dimensions ~delta)
+;;
+
 let browse_host session delta =
+  scroll_host session delta;
   change_synthesis session (fun tile local ->
     let synthesis =
       match Synthesis_view.State.mode local.synthesis with
-      | Details | Evidence -> Synthesis_view.State.scroll local.synthesis ~delta
+      | Details | Metrics | Evidence -> local.synthesis
       | Summary | Cells ->
         Synthesis_view.State.move
           local.synthesis
@@ -2316,12 +2383,14 @@ let host_handler session event ~exit : unit Bonsai_term.Effect.t option =
   match effect with
   | Host.Execute (capture, action) -> Some (execute_host session capture action ~exit)
   | Host.Activate ->
+    change_terminal_result session Terminal_result_view.State.inspect;
     change_synthesis session (fun _ local ->
       let mode =
         match Synthesis_view.State.mode local.synthesis with
         | Summary -> Synthesis_view.Mode.Cells
         | Cells -> Details
         | Details -> Details
+        | Metrics -> Metrics
         | Evidence -> Evidence
       in
       { local with synthesis = Synthesis_view.State.set_mode local.synthesis mode });
@@ -2356,8 +2425,15 @@ let host_handler session event ~exit : unit Bonsai_term.Effect.t option =
      | Some (Character 't') -> dispatch "project.test"
      | Some (Character 'i') -> dispatch "project.discover"
      | Some (Character 's') -> dispatch "synthesis.cycle-sort"
-     | Some (Character 'e') -> dispatch "synthesis.evidence"
+     | Some (Character 'e') ->
+       (match Host.focused session.host with
+        | Some tile when Terminal_result_view.supports tile.kind ->
+          change_terminal_result session Terminal_result_view.State.inspect;
+          Some Effect.Ignore
+        | _ -> dispatch "synthesis.evidence")
+     | Some (Character 'm') -> dispatch "synthesis.metrics"
      | Some Escape ->
+       change_terminal_result session Terminal_result_view.State.back;
        change_synthesis session (fun _ local ->
          { local with synthesis = Synthesis_view.State.back local.synthesis });
        Some Effect.Ignore
@@ -2397,14 +2473,8 @@ let host_handler session event ~exit : unit Bonsai_term.Effect.t option =
        Some Effect.Ignore
      | Some (Character (('[' | ']') as ch)) ->
        (match Host.focused session.host with
-        | Some tile when String.equal tile.kind "synthesis" ->
-          change_synthesis session (fun _ local ->
-            { local with
-              synthesis =
-                Synthesis_view.State.scroll
-                  local.synthesis
-                  ~delta:(if Char.equal ch '[' then -1 else 1)
-            })
+         | Some tile when Terminal_result_view.supports tile.kind || String.equal tile.kind "synthesis" ->
+           scroll_host session (if Char.equal ch '[' then -1 else 1)
         | _ ->
           Option.iter session.host.focus ~f:(fun id ->
             let l = Host.local session.host id in

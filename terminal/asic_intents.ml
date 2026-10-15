@@ -181,6 +181,8 @@ let fixture_summary : Asic.Summary.t =
   ; cell_count = None
   ; cells = []
   ; timing = []
+  ; metrics = []
+  ; terminal = None
   ; completion = "fixture"
   ; acceptance = "unavailable"
   ; producer = "synthetic-test"
@@ -189,8 +191,8 @@ let fixture_summary : Asic.Summary.t =
   }
 ;;
 
-let%test_unit "completed cached evidence never schedules repeated observation or summary \
-               loads"
+let%test_unit "old cached evidence without metrics never schedules observation, summary \
+               loads or Refresh"
   =
   let snapshot =
     fixture_snapshot

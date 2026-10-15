@@ -504,6 +504,119 @@ let require_portable_round_trip
         "bin_io round trip failed" (label : string) (!position : int) (length : int)]
 ;;
 
+let%expect_test "ASIC metrics round-trip and old summary sexps have no metrics" =
+  let metric : Asic.Metric.t =
+    { key = "design__instance__area"
+    ; label = "Mapped cell area"
+    ; value = Some 13041.6048
+    ; unit_ = Some "µm²"
+    ; availability = "available"
+    ; source =
+        Some
+          "{\"path\":\"/public/segment.json\",\"field\":\"metrics.design__instance__area\"}"
+    }
+  in
+  require_portable_round_trip
+    "ASIC metric"
+    ~equal:Asic.Metric.equal
+    ~sexp_of:Asic.Metric.sexp_of_t
+    ~of_sexp:Asic.Metric.t_of_sexp
+    ~bin_size:Asic.Metric.bin_size_t
+    ~bin_write:Asic.Metric.bin_write_t
+    ~bin_read:Asic.Metric.bin_read_t
+    metric;
+  let check : Asic.Check.t =
+    { name = "drc"; status = "unknown"; reason = Some "metric missing"; source = None }
+  in
+  let terminal : Asic.Terminal_result.t =
+    { attempt = "/public/operation"
+    ; results_file = "/public/operation/published-results.json"
+    ; results_digest = "results-digest"
+    ; operation_status = "failed"
+    ; physical_completion = "full"
+    ; acceptance = "fail"
+    ; timing_goal = "unknown"
+    ; metrics = [ metric ]
+    ; checks = [ check ]
+    ; evidence = "supplied operation/results metadata"
+    }
+  in
+  require_portable_round_trip
+    "ASIC terminal result"
+    ~equal:Asic.Terminal_result.equal
+    ~sexp_of:Asic.Terminal_result.sexp_of_t
+    ~of_sexp:Asic.Terminal_result.t_of_sexp
+    ~bin_size:Asic.Terminal_result.bin_size_t
+    ~bin_write:Asic.Terminal_result.bin_write_t
+    ~bin_read:Asic.Terminal_result.bin_read_t
+    terminal;
+  let summary : Asic.Summary.t =
+    { run =
+        { backend = Backend_id.of_string "asic"; id = "old"; build = None; label = None }
+    ; source_digest = "digest"
+    ; execution_file = "/public/execution.json"
+    ; plan_identity = None
+    ; cell_count = Some 673
+    ; cells = []
+    ; metrics = [ metric ]
+    ; terminal = Some terminal
+    ; timing = []
+    ; completion = "completed"
+    ; acceptance = "not_evaluated"
+    ; producer = "boundary_snapshot"
+    ; observed_at = "recorded"
+    ; freshness = Cached_unverified
+    }
+  in
+  require_portable_round_trip
+    "ASIC summary"
+    ~equal:Asic.Summary.equal
+    ~sexp_of:Asic.Summary.sexp_of_t
+    ~of_sexp:Asic.Summary.t_of_sexp
+    ~bin_size:Asic.Summary.bin_size_t
+    ~bin_write:Asic.Summary.bin_write_t
+    ~bin_read:Asic.Summary.bin_read_t
+    summary;
+  let legacy =
+    Sexp.of_string
+      "((run ((backend asic) (id old) (build ()) (label ())))\n\
+      \        (source_digest digest) (execution_file /public/execution.json)\n\
+      \        (plan_identity ()) (cell_count (673)) (cells ()) (timing ())\n\
+      \        (completion completed) (acceptance not_evaluated)\n\
+      \        (producer boundary_snapshot) (observed_at recorded) (freshness \
+       Cached_unverified))"
+  in
+  let decoded = Asic.Summary.t_of_sexp legacy in
+  assert (Asic.Summary.equal decoded { summary with metrics = []; terminal = None });
+  let v2 =
+    match Asic.Summary.sexp_of_t { summary with terminal = None } with
+    | Sexp.List fields ->
+      Sexp.List
+        (List.filter fields ~f:(function
+          | Sexp.List (Sexp.Atom "terminal" :: _) -> false
+          | _ -> true))
+    | _ -> assert false
+  in
+  assert (Asic.Summary.equal (Asic.Summary.t_of_sexp v2) { summary with terminal = None });
+  let inspect =
+    Asic.Operation.Inspect_finalization { run = summary.run; attempt = terminal.attempt }
+  in
+  require_portable_round_trip
+    "ASIC inspect finalization"
+    ~equal:Asic.Operation.equal
+    ~sexp_of:Asic.Operation.sexp_of_t
+    ~of_sexp:Asic.Operation.t_of_sexp
+    ~bin_size:Asic.Operation.bin_size_t
+    ~bin_write:Asic.Operation.bin_write_t
+    ~bin_read:Asic.Operation.bin_read_t
+    inspect;
+  show "legacy metrics" [%sexp (decoded.metrics : Asic.Metric.t list)];
+  show "legacy cell count" [%sexp (decoded.cell_count : int option)];
+  [%expect {|
+    ("legacy metrics" ())
+    ("legacy cell count" (673)) |}]
+;;
+
 let%expect_test "V1 1B operation values have portable codecs and bounded wire shapes" =
   let check label equal sexp_of of_sexp bin_size bin_write bin_read value =
     require_portable_round_trip

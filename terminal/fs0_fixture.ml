@@ -32,6 +32,8 @@ let summary run cell_count cells : Asic.Summary.t =
   ; cell_count = Some cell_count
   ; cells
   ; timing = []
+  ; metrics = []
+  ; terminal = None
   ; completion = "completed"
   ; acceptance = "not evaluated (synthetic fixture)"
   ; producer = "SYNTHETIC FS0 FIXTURE"

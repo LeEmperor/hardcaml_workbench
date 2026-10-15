@@ -6,6 +6,7 @@ module Mode = struct
     | Summary
     | Cells
     | Details
+    | Metrics
     | Evidence
   [@@deriving equal, sexp]
 end
@@ -141,12 +142,15 @@ module State = struct
       (match t.mode with
        | Summary -> Summary
        | Cells -> Summary
+       | Metrics -> Summary
        | Details | Evidence -> Cells)
   ;;
 
   let set_sort t sort = { t with sort; offset = 0 }
   let cycle_sort t = set_sort t (Synthesis.Sort.next t.sort)
-  let scroll t ~delta = { t with offset = shift t.offset delta }
+  let scroll t ~delta ~max_offset =
+    let maximum = Int.max 0 max_offset in
+    { t with offset = Int.min maximum (shift (Int.min maximum t.offset) delta) }
 end
 
 (** Decode UTF-8 only to ask Bonsai/Notty for terminal cell widths. No byte-based
@@ -238,6 +242,64 @@ let sort_text = function
   | Name_desc -> "Cell type descending"
 ;;
 
+let metric_value (metric : Asic.Metric.t) =
+  match metric.value with
+  | None -> "unavailable"
+  | Some value when not (Float.is_finite value) -> "invalid (non-finite)"
+  | Some value when Float.(value < 0.) -> "invalid (negative)"
+  | Some _ when not (String.equal metric.availability "available") -> "unavailable"
+  | Some value ->
+    sprintf "%g%s" value (Option.value_map metric.unit_ ~default:"" ~f:(( ^ ) " "))
+;;
+
+let metric_line (metric : Asic.Metric.t) =
+  let label = if String.is_empty metric.label then metric.key else metric.label in
+  let availability =
+    if String.is_empty metric.availability
+    then "availability not reported"
+    else metric.availability
+  in
+  sprintf "%s: %s [%s]" label (metric_value metric) availability
+;;
+
+let metrics_lines (summary : Asic.Summary.t) =
+  [ "Synthesis metrics | j/k scroll | e Evidence | Esc Summary" ]
+  @ (if List.is_empty summary.metrics
+     then [ "Metrics unavailable in cached summary; explicit Refresh needed" ]
+     else List.map summary.metrics ~f:metric_line)
+  @ [ "Scope: synthesis resources/diagnostics, not physical area or DRC/LVS"
+    ; "Freshness: " ^ freshness summary.freshness
+    ; "Provenance: accumulated checkpoint-boundary reports; see Evidence"
+    ; "Acceptance (reported): " ^ summary.acceptance
+    ; "Zero diagnostic counts do not imply signoff"
+    ]
+;;
+
+let checks_lines (summary : Asic.Summary.t) =
+  let diagnostic_keys =
+    [ "design__instance_unmapped__count"
+    ; "synthesis__check_error__count"
+    ; "design__inferred_latch__count"
+    ; "design__lint_error__count"
+    ; "design__lint_warning__count"
+    ; "design__lint_timing_construct__count"
+    ]
+  in
+  let diagnostics =
+    List.filter summary.metrics ~f:(fun metric ->
+      List.mem diagnostic_keys metric.key ~equal:String.equal)
+  in
+  [ "Checks: synthesis diagnostic counters (not DRC/LVS)" ]
+  @ (if List.is_empty diagnostics
+     then [ "Synthesis diagnostics unavailable; explicit Refresh needed for old caches" ]
+     else List.map diagnostics ~f:metric_line)
+  @ [ "Zero diagnostic counts do not imply signoff"
+    ; "Acceptance (reported): " ^ summary.acceptance
+    ; "Checkpoint-boundary provenance: synthesis Metrics / Evidence"
+    ; "DRC/LVS: no terminal verification result imported"
+    ]
+;;
+
 let table ~state ~(projection : Synthesis.t) ~width ~height =
   let candidates = State.cell_rows state in
   let header = clip ~width "  Count  Cell type" in
@@ -283,15 +345,29 @@ let rows state ~summary ~filter ~width ~height =
     let state = State.reconcile state ~summary ~filter in
     match summary with
     | None ->
-      List.take (wrap ~width "Synthesis summary unavailable (no cached data)") height
+      let message =
+        if Mode.equal (State.mode state) Metrics
+        then "Synthesis metrics unavailable (no cached summary); explicit Refresh needed"
+        else "Synthesis summary unavailable (no cached data)"
+      in
+      List.take (wrap ~width message) height
     | Some summary ->
       let projection = (Option.value_exn state.State.cache).projection in
       (match State.mode state with
        | Summary ->
          let intro =
-           [ "Cell count: " ^ total_text projection.total
-           ; "Freshness: " ^ freshness summary.freshness
-           ]
+           ([ "Cell count: " ^ total_text projection.total
+            ; "Freshness: " ^ freshness summary.freshness
+            ]
+            @
+            if height < 10
+            then []
+            else
+              List.find summary.metrics ~f:(fun metric ->
+                String.equal metric.key "design__instance__area")
+              |> Option.to_list
+              |> List.map ~f:(fun metric ->
+                "Synthesis resource area (mapped cells): " ^ metric_value metric))
            |> List.map ~f:(clip ~width)
          in
          let footer =
@@ -300,7 +376,7 @@ let rows state ~summary ~filter ~width ~height =
            then
              [ coverage_text projection
              ; "Producer: provider checkpoint (inspect Evidence)"
-             ; "Enter table/detail | / filter | s sort | e evidence"
+             ; "Enter table/detail | m metrics | / filter | s sort | e evidence"
              ]
            else if height >= 6
            then [ coverage_text projection ]
@@ -361,6 +437,7 @@ let rows state ~summary ~filter ~width ~height =
               ; "Source: cached summary.cells; execution reference in Evidence"
               ; "j/k scroll | e full evidence | Esc cell table"
               ])
+       | Metrics -> page ~state ~width ~height (metrics_lines summary)
        | Evidence ->
          let freshness_detail =
            match summary.freshness with
@@ -389,7 +466,38 @@ let rows state ~summary ~filter ~width ~height =
             @ freshness_detail
             @ List.map summary.timing ~f:(fun (name, value, unit_) ->
               sprintf "Timing (reported): %s = %g %s" name value unit_)
+            @ [ "Checkpoint-boundary provenance (accumulated reported metric sources)"
+              ; "Boundaries are evidence scope, not stage completion or acceptance"
+              ; "Zero diagnostic counts do not imply signoff; no DRC/LVS verdict inferred"
+              ]
+            @ (if List.is_empty summary.metrics
+               then [ "Metrics unavailable in cached summary; explicit Refresh needed" ]
+               else
+                 List.concat_map summary.metrics ~f:(fun metric ->
+                   [ "Metric key: " ^ metric.key
+                   ; "Metric label (reported): " ^ metric.label
+                   ; "Metric value (reported): "
+                     ^ Option.value_map
+                         metric.value
+                         ~default:"not reported"
+                         ~f:(sprintf "%g")
+                   ; "Metric unit (reported): "
+                     ^ Option.value metric.unit_ ~default:"not reported"
+                   ; "Metric availability (reported): " ^ metric.availability
+                   ; "Metric source (full): "
+                     ^ Option.value metric.source ~default:"not reported"
+                   ]))
             @ [ "Producer (raw):"; summary.producer ])))
+;;
+
+let scroll state ~summary ~filter ~width ~height ~delta =
+  let state = State.reconcile state ~summary ~filter in
+  match State.mode state with
+  | Summary | Cells -> state
+  | Details | Metrics | Evidence ->
+    let content = rows { state with offset = 0 } ~summary ~filter ~width ~height:Int.max_value in
+    State.scroll state ~delta
+      ~max_offset:(if width <= 0 || height <= 0 then 0 else Int.max 0 (List.length content - height))
 ;;
 
 module%test Tests = struct
@@ -398,6 +506,7 @@ module%test Tests = struct
     ?(digest = "digest-a")
     ?(total = Some 10)
     ?(cells = [ "alpha", 4; "beta", 6 ])
+    ?(metrics = [])
     ()
     : Asic.Summary.t
     =
@@ -408,6 +517,8 @@ module%test Tests = struct
     ; cell_count = total
     ; cells
     ; timing = []
+    ; metrics
+    ; terminal = None
     ; completion = "reported completion"
     ; acceptance = "reported acceptance"
     ; producer = "{\"raw-provider-sentinel\":\"untouched\"}"
@@ -419,6 +530,200 @@ module%test Tests = struct
   let ready summary =
     State.reconcile State.empty ~summary:(Some summary) ~filter:""
     |> fun t -> State.reconcile t ~summary:(Some summary) ~filter:""
+  ;;
+
+  let metric
+    ?(value = Some 12.5)
+    ?(unit_ = Some "um^2")
+    ?(availability = "available")
+    ?(source = Some "/private/checkpoints/synthesis/resources.json#area")
+    key
+    label
+    : Asic.Metric.t
+    =
+    { key; label; value; unit_; availability; source }
+  ;;
+
+  let render_mode s mode =
+    rows
+      (State.set_mode (ready s) mode)
+      ~summary:(Some s)
+      ~filter:""
+      ~width:200
+      ~height:200
+  ;;
+
+  let%test_unit "metrics missing in old caches require explicit Refresh; invalid values \
+                 stay explicit"
+    =
+    let output = render_mode (summary ()) Metrics in
+    assert (
+      List.mem
+        output
+        "Metrics unavailable in cached summary; explicit Refresh needed"
+        ~equal:String.equal);
+    let s =
+      summary
+        ~metrics:
+          [ metric "area" "Synthesis resource area"
+          ; metric ~value:None ~availability:"not_reported" "missing" "Missing"
+          ; metric ~value:(Some Float.nan) "nan" "NaN"
+          ; metric ~value:(Some Float.infinity) "inf" "Infinity"
+          ; metric ~value:(Some (-1.)) "negative" "Negative"
+          ; metric ~value:(Some 0.) ~unit_:None "diagnostics" "Synthesis diagnostics"
+          ; metric ~unit_:None ~availability:"" ~source:None "fallback" ""
+          ]
+        ()
+    in
+    let output = render_mode s Metrics in
+    List.iter
+      [ "Synthesis resource area: 12.5 um^2 [available]"
+      ; "Missing: unavailable [not_reported]"
+      ; "NaN: invalid (non-finite) [available]"
+      ; "Infinity: invalid (non-finite) [available]"
+      ; "Negative: invalid (negative) [available]"
+      ; "Synthesis diagnostics: 0 [available]"
+      ; "fallback: unavailable [availability not reported]"
+      ; "Zero diagnostic counts do not imply signoff"
+      ; "Acceptance (reported): reported acceptance"
+      ]
+      ~f:(fun line -> assert (List.mem output line ~equal:String.equal));
+    assert (not (List.exists output ~f:(String.is_substring ~substring:"/private/")));
+    let compact =
+      rows
+        (State.set_mode (ready s) Metrics)
+        ~summary:(Some s)
+        ~filter:""
+        ~width:80
+        ~height:2
+    in
+    assert (
+      List.mem
+        compact
+        "Synthesis resource area: 12.5 um^2 [available]"
+        ~equal:String.equal)
+  ;;
+
+  let%test_unit "summary area and Checks use synthesis scope and preserve acceptance" =
+    let s =
+      summary
+        ~metrics:
+          [ metric "design__instance__area" "Mapped cell area"
+          ; metric
+              ~value:(Some 0.)
+              ~unit_:(Some "count")
+              "synthesis__check_error__count"
+              "Synthesis check errors"
+          ; metric
+              ~value:(Some 2.)
+              ~unit_:(Some "count")
+              "design__lint_warning__count"
+              "Lint warnings"
+          ]
+        ()
+    in
+    let output = render_mode s Summary in
+    assert (
+      List.mem
+        output
+        "Synthesis resource area (mapped cells): 12.5 um^2"
+        ~equal:String.equal);
+    let checks = checks_lines s in
+    assert (
+      List.mem
+        checks
+        "Checks: synthesis diagnostic counters (not DRC/LVS)"
+        ~equal:String.equal);
+    assert (
+      List.mem checks "Synthesis check errors: 0 count [available]" ~equal:String.equal);
+    assert (List.mem checks "Lint warnings: 2 count [available]" ~equal:String.equal);
+    assert (
+      List.mem checks "Acceptance (reported): reported acceptance" ~equal:String.equal);
+    assert (
+      List.mem checks "Zero diagnostic counts do not imply signoff" ~equal:String.equal);
+    assert (
+      not (List.exists checks ~f:(String.is_substring ~substring:"Mapped cell area")));
+    let missing = checks_lines (summary ()) in
+    assert (
+      List.exists missing ~f:(String.is_substring ~substring:"explicit Refresh needed"));
+    let no_summary =
+      rows
+        (State.set_mode State.empty Metrics)
+        ~summary:None
+        ~filter:""
+        ~width:100
+        ~height:2
+    in
+    assert (
+      List.exists no_summary ~f:(String.is_substring ~substring:"explicit Refresh needed"))
+  ;;
+
+  let%test_unit "checkpoint boundaries retain original sources separately from acceptance"
+    =
+    let sources =
+      [ "/private/checkpoints/rtl/check.json#diagnostics"
+      ; "/private/checkpoints/synthesis/check.json#diagnostics"
+      ]
+    in
+    let s =
+      summary
+        ~metrics:
+          (List.mapi sources ~f:(fun n source ->
+             metric
+               ~value:(Some 0.)
+               ~unit_:None
+               ~source:(Some source)
+               (sprintf "checks-%d" n)
+               "Synthesis diagnostic count"))
+        ()
+    in
+    let output = render_mode s Evidence in
+    List.iter sources ~f:(fun source ->
+      assert (List.mem output ("Metric source (full): " ^ source) ~equal:String.equal));
+    assert (
+      List.mem output "Acceptance (reported): reported acceptance" ~equal:String.equal);
+    assert (
+      List.mem
+        output
+        "Boundaries are evidence scope, not stage completion or acceptance"
+        ~equal:String.equal);
+    assert (List.mem output s.producer ~equal:String.equal);
+    let wrapped =
+      rows
+        (State.set_mode (ready s) Evidence)
+        ~summary:(Some s)
+        ~filter:""
+        ~width:17
+        ~height:200
+    in
+    let text = String.concat wrapped in
+    List.iter sources ~f:(fun source ->
+      assert (String.is_substring text ~substring:source))
+  ;;
+
+  let%test_unit "metrics paging is local and same-digest metric refresh renders new data" =
+    let s = summary () in
+    let cells = ready s |> fun t -> State.set_mode t Cells in
+    let metrics = State.set_mode cells Metrics |> fun t -> State.scroll t ~delta:2 ~max_offset:10 in
+    assert (Mode.equal (State.mode cells) Cells);
+    [%test_result: int] cells.State.offset ~expect:0;
+    [%test_result: string option] (State.selected metrics) ~expect:(State.selected cells);
+    let updated = { s with metrics = [ metric "area" "Synthesis resource area" ] } in
+    let refreshed = State.reconcile metrics ~summary:(Some updated) ~filter:"" in
+    assert (Mode.equal (State.mode refreshed) Metrics);
+    [%test_result: int] refreshed.State.offset ~expect:2;
+    let output = rows refreshed ~summary:(Some updated) ~filter:"" ~width:200 ~height:2 in
+    assert (List.exists output ~f:(String.is_substring ~substring:"Scope: synthesis"));
+    let top = State.scroll refreshed ~delta:Int.min_value ~max_offset:10 in
+    let output = rows top ~summary:(Some updated) ~filter:"" ~width:200 ~height:2 in
+    assert (
+      List.mem output "Synthesis resource area: 12.5 um^2 [available]" ~equal:String.equal);
+    let replacement =
+      State.reconcile refreshed ~summary:(Some (summary ~digest:"new" ())) ~filter:""
+    in
+    assert (Mode.equal (State.mode replacement) Metrics);
+    [%test_result: int] replacement.State.offset ~expect:0;
+    assert (Mode.equal (State.mode (State.back replacement)) Summary)
   ;;
 
   let%test_unit "shares use reported denominator; all coverage states are explicit" =
@@ -625,7 +930,7 @@ module%test Tests = struct
       (rows t ~summary:(Some s) ~filter:"" ~width:0 ~height:4)
       ~expect:[];
     let evidence =
-      State.set_mode t Evidence |> fun t -> State.scroll t ~delta:Int.max_value
+      State.set_mode t Evidence |> fun t -> scroll t ~summary:(Some s) ~filter:"" ~width:80 ~height:3 ~delta:Int.max_value
     in
     let output = rows evidence ~summary:(Some s) ~filter:"" ~width:80 ~height:3 in
     [%test_result: int] (List.length output) ~expect:3;

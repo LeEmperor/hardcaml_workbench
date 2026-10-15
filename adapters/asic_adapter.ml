@@ -93,3 +93,7 @@ let updates config ~root ~environment (r : Asic.Reference.t) ~after =
 let report config ~root ~environment execution_file =
   provider config ~root ~environment [ "report"; execution_file; "--json" ]
 ;;
+
+let inspect_finalization config ~root ~environment attempt =
+  provider config ~root ~environment [ "finalization-inspect"; attempt; "--json" ]
+;;

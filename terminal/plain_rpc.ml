@@ -33,6 +33,8 @@ let keys (operation : Asic.Operation.t) (snapshot : Asic.Snapshot.t) =
     else [ key ]
   | Load_summary run -> [ "summary:" ^ run.id ]
   | Refresh run -> [ "refresh:" ^ run.id ]
+  | Inspect_finalization { run; attempt } ->
+    [ "finalization:" ^ run.id ^ ":" ^ digest attempt ]
   | Cancel key ->
     [ (if List.exists snapshot.operations ~f:(fun op -> String.equal op.key key)
        then key
@@ -138,6 +140,43 @@ let%test_unit "Observe waits for its read, independently of a long execution" =
     match progress ~wait:false (keys Get snapshot) snapshot with
     | Complete -> true
     | _ -> false)
+;;
+
+let%test_unit "finalization waits for the exact attempt rather than an earlier import" =
+  let run = Fs0_fixture.run_a in
+  let old_attempt = "/private/finalization/old/operation.json" in
+  let attempt = "/private/finalization/exact/operation.json" in
+  let snapshot = Fs0_fixture.snapshot in
+  let requested = keys (Inspect_finalization { run; attempt }) snapshot in
+  let old_key =
+    List.hd_exn (keys (Inspect_finalization { run; attempt = old_attempt }) snapshot)
+  in
+  let key = List.hd_exn requested in
+  assert (not (String.equal old_key key));
+  let completed : Asic.Pending.t =
+    { key = old_key
+    ; kind = "finalization"
+    ; state = "completed"
+    ; run = None
+    ; error = None
+    }
+  in
+  let snapshot = { snapshot with operations = [ completed ] } in
+  (match progress ~wait:true requested snapshot with
+   | Failed _ -> ()
+   | _ -> assert false);
+  let snapshot =
+    { snapshot with
+      operations = { completed with key; state = "executing" } :: snapshot.operations
+    }
+  in
+  (match progress ~wait:true requested snapshot with
+   | Pending -> ()
+   | _ -> assert false);
+  let snapshot = { snapshot with operations = [ { completed with key } ] } in
+  match progress ~wait:true requested snapshot with
+  | Complete -> ()
+  | _ -> assert false
 ;;
 
 let%test_unit "Observe does not await the lifetime of a coalesced automatic observer" =

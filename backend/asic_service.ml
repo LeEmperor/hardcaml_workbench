@@ -12,6 +12,7 @@ module Stored = struct
     ; runs : Asic.Run.t list
     ; submissions : (string * Asic.Preview.t * string option) list
     ; index : (string * string) list
+    ; terminal_attempts : (string * string) list [@sexp.default []]
     }
   [@@deriving sexp]
 end
@@ -27,6 +28,64 @@ end
 
 let summary_digest summary =
   Public.digest (Sexp.to_string_mach (Asic.Summary.sexp_of_t summary))
+;;
+
+(* v1 predates metrics; v2 predates terminal results. Reconstruct each version's exact
+   canonical record shape after decoding with defaults. Keeping the blob path namespace
+   permits old L2 entries to reopen without IO to the provider. Absent terminal evidence
+   requires explicit adoption. *)
+let decode_summary_blob sexp =
+  let blob = Summary_blob.t_of_sexp sexp in
+  let valid =
+    match blob.version with
+    | 3 | 4 -> String.equal blob.normalized_digest (summary_digest blob.summary)
+    | (1 | 2) as version ->
+      let legacy =
+        match Asic.Summary.sexp_of_t blob.summary with
+        | Sexp.List fields ->
+          Sexp.List
+            (List.filter fields ~f:(function
+              | Sexp.List (Sexp.Atom "metrics" :: _) when version = 1 -> false
+              | Sexp.List (Sexp.Atom "terminal" :: _) -> false
+              | _ -> true))
+        | _ -> failwith "Expected summary record"
+      in
+      (version <> 1 || List.is_empty blob.summary.metrics)
+      && Option.is_none blob.summary.terminal
+      && String.equal blob.normalized_digest (Public.digest (Sexp.to_string_mach legacy))
+    | _ -> false
+  in
+  Public.require valid "Corrupt/incompatible normalized summary";
+  Public.require (List.length blob.summary.metrics <= 64) "Metric cache exceeds budget";
+  Option.iter blob.summary.terminal ~f:(fun terminal ->
+    Public.require
+      (List.length terminal.metrics <= 64
+       && List.length terminal.checks <= 64
+       && String.length terminal.evidence <= 160 * 1024)
+      "Terminal cache exceeds budget");
+  let summary = blob.summary in
+  (* Before v4 the last checkpoint was projected as synthesis, even for physical
+     executions. Keep old caches readable but never relabel routing evidence. A refresh
+     recovers explicit synthesis evidence from the full public report. *)
+  let explicit_synthesis =
+    Or_error.try_with (fun () ->
+      Poly.equal
+        (Public.field
+           "boundary"
+           (Public.field "reference" (Public.decode summary.producer)))
+        (`String "synthesis"))
+    |> Result.ok
+    |> Option.value ~default:false
+  in
+  if blob.version < 4 && not explicit_synthesis
+  then
+    { summary with
+      cell_count = None
+    ; cells = []
+    ; metrics = []
+    ; producer = "no synthesis checkpoint in legacy projection"
+    }
+  else summary
 ;;
 
 type task =
@@ -48,6 +107,7 @@ type project =
   ; mutable runs : Asic.Run.t list
   ; mutable submissions : (string * Asic.Preview.t * string option) list
   ; mutable index : (string * string) list
+  ; mutable terminal_attempts : (string * string) list
   ; hot : Asic.Summary.t String.Table.t
   ; mutable recency : string list
   ; tasks : task String.Table.t
@@ -109,6 +169,8 @@ let read_bounded filename limit =
   In_channel.read_all filename
 ;;
 
+let read_public_bounded = Asic_evidence_file.read_bounded
+
 let save_registry ?reservation t p =
   let previous = p.save_tail in
   let outcome =
@@ -141,6 +203,7 @@ let save_registry ?reservation t p =
         ; runs = p.runs
         ; submissions
         ; index = p.index
+        ; terminal_attempts = p.terminal_attempts
         }
       in
       let data = Sexp.to_string (Stored.sexp_of_t stored) in
@@ -214,6 +277,7 @@ let load_project t ~root ~environment =
     ; runs = []
     ; submissions = []
     ; index = []
+    ; terminal_attempts = []
     ; hot = String.Table.create ()
     ; recency = []
     ; tasks = String.Table.create ()
@@ -251,13 +315,15 @@ let load_project t ~root ~environment =
         || List.length s.runs > 256
         || List.length s.index > 128
         || List.length s.submissions > 256
+        || List.length s.terminal_attempts > 256
      then (
        p.registry_writable <- false;
        p.cache_error <- Some "Incompatible ASIC registry")
      else (
        p.runs <- s.runs;
        p.submissions <- s.submissions;
-       p.index <- s.index));
+       p.index <- s.index;
+       p.terminal_attempts <- s.terminal_attempts));
   (* This is our explicitly configured, single-writer derived cache directory, never a
      provider directory. Recover only our own namespace's orphan blobs. *)
   let retained =
@@ -479,7 +545,7 @@ let observe t p cancel (run : Run_ref.t) =
   serialized p ("observe:" ^ run.Run_ref.id) (fun () -> observe_unlocked t p cancel run)
 ;;
 
-let materialize_unlocked t p cancel (run : Run_ref.t) =
+let materialize_unlocked ?attempt t p cancel (run : Run_ref.t) =
   Public.require (not (Deferred.is_determined cancel)) "ASIC report read cancelled";
   let%bind () = check_provider t p cancel in
   let r = find_run p run in
@@ -491,7 +557,7 @@ let materialize_unlocked t p cancel (run : Run_ref.t) =
   | Some execution_file ->
     let%bind result =
       Monitor.try_with (fun () ->
-        let%map report =
+        let%bind report =
           query
             t
             p
@@ -505,7 +571,57 @@ let materialize_unlocked t p cancel (run : Run_ref.t) =
                (Public.field "bundle_identity" (Public.field "methodology" report))
                (`String bundle))
             "Report bundle identity mismatch");
-        Public.summary r ~expected_plan:(expected_plan p run) ~execution_file report)
+        let summary =
+          Public.summary r ~expected_plan:(expected_plan p run) ~execution_file report
+        in
+        let attempt =
+          match attempt with
+          | Some _ -> attempt
+          | None -> List.Assoc.find p.terminal_attempts run.id ~equal:String.equal
+        in
+        match attempt with
+        | None -> return summary
+        | Some attempt ->
+          let%bind receipt =
+            query
+              t
+              p
+              cancel
+              (invoke p (fun c ~root ~environment ->
+                 Adapter.inspect_finalization c ~root ~environment attempt))
+          in
+          let results_file = Public.terminal_results_file receipt in
+          let%map terminal =
+            In_thread.run (fun () ->
+              let execution_file = Filename_unix.realpath execution_file in
+              let execution_bytes =
+                read_public_bounded execution_file (8 * 1024 * 1024)
+              in
+              let results_bytes = read_public_bounded results_file (128 * 1024) in
+              let terminal =
+                Public.terminal_result
+                  ~attempt
+                  ~execution_file
+                  ~execution_bytes
+                  ~report
+                  ~receipt
+                  ~results_bytes
+              in
+              let snapshot_bytes =
+                Option.map (Public.declared_clock_snapshot report) ~f:(fun (path, _) ->
+                  read_public_bounded path (256 * 1024))
+              in
+              let clock = Public.declared_clock_metric ~report ~receipt ~snapshot_bytes in
+              { terminal with metrics = terminal.metrics @ [ clock ] })
+          in
+          { summary with
+            terminal = Some terminal
+          ; source_digest =
+              Public.digest
+                (summary.source_digest
+                 ^ terminal.evidence
+                 ^ Sexp.to_string_mach ([%sexp_of: Asic.Metric.t list] terminal.metrics))
+          })
     in
     (match result with
      | Error exn ->
@@ -526,7 +642,7 @@ let materialize_unlocked t p cancel (run : Run_ref.t) =
          (String.length data <= 256 * 1024)
          "Normalized ASIC summary exceeds 256KiB";
        let blob : Summary_blob.t =
-         { version = 1; normalized_digest = summary_digest summary; summary }
+         { version = 4; normalized_digest = summary_digest summary; summary }
        in
        let data = Sexp.to_string (Summary_blob.sexp_of_t blob) in
        hot p summary;
@@ -554,13 +670,19 @@ let materialize_unlocked t p cancel (run : Run_ref.t) =
                  try Core_unix.unlink (summary_path t p digest) with
                  | _ -> ())))
        in
+       Option.iter summary.terminal ~f:(fun terminal ->
+         p.terminal_attempts
+         <- (run.id, terminal.attempt)
+            :: List.filter p.terminal_attempts ~f:(fun (id, _) ->
+              not (String.equal id run.id)));
        persist t p)
 ;;
 
-let materialize t p cancel (run : Run_ref.t) =
+let materialize ?attempt t p cancel (run : Run_ref.t) =
   (* Global publication ordering also protects L2 eviction from deleting a digest
      concurrently reintroduced by another registered run. *)
-  serialized p "report-publication" (fun () -> materialize_unlocked t p cancel run)
+  serialized p "report-publication" (fun () ->
+    materialize_unlocked ?attempt t p cancel run)
 ;;
 
 let load_summary t p cancel (run : Run_ref.t) =
@@ -575,15 +697,11 @@ let load_summary t p cancel (run : Run_ref.t) =
         | None -> return None
         | Some digest ->
           In_thread.run (fun () ->
-            let blob =
-              Summary_blob.t_of_sexp
+            let s =
+              decode_summary_blob
                 (Sexp.of_string
                    (read_bounded (summary_path t p digest) ((256 * 1024) + 1024)))
             in
-            let s = blob.summary in
-            Public.require
-              (blob.version = 1 && String.equal blob.normalized_digest (summary_digest s))
-              "Corrupt/incompatible normalized summary";
             Public.require
               (Run_ref.equal s.run run && String.equal s.source_digest digest)
               "Wrong L2 summary identity";
@@ -815,6 +933,25 @@ let handle_operation t p operation =
               then hot p { s with freshness = Refresh_failed (Exn.to_string exn) });
             raise exn));
     Deferred.unit
+  | Inspect_finalization { run; attempt } ->
+    ignore (find_run p run : Asic.Run.t);
+    ignore (Public.absolute attempt : string);
+    Public.require (String.length attempt <= 4096) "Finalization reference exceeds budget";
+    enqueue
+      ~key:("finalization:" ^ run.id ^ ":" ^ Public.digest attempt)
+      ~kind:"finalization"
+      (fun cancel ->
+        serialized p ("summaryop:" ^ run.id) (fun () ->
+          Monitor.try_with (fun () ->
+            let%bind (_ : bool) = observe t p cancel run in
+            materialize ~attempt t p cancel run)
+          >>| function
+          | Ok () -> ()
+          | Error exn ->
+            Option.iter (Hashtbl.find p.hot run.id) ~f:(fun s ->
+              hot p { s with freshness = Refresh_failed (Exn.to_string exn) });
+            raise exn));
+    Deferred.unit
   | Run { key; preview } ->
     Public.require
       p.registry_writable
@@ -822,9 +959,6 @@ let handle_operation t p operation =
     Public.require
       ((not (String.is_empty key)) && String.length key <= 256)
       "Invalid ASIC submission key";
-    Public.require
-      (String.equal preview.selection.endpoint "synthesis")
-      "FS0 execution supports synthesis only";
     ignore
       (Public.preview preview.selection (Public.decode preview.plan_json)
        : Asic.Preview.t);
@@ -840,6 +974,20 @@ let handle_operation t p operation =
         let deadline = Clock.after (Time_float.Span.of_sec 1800.) in
         let cancel = Deferred.any [ Ivar.read task.cancel; deadline ] in
         let%bind () = check_provider t p cancel in
+        let%bind () =
+          if String.equal preview.selection.endpoint "synthesis"
+          then Deferred.unit
+          else (
+            let%map description =
+              query
+                t
+                p
+                cancel
+                (invoke p (fun c ~root ~environment ->
+                   Adapter.describe c ~root ~environment preview.selection.flow))
+            in
+            Public.validate_physical_selection preview.selection description)
+        in
         let allocated = ref None in
         let delivered_execution = ref None in
         let validate_delivery run =
@@ -932,8 +1080,12 @@ let handle_operation t p operation =
         in
         let%bind result =
           Monitor.try_with (fun () ->
-            Asic_process.run
-              ~seconds:1800.
+             Asic_process.run
+               (* The adopted producer needs its child termination grace, five-second
+                  container cleanup window, and terminal receipt publication before
+                  escalation. Queries retain the shorter default grace. *)
+               ~stop_grace_seconds:15.
+               ~seconds:1800.
               ~cancel
               ~on_process:ignore
               ~on_line

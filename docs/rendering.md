@@ -128,9 +128,9 @@ paths and environment details to inspection. A compact overview may remain visib
 in the default preset; users are not forced into one global persistent dashboard.
 
 Owner review (2026-10-15) confirmed that Overview contents render correctly; the
-row/grid arrangement remains provisional. Current producer/source rows expose raw
-JSON and long absolute paths. Replace these with concise semantic labels plus
-detail inspection, preserving full evidence references. This information-density
+row/grid arrangement remains provisional. The subsequent F06 synthesis inspector
+replaced raw producer JSON and long absolute paths in normal synthesis views with
+concise labels and full evidence drilldown. This delivered information-density
 cleanup is distinct from selecting a final skin or layout.
 
 ## 4. Focus and commands
