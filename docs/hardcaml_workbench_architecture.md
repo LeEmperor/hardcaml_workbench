@@ -1,6 +1,15 @@
 # Hardcaml Workbench — Architecture
 
-Updated 2026-10-12. This is the central product and system design document.
+Updated 2026-10-15. This is the central product and system design document.
+
+**Active review:** the [feature inventory](feature_list.md) records the October 15
+scope, and the [demo plan](construction_phase_plan.md) supersedes P0–P7. Named
+i3-style arrangements, a command palette and snapshot-aware references are now
+explicit requirements. [D1](decisions.md) is accepted: workspaces follow shared run
+contexts by default and can detach for independent inspection. D2 command policy
+and D3 exact-snapshot scope retain open questions. Provider descriptions below are dated source
+reviews; the current native/named-flow/observation foundation must be assessed at
+the adopted version rather than assumed absent.
 The [construction plan](construction_phase_plan.md) owns phase order and evidence;
 [rendering](rendering.md) owns visual and interaction conventions;
 [backlog](backlog/README.md) holds explicitly deferred work. Historical decisions
@@ -24,9 +33,12 @@ Settled direction:
 
 - Bonsai Term first; Bonsai Web is deferred until graphical needs justify it.
 - Backend feature modules and independently movable frontend tiles.
-- A workspace contains windows; a window normally occupies one monitor and has
-  its own selected run. A window contains tiles following that run or explicit
-  exceptions pinned to another run.
+- Appearance is separate theme/component/layout policy (F12). Navigation/status
+  chrome is generally mountable tiles; only thin input/render/recovery infrastructure
+  is mandatory. No final visual candidate is selected.
+- A project session has windows containing named workspaces (Overview, Timing,
+  Resources). Workspaces normally follow one shared Main run context; they can
+  detach into independent contexts. Tiles follow their workspace or pin a reference.
 - ASIC flow routing and authoritative results belong project-side, normally via
   `hardcaml_asic`. Workbench is not a required dependency of that library or flow.
 - Development uses a dedicated sibling **test-asic repository**, with pinned
@@ -42,13 +54,14 @@ below are architectural requirements, not claims of delivered functionality.
 ## 2. Runtime and dependency boundaries
 
 ```text
-Workspace
-  Window A: selected run A       Window B: selected run B
-  [tiles, focus, local views]    [tiles, focus, local views]
+Project session: shared run contexts (Main → A, Investigation → B)
+  Window 1                      Window 2
+  Overview / Timing             Resources / Investigation
+  [workspaces, tiles, focus]     [workspaces, tiles, focus]
                   │ typed application API
                   ▼
 Workbench daemon
-  workspace/catalog services + feature modules
+  session/context/catalog services + feature modules
   jobs / logs / artifacts / provenance / subscriptions
                   │ Workbench provider adapter
                   ▼
@@ -62,7 +75,7 @@ Opened project's commands and integration entry point
 The daemon runs beside the project/toolchain and owns supervised processes. Client
 exit does not stop jobs. The initial deployment is server-side Bonsai Term over
 SSH; each terminal application surface represents a logical window. Multiple
-surfaces can attach to one daemon/workspace. The terminal emulator/window manager
+surfaces can attach to one daemon/project session. The terminal emulator/window manager
 places those surfaces on monitors; Workbench need not manage OS monitors itself.
 
 Clients render portable typed data and send commands. They do not start project
@@ -88,8 +101,19 @@ Here **module** means a feature subsystem, not an OCaml language module.
 | Workbench provider adapter | Translation between a project/backend's public contract and feature contracts |
 | Project-side router/adapter | Toolchain/flow selection, tool-specific invocation, collection and interpretation |
 | Tile | Rendering and local selection/filter/scroll; emits typed action intent |
-| Window host | Tile instances, geometry, focus/input routing and selected-run context |
-| Workspace | Associated project/run catalog, windows and saved workspace preferences |
+| Window host | Attached surface, workspace switching, geometry and focus/input routing |
+| Workspace | Named tile arrangement, local investigation state and a run-context binding |
+| Run context | Shared selected-run identity/revision, independent of selector tile lifetime |
+| Project session | Associated project/catalog, modules, windows and context registry |
+
+The planned daemon owns the authoritative semantic registry of open session/window/
+workspace/tile instances and run-context bindings. This is not yet implemented by
+the existing project/job/artifact service. Clients mirror that registry, send typed
+intents and retain local presentation state: dimensions, active-workspace display,
+focus, scroll, open overlays and effective clamped geometry. Persist requested
+layouts/preferences through UI-configuration services without making live terminal
+dimensions or one client's focus global. Build the registry once, not per appearance
+candidate; the gallery may inject the same contracts with clearly mocked state.
 
 A module can serve multiple tile types and clients. A composite tile can read
 several module contracts. A WNS summary and a corner table share timing data;
@@ -100,6 +124,13 @@ Start with statically assembled typed subsystems using existing daemon services.
 Neither a separate process per module nor dynamic plugin loading is required.
 Provider data is structured domain data, not a list of already formatted tile rows.
 Keep backend meaning independent of colors, geometry and frontend toolkit.
+
+F12 separates theme tokens, components and layouts in the frontend. Headers/tabs/
+palette actions consume explicit typed state and F03 command IDs. Provider data
+supplies measurement context, severity/verdict and availability where meaningful;
+colors/icons are frontend mappings, not provider acceptance policy. Workspace
+composition, requested geometry and appearance preset are distinct configuration.
+Changing skin/density/icons/color preserves IDs, contexts and F11 cached summaries.
 
 ### Feature contract
 
@@ -114,6 +145,32 @@ Pure rendering and subscription must not implicitly execute work. Expensive
 analysis is an explicit operation with status, cancellation and result identity.
 Multiple consumers share published data; module dependencies refer to existing
 facts rather than reparsing another feature's report independently.
+
+### Asynchronous queries and rendering
+
+Feature modules live daemon-side. Tiles use typed Workbench APIs; they never invoke
+`hardcaml-asic-flow` directly. Subscriptions may cause bounded read-only provider
+queries on cache misses, not synthesis/implementation or expensive new analysis.
+Rendering itself reads frontend state and performs no provider I/O.
+
+The daemon coalesces equivalent in-flight queries and shares cached results across
+modules/tiles/windows. One report can feed several projections; independent reads
+can run asynchronously with bounded provider concurrency. Observation/watch readers
+fan out updates to many subscribers. Existing per-root execution queues must not
+force safe read queries to wait until a physical job completes; respect provider
+locking/consistency for any operation that changes evidence.
+
+Switching a context updates labels/loading immediately. Cached summaries render
+first; other results arrive independently without a global readiness barrier.
+Scope/revision checks prevent obsolete replies from repainting the wrong run.
+Unsubscribing releases query interest, not execution ownership. Keep pinned/shared
+consumers alive and cancel only truly unneeded safe read work. Bound queues, pages,
+cache entries and update batches so provider reads do not stall input processing.
+
+This is asynchronous coordination in the existing native Async application, not a
+process-per-tile design or an assumption that the provider is a persistent RPC
+server. CLI reads, watch processes and any future public provider service are
+adapter implementation choices. See [F02](features/modules_and_tiles.md) for tests.
 
 ## 4. ASIC provider routing and ownership
 
@@ -253,8 +310,10 @@ and diagnostic evidence from failed runs; do not silently relax the existing
 completed-run archive or acceptance contract. Legacy records remain readable with
 step history explicitly unavailable rather than reconstructed as fiction.
 
-The bounded provider handoff and its relation to ASIC's existing P6 work are in
-the [construction plan](construction_phase_plan.md#asic-provider-handoff-within-workbench-p1).
+The historical provider handoff and its relation to ASIC's then-existing P6 work
+are in the [archived plan](archive/construction_phase_plan_2026_10_12.md#asic-provider-handoff-within-workbench-p1).
+Use the active demo plan for current adoption work; this handoff is not a fresh
+upstream implementation queue.
 
 ## 5. Builds, runs, operations and jobs
 
@@ -286,9 +345,12 @@ build identity. Until then, show an explicitly pending submission, not a fabrica
 provider run ID. Failures before allocation remain visible as failed submissions.
 Runs launched through the CLI become discoverable through the same catalog.
 
-After allocation, the new run appears in the window's run selector. An explicit
-launch-and-view action selects it in the initiating window; other windows keep
-their selections. Background arrivals do not steal selection. A report tile shows
+After allocation, the new run appears in run selectors. A plain launch does not
+implicitly steal selection. An explicit launch-and-view action targets a run
+context: selection changes affect all workspaces linked to that context, not just
+the initiating window. Independent contexts and pinned tiles remain unchanged.
+D2 will settle capture/revalidation policy for context changes during allocation.
+Background arrivals do not steal selection. A report tile shows
 pending only when its measurement is expected for that requested operation; if
 power analysis was not requested or supported, show that instead of a spinner.
 
@@ -296,53 +358,90 @@ Separate process liveness, log activity, known stage/substep progress, tool exit
 timing goals and verification. A finished process or GDS artifact does not imply
 signoff. Loss of observation is not completion. Never invent a percent or ETA.
 
-## 6. Workspace → windows → tiles
+## 6. Project sessions, workspaces and run contexts
 
 ```text
-Workspace: test-asic
-  Associated project/run catalog: A, B, C, ...
-  Window 1 (monitor 1): selected run C
-    Run selector | flow C | timing C | checks C | artifacts C | logs C
-    Optional reference tile: timing A [pinned]
-  Window 2 (monitor 2): selected run B
-    Run selector | timing B | physical design B | report B
+Project session: test-asic; shared project/run catalog: A, B, C, ...
+  Main context → C
+    Overview workspace: large selector | flow C | resources C | logs C
+    Timing workspace: compact selector | timing C | timing A [pinned]
+    Resources workspace: compact selector | resource breakdown C
+  Independent context → B
+    Investigation workspace: selector | timing B | physical design B
+
+Window 1 and Window 2 can display these workspaces on separate monitors;
+one window can also switch between named workspaces.
 ```
 
-A workspace organizes access to many runs, but their authoritative records belong
-to the project/provider, not the UI workspace. Closing a window/workspace does not
-delete results or stop execution. Initially a workspace is associated with one
-project root; multiple windows satisfy the monitor use case. Multiple named
-workspaces may reference the same project/catalog without copying runs. A later
-multi-project workspace is separate from this initial requirement.
+A project session initially associates with one project root. A window is an
+attached terminal/application surface. A workspace is a named switchable tile
+arrangement, not a physical monitor. Authoritative results remain provider-owned;
+closing a workspace/window never deletes results or stops execution.
 
-Each window has an independent selected run. Its run-selector tile changes that
-one context. Tiles follow it by default. Thus selecting older run B replaces all
-ordinary tiles with B's evidence, including unavailable/failed/not-run states,
-without starting analysis. The selector retains all available runs regardless of
-which one is being inspected, including currently running ones.
+Run contexts are Workbench session state. Each owns stable identity, selected run
+(possibly none) and selection revision. Default workspaces bind to Main. Separate
+project sessions do not accidentally share Main merely because their labels match.
 
-**Binding** is only the rule that answers "which run does this tile display?":
+Any number of run-selector tiles control the same context through their workspace
+bindings. Overview's selector has no special authority. Selectors share the selected
+run, but keep independent geometry, focus, filters, browsing cursor and scroll.
+Changing selection updates all linked workspaces without forcing another selector's
+navigation position to jump. Hiding the large selector does not disable the others.
 
-- **Follow window** (default): use that window's selected run.
-- **Pinned reference**: display a named other run, with a prominent run label.
-- **Explicit comparison** (later): name both sides and their measurement contexts.
+**Make independent** creates a context initialized to the current selected run and
+rebinds that workspace only. **Link to context** adopts the target context's current
+selection. Start with Main/independent; advanced named groups can follow. A context
+cannot be discarded while another workspace still references it.
 
-One timing tile pinned to A inside a window viewing B is the first comparison
-workflow. A dedicated comparator with deltas/alignment is deferred. Cross-run
-differences in corner, stage, units or constraints must remain visible.
+**Tile binding** answers which evidence a data tile displays:
 
-On window selection change, update the context once and invalidate old in-flight
-queries. Uncached tiles show loading for the new run; never retain A's number under
-B's label. Responses are keyed by run, query and selection generation/revision.
-Pinned tiles stay pinned. Composite tiles join compatible identities explicitly.
-No requirement forces all providers to finish loading simultaneously.
+- **Follow workspace context** (default): use its bound context's selected run.
+- **Pin run**: display a named other run; newer evidence can still update it.
+- **Pin result snapshot**: exact immutable observation where the provider supports
+  it; initial scope/retention remains open in D3.
 
-Window identity and tile-instance identity are stable. Moving a tile within a
-window changes geometry only. Moving it to another window makes a follow-window
-tile follow the destination; a pinned tile retains its run. Closing and hiding
-are distinct workspace actions; neither is a provider lifecycle command.
+Dedicated comparison/deltas are later work. Cross-run stage/corner/unit/constraint
+differences remain visible. Run pinning is accepted and does not imply frozen data.
+
+Serialize context selection transitions through authoritative session state and
+increment selection revisions. Bind responses to context/revision plus run/query/
+result identity; unlink/relink also invalidates obsolete requests. Uncached tiles
+show loading for the new run, never A's number under B's label. Pinned references
+remain unchanged; composite views join compatible identities explicitly. Providers
+need not finish loading simultaneously. Selecting evidence never starts analysis.
+
+Window/workspace/tile identities are stable. Moving within a workspace changes
+geometry only; moving a following tile between workspaces adopts the destination
+context, while a pinned tile retains its reference. Moving a whole workspace across
+windows retains its context binding. Closing/hiding are distinct host actions,
+neither a provider lifecycle command. See [F10](features/run_contexts.md).
 
 ## 7. Storage and fast switching
+
+The [F11 cache specification](features/run_summary_cache.md) makes fast switching
+an FS0 requirement. Use L1 decoded domain summaries in daemon memory and L2
+persistent normalized summaries in a separate Workbench store; canonical provider
+records remain the source of truth, not an expendable third cache tier. Cache typed
+facts rather than tile-rendered text or geometry. Cache location/format are not yet
+chosen; project-local ignored or user-cache storage must stay outside canonical runs.
+
+On context switch, use L1 when available, asynchronously load L2 on a memory miss,
+and only materialize provider results on a cold/invalid entry. Share equivalent
+requests across modules/windows. A current-observation index maps run/query to
+versioned observations; late fetches must not regress it. Completed runs can still
+receive newer results. Adapter/schema changes invalidate incompatible derived data.
+
+Keep small active/pinned/recent summaries hot within byte/entry budgets; a last-3–5
+run working set is a workload example, not an unlimited retention guarantee. Large
+path tables, waveforms and raw artifacts remain separately paginated/provider-backed.
+L2 hits may appear as cached/unverified while asynchronous source validation occurs.
+Source disappearance or refresh failure remains visible. Corrupt/incompatible cache
+entries rebuild safely; cache writes publish complete entries atomically.
+
+Acceptance includes unchanged resident A→B→A switching without new report queries,
+and L2 reopening without re-materializing unchanged large reports after restart.
+Account separately for lightweight freshness checks/live observation and measure
+latency/working sets before promising a fixed timing budget.
 
 Split storage by ownership:
 
@@ -350,8 +449,13 @@ Split storage by ownership:
 | --- | --- |
 | Input bundles, runs, raw reports, check attempts and archives | Project/ASIC provider; durable source of evidence, useful from CLI |
 | Run catalog/index and normalized summaries | Workbench; derived, rebuildable acceleration over provider records |
-| Workspace/window layouts, selections and pinned references | Workbench UI configuration; durable preferences, not flow evidence |
+| Window/workspace layouts, context registry/linkage, selections and pinned references | Workbench UI configuration; durable preferences, not flow evidence |
 | Job/process supervision | Workbench daemon; live process handles are not restart-persistent |
+
+Persist context identities and linkage, not just a selected run copied into each
+workspace. Restore Main-linked workspaces to one shared context. Layout templates
+create distinct view instances with intended linking defaults; session restoration
+can retain concrete references. Persistence is separate from selection linkage.
 
 Avoid copying every large physical output into another Workbench store. Register
 provider-backed artifacts through daemon-mediated lookup; materialize bounded
@@ -382,7 +486,7 @@ These are feature boundaries, not a requirement to implement every possible view
 | --- | --- | --- | --- |
 | Context | Source, target/configuration, environment, hierarchy | PDK, technology, harness | Device/board |
 | Execution | Operations, stages, elapsed time, logs and cancellation | Physical flow/tool progress | Vendor implementation jobs |
-| Tests/regressions | Cases, seeds, attempts, outcomes and failure evidence | RTL/gate-level/regression suites | Simulation/emulation suites |
+| Simulation/tests | Generic test attempts, optional cases/seeds, outcomes and failure evidence | Cyclesim/RTL/gate-level/regression adapters | Simulation/emulation suites |
 | Artifacts | Roles, provenance, retrieval and viewer actions | GDS, LEF/DEF, extracted data | Bitstreams/checkpoints |
 | Timing | Setup/hold, WNS/TNS, paths, constraints, units, corner/mode | Physical multi-corner STA | Vendor timing |
 | Clocks | Declared/generated clocks, relationships and coverage | CTS skew/insertion latency | PLL/MMCM/device networks |
@@ -395,6 +499,12 @@ owned by clocks; timing references them rather than maintaining conflicting cloc
 definitions. A clock inventory does not prove CDC verification. Report tools and
 providers retain acceptance policy; Workbench should explain and link evidence,
 not invent universal thresholds or a signoff verdict.
+
+The [simulation/test module](features/simulation_and_tests.md) begins with existing
+supervised Dune test operations, not an embedded simulator. Project-owned test
+adapters can add structured cases and trace artifacts. Generic test attempts are
+project-scoped unless real build/run provenance exists; selected ASIC run context
+must never fabricate that association. Waveform exploration remains a later feature.
 
 ## 9. Inspection, rendering and verification
 
@@ -409,6 +519,18 @@ capability-based input routing and requested/effective geometry. It is not a run
 dependency. Workbench has no mandatory editor-like primary document tile. See
 [rendering](rendering.md) for presentation, selection and focus behavior.
 
+The [imported gallery handoff](design/tui_candidate_gallery_handoff.md) guides visual
+experiments, with [interpretation notes](design/README.md) correcting assumptions
+about existing implementation. Reuse/adapt Ches's inspected single-transient-float
+placement/capture/release seams before introducing overlays; no full stacked float
+manager or editor embedding is established by those APIs. Domain-free shared UI
+packaging is a possible extraction outcome, not an FS0 prerequisite.
+
+FS0 needs replaceable tokens/headers, optional utility chrome, consistent geometry
+and safe input. FS5 compares A–E on identical mock Overview/Timing fixtures in actual
+terminal cells. Browser screenshots are visual references, not terminal or real-flow
+acceptance. Keep backend extraction independent of the appearance review schedule.
+
 Develop against the sibling test-asic project with pinned `hardcaml_asic`, tools,
 PDK and constraints. Keep real archived reports plus deterministic/synthetic replay
 fixtures; identify which is which. The existing counter fixture remains for fast
@@ -416,7 +538,7 @@ Dune/RTL/hierarchy checks. Real-tool acceptance cannot be replaced by canned dat
 
 Test providers and reducers headlessly, then use Bonsai Term's actual input path
 with injected transport, controlled time and dimensions. Prove run selection,
-stale-response rejection, pinned views, workspace/window independence and commands
+stale-response rejection, linked selectors, independent contexts, pinned views and commands
 without manual clicking. Pure reducer tests alone do not prove UI wiring. Use a
 few component/frame expectations and installed/PTY checks; human review focuses
 on appearance and comfort. Bound event/log volume and update incrementally so
@@ -432,8 +554,8 @@ contracts rather than a speculative directory/framework rewrite.
 
 The first release operates the test ASIC through project commands and the ASIC
 provider: build/test/regression, live physical-flow observation, selectable durable
-runs, timing/check/artifact inspection, bounded clock/PD views and independent
-monitor windows with movable tiles. Demonstrate a pinned reference tile, reopening
+runs, timing/check/artifact inspection, bounded clock/PD views and monitor windows
+with linked or independent contexts and movable tiles. Demonstrate a pinned reference tile, reopening
 results after restart and continued execution after client detach. Exercise FPGA
 profile composition with fixtures; a live Vivado implementation is deferred.
 

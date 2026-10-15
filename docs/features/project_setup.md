@@ -1,0 +1,36 @@
+# F07 — Project setup and approachable presets
+
+Status: requested; current root manifest remains supported.
+
+## Requirements
+
+- Initialize Workbench configuration inside an existing directory/repository/Dune
+  project without taking ownership of its build or version-control system.
+- Support explicit roots and convenient upward configuration discovery; generic
+  Dune fallback remains useful without hardware hooks.
+- Keep project-local shareable configuration in a dedicated directory (candidate
+  `.workbench/`; final naming/migration is not yet decided).
+- Separate committed integration/layout templates from personal selections,
+  machine-specific paths, transient session state and rebuildable caches.
+- Preserve/migrate existing `hardcaml-workbench.sexp` deliberately; do not silently
+  change precedence when both old and new configuration exist.
+- Offer starter/minimal layouts with a small visible command set. Users can add
+  tiles/controls as they learn; the backend retains its real capabilities.
+- Default Overview/Timing/Resources workspaces deliberately link to the session's
+  Main run context. Templates instantiate separate views; session persistence
+  preserves intended shared context identities/linkage (F10). A minimal generic
+  project can instead start with build/log and project-test views (F09).
+- Appearance presets (F12) are separate from functional workspace templates.
+  Persist explicit skin/density/icon/color choices without rewriting project flows,
+  run contexts or canonical evidence; utility-tile placement is a layout preference.
+- Later, create new projects using project/provider-owned templates, then open the
+  result. Recipe content belongs to the ASIC project, not the Workbench config.
+- Git is optional; Mercurial/non-VCS roots remain valid projects. Provider/source
+  identity support for each VCS is a separate capability, never inferred falsely.
+
+## First demo / later
+
+First demos configure the existing specimen explicitly. Setup wizard, new-project
+creation and expanded beginner templates follow the proven integration/layout model.
+
+Dependencies: F01 configuration; F04 layout serialization; F03 command availability.

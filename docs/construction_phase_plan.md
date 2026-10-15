@@ -1,313 +1,329 @@
-# Hardcaml Workbench — Construction Plan
+# Hardcaml Workbench — Demo construction plan
 
-Plan reset and consolidated 2026-10-12. The [architecture](hardcaml_workbench_architecture.md)
-defines ownership and contracts; [rendering](rendering.md) defines presentation.
-This is the only active phase plan. P0–P7 below replace all archived 1A–4D, D1–D4,
-W0–W6 and prettification phases. Deferred work lives in [backlog](backlog/README.md).
+Updated 2026-10-15. This is the active implementation queue, replacing October 12
+P0–P7 (preserved in the [archive](archive/construction_phase_plan_2026_10_12.md)).
+The [feature inventory](feature_list.md) owns product scope; the [decision log](decisions.md)
+records accepted D1 run contexts and remaining D2/D3 questions. Phase IDs use **M0–M5** to avoid
+confusion with ASIC's phases and the archived Workbench plan.
 
-**Current status: planning only; every phase below is not started.** Existing
-daemon/client, Dune jobs, RTL/artifacts and hierarchy remain delivered foundations.
-Their earlier validation is preserved in [archive](archive/README.md); it is not
-evidence that the newly planned features exist.
+**Active product target: [FS0 — initial functional demos](feature_sets.md).** FS0
+groups M0–M3; FS1/FS2 split M4 into ASIC inspection and simulation themes, and FS3
+groups workspace/setup adoption. Feature sets are product groupings; phases below
+remain the single ordered implementation/evidence checklist.
 
-## P0 — Establish the sibling test ASIC and evidence fixtures
+F12's minimal appearance seams belong to FS0/M2. **FS5/V1** below is an independent
+comparative-gallery track, not a gate on the functional demos. The imported visual
+handoff's gallery phases apply to that track; they do not reorder the main plan.
 
-**Goal:** a stable development specimen independent of the production ASIC.
+**Status: planning only. No new Workbench implementation or test pass is claimed.**
+Delivered foundations remain native daemon/client, generic Dune operations,
+supervision/logs/cancellation, integration discovery, RTL/artifacts/provenance and
+elaborated hierarchy. Preserve their existing behavior through extraction.
 
-- [ ] Use the owner's dedicated sibling test-asic repository. Choose a small
-  understandable design and record its source revision, pinned `hardcaml_asic`,
-  tool/PDK versions, constraints and ordinary build/test/flow commands. Its root is
-  configured, not a mandatory hardcoded sibling path in the installed application.
-- [ ] Obtain one real physical run and archive original records/reports with
-  provenance. Record which Magic/KLayout operations the chosen flow supports.
-- [ ] Keep small deterministic report/event fixtures in Workbench, including
-  pending, failure, missing/unconstrained timing, partial results, disconnects and
-  two distinguishable runs. Synthetic evidence is explicitly labeled.
-- [ ] Specify operation and evidence examples jointly with the ASIC provider:
-  build/unit test, bounded regression, generation, physical run, collect/inspect.
-  Preserve the existing counter fixture for generic Dune/RTL/hierarchy tests.
+## What changed since the previous plan
 
-**Exit:** standalone CLI reproduction and one real archived result; fast tests
-need no PDK/vendor tools. Exact specimen/technology and usable provider revision
-remain to be selected. Contract prototyping can proceed while live setup is pending.
+The sibling `hardcaml_asic_example` now supplies a controlled FIFO specimen and
+public named-flow discovery/description/preview/launch. Newer ASIC development
+provides native execution, durable observation/watch and report references. The
+standalone headless client demonstrates the candidate boundary. These findings
+replace the old assumption that the entire observation interface is still missing.
 
-## P1 — Define and supply the ASIC provider boundary
+The October 15 source review included uncommitted provider development. Latest
+named-flow integration evidence uses installed native orchestration with a fixture
+external backend; earlier real physical evidence is separate. Neither is proof of
+Workbench integration or of real acceptance for the newest named-flow path.
 
-**Depends on:** P0 examples; distinguish provider work from Workbench adaptation.
+Useful sibling references (checkout locations, not installed runtime dependencies):
 
-- [ ] Specify a versioned public contract for capability/operation discovery, run
-  listing/lookup, early run allocation, request correlation, stage/substep updates,
-  result revisions and artifact lookup. Decide event or bounded status transport,
-  update atomicity and reconnect behavior with concrete examples.
-- [ ] Implement missing flow-side capabilities in `hardcaml_asic` through its own
-  development process and pin the resulting revision in test-asic. The APIs must
-  work without Workbench and not import Workbench UI/application libraries.
-- [ ] Define supported stage continuation/retry semantics and cancellation
-  ownership. Preserve separate attempts and earlier evidence. Do not promise a
-  generic resume facility the provider does not implement.
-- [ ] Implement the Workbench ASIC adapter to consume these contracts and reuse
-  its supervisor. Keep project Dune/tests/regressions on their own declared paths
-  where appropriate; associate them with runs only when meaningful.
-- [ ] Adapt existing execution state into a feature contract and implement timing
-  import/projection from provider data. Setup/hold, corners, units, constraints,
-  stage and original reports remain attached to observations.
+- `../hardcaml_asic_example/docs/headless_flow.md`
+- `../hardcaml_asic/docs/development/project-flow-catalog-progress.md`
+- `../hardcaml_asic/docs/development/flow-infrastructure-progress.md`
 
-**Exit:** a plain client can launch/observe a bounded operation and inspect one
-archived run; the provider exposes the same data without Workbench. Two timing
-consumers share data without repeating parsing/extraction. Early run identity is
-observable before the physical process finishes, not only in its final stdout.
+Review current public contracts and pin a candidate. Do not implement the obsolete
+Python-specific upstream handoff verbatim or assume every catalog/artifact/fine-step
+capability is now present.
 
-### ASIC provider handoff within Workbench P1
+## M0 — Decisions, provider baseline and demo fixtures
 
-**Proposal after source review, 2026-10-12; not yet adopted into ASIC's own plan.**
-This section records upstream deliverables needed by Workbench P1, not a second
-ASIC phase-numbering scheme. Prefix existing task IDs with `ASIC` or `Workbench`.
-The ASIC owner should incorporate the agreed sequence into its authoritative
-architecture/phase plan before implementation. No ASIC files were changed by this
-review. Source baseline: clean `hardcaml_asic` at `f6e8fd7`.
+Features: F01–F06, F09–F11. Status: in progress (documentation decision only);
+provider baseline and implementation fixtures remain pending.
 
-#### Existing work and dependency triage
+- [x] Record accepted D1: project session → windows → workspaces → tiles; default
+  shared Main run context, multiple selector instances, independent/relink and
+  per-tile pinned references. Architecture/rendering/specs synchronized 2026-10-15.
+- [x] Import both aesthetic handoffs and reconcile their precedence/scope in
+  `docs/design/README.md` (2026-10-15). Gallery v0.5 is newer; registry and general
+  float-manager claims are qualified against current code. No visual implementation.
+- [ ] Settle remaining D2 command capture/default-selection policy and D3 exact
+  snapshot demo/retention scope before those specific contracts harden.
+- [ ] Record configured specimen path, provider revision or immutable installation
+  identity, project executable, environment and supported protocol versions.
+- [ ] Verify the public discover/describe/plan/run/observe/report sequence, using
+  explicit paths. Record gaps in run-store listing, snapshot identity/retention,
+  detailed timing data, artifact access and cancellation separately.
+- [ ] Retain two distinguishable run fixtures with original context, plus pending,
+  preallocation failure, failed execution, late response and missing-evidence cases.
+  Label synthetic/replayed/real evidence. Keep the existing counter fixture.
+- [ ] Choose a bounded synthesis demo and inventory available cell/resource and
+  diagnostic fields; unavailable metrics remain explicit.
+- [ ] Specify F11 cache source identity/freshness examples, including later result
+  revision, missing source and adapter/schema changes. Identify provider revision
+  validation separately from potentially expensive report materialization.
+- [ ] Identify the existing generic Dune test command and deterministic success,
+  failure/cancellation fixtures for F09; this path requires no ASIC provider.
 
-| Foundation / track | Finding and integration consequence |
-| --- | --- |
-| ASIC P0–P5 / M3 | Completed project/build/bundle and execution/result foundation; reuse it |
-| ASIC P6.1–P6.3, P6.4a/b | Reporting/archive policies, dispatcher, installed package and per-operation tests are recorded delivered; do not repackage or duplicate them |
-| ASIC P6.5a | Source-artifact identity is still explicitly unknown in `identity.py`; finish this existing next slice for reliable generator/executor provenance |
-| ASIC P6.5b/c and P6.6 | Dependency/waiver/provisioning and independent-installation gates remain; carry them toward a dependable pinned release, while observation prototypes proceed |
-| ASIC P7 | Old protemu/scaf consumer migration; it is not a dependency of a new test-asic consumer or Workbench observation |
-| ASIC S-series / T-series | SRAM and specific external-tool fixes remain independent unless the chosen specimen actually needs them |
+**Exit:** remaining command/binding scope settled and versioned examples available.
+Accepted D1 plus generic test fixtures already define an independent first slice;
+host/context reducers and generic runner extraction need not wait for ASIC or
+exact-snapshot work. Real EDA is not required for fixture-backed implementation.
 
-Some README/status headers describe an earlier state than the detailed P6.4b
-evidence. `p6-status.md` also records an old dirty HEAD, not the current clean
-checkout. Reconcile those descriptions during the next ASIC planning update;
-do not rerun completed packaging work based only on a stale header. Its old
-handoff's mandatory scaf lookup is not applicable to the absent worktree.
+## M1 — Module/command contracts and headless ASIC path
 
-#### Ordered upstream slices
+Features: F01, F02, F03, F05, F09/F11, first F06 slice. Depends on relevant M0 examples.
 
-1. **Run-domain contract and a narrow adapter feasibility probe.** Define build,
-   run, outer operation, implementation step occurrence, attempt, result snapshot
-   and artifact identities. Preserve existing `run`/`execute` semantics and final
-   JSON stdout. Write two-run recorded examples with skipped/failed/interrupted
-   steps and late result publication. Inspect the pinned LibreLane entry path and
-   demonstrate how actual step boundaries can be observed; select a supported hook,
-   structured-state observer with known limits, or bounded upstream change. Do not
-   assume overriding `Flow.start_step` observes the sequential flow, which calls
-   `step.start` directly. **Exit:** a tested observation seam and concrete contract
-   examples without Workbench or a general orchestration rewrite.
+- [ ] Extract execution/log access into a typed module over existing supervision.
+  Specify scope, revisions, bounded updates, queries, commands and evidence refs.
+- [ ] Establish daemon-owned asynchronous query coordination: shared cache and
+  equivalent in-flight fetches, bounded provider reads and one-reader fan-out.
+  Separate safe read scheduling from long-lived execution queues; keep provider
+  locking rules. No tile-owned processes or query-triggered EDA execution.
+- [ ] Implement F11 L1 typed summary caching, versioned keys/current-observation
+  index and bounded active/recent retention. Share data across contexts/tiles;
+  separate large detail. Map provider invalidation so late fetches cannot regress
+  newer summaries and completed runs can acquire later revisions.
+- [ ] Define command IDs/arguments/availability/context once; adapt existing
+  build/test/cancel/RTL actions without losing submission deduplication.
+- [ ] Expose the generic simulation/test module over existing Dune test supervision:
+  typed attempts/status/log access and cancellation, no invented case counts or ASIC
+  run association. Verify fixtures and one real PDK-free project test invocation.
+- [ ] Implement the configured ASIC adapter: discovery, flow/profile selection,
+  preview identity, launch and early allocation. No fabricated run IDs.
+- [ ] Consume durable observation with stream/cursor reconnect; drain launcher
+  output without confusing query success with execution or acceptance success.
+- [ ] Use returned exact report/artifact references and validate context. Project
+  commands retain tool/flow semantics; Workbench does not become a scheduler inside
+  the provider. Validate descendant cancellation for the adopted execution path.
+- [ ] Project synthesis resources and available diagnostics into shared module
+  data. Preserve original reports and source/stage identity.
 
-2. **Durable catalog and outer-operation observation.** Expose explicit run-store
-   listing/inspection, early run allocation with request correlation, and recorded
-   updates plus a recoverable current snapshot. Instrument the existing runner and
-   dispatcher once. Define writer serialization, cursor/snapshot consistency,
-   partial writes, retention, stale observation and interrupted-writer behavior.
-   Keep legacy records readable. **Exit:** a standalone CLI observer attaches late,
-   disconnects/reconnects and inspects two runs; allocation is visible while the
-   process is still running. This enables Workbench's run selector, but is not yet
-   fine-grained physical progress.
+**Demo A:** plain/headless Workbench discovers the specimen, previews and launches
+synthesis, observes allocation/progress, reconnects and reads a contextual report.
+Run fixture acceptance first; record actual synthesis acceptance separately when
+the chosen provider/tool environment is ready. Client detach leaves work running.
+**Independent early check:** generic tests work through the new module API before
+the ASIC adapter, retaining explicit project scope and submission identity.
 
-3. **Actual implementation-step lifecycle.** Use the proven seam inside the
-   LibreLane adapter to expose the actual step plan and started/completed/failed/
-   skipped states, including repeated step identities and deferred errors. Keep
-   raw logs as diagnostics. Cover the real Dockerized path and cancellation of its
-   descendants; avoid inferring success from directory existence or silence.
-   **Exit:** a bounded flow shows earlier steps completed while a later step is
-   still executing; its status is available without Workbench.
+## M2 — Tile host, named arrangements and palette
 
-4. **Incremental result publication and evidence preservation.** Refactor collection
-   into reusable step-aware extraction plus final aggregation, keeping current
-   reporter acceptance. Start with synthesis resources and one intermediate timing
-   snapshot, then physical checks. Publish complete versioned snapshots before
-   events reference them; retain producer provenance for cumulative/inherited
-   metrics. Replace fragile fixed step-directory assumptions behind the adapter,
-   not inside Workbench. Preserve snapshots, event history and referenced evidence
-   through archive/restoration; decide a separate explicit policy for failed-run
-   diagnostic exports. **Exit:** inspect earlier measurements during a later step,
-   after a later failure, and from preserved evidence after scratch cleanup.
+Features: F02–F05, F09–F11. Depends on accepted D1 and relevant M1 contract shapes; fixtures allow
+parallel progress before the live adapter is finished.
+Also includes F12's minimal host/component seams, not full gallery acceptance.
 
-5. **Installed standalone acceptance and test-asic handoff.** Extend the existing
-   installed-prefix tests for all public observation operations and compatible
-   legacy behavior. Demonstrate cancellation, duplicate/partial updates, independent
-   readers, later standalone postcheck/collect revisions and no-UI operation. Use
-   one small real test-asic flow to validate internal-step/result evidence; fixtures
-   cover the broader failure matrix. Finish applicable P6 identity/installation
-   gates and record the exact candidate revision for deliberate adoption.
-   **Exit:** a usable provider release and replay fixtures, with no Workbench
-   import, source-checkout requirement or background UI service.
+- [ ] Separate transport/server data from host context, tile-local state and render.
+  Preserve existing event sequencing and stale-response rejection.
+- [ ] Implement stable workspace/tile/context identities and at least two named
+  workspaces linked to Main. Add differently sized run selectors with shared selected
+  run but local focus/filter/scroll; Overview has no privileged ownership.
+- [ ] Establish one daemon-owned semantic session/window/workspace/tile registry and
+  client projections. Keep local dimensions/focus/scroll/overlays/effective geometry
+  separate; do not implement a competing registry for a skin or gallery.
+- [ ] Implement make-independent initialized from the current run, link-to-context,
+  and revisioned invalidation across selection/rebinding. Moving a workspace retains
+  its binding; moving a following tile adopts its destination workspace's context.
+- [ ] Implement shared shell/focus/input capture and move/reorder, resize,
+  hide/restore and zoom. No backend lifecycle side effects from tile manipulation.
+- [ ] F12 minimum: semantic tokens, replaceable skin, configurable mostly-on headers,
+  reusable tabs and explicit layout geometry. Navigation/status/help-legend tiles
+  are mountable; essential commands/recovery work when all such chrome is hidden.
+- [ ] Inspect installed Bonsai Term APIs and Ches float placement/capture/release
+  implementation; select a thin adapter or bounded shared extraction for the
+  single-transient palette. Record reuse limits instead of adding a general float
+  manager or mandatory editor dependency. Preserve return focus/paste ownership.
+- [ ] Add palette (`Space c c` intended), command availability and effective target
+  labels; derive help/shortcut hints from the command registry.
+- [ ] Add run selector, execution/log/synthesis tiles, following and reference
+  bindings accepted in D1/D3. Preserve useful RTL/hierarchy/artifact inspection while
+  migrating it into tile-compatible boundaries.
+- [ ] Add a project-scoped simulation/test tile over F09: run, list/select attempts,
+  inspect logs/status and cancel. It works without a selected ASIC run and never
+  relabels generic test evidence after a context switch.
+- [ ] Test actual frontend events with controlled transport/time/dimensions:
+  execute once, switch A→B with A responses pending, pin A, move/hide, change
+  arrangement, modal capture and compact-size recovery. Select from either linked
+  selector, hide the other, detach/relink Timing and verify local navigation/pins.
+- [ ] Exercise many tiles over a few shared queries: measure provider-call counts,
+  bounded concurrency and warm-cache switching; accept results independently while
+  input stays responsive. Test obsolete reads and shared/pinned consumers surviving
+  context changes without cancellation of their jobs or required readers.
+- [ ] F11 warm-switch acceptance: load R1/R2 with different cell counts, then select
+  R1→R2→R1 while unchanged/resident and assert correct values with zero additional
+  summary/report materialization queries. Account separately for freshness checks;
+  exercise source revision updates, stale responses and bounded-memory eviction.
+- [ ] Verify styling/density/icon changes preserve IDs, bindings and local state,
+  cause no provider fetches for existing data and retain meaning without color or
+  special fonts. Capture one provisional skin at wide/narrow terminal cell grids;
+  sensible scroll/hide/tab fallback is enough, no pixel-responsive layout gate.
 
-#### Files and tests to build on
+**Demo B:** from the palette launch synthesis; select A/B and see following tiles
+change; keep a labeled A synthesis reference beside B; switch arrangements and
+return without losing context or stopping execution. Linked selectors agree; an
+independent workspace retains its run until relinked. Run/inspect a generic test
+through the simulation tile. Multiple views share module data, not local scroll.
 
-- `lib/build.mli`, `lib/bundle.ml`: immutable intent/input identity. Export declared
-  clock/constraint facts as needed rather than duplicating editable configuration
-  in Workbench. Generated-clock/CTS analytics are later capability slices; the
-  current clock/timing declaration API is narrower.
-- `flow/hardcaml_asic_flow/cli.py`: installed operation dispatch and fixed sequence.
-- `phase4.py`: allocation, atomic JSON replacement, execution, postchecks and
-  collection. Existing collection uses fixed synthesis paths and final metrics;
-  adapt it for step snapshots rather than create a competing report parser.
-- `report.py`: operation-aware acceptance. New progress must not weaken its policy.
-- `archive.py`: explicit artifact selection and integrity-preserving publication.
-  Its current keep-list does not preserve every intermediate result automatically.
-- `test/test_phase4.py`, `test/test_flow_cli.py`, `test/test_report.py`,
-  `test/test_archive.py`: existing injected-process/fixture regression seams.
-- `test/test_packaging.py`, `test/test_installed_prefix.py`: install boundary.
-  The latter builds/installs with Dune and is intentionally run separately from
-  `dune runtest`, not nested inside it.
+## M3 — Historical reopening and saved layouts
 
-#### What Workbench can do before upstream completion
+Features: F04/F05/F10/F11. Depends on M1 identities and M2 host model. Storage prototyping
+may proceed alongside M2 once identities are stable.
 
-| Available upstream slice | Workbench work unlocked |
-| --- | --- |
-| Contract examples / archived records | Feature reducers, adapter decoders, P3 headless window/tile tests |
-| Catalog + outer observation | P2 catalog/cache, run selector, early run display, coarse progress |
-| Internal step lifecycle | Live per-step execution tiles |
-| Incremental results | Timing/PD/check tiles updating before run completion |
-| Installed real-flow acceptance | P4 live integration and provider pin for release |
+- [ ] Persist a rebuildable provider-result index and bounded revision-keyed cache.
+  Start with explicit known references if provider store discovery is unavailable;
+  record that limitation rather than guessing the newest directory.
+- [ ] Implement F11 L2 normalized summary storage outside canonical run results.
+  Choose location/format/budgets and writer ownership; publish complete entries
+  atomically, reject incompatible/corrupt entries and rebuild without provider edits.
+- [ ] Reopen historical results after daemon restart without tool execution.
+  Distinguish missing canonical evidence from labeled cached evidence.
+- [ ] Verify L2 reopening avoids re-materializing unchanged large reports after
+  restart. Show cached/unverified while validation is pending and source-unavailable
+  on missing records; test refresh failure and schema/adapter changes. Measure cold,
+  L1 and L2 latency/query counts and memory/disk sizes before setting speed targets.
+- [ ] Persist named layouts/templates and session references with schema versions;
+  keep project-shared templates separate from personal/machine session state.
+- [ ] Keep functional workspace definitions, appearance choices and requested
+  geometry distinct in saved config. Restyling does not recreate tile IDs or runs;
+  changing suggested layout is explicit and clamping stays local to each surface.
+- [ ] Preserve context identities and workspace linkage on restoration: Main-linked
+  workspaces must not restore as independent copies of the selected run. Preserve
+  independent contexts and pinned references separately from geometry.
+- [ ] Refresh later result revisions correctly. Implement immutable snapshot pinning
+  only to the extent selected in D3 and supported by provider guarantees.
+- [ ] Restore the existing hierarchy/evidence context accurately; a stale result
+  must not become an apparent view of a newly selected build/run.
 
-No ASIC work is needed for moving a tile, selecting a window's run, pinning a
-reference tile or composing two typed feature views. Those remain Workbench UI
-state. ASIC supports multiple independent readers of run evidence; it never stores
-their window selections. The sibling test-asic owns declaration, source pins,
-testbench/regression semantics and ordinary command entry points.
+**Demo C:** save a layout/reference, restart the daemon/client, reopen the same
+identified results and restore the arrangement. Missing references remain explicit;
+unchanged summaries do not trigger tool execution or repeated large-report parsing.
 
-**Recommended immediate order:** complete the already-scoped ASIC P6.5a identity
-slice, settle the run-domain examples and adapter probe, then implement catalog/
-outer observation. P6.5b/c/P6.6 can progress alongside the new observation work;
-do not require all ASIC roadmap items or old consumer migration before starting
-Workbench's fixture-backed UI work. No EDA execution or new test pass is claimed
-by this source/planning review.
+## M4 — Rich evidence and live acceptance
 
-## P2 — Persistent run catalog and bounded summary cache
+Features: F06/F09 plus execution/regression extensions. Depends on M1–M3 and actual
+provider data availability; deliver individual useful slices rather than all at once.
 
-**Depends on:** P1 identities/revisions; archived fixtures allow early work.
+- [ ] Add one timing/check drilldown with setup/hold and measurement context;
+  paginate paths/details if supplied. Explain unavailable detailed-path data.
+- [ ] Add bounded placement/resource/clock views using actual provider fields.
+- [ ] Extend F09 with project-declared simulation/regression cases, seeds and failure
+  artifacts where supported. Trace artifacts do not require an embedded waveform UI.
+- [ ] Add explicit external artifact/source viewer actions with host/path handling.
+- [ ] Demonstrate a real supported physical run, failure/cancellation cases and
+  observation freshness. Preserve earlier measurements after later-stage failure.
 
-- [ ] Index configured provider run stores, including CLI-created runs, using
-  explicit identities. List queued submissions separately until a provider run is
-  allocated; correlate it without substituting a Workbench ID.
-- [ ] Define persistent index/config storage and schema compatibility. Canonical
-  run records/reports remain provider-owned; Workbench data is a rebuildable index
-  plus saved UI configuration. Test missing/moved stores and schema failures.
-- [ ] Cache normalized summaries keyed by project/provider, run, record revision
-  or digest and adapter version. Invalidate when later postchecks/collection change
-  evidence; bound retention and paginate catalogs/logs/report detail.
-- [ ] Extend artifact access to registered provider-backed evidence with explicit
-  missing/cached states. Do not copy an entire physical output tree to view a summary.
-- [ ] Reopen named results after daemon restart without flow execution. Saved IDs
-  that no longer resolve remain unavailable instead of selecting another run.
+**Exit:** trace a real issue from a summary to its supporting report. Fixture and
+real-tool acceptance are recorded separately. Full timing exploration can continue
+after the first useful drilldown.
 
-**Exit:** alternate between two stored runs without launching tools or reparsing
-unchanged large reports; new observations invalidate the right cache entries.
-Rebuild the index from canonical records and demonstrate cache eviction does not
-delete provider evidence. Document measured switch behavior before setting a budget.
+## M5 — Multi-window polish and adoption
 
-## P3 — Window context, tiles and headless interaction
+Features: F04/F07/F08/F10 selective slices. Depends on working demos above.
 
-**Depends on:** P1 feature contracts; P2 supplies live catalog/storage. Host and
-selection tests can start against deterministic data before those are complete.
+- [ ] Attach two monitor surfaces with shared Main selectors plus independent-context
+  support and local focus/scroll. Verify context changes converge across surfaces
+  and implement documented cross-window workspace/tile movement semantics.
+- [ ] Provide useful starter templates and initialization of an existing project;
+  decide configuration-directory naming and root-manifest migration explicitly.
+- [ ] Measure responsiveness under bounded high-volume logs/events; review visual
+  comfort and help/palette discoverability.
+- [ ] Adopt reviewed F12 presets where available without requiring FS5's entire
+  experiment matrix for functional adoption. Validate SSH/tmux controls and glyph
+  fallbacks on a modest grid; do not assume monitor pixels determine cell sizes.
+- [ ] Validate format/lint/unit/build plus affected fixture/install/PTY checks;
+  adopt a verified provider version deliberately before production use.
 
-- [ ] Separate terminal startup/transport, server-derived data, window UI state and
-  rendering. Preserve production event reduction and stale-response checks.
-- [ ] Implement workspace, window and tile-instance identities. A workspace
-  associates with one project/catalog; each window has an independent selected
-  run. Establish an API/configuration seam for multiple window attachments.
-- [ ] Implement the run-selector tile, default follow-window bindings and explicit
-  pinned-reference bindings. Run changes invalidate old queries as one context
-  transition; late responses never populate another run's tiles.
-- [ ] Add shared tile shell/geometry/focus, keyboard move/reorder, resize,
-  hide/restore and zoom. Start with jobs/logs/timing tiles and a useful preset.
-  Input routing and command definitions drive both dispatch and help.
-- [ ] Test through the actual Bonsai frontend using injected transport, controlled
-  time/dimensions and supported events. Verify commands submit once, arrival does
-  not steal focus, switching replaces ordinary data, and pinned views stay pinned.
-- [ ] Apply semantic theme roles, cell-aware measurement and explicit log follow
-  state as tiles migrate. A few frame tests cover compact/wide geometry and focus.
+Later independent features: full project creation, Ches summary integration,
+MCP/automation adapters, embedded editor, dedicated comparator, rich graphical
+views and live third-party/FPGA integrations. Their requirements are retained in
+feature specs/backlog, not prerequisites for Demos A–C.
 
-**Exit:** select run A/B in one window, see all follow-window tiles change, and
-retain A's timing as a labeled reference inside B. Moving/hiding a tile has no
-backend side effect. Routine interaction acceptance requires no manual clicking.
+## Dependency and acceptance summary
 
-## P4 — Live flow, regressions, checks and artifact inspection
+### V1 — Independent appearance gallery track (FS5)
 
-**Depends on:** P0 real environment, P1 adapter, P2/P3 catalog and UI.
+Status: not started. Feature: F12. Depends on enough M2 host/component contracts
+to reuse them, with injected mock state allowed. This is a visual-workstream task
+ID, unrelated to application wire protocol V1. It does not block Demos A–C.
 
-- [ ] Launch front-end builds/tests, a bounded long-running regression and a full
-  physical flow through the specimen's declared commands. Preserve standalone CLI.
-- [ ] Show early run allocation, requested extent, real stage/substep/tool progress,
-  logs, elapsed time and observation freshness. Unknown substeps stay unknown.
-- [ ] Populate timing/check/artifact tiles for that run. Expected future values are
-  pending; unsupported, not requested, failed and not produced are distinct.
-  Verify supported Magic/KLayout evidence against their actual reports.
-- [ ] Add bounded text/report readers and an explicit external viewer action with
-  host location, file-transfer requirements and unavailable-display behavior defined.
-- [ ] Verify cancellation of the actual runner/tool descendants, including
-  containers if used. Client detach and run-selection changes do not affect work.
-- [ ] Confirm late postchecks/results update the same identified run with new
-  revisions. Explicit new implementation attempts receive new provider run IDs.
+- [ ] Confirm reusable installed rendering APIs and Ches float seams; keep generic
+  theme/component/layout code free of ASIC I/O and editor-primary assumptions.
+- [ ] Add only components needed for the comparison: configurable tile header,
+  panel/tabs, metrics, tree/table, inspector, utility status/navigation and overlays.
+- [ ] Render A Instrument, B Structured, C Minimal, D Studio and E Structured Studio
+  using identical labeled synthetic Overview and Timing data. Retain C; E must be
+  a real B+D composition. Neither fixture chooses a mandatory workspace style.
+- [ ] Expose independent vivid/selective/restrained color, none/ascii/unicode/
+  nerd-font icon modes with fallbacks, and compact/comfortable density. Reuse tabs
+  across skins; preserve semantic selection and local state across changes.
+- [ ] Showcase movable/hidden utility chrome, configurable/headerless tiles and
+  palette/help/mock source-peek surfaces. Use real adapted lifecycle where available
+  or label the mock; do not claim stacked/nonmodal or Ches editor integration.
+- [ ] Capture actual terminal-cell wide and modest/narrow frames and test geometry,
+  glyph widths, focus versus selection, tab semantics, input recovery and no domain
+  effects on restyling. Review variants with the owner before choosing defaults.
 
-**Exit:** one real physical run and bounded failure/cancellation cases are observed
-end to end; replay and live acceptance are recorded separately. Run B's selected
-tiles never contain unlabeled measurements from A while B is pending.
+**Exit:** comparative terminal gallery and bounded component/input evidence; source
+panes and engineering fixtures remain explicitly synthetic. Record visual feedback
+in the current gallery handoff, not a new sequence of exported versions. Later
+defaults, richer floating behaviors and cross-project UI packaging need their own
+reviewed scope.
 
-## P5 — Clock and physical-design slices
+### Functional dependency graph
 
-**Depends on:** P4 evidence. Keep these narrow enough to deliver useful views.
+```text
+M0 decisions/examples ──→ M1 headless adapter ──→ Demo A
+         └──────────────→ M2 host/palette ──────→ Demo B (with M1)
+                  M1 identities + M2 host ─────→ M3 → Demo C
+                  M1–M3 + real evidence ────────→ M4 → M5
+```
 
-- [ ] Expose declared/generated clocks, periods, relationships and constraint
-  coverage; add CTS observations where the provider produces them. Reuse timing
-  references; a clock list does not imply CDC verification.
-- [ ] Expose core/die context, cell/macro area and utilization plus known
-  placement/routing/CTS/congestion evidence. Physical design is the meaning of PD;
-  power-domain intent is a deferred separate feature.
-- [ ] Add concise metric/check explanations and report drilldowns, including the
-  producing stage/corner and declared goal. Provider policy owns verdicts.
-- [ ] Compose an overview from multiple compatible feature contracts and a second
-  view of one module without duplicating provider work.
-
-**Exit:** the user can identify a concrete clock/physical issue and open its
-supporting evidence rather than only see an unexplained number or status color.
-
-## P6 — Multi-window monitor workspace and release acceptance
-
-**Depends on:** P3 window foundation, P4/P5 usable views.
-
-- [ ] Persist named workspace/window layouts, selected-run preferences and pinned
-  references with explicit versions. Missing runs are visible after restoration.
-- [ ] Attach two terminal surfaces to distinct windows of one workspace. Select A
-  in one and B in the other; share backend observations without synchronizing their
-  selections, focus or scroll. Move/restore tiles with documented binding semantics.
-- [ ] Exercise wide dedicated-monitor layouts and compact/tiny recovery. Bound
-  high-volume progress/log work and measure responsiveness during regression.
-- [ ] Prove FPGA-only and ASIC-with-FPGA-emulation capability composition using
-  fixtures. Do not claim live Vivado support from recorded data.
-- [ ] Run format/lint/unit/build, affected installed/fixture and PTY checks. Keep a
-  focused human review of appearance/comfort. Record results here with evidence
-  paths, rather than creating another general development log.
-
-**Release exit:** the sibling test ASIC is operated and inspected from independent
-monitor windows with movable tiles, selectable durable runs, a pinned comparison
-reference, traceable evidence and reliable detach/reconnect/restart reopening.
-
-## P7 — Production adoption
-
-**After the first release.** Integrate the current production ASIC project through
-the proven provider contracts. Record gaps in their owning repository and extend
-only for concrete workflows. Revisit [backlog](backlog/README.md) deliberately;
-phase completion does not automatically activate deferred features.
-
-## Tracking and immediate next step
-
-| Phase | Status | Evidence |
+| Phase | Status | Completion evidence |
 | --- | --- | --- |
-| P0 | Not started | Owner selected a sibling repository; specimen/pins pending |
-| P1 | Not started | Existing ASIC dispatcher/records inspected; new contract pending |
-| P2 | Not started | Storage ownership agreed; index/cache not implemented |
-| P3 | Not started | Window/run semantics agreed; tile workspace not implemented |
-| P4 | Not started | Live integration pending |
-| P5 | Not started | Clock/PD slices pending |
-| P6 | Not started | Multi-window implementation and acceptance pending |
-| P7 | Deferred until release | Production adoption follows specimen validation |
+| M0 | In progress (docs) | D1 accepted and synchronized 2026-10-15; D2/D3 and baseline pending |
+| M1 | Not started | Existing supervisor/driver foundation; ASIC adapter absent |
+| M2 | Not started | Existing fixed renderer; new host/palette absent |
+| M3 | Not started | Provider reference foundations; Workbench catalog/layout storage absent |
+| M4 | Not started | Existing RTL/hierarchy; richer ASIC views pending |
+| M5 | Not started | Depends on demos |
+| V1 (FS5) | Not started | Imported visual handoffs and API inspection only |
 
-Next: select the P0 design/provider revision and write P1's early-run/catalog/
-observation examples. Implement missing provider features in `hardcaml_asic`
-without requiring Workbench. P3's pure window-selection/headless seam can be
-prototyped against the two-run fixture while that work proceeds.
+Record new acceptance here: exact revisions/environment, command/test, outcome,
+evidence path, fixture versus real-tool scope, and remaining limitations. Existing
+historical acceptance stays archived. Run Dune checks serially per the repository
+README. Documentation updates alone do not complete implementation checkboxes.
+
+## Decision/feature update — 2026-10-15
+
+Owner accepted shared Main run contexts, multiple selector instances, workspace
+independence/relink and per-tile references (D1/F10). Added F09 simulation/tests
+with a generic supervised test runner first. Specs, architecture, rendering and
+demo tasks are updated; no new application implementation or runtime acceptance.
+
+**Immediate implementation entry:** F10 pure context state/reducers and F02/F09
+execution/test module extraction over existing supervision, using deterministic
+fixtures. Settle D2 before palette dispatch semantics and D3 before exact-snapshot
+support; establish M0's provider baseline for the separate ASIC adapter track.
+
+Feature-set organization and asynchronous access clarification (2026-10-15): FS0
+is the current target; F02 specifies daemon-coordinated reads/subscriptions and
+reactive tile rendering. This documents intended behavior, not a new implementation
+or concurrency benchmark.
+
+Tiered run caching update (2026-10-15): F11 belongs to FS0a–c, delivering L1 memory,
+provider revision/invalidation and L2 persistence respectively. Fast switching uses
+normalized summaries, not reparsing full result entries or caching rendered tiles.
+The source of truth remains provider-owned; exact snapshot retention stays D3 scope.
+
+Appearance intake (2026-10-15): copied the two owner exports under `docs/design/`;
+gallery v0.5 takes precedence. F12 records composable utility tiles, configurable
+headers, independent axes and A–E candidates. Minimal structural requirements are
+in M2/FS0; the comparative gallery is V1/FS5. Source review confirmed Ches single-
+float placement/lifecycle seams and that Workbench's semantic workspace registry is
+still planned. No UI implementation, browser/gallery execution or EDA acceptance.

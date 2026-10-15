@@ -1,26 +1,42 @@
 # Hardcaml Workbench — Rendering and Interaction
 
+**2026-10-15 accepted direction:** named workspaces follow shared run contexts by
+default, with independent-context and per-tile reference options (D1/F10). Palette
+policy (D2) and exact-snapshot scope (D3) retain open questions. These are planned
+behaviors; the fixed renderer has not yet been migrated.
+
+**Appearance sources:** the newer [candidate gallery handoff](design/tui_candidate_gallery_handoff.md)
+supersedes the [older design handoff](design/tui_design_system_handoff.md). See
+[F12](features/appearance.md) and [source interpretation](design/README.md). Preserve
+five candidates and independent style axes; no final default is selected. FS0 needs
+the host/component seams and legibility, not a completed aesthetic gallery.
+
 The [architecture](hardcaml_workbench_architecture.md) owns semantic boundaries;
 the [plan](construction_phase_plan.md) owns implementation order. This document
 owns the intended Bonsai Term presentation. These are requirements for the new
 workspace, not descriptions of the current fixed terminal renderer.
 
-## 1. Workspace, windows and monitor use
+## 1. Workspaces, windows and monitor use
 
-A workspace contains windows. A window is a logical rendering surface normally
-shown in one terminal window on one monitor; a monitor is not an application
-identity. The terminal emulator/OS handles physical placement. Multiple windows
-can show the same project with independent selected runs and layouts.
+A project session has windows containing named workspaces. A window is an attached
+terminal/application surface; Overview, Timing and Resources are workspaces. They
+can be switched on one surface or displayed across monitor surfaces. The terminal
+emulator/OS handles placement; a monitor is not an application identity.
 
-Start with a useful ASIC layout preset, then let the user move/reorder, resize,
+Start with a useful provisional ASIC layout preset, then let the user move/reorder, resize,
 hide/restore and zoom tiles. Save requested layout separately from effective
 clamped geometry so shrinking does not destroy the preferred wide layout.
-One run-selector tile controls its window's default run context.
+Default workspaces follow Main, one shared run context. Show a concise linkage
+label such as `Linked: Main` or `Independent`. A large Overview selector and compact
+Timing/Resources selectors all control Main; each keeps its own layout, focus,
+filter and scroll. Selected-run indication updates without forced scroll/focus jumps.
+No selector owns the context. Make-independent starts from the currently viewed run;
+link-to-context immediately adopts its selection. Per-tile pinning is separate.
 
 Illustrative wide window, not a fixed cell budget:
 
 ```text
-test-asic / bring-up     Window: physical     Selected run: C      Connected
+test-asic / Overview     Linked: Main     Selected run: C      Connected
 ┌ Runs ────────┐ ┌ Flow / operations · C ──────────────────────────────┐
 │ C  running  ◀│ │ route: running · elapsed … · observed …             │
 │ B  complete │ └────────────────────────────────────────────────────┘
@@ -33,20 +49,35 @@ test-asic / bring-up     Window: physical     Selected run: C      Connected
 └────────────────────────────────────┘ └────────────────────────────┘
 ```
 
-Clock, physical-design and regression tiles can replace or extend this preset.
+Clock, physical-design and simulation/test tiles can replace or extend this preset.
 The example's run statuses and pending values are illustrative, not captured tool
 evidence. Wider dimensions do not automatically summon unwanted tiles.
 
+Workspace selectors, navigation, status/legend and project summaries should be
+mountable utility tiles, not permanently reserved screen bands. Commands for
+navigation/help remain usable when those tiles are hidden. The small renderer/input/
+overlay/recovery host is infrastructure, not mandatory visible application chrome.
+Workspace tabs, tile-local tabs and run selection keep distinct semantic actions.
+
 ## 2. Run selection and loading
 
-- Follow-window is the default; tile titles identify the run being displayed.
-- Selecting B changes ordinary tiles to B's data. Switching never starts a tool.
+- Follow-workspace-context is the default; tile titles identify their evidence scope.
+- Selecting B changes following tiles across every linked workspace. Switching
+  never starts a tool. Independent contexts and pinned references stay unchanged.
 - Uncached content shows "Loading run B". Do not draw A's values below a B header.
-- Pinned tiles prominently identify their reference run and remain unchanged.
+- F11 L1 hits render matching typed summaries immediately; L2 loads and cold queries
+  arrive asynchronously. Distinguish cached/unverified, source-unavailable and failed
+  refresh states from validated current evidence. A layout repaint is not a fetch.
+- Pinned-run tiles identify their reference and retain that binding; newer results
+  for the pinned run may update them. Exact snapshot pins, when supported, are frozen.
 - New background runs do not steal selection. An explicit launch-and-view action
-  selects its new run only in the initiating window once its identity is known.
+  targets an explicit run context and affects all linked workspaces once identity
+  is known. Capture/revalidation details remain in D2.
 - Queued submission before provider allocation has its own label, not a fake run ID.
 - Missing saved runs remain unavailable. Do not silently choose another run.
+- Unlink/relink invalidates obsolete requests just like changing selected runs.
+- Generic tests may be project-scoped with no ASIC run. Label that scope instead
+  of displaying the current ASIC run as if it produced those test results.
 
 Expected work may show pending/running animation. Distinguish not requested,
 unsupported, no result, failure, cancellation, stale observation and unconstrained
@@ -61,15 +92,34 @@ thin borders, title/footer labels and clear selection. Reuse design principles,
 not editor-specific primary-document assumptions or a dependency on its UI code.
 
 Centralize semantic theme roles: background, foreground, surface, muted, border,
-focus, selection, running, success, warning and failure. One coherent default
-theme comes first. Labels/markers retain meaning without color or special fonts.
+focus, selection, running, success, warning, failure, emphasized metric and active/
+inactive tab. One provisional functional-demo skin is enough for FS0, not a final
+default. Labels/markers retain meaning without color or special fonts.
 Stderr is a stream identity, not evidence of failure; avoid a wall of red logs.
+
+Separate workspace composition, geometry, component skin, color intensity
+(`vivid/selective/restrained`), icon mode (`none/ascii/unicode/nerd_font`), density
+(`compact/comfortable`) and utility-tile placement. Appearance presets suggest
+combinations, not workspace identities. Keep A Instrument, B Structured, C Minimal,
+D Studio and E Structured Studio (B+D) for visual comparison; allow D-like tabs in
+every candidate. Changing skin/color/icons/density preserves context, pins, tile
+identity and interaction state; applying a different suggested geometry is explicit.
+
+Most tiles have configurable headers with title, optional scope/status, tabs,
+actions or metrics. Text-only, border-integrated and richer treatments share one
+component contract. Headerless widgets remain possible; they still expose evidence
+identity/freshness and focus through content/inspection. Avoid nested-box clutter.
 
 Measure terminal display cells, accounting for wide and combining characters.
 One geometry computation supplies shell/content rectangles, clipping, scrolling,
 cursor and any hit testing. Respect nonzero origins. Tile adapters declare useful
 minimum/preferred sizes; degradation reduces decoration before essential context.
 At tiny sizes, preserve recoverable navigation/help rather than throw exceptions.
+
+Test wide desktop and modest laptop/tmux cell grids. The target workstation has
+four monitors but normally one Workbench surface; do not infer four windows or a
+pixel budget from that. Initial narrow recovery can use scrolling/tabs/hiding
+secondary details rather than sophisticated automatic responsive rearrangement.
 
 Keep project/run identity and connection health easy to find, but move full IDs,
 paths and environment details to inspection. A compact overview may remain visible
@@ -83,10 +133,19 @@ must not accidentally trigger build/cancel shortcuts. Keep focus/selection stabl
 when jobs, logs or results arrive. Select list items by identity, not row index.
 
 Define command identity, availability/reason, bindings and description once; derive
-dispatch, help and hints from that definition. Exact keys are settled during P3.
+dispatch, help and hints from that definition. Exact keys are settled during M2;
+`Space c c` is the intended palette binding.
 Provide discoverable run selection, tile movement/resize, focus navigation,
-inspection, back/close, help and client exit. Moving a follow-window tile into a
-different window adopts that window's run; pinned tiles keep their reference.
+inspection, context unlink/relink, back/close, help and client exit. Moving a following
+tile into another workspace adopts its context; pinned tiles keep their reference.
+Moving an entire workspace between windows preserves its context binding.
+
+Reuse/extract the inspected Ches float placement and lifecycle where compatible:
+it currently supports one transient float, with release and return-focus behavior.
+The palette's modal capture must not become an implicit rule for every future peek.
+Gallery help/source-peek examples can be clearly mocked until the adapter exists;
+stacked floats and tiled↔floating transitions are not first-demo requirements.
+Browser Ctrl+K in the export is illustrative, not a replacement for `Space c c`.
 
 Logs have bounded scrollback and explicit follow state. Scrolling away pauses
 follow; a visible command resumes it. Artifact readers page large content and show
@@ -121,8 +180,17 @@ Tests send events through the production frontend, not just its reducers:
 1. Select B while A queries are pending; complete A later and verify B stays correct.
 2. Pin timing A, select B, and verify only ordinary tiles change.
 3. Launch once, hide/move its tile, then reconnect without another submission.
-4. Attach two windows; selection/focus/scroll remain independent while run data updates.
-5. Resize, restore layout, scroll/pause/resume logs and exercise modal input capture.
+4. Use differently sized selectors in two Main-linked workspaces; selection updates
+   both, while focus/filter/scroll stay local. Hide one selector and use the other.
+5. Detach Timing at B, select A in Main, then relink Timing and observe A. Reject late
+   replies across detach/relink. Repeat across two windows when supported.
+6. Resize, restore layout/context linkage, scroll/pause/resume logs and exercise
+   modal input capture. Restoring Main must not create one context per workspace.
+7. Launch a generic test once, inspect its logs/status in a simulation tile, cancel
+   the intended attempt and verify workspace switches never relabel its provenance.
+8. Hide/move navigation/status tiles and recover via commands. Switch appearance
+   without provider fetches, context/pin changes or lost selection; distinguish
+   focused tile, selected row and active tab without relying solely on color.
 
 Use injected responses and controlled clocks; assert actions/state separately from
 a few component/frame expectations. PTY checks cover terminal plumbing. Human
@@ -140,3 +208,16 @@ Files remain under `test/baselines/terminal/`; the [archived capture notes](arch
 describe them. They include synthetic scenarios and do not establish live ASIC
 integration. Replace affected expectations deliberately as the new renderer ships,
 without promoting unrelated behavior or treating old fixed layouts as requirements.
+
+## 8. Comparative gallery track (FS5)
+
+The [F12](features/appearance.md) gallery uses labeled synthetic Overview and Timing
+fixtures across A–E, independent color/icon/density controls, optional chrome tiles
+and shared header/tab/table/tree/inspector components. Source panes are placeholders
+until real source-navigation/editor integration exists. Gallery fixtures do not
+prove timing extraction, per-case test reporting or source mapping.
+
+Implement on current OCaml/Bonsai Term primitives, not an embedded HTML renderer.
+Capture terminal frames at wide/narrow cell dimensions and review real variants
+before choosing defaults. Its V1 tasks live in the main construction plan as an
+independent track, not an extra gate on FS0 functional demos.

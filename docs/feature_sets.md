@@ -1,0 +1,134 @@
+# Feature sets
+
+Updated 2026-10-15. **FS numbers group product work**, F numbers identify individual
+feature specs, and M numbers order implementation/acceptance in the construction
+plan. One feature can contribute slices to several sets; completing a set does not
+mean every linked feature is finished. Later set scope is provisional and can be
+refined when activated.
+
+## At a glance
+
+| Set | Theme | Demonstrable outcome | Main features | Delivery mapping |
+| --- | --- | --- | --- | --- |
+| **FS0** | Initial functional demos | Modular shell, generic tests, linked contexts, fast synthesis/reference switching and saved reopening | F01–F05, bounded F06/F09, F10/F11, F12 seams | M0–M3; Demos A–C |
+| **FS1** | ASIC evidence investigation | Useful timing/check/physical/clock drilldowns backed by actual evidence | F05/F06, F01/F02 extensions | M4 ASIC slices |
+| **FS2** | Simulation helpers and test views | Structured suites/cases/seeds, regression failure investigation and trace artifacts | F09, F03/F05/F06 | M4 simulation/regression slices; later dedicated tasks |
+| **FS3** | Workspace adoption and setup | Multiple monitor surfaces, comfortable presets and existing-project initialization | F04/F07/F10 | M5 host/setup slices |
+| **FS4** | External clients and advanced extensions | Ches summaries/source navigation and automation; additional extensions when justified | F08 plus provider-specific additions | Future scoped phases |
+| **FS5** | Appearance experiments and candidate gallery | Comparable A–E terminal variants with independent styling axes and composable chrome | F12, F03/F04 adapters, mocked F06/F08 data | V1 independent gallery track |
+
+Sets express themes, not a compulsory serial queue: FS1 and FS2 can progress
+independently once FS0 contracts exist. Some FS3 polish can happen alongside them.
+M5 release/adoption checks run against whichever feature scope is being adopted;
+they do not require every future set to finish.
+FS5 can run alongside FS0 after common host/component seams; its number does not
+place it after FS4. A complete gallery is not an FS0 exit criterion.
+
+## FS0 — Initial functional demos (active target)
+
+### FS0a: provider-independent shell
+
+- Extract existing execution/test supervision into module contracts.
+- Build Main/independent contexts, linked selectors and per-tile run references.
+- Add workspace/tile host, command palette and generic test/log views.
+- Exercise asynchronous shared queries, bounded fan-out and stale-response handling
+  using fixtures. Keep RTL/hierarchy access available through migration.
+- F11: define normalized summary identities and a bounded L1 memory cache with
+  shared cold fetches. Prove unchanged resident R1→R2→R1 uses no new report queries.
+- F12 minimum: semantic tokens/replaceable skin, configurable tile headers and
+  mountable navigation/status tiles over one host. Keep commands usable without
+  mounted chrome, use safe palette capture and test a narrow cell-grid fallback.
+  Inspect/adapt Ches primitives before writing new overlay machinery. A provisional
+  skin is sufficient; no final aesthetic selection or five-candidate gallery gate.
+
+**Can start now:** pure context state and generic module extraction. D2 policy is
+needed before palette dispatch hardens; physical tools are not a prerequisite.
+
+### FS0b: bounded ASIC synthesis integration
+
+- Configure/pin project executable and installed provider contracts.
+- Discover/select/preview/launch, consume early allocation and observe/reconnect.
+- Project available synthesis resources/reports into the same module/tile model.
+- Select two runs and keep one labeled reference while inspecting the other.
+- F11: map provider result identities/revisions, invalidate live/later results
+  correctly and measure warm switching with real summaries. Record the adapter's
+  freshness strategy and distinguish lightweight validation from materialization.
+
+**Dependency:** verified public project/provider interfaces. Fixture integration
+and real synthesis acceptance are recorded separately; missing rich timing or
+fine-grained internal-step APIs do not block this slice.
+
+### FS0c: reusable session
+
+- Save layouts, shared context linkage and pinned references.
+- Index explicit provider result references and reopen after daemon restart.
+- Restore missing references honestly; bounded caches do not become provider truth.
+- F11: persist versioned normalized summaries in L2, load them after restart without
+  re-materializing unchanged large reports, and expose pending/unavailable source
+  validation. Exercise corruption/schema rebuild and eviction without provider edits.
+
+**Exit:** Demos A–C in the active plan, including a real bounded synthesis path and
+real PDK-free tests, with fixture-backed failure/race coverage. Generic test-history
+restart persistence is not implied by provider-result reopening. Exact immutable
+snapshot support is governed by D3 and must not be claimed from run pinning.
+F11 is part of FS0, not deferred performance polish. Concrete memory/disk budgets
+and storage location are implementation choices; predictive prefetch and elaborate
+large-detail indexes can follow measured need in later feature-set slices.
+
+## FS1 — ASIC evidence investigation
+
+Timing summaries/path detail, checks, clocks and physical/resource slices with
+original evidence and context. Full physical operation/cancellation acceptance
+belongs here. Adopt fields actually provided; put missing extraction semantics in
+the provider rather than reverse-engineering tool reports in tiles. Detailed paths,
+intermediate snapshots and fine-grained progress may depend on further ASIC work.
+
+## FS2 — Simulation helpers and test views
+
+Extend FS0's generic test runner with project-declared suites, cases, seeds,
+structured progress/outcomes, targeted reruns and failure/trace artifacts. Rich
+adapters can proceed without ASIC for Cyclesim or ordinary RTL tests. Gate-level
+association depends on real build/output provenance. Embedded waveform exploration
+is a separately activated extension, not an automatic FS2 prerequisite.
+
+## FS3 — Workspace adoption and project setup
+
+Multiple attached windows, shared/independent contexts across them, preset/layout
+comfort, responsiveness and existing-project initialization. Full project creation
+is a later F07 slice after configuration/templates are proven. Saved single-window
+layouts already belong to FS0; FS3 expands their use rather than delaying them.
+Adopt reviewed F12 appearance/layout presets here as available, preserving the
+separation of functional workspace definitions, geometry and styling choices.
+
+## FS4 — External clients and extensions
+
+Start with a Ches summary subscription or source-open action over public contracts,
+then automation/MCP when needed. Embedded editing, graph/layout views and new tool
+providers require their own concrete acceptance scope. Mixed-tool flow validation
+remains provider-owned. This set is a grouping of future work, not a commitment to
+ship every extension together.
+
+## FS5 — Appearance experiments and candidate gallery
+
+Implement F12's theme/components/layout boundaries over the same host contracts;
+use injected synthetic Overview and Timing fixtures to compare A Instrument,
+B Structured, C Minimal, D Studio and E Structured Studio. Keep every candidate,
+independent vivid/selective/restrained color, optional width-safe icons and compact/
+comfortable density. D-style tabs can appear in any candidate. Navigation/status/
+legend chrome is mountable; headers are configurable, including headerless widgets.
+
+V1 in the construction plan owns the gallery tasks/evidence. Use actual Bonsai Term
+cell grids at wide and laptop/tmux-like sizes, mock source panes honestly and inspect
+Ches float reuse before overlay showcases. No provider, full multi-client system,
+embedded editor or web renderer is needed for the gallery. Default selection waits
+for owner review of rendered variants; extra polish need not block functional demos.
+
+Source priority and implementation corrections are recorded in [design/README](design/README.md).
+
+## Tracking rules
+
+- Use “working on FS0 / M2 / F10” for set, phase and feature respectively.
+- The [feature inventory](feature_list.md) remains the full scope/status index.
+- The [construction plan](construction_phase_plan.md) owns checkboxes and evidence.
+- The [decision log](decisions.md) owns accepted policy and unresolved questions.
+- Do not create competing implementation checklists in each set description.

@@ -2,21 +2,27 @@
 
 A development workbench for inspecting, running, measuring, and debugging Hardcaml designs.
 
-**Current direction (2026-10-12):** a configurable Bonsai Term workspace containing
-monitor-sized windows and movable tiles over backend feature modules. Each window
-selects a run; its tiles follow that selection or explicitly pin a reference run.
-ASIC flow ownership stays with the project and `hardcaml_asic`. Development will
-use a dedicated sibling test-asic repository and headless interaction tests.
+**Current direction (2026-10-15):** configurable Bonsai Term tiles over typed
+provider/module contracts, a command palette and named workspaces linked to a shared
+Main run context by default. Workspaces can inspect independently; tiles can pin
+references. Simulation/testing starts with a generic supervised test runner. ASIC
+flow ownership stays with the project and `hardcaml_asic`; development uses the
+sibling FIFO specimen and headless tests.
 
 The existing daemon, Dune jobs, RTL/artifact and hierarchy workflows are
 implemented. The provider/catalog and multi-window tile design is planned.
 
 ## Documentation
 
+- [Documentation index](docs/README.md) — orientation and reading routes.
+- [Feature list](docs/feature_list.md) — concise scope/status and focused feature specs.
+- [Feature sets](docs/feature_sets.md) — FS0 initial demos and later themed work groups.
+- [Decision log](docs/decisions.md) — accepted run contexts; remaining command/snapshot policy.
 - [Architecture](docs/hardcaml_workbench_architecture.md) — product, ownership, providers,
   runs/storage and workspace/window/tile boundaries.
-- [Construction plan](docs/construction_phase_plan.md) — active P0–P7 phases and progress.
+- [Construction plan](docs/construction_phase_plan.md) — active demo phases M0–M5 and progress.
 - [Rendering](docs/rendering.md) — styles, layout, interaction and headless UI testing.
+- [Appearance handoffs](docs/design/README.md) — imported aesthetic sources and F12/FS5 interpretation.
 - [Formatting guide](docs/formatting_guide.md) — retained source conventions.
 - [Backlog](docs/backlog/README.md) — explicitly deferred ideas and reactivation triggers.
 - [Archive](docs/archive/README.md) — earlier designs, plans and completion evidence.

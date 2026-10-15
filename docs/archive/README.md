@@ -6,6 +6,12 @@ not active requirements; use the current [architecture](../hardcaml_workbench_ar
 
 ## 2026-10-12 consolidation
 
+The [October 12 P0–P7 plan](construction_phase_plan_2026_10_12.md) was archived on
+2026-10-15 when the active plan moved to demo phases M0–M5. It preserves the old
+provider handoff and phase statuses; newer native/provider development supersedes
+parts of that handoff. Relative links inside that snapshot retain their original
+locations.
+
 The snapshots retain their bodies, including old statuses, proposals and code
 references. Relative links inside them were written for their original location
 directly under `docs/`; treat them as historical references, not a current
