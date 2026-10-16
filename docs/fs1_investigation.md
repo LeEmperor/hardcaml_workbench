@@ -156,6 +156,58 @@ production/demo provider configuration to activate.
 
 ## Timing paths and navigation
 
+### Escape responsiveness in tmux — 2026-10-16 followup
+
+The reported pause when closing a table or path detail was reproduced with a
+private tmux server. The owner's server reported `escape-time 500`: tmux waits
+up to 500 ms to disambiguate a standalone Escape from a key sequence. Installed
+Notty_async itself has no corresponding Escape timer. Workbench also previously
+waited for its 100 ms display clock after mutating local navigation state.
+
+The TUI now invalidates the Bonsai view immediately after local input and after
+deferred actions/poll completion. Domain refresh still polls every 500 ms; the
+100 ms display clock remains for time-dependent content. This is a local feedback
+fix, not a claim of a fully subscription-driven transport rewrite.
+
+Actual 200×60 PTY observations (three samples per transition):
+
+| Candidate / private tmux setting | Timing table → workspace | Detail → table |
+| --- | --- | --- |
+| Before, 500 ms | 586–592 ms | 589–608 ms (cached source-detail pane) |
+| Before, 0 ms | 3–108 ms | 105–107 ms (cached source-detail pane) |
+| After, 500 ms | 503–505 ms | 502–505 ms (cached source-detail pane) |
+| After, 10 ms | 13.5–14.3 ms | 12.7–14.7 ms (actual provider path detail) |
+
+These are host-PTY-observation bounds, not remote display/compositor guarantees.
+Evidence: `workbench-inspector-latency-03a5e823`, `...-9d3gcbak`, `...-pgsdv2mg`,
+and final `...-pa1haj23`, all below `/tmp/opencode`. The final run passed an 80 ms
+regression ceiling for palette/table/real-detail/filtered-table exits. Cached
+indexes contain all 1020 actual timing paths; provider detail reads are allowed
+only during setup, with no provider calls during measured Escape transitions.
+Private source state/config inventories were unchanged. Format/lint, terminal
+unit tests/build, installed native workflow, and all five Ctrl-C modes passed
+(`workbench-terminal-interrupt-_1pdl_38`).
+
+To reduce the tmux delay, explicitly run `tmux set-option -s escape-time 10` in
+the relevant tmux server; this is a server-wide setting. Persist it with
+`set -s escape-time 10` in the user's tmux configuration if desired. Workbench
+does not change that setting automatically. Reopen only the rebuilt client to
+get immediate local redraw; the existing daemon can remain running.
+
+Reproduce without affecting the owner's tmux server or application processes:
+
+```sh
+./scripts/with-switch.sh python3 -B scripts/test-inspector-latency.py \
+  --detail-mode real \
+  --provider /tmp/opencode/workbench-fs1-inspection-provider/generations/59466eda06df463e8d921678830ff5c2/bin/hardcaml-asic-flow \
+  --tmux-escape-time 10 --single-escape-only --iterations 3 --max-latency-ms 80
+```
+
+The script owns its tmux socket, daemon, client, and rekeyed state copies. Omit
+`--max-latency-ms` for diagnostic runs with an intentionally large Escape wait.
+Its incremental screen parser has a pure `--self-test-screen` check, including
+fragmented UTF-8/escape sequences and tmux erasure/charset controls.
+
 The signoff timing index contains **1020 actual timing paths**, plus its recorded
 input-reference row. Every max/min block matches the independently read original
 report span, startpoint, endpoint, group, type and signed slack. Corners are

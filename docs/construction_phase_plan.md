@@ -186,7 +186,9 @@ Features: F02–F06/F09–F12 (minimal F12 seams). **Demo B delivered.**
   RPC-driven live selection do not prove every interactive launch path.
 - [ ] Measure high-tile-count fan-out, responsiveness, latency and memory/disk use.
 - [ ] Fully reactive publication/redraw and richer capability-aware endpoint forms.
-  Current refresh/repaint is clock-driven; assignments are whitespace-separated.
+  Domain refresh remains clock-driven; local input/deferred completion now invalidates
+  the view immediately. Time-dependent displays retain a clock. Assignments are
+  whitespace-separated.
 
 **Demo B:** linked/independent workspaces, following/pinned synthesis comparison,
 palette operations and project-scoped tests/logs are delivered. Synthetic renderer
@@ -247,7 +249,8 @@ The unchecked M0–M3 items are bounded followups, not grounds to label delivere
 demos “not started.” Final parent-wide checks passed. Prioritize missing interactive
 race/reconnect/launch-and-view/cancellation coverage, then measured scaling and
 adoption choices. Template export/clone, freeform geometry, persisted local chrome
-and richer endpoint forms remain explicit gaps; clock-driven redraw remains current.
+and richer endpoint forms remain explicit gaps; domain refresh remains clock-driven,
+with immediate local input/completion redraw after the Escape-latency followup.
 
 ## M4 — Rich evidence and live acceptance (FS1/FS2)
 
@@ -367,6 +370,18 @@ synthesis inspector (`...-arle_91_`) passed. Inspection is read-only over the
 previous physical run; no new physical/signoff execution was needed. Embedded
 graphical editing, spatial heatmaps and unsupported source mapping remain F06
 extensions, not inferred capabilities of these tables or the external handoff.
+
+### Inspector input responsiveness
+
+**Inspector Escape responsiveness:** the manual demo's delay was reproduced as
+tmux's 500 ms Escape wait plus the former 100 ms input repaint dependency. The
+client now invalidates its view immediately for local navigation and deferred
+completion. Actual private-tmux 10 ms tests with real path detail measured
+13–15 ms exits; private-tmux 500 ms still measured about 500 ms, distinguishing
+the two causes. The owner server was not changed. Final latency regression
+`/tmp/opencode/workbench-inspector-latency-pa1haj23` passed its 80 ms ceiling;
+terminal tests/build, format/lint, installed lifecycle and Ctrl-C matrix passed.
+See [evidence and commands](fs1_investigation.md#escape-responsiveness-in-tmux--2026-10-16-followup).
 
 ### Earlier proposed execution followup — deferred in favor of FS1
 

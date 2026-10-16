@@ -141,6 +141,11 @@ must not accidentally trigger build/cancel shortcuts. Keep focus/selection stabl
 when jobs, logs or results arrive. Select list items by identity, not row index.
 
 Ctrl-C is the global client-exit escape route and precedes all modal/paste capture.
+Local navigation and deferred completion now explicitly invalidate the view;
+Escape does not wait for the 100 ms display clock. Domain refresh is still polled.
+Terminal-multiplexer Escape waits remain separate; the
+[measured tmux followup](fs1_investigation.md#escape-responsiveness-in-tmux--2026-10-16-followup)
+documents the owner's 500 ms setting and explicit opt-in tuning.
 Raw terminal mode disables keyboard-generated OS signals, so checking it only in
 a fallback keymap is insufficient. Filters and unfinished paste capture remain
 visibly marked even with ordinary chrome hidden; abort restores terminal settings

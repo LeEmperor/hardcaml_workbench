@@ -65,7 +65,7 @@ of an implemented Workbench feature.
   independent color/icon/density controls are delivered; richer gallery fixtures,
   reusable tabs and final aesthetic review remain pending. No embedded editor is selected.
 - Limits: shelf layout rather than freeform geometry; no template export/clone;
-  local chrome/header preferences do not persist; clock-driven redraw and a basic
+  local chrome/header preferences do not persist; clock-driven domain polling and a basic
   endpoint/assignment form; embedded graphical editing and unsupported source mappings remain later work. Remaining frontend race/reconnect/
   cancellation coverage and scaling measurements are explicit in M0–M3.
 - FS1 now includes [synthesis metrics and aggregate physical evidence](fs1_acceptance.md),
