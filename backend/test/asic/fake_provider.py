@@ -86,10 +86,20 @@ elif args[:2] == ['flow', 'run']:
     emit(envelope('stage-observation', event='observation_terminal',
                   execution_file=os.path.join(attempt, 'execution.json')))
 elif args[:2] == ['observation', 'read-updates']:
+    stage_fixture = os.path.join(args[2], 'observation.json')
+    cursor = 0
+    if os.path.exists(stage_fixture):
+        with open(stage_fixture) as src:
+            cursor = json.load(src)['cursor']
     emit(envelope('stage-observation', 2, stream_id=option('--stream-id'),
-                  after=int(option('--after')), cursor=0, events=[]))
+                  after=int(option('--after')), cursor=cursor, events=[]))
 elif args[:2] == ['observation', 'inspect']:
     attempt = args[2]
+    stage_fixture = os.path.join(attempt, 'observation.json')
+    if os.path.exists(stage_fixture):
+        with open(stage_fixture) as src:
+            emit(json.load(src))
+        sys.exit(0)
     stream = 'stream-' + os.path.basename(attempt).removeprefix('attempt-')
     done = os.path.exists(os.path.join(attempt, 'done'))
     missing = os.path.exists('missing')

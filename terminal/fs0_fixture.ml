@@ -17,6 +17,7 @@ let run run : Asic.Run.t =
   { run
   ; reference = { attempt = "/explicit/synthetic/fs0/" ^ run.id; stream_id = run.id }
   ; selection = None
+  ; stages = []
   ; cursor = 1
   ; status = "completed"
   ; execution_file = Some (execution_file run)

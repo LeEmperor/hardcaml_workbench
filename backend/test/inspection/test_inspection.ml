@@ -29,6 +29,7 @@ let make_registered execution_file : Asic.Run.t =
   ; status = "completed"
   ; execution_file = Some execution_file
   ; error = None
+  ; stages = []
   }
 ;;
 

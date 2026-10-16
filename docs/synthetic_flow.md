@@ -1,0 +1,170 @@
+# Interactive synthetic flow demo
+
+Implemented and exercised 2026-10-16 in the aesthetics worktree. This is a
+development/demo provider behind the **normal daemon, adapter and terminal**.
+It supplies explicitly synthetic data; it runs no synthesis, physical-design or
+acceptance tools. No PDK or retained real-run directories are required.
+
+## Launch in two terminals
+
+The commands below use `/tmp/opencode/wb-synthetic-demo` as a new demo directory.
+Choose a different name if it already exists; preparation deliberately refuses to
+overwrite a prepared demo. The existing Workbench opam switch is required. Scripts
+use `scripts/with-switch.sh`, respecting `OPAM_SWITCH` (default `5.2.0+ox`).
+
+### Terminal 1 — prepare once and start the daemon
+
+```sh
+cd /home/wayne/devel/jane/aesthetics
+./scripts/with-switch.sh dune build -j20 daemon/main.exe terminal/main.exe
+
+python3 -B scripts/synthetic-flow-demo.py prepare \
+  --dir /tmp/opencode/wb-synthetic-demo
+
+python3 -B scripts/synthetic-flow-demo.py daemon \
+  --dir /tmp/opencode/wb-synthetic-demo
+```
+
+The daemon stays in the foreground. Its port is selected automatically and recorded
+in the demo's discovery file; it has its own state directory.
+
+### Terminal 2 — populate the daemon and connect
+
+```sh
+cd /home/wayne/devel/jane/aesthetics
+
+python3 -B scripts/synthetic-flow-demo.py seed \
+  --dir /tmp/opencode/wb-synthetic-demo
+
+python3 -B scripts/synthetic-flow-demo.py client \
+  --dir /tmp/opencode/wb-synthetic-demo
+```
+
+Both commands discover this demo's exact daemon endpoint. Start with a terminal
+at least **120 columns × 40 rows**. Overview and Timing already have useful tile
+arrangements; no Apply default layout action is required.
+
+For later sessions, repeat only `daemon` and `client`. `seed` reimports reference
+evidence, selects the reference and reapplies the demo's curated layouts, hiding
+extra tiles; use it deliberately if you have customized that demo.
+
+`q` exits the client while the daemon stays alive. Ctrl-C stops the foreground
+daemon. `--url` permits explicitly connecting to another endpoint; `--daemon` and
+`--client` override binary paths. No setup command builds binaries automatically.
+
+## What to try
+
+### Run a simulated prefix from the checklist
+
+1. In Overview, use **Tab / Shift-Tab** to focus **Stage checklist**.
+2. Use **j/k** to select Placement (the order is synthesis, floorplan, placement,
+   CTS, routing, signoff).
+3. **Enter** inspects the selected stage, reason and advertised action; **Esc**
+   returns. Use the palette's **Zoom focused tile** if you want more room.
+4. Press **r** to prepare the advertised selection. This plans but does not execute.
+5. When the matching preview is ready, press **Space c c**, search for
+   **Launch and view in captured context**, and press Enter.
+
+This starts a **new run from synthesis through placement**, not a restart of
+placement inside the reference run. The normal allocation/context machinery
+selects the new run. Stages advance at 1.5 seconds each by default; stages beyond
+the selected endpoint are explicitly not requested. Selecting signoff instead
+exercises the entire six-stage simulation (about nine seconds).
+
+The separate **Launch …** action runs without changing the selection.
+Run selection, pinning, inspection, scrolling and appearance changes do not launch
+work. Producer calls are recorded in `project/provider-calls.jsonl`.
+
+### Inspect good and failed evidence
+
+- The run selector contains **synthetic-reference** (six completed stages) and
+  **synthetic-failed** (routing failed, signoff skipped). Select a row with j/k
+  and Enter. The failure profile can also be launched through its advertised actions.
+- **1 / 2** switch Overview and Timing; their run context remains linked.
+- Use **Space c c → Inspect timing paths**, then **j/k**, **Enter**, **s** to sort,
+  and **/** to filter. Other palette inspection commands open clocks, physical
+  resources and routing data through the same FS1 interfaces as a real provider.
+- Synthesis contains 128 cells for the reference and 144 for the failed candidate.
+  Reference setup/hold slack is 0.42/0.08 ns. The timing dataset has 12 paths across
+  two corners and two groups, with setup/hold entries and varied values.
+- Five clock rows distinguish declared constraints from synthetic measured facts;
+  physical and routing indexes each have five rows. Text artifacts can be inspected
+  using existing artifact commands. File hashes and source references are genuine
+  hashes of these synthetic evidence files.
+
+Freshly launched runs publish synthesis/checkpoint evidence. Their collection
+receipts are retained under the run's `finalizations/` directory; adoption of
+aggregate terminal results still uses the normal explicit finalization import.
+The seeded reference/failed runs already have those aggregate results imported.
+
+### Cancellation and manual advancement
+
+The normal palette cancellation command stops the daemon-owned simulated launch.
+Cancellation can stop its automatic observer as well; use the normal **Refresh**
+action to reconcile the final provider-reported cancelled stages if the checklist
+still shows the last running observation. Cancellation is not inferred from process
+exit alone.
+
+For deterministic stepping, prepare a separate directory with `prepare --manual`.
+After launching, advance the exact allocated attempt explicitly:
+
+```sh
+/tmp/opencode/MANUAL-DEMO/project/synthetic-flow advance /ABSOLUTE/ALLOCATED/ATTEMPT
+```
+
+Each advance completes one stage and starts the next. `advance ... --cancel`
+publishes cancellation. All launches, including manual mode, have a 120-second
+bound. Ordinary reads never advance the simulation. `prepare --delay SECONDS`
+sets timed playback between 0.01 and 2 seconds per stage.
+
+## Implementation boundary
+
+- Shared scenario definitions and provider implementation: `demo/synthetic_flow/`.
+- Setup, seed and convenience launch: `scripts/synthetic-flow-demo.py`.
+- Typed optional stage observations/actions: `Asic.Stage`, `Asic.Run.stages`.
+- Stage parsing/persistence: `backend/asic_public.ml` and `backend/asic_service.ml`.
+- Checklist projection/input: existing terminal host, with stable stage IDs and
+  exact run/pin scope.
+- Build/ownership plan: [synthetic flow implementation plan](synthetic_flow_plan.md).
+
+The synthetic provider implements an optional versioned stage-plan extension.
+Other providers that do not supply it continue to show unreported stage state;
+this feature does not claim new real-provider stage-action support. Existing
+Plan/Run operations are reused, rather than a demo-only execution path.
+
+This first slice does not generate RTL hierarchy, binary layouts, real simulator
+cases, waveforms or FS2 suite data. Some compact labels clip at 120×40; zoom and
+inspection expose full context. Routing's aggregate tile still reports unavailable
+detail where appropriate; its FS1 routing inspector has populated synthetic rows.
+Provider acceptance remains `not_evaluated`; illustrative check passes are not EDA
+acceptance evidence.
+
+## Verification
+
+```sh
+./scripts/with-switch.sh dune build -j20 @fmt
+./scripts/with-switch.sh dune build -j20 @lint
+./scripts/with-switch.sh dune runtest -j20
+./scripts/with-switch.sh dune build -j20
+
+python3 -B scripts/test-synthetic-flow.py --smoke
+python3 -B scripts/test-synthetic-flow.py --pty \
+  --daemon _build/default/daemon/main.exe \
+  --client _build/default/terminal/main.exe
+```
+
+Formatting, lint, full tests and build passed; terminal tests were repeated after
+checklist viewport/preview refinements. Final provider + real HTTP + PTY acceptance
+passed at **`/tmp/opencode/synthetic-flow-8rmfu7xu/`**. This includes:
+
+- Valid source hashes, read-only evidence, all four inspection domains and text artifacts.
+- Automatic timed playback and deterministic manual stage transitions.
+- Distinct runs, idempotent resubmission and exact captured-context launch selection.
+- No producer calls from browsing, details, restyling or planning.
+- Explicit cancelled-state observation after the cancellation lifecycle settles.
+- Full Overview/Timing terminal captures, 12-path sort/filter and exact detail text.
+
+Review `pty-full-overview`, `pty-full-timing`, `pty-path-index`, `pty-path-sorted`,
+`pty-path-filtered`, and `pty-path-detail` in that directory (`.txt` and `.ansi`).
+The harness stops only its own processes and retains its evidence. No actual EDA
+execution, sibling repository changes or Git staging/commit/push were needed.

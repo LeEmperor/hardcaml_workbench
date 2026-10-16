@@ -100,7 +100,9 @@ type t =
 [@@deriving equal, sexp]
 
 (* Provisional presentation default; independent of persisted workspace state. *)
-let default = { preset = Structured; color = Selective; icons = Ascii; density = Compact }
+let default =
+  { preset = Instrument; color = Vivid; icons = Unicode; density = Comfortable }
+;;
 
 let%test_unit "appearance keys are stable and round trip" =
   List.iter Preset.all ~f:(fun t ->

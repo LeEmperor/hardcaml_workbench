@@ -350,9 +350,12 @@ let load_project t ~root ~environment =
         let filename = registry_path t p in
         if Poly.equal (Sys_unix.file_exists filename) `No
         then None
-        else
-          Some
-            (Stored.t_of_sexp (Sexp.of_string (read_bounded filename (4 * 1024 * 1024))))))
+        else (
+          let stored =
+            Stored.t_of_sexp (Sexp.of_string (read_bounded filename (4 * 1024 * 1024)))
+          in
+          List.iter stored.runs ~f:(fun run -> Public.validate_stages run.stages);
+          Some stored)))
   in
   (match loaded with
    | Error exn ->
@@ -503,6 +506,7 @@ let register t (p : project) ?selection (reference : Asic.Reference.t) =
       ; status = "allocated"
       ; execution_file = None
       ; error = None
+      ; stages = []
       }
     in
     replace_run p r;

@@ -597,6 +597,20 @@ let reconcile_synthesis session =
             ~filter:local.filter
         in
         session.host <- Host.set_local session.host tile.id { local with synthesis })
+      else if String.equal tile.kind "stage-checklist"
+      then (
+        let local = Host.local session.host tile.id in
+        let run =
+          Workspace.resolve_tile registry tile.id
+          |> Result.ok
+          |> Option.bind ~f:(fun reference -> reference.run)
+        in
+        let stages =
+          Option.value_map run ~default:[] ~f:(fun run ->
+            Terminal_presentation.Overview_tiles.observed_stages ~asic:session.asic ~run)
+        in
+        session.host
+        <- Host.set_local session.host tile.id (Host.reconcile_stages local ~run ~stages))
       else if Terminal_result_view.supports tile.kind
       then (
         let local = Host.local session.host tile.id in
@@ -1138,8 +1152,13 @@ let refresh_host session =
        | Awaiting -> return ())
     | _ -> return ()
   in
-  (* One bounded read intent per distinct visible run, shared by all its tiles. *)
-  let runs = Host.evidence_runs session.host in
+  (* Visible evidence and active runs share the same bounded read-intent scheduler. *)
+  let runs =
+    Host.evidence_runs session.host
+    @ Option.value_map session.asic ~default:[] ~f:(fun snapshot ->
+      List.filter_map snapshot.runs ~f:(fun run ->
+        if Asic_intents.live_status run.status then Some run.run else None))
+  in
   match session.asic with
   | None -> return ()
   | Some snapshot ->
@@ -1293,6 +1312,13 @@ and reconnect session =
        };
     if instance_changed
     then (
+      session.host
+      <- { session.host with
+           active = None
+         ; focus = None
+         ; locals = []
+         ; workspace_focus = []
+         };
       session.view_on_allocation <- None;
       session.asic_reads <- Asic_intents.empty);
     if instance_changed
@@ -2278,6 +2304,7 @@ let host_data session : Host_view.data =
   ; status = session.status
   ; environment = session.environment_label
   ; asic_lines
+  ; asic = session.asic
   }
 ;;
 
@@ -2811,6 +2838,38 @@ let execute_host session captured action ~exit =
     | Switch id ->
       session.host <- Host.switch session.host id;
       Effect.Ignore
+    | Create_testing_workspace ->
+      async (fun () ->
+        match session.host.registry, Host.active session.host with
+        | Some registry, Some active
+          when not
+                 (List.exists registry.workspaces ~f:(fun w ->
+                    String.equal w.name "Testing")) ->
+          let%bind () =
+            mutate_workspace
+              session
+              (Create_workspace
+                 { window = active.window
+                 ; name = "Testing"
+                 ; context = registry.main_context
+                 })
+          in
+          (match session.host.registry with
+           | Some current
+             when Workspace.Session_id.equal current.session_id registry.session_id ->
+             (match
+                List.find current.workspaces ~f:(fun w ->
+                  String.equal w.name "Testing"
+                  && not
+                       (List.exists registry.workspaces ~f:(fun old ->
+                          Workspace.Workspace_id.equal old.id w.id)))
+              with
+              | None -> return ()
+              | Some workspace ->
+                let%map () = add_default_tiles session current workspace in
+                session.host <- Host.switch session.host workspace.id)
+           | _ -> return ())
+        | _ -> return ())
     | Apply_default_layout ->
       async (fun () ->
         match session.host.registry with
@@ -3093,7 +3152,22 @@ let scroll_host session delta =
 ;;
 
 let browse_host session delta =
-  scroll_host session delta;
+  let checklist =
+    Option.filter (Host.focused session.host) ~f:(fun tile ->
+      String.equal tile.kind "stage-checklist")
+  in
+  (match checklist with
+   | Some tile when not (Host.local session.host tile.id).utility_detail ->
+     Option.iter session.host.registry ~f:(fun registry ->
+       Workspace.resolve_tile registry tile.id
+       |> Result.ok
+       |> Option.bind ~f:(fun reference -> reference.run)
+       |> Option.iter ~f:(fun run ->
+         let stages =
+           Terminal_presentation.Overview_tiles.observed_stages ~asic:session.asic ~run
+         in
+         session.host <- Host.browse_stages session.host tile.id ~run ~stages ~delta))
+   | _ -> scroll_host session delta);
   change_synthesis session (fun tile local ->
     let synthesis =
       match Synthesis_view.State.mode local.synthesis with
@@ -3135,7 +3209,18 @@ let browse_host session delta =
     in
     let index = Int.max 0 (Int.min (List.length values - 1) (index + delta)) in
     let cursor = List.nth values index in
-    let visible = Int.max 1 (tile.requested_geometry.height - 2) in
+    let visible =
+      Option.bind session.last_dimensions ~f:(fun dimensions ->
+        let _, _, layout = Host_view.tile_layout session.host dimensions in
+        List.find layout ~f:(fun (t, _) -> Workspace.Tile_id.equal t.id tile.id)
+        |> Option.map ~f:(fun (_, g) ->
+          let _, _, _, _, height =
+            Host_view.body_geometry session.host tile ~width:g.width ~height:g.height
+          in
+          height - 1))
+      |> Option.value ~default:(tile.requested_geometry.height - 2)
+      |> Int.max 1
+    in
     let scroll =
       if String.equal tile.kind "run-selector"
       then
@@ -3157,6 +3242,13 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
     || session.host.paste
   in
   let input = Host.decode_event event in
+  let workspace_navigation =
+    Option.exists (Host.focused session.host) ~f:(fun tile ->
+      String.equal tile.kind "workspace-tabs")
+    && Option.exists input ~f:(function
+      | Host.Character ('j' | 'k') | Next | Previous | Enter -> true
+      | _ -> false)
+  in
   let prefix = session.host.prefix > 0 in
   let captured = Host.capture session.host in
   let host, effect =
@@ -3172,6 +3264,14 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
   match effect with
   | Host.Execute (capture, action) -> Some (execute_host session capture action ~exit)
   | Host.Activate ->
+    Option.iter (Host.focused host) ~f:(fun tile ->
+      if List.mem [ "stage-checklist"; "live-status" ] tile.kind ~equal:String.equal
+      then
+        session.host
+        <- Host.set_local
+             session.host
+             tile.id
+             { (Host.local session.host tile.id) with utility_detail = true; scroll = 0 });
     change_terminal_result session Terminal_result_view.State.inspect;
     change_synthesis session (fun _ local ->
       let mode =
@@ -3202,6 +3302,7 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
          || Option.is_some host.palette
          || host.editing_filter
          || host.prefix > 0 -> Some Effect.Ignore
+  | Host.No_effect when workspace_navigation -> Some Effect.Ignore
   | Host.No_effect ->
     let dispatch id =
       Option.bind captured ~f:(fun capture ->
@@ -3263,7 +3364,51 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
           Some Effect.Ignore
         | _ -> dispatch "synthesis.evidence")
      | Some (Character 'm') -> dispatch "synthesis.metrics"
+     | Some (Character 'r')
+       when Option.exists (Host.focused session.host) ~f:(fun tile ->
+              String.equal tile.kind "stage-checklist") ->
+       let selected =
+         Option.bind (Host.focused session.host) ~f:(fun tile ->
+           Option.bind session.host.registry ~f:(fun registry ->
+             Workspace.resolve_tile registry tile.id
+             |> Result.ok
+             |> Option.bind ~f:(fun reference -> reference.run)
+             |> Option.bind ~f:(fun run ->
+               let stages =
+                 Terminal_presentation.Overview_tiles.observed_stages
+                   ~asic:session.asic
+                   ~run
+               in
+               Host.stage_cursor (Host.local session.host tile.id) ~run ~stages)))
+       in
+       (match Host.stage_plan selected, captured with
+        | Ok operation, Some capture ->
+          session.host
+          <- { session.host with
+               notice =
+                 "Preparing NEW run; when preview ready: Space c c → Launch / Launch and \
+                  view"
+             };
+          Some (execute_host session capture (Asic operation) ~exit)
+        | Error reason, _ ->
+          session.host <- { session.host with notice = reason };
+          Some Effect.Ignore
+        | Ok _, None ->
+          session.host
+          <- { session.host with
+               notice = "Stage action unavailable: workspace not loaded"
+             };
+          Some Effect.Ignore)
      | Some Escape ->
+       Option.iter (Host.focused session.host) ~f:(fun tile ->
+         let local = Host.local session.host tile.id in
+         if local.utility_detail
+         then
+           session.host
+           <- Host.set_local
+                session.host
+                tile.id
+                { local with utility_detail = false; scroll = 0 });
        change_terminal_result session Terminal_result_view.State.back;
        change_synthesis session (fun _ local ->
          { local with synthesis = Synthesis_view.State.back local.synthesis });
@@ -3296,10 +3441,9 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
      | Some (Character 'k') | Some Previous ->
        browse_host session (-1);
        Some Effect.Ignore
-     | Some (Character (('1' | '2') as ch)) ->
-       let name = if Char.equal ch '1' then "Overview" else "Timing" in
-       Option.bind session.host.registry ~f:(fun s ->
-         List.find s.workspaces ~f:(fun w -> String.equal w.name name))
+     | Some (Character ('1' .. '9' as ch)) ->
+       let index = Char.to_int ch - Char.to_int '1' in
+       Option.bind session.host.registry ~f:(fun s -> List.nth s.workspaces index)
        |> Option.iter ~f:(fun w -> session.host <- Host.switch session.host w.id);
        Some Effect.Ignore
      | Some (Character (('[' | ']') as ch)) ->
@@ -3307,7 +3451,9 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
         | Some tile
           when Terminal_result_view.supports tile.kind
                || String.equal tile.kind "simulation"
-               || String.equal tile.kind "synthesis" ->
+               || String.equal tile.kind "synthesis"
+               || String.equal tile.kind "live-status"
+               || String.equal tile.kind "stage-checklist" ->
           scroll_host session (if Char.equal ch '[' then -1 else 1)
         | _ ->
           Option.iter session.host.focus ~f:(fun id ->
@@ -3321,7 +3467,7 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
                  ; scroll = Int.max 0 (l.scroll + if Char.equal ch '[' then -1 else 1)
                  }));
        Some Effect.Ignore
-     | Some Focus -> Some Effect.Ignore
+     | Some (Focus | Focus_previous) -> Some Effect.Ignore
      | _ -> None)
 ;;
 
@@ -3342,7 +3488,7 @@ let host_handler_overlays session event ~exit =
     || session.host.prefix > 0
     ||
     match input with
-    | Some (Host.Focus | Paste_start | Paste_end) -> true
+    | Some (Host.Focus | Focus_previous | Paste_start | Paste_end) -> true
     | Some (Character ' ') ->
       not (Option.exists inspection ~f:(fun (_, view) -> view.editing))
     | _ -> false
@@ -3614,6 +3760,28 @@ let fs0_fixture scenario =
     else registry
   in
   session.host <- Host.receive Host.empty registry;
+  if String.equal scenario "aesthetic-overview"
+  then (
+    let registry =
+      apply
+        registry
+        (Create_workspace
+           { window = overview.window; name = "Testing"; context = registry.main_context })
+    in
+    let registry =
+      List.fold
+        [ "live-status"; "workspace-tabs"; "stage-checklist" ]
+        ~init:registry
+        ~f:(fun registry kind ->
+          apply
+            registry
+            (Create_tile
+               { workspace = overview.id
+               ; kind
+               ; geometry = { x = 0; y = 0; width = 36; height = 12 }
+               }))
+    in
+    session.host <- Host.receive session.host registry);
   List.iter registry.tiles ~f:(fun tile ->
     if String.equal tile.kind "logs"
        || String.equal tile.kind "project-tests"
@@ -3692,7 +3860,7 @@ let capture_appearance_frames ~directory =
   Core_unix.mkdir_p directory;
   List.iter Appearance.Preset.all ~f:(fun preset ->
     List.iter
-      [ "synthesis-a"; "timing"; "pinned-synthesis"; "palette" ]
+      [ "aesthetic-overview"; "synthesis-a"; "timing"; "pinned-synthesis"; "palette" ]
       ~f:(fun scenario ->
         List.iter Appearance.Density.all ~f:(fun density ->
           List.iter capture_dimensions ~f:(fun dimensions ->

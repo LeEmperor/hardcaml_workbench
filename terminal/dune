@@ -4,6 +4,8 @@
   baseline_fixture
   fs0_fixture
   appearance
+  overview_tiles
+  overview_layout
   synthesis_view
   terminal_result_view
   artifact_view
