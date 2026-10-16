@@ -1,14 +1,20 @@
 # F03 — Command palette and project-owned flows
 
-Status (2026-10-15): **FS0 palette, typed captured/revalidated commands, remembered
-Plan inputs and exact-preview synthesis launch delivered**. [D2](../decisions.md)
-FS0 defaults are accepted. See [terminal policy/limits](../fs0_terminal.md) and
-[acceptance](../fs0_acceptance.md). Requirements remain normative; richer grammar,
-capability forms and broader interactive launch-and-view coverage remain open.
+Status (2026-10-16): **FS0 palette/captured commands and FS1 physical, finalization
+and inspection actions delivered**. Remembered Plan inputs and exact-preview launch
+now cover capability-checked known physical endpoints as well as synthesis.
+[D2](../decisions.md) FS0 defaults are accepted. See [terminal policy](../fs0_terminal.md),
+[finalization lifecycle](../fs1_lifecycle_and_artifacts.md) and
+[investigation controls](../fs1_investigation.md#timing-paths-and-navigation).
+Collect versus accept, explicit five-field acceptance collateral, durable submission
+keys, cancel/read-only reconnect, report browsing and four rich inspectors are
+implemented. The owner confirms Escape works after immediate local invalidation
+and the documented tmux followup. Requirements remain normative; richer grammar,
+general capability forms and broader launch-and-view coverage remain open.
 
 ## User outcome
 
-Open a palette (requested binding: `Space c c`), search for an operation such as
+Open a palette (`Space c c`), search for an operation such as
 `run synth`, and execute it against the remembered project flow/profile. Buttons,
 shortcuts and automation invoke the same semantic operation.
 
@@ -49,10 +55,12 @@ Do not hardcode an illustrative stage list as a universal execution engine.
 
 ## First demo / later
 
-First: build/test/cancel, workspace context actions, plus discover → select →
-preview → run through synthesis. The simulation/test module (F09) reuses the same
+Delivered: build/test/cancel, workspace context actions, discover → select →
+preview → run through supported known endpoints, finalization and bounded evidence
+inspection. The simulation/test module (F09) reuses the same
 test action and attempt identity rather than introducing a second runner.
-Later: more endpoints, supported continuation, configurable command aliases and
-external automation adapters. No second shell/recipe language is required.
+Later: additional endpoints, supported continuation, configurable command aliases
+and external automation adapters. FS2 structured simulation remains unstarted.
+No second shell/recipe language is required.
 
 Dependencies: F01 capabilities; F02 actions; F05 allocation and outcomes; D2.

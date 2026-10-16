@@ -138,10 +138,14 @@ stamp. CLI4 compatibility is separate from source-artifact identity.
 Manual-demo followup: an `invalid command: inspect` error was traced to the
 example configuration still selecting the older provider. Its `provider_executable`
 now selects the final generation above, whose metadata was checked to advertise
-`inspection1: true`. The owner's active daemon/client were left running; restart
-and re-registration under the new configuration are still required. This config
+`inspection1: true`. The owner's active daemon/client were left running at that
+point; restart and re-registration were required to adopt the new configuration. This config
 correction is not a claim that the already-running daemon hot-reloaded it.
 The acceptance harness used its own project configuration and read-only relay.
+The owner subsequently opened the retained timing path in the manual client.
+That observation establishes the viewed workflow, not migration of every saved
+configuration namespace. The [README manual route](../README.md#open-the-completed-fs1-example)
+records the exact registration and launch steps for the current provider.
 
 To adopt the new provider in the owner application, `provider_executable` must
 explicitly select the generation above and the project must be reopened so the
@@ -194,6 +198,11 @@ the relevant tmux server; this is a server-wide setting. Persist it with
 does not change that setting automatically. Reopen only the rebuilt client to
 get immediate local redraw; the existing daemon can remain running.
 
+**Owner confirmation, 2026-10-16:** after the fix and setup guidance the owner
+reported that it works fine. This closes the reported manual Escape-latency issue.
+It is distinct from the measured private-tmux acceptance above and does not select
+a final visual design or establish all lifecycle/terminal permutations.
+
 Reproduce without affecting the owner's tmux server or application processes:
 
 ```sh
@@ -207,6 +216,20 @@ The script owns its tmux socket, daemon, client, and rekeyed state copies. Omit
 `--max-latency-ms` for diagnostic runs with an intentionally large Escape wait.
 Its incremental screen parser has a pure `--self-test-screen` check, including
 fragmented UTF-8/escape sequences and tmux erasure/charset controls.
+
+### Current inspector mode and controls
+
+Opening **Inspect timing paths** attaches a client-local explorer to the focused
+tile and covers the current window. It is not another workspace or a persisted
+layout change. Enter opens the selected path's detail; **Esc returns to its table,
+then Esc again closes the explorer**. Switching to the already-active Overview
+does not dismiss the inspector remembered by its focused tile. The global palette
+remains available with Space c c, and Ctrl-C exits the client from every mode.
+
+This behavior is functional but not sufficiently self-describing. Breadcrumbs,
+mode-specific help, an explicit Close inspector palette command and less prominent
+raw JSON/full paths are [presentation followups](backlog/README.md#inspector-usability-polish),
+not implemented controls or remaining FS1 feature blockers.
 
 The signoff timing index contains **1020 actual timing paths**, plus its recorded
 input-reference row. Every max/min block matches the independently read original

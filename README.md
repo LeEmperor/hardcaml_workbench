@@ -2,7 +2,7 @@
 
 A development workbench for inspecting, running, measuring, and debugging Hardcaml designs.
 
-**Current direction (2026-10-15):** configurable Bonsai Term tiles over typed
+**Current direction (2026-10-16):** configurable Bonsai Term tiles over typed
 provider/module contracts, a command palette and named workspaces linked to a shared
 Main run context by default. Workspaces can inspect independently; tiles can pin
 references. Simulation/testing starts with a generic supervised test runner. ASIC
@@ -12,7 +12,7 @@ sibling FIFO specimen and headless tests.
 **FS0 demos are implemented and exercised:** workspace/run-context persistence,
 palette and generic test/log tiles, synthesis views, installed ASIC discovery/plan/
 launch/observation, and L1/L2 summary reuse. Two real synthesis profiles produced
-673 and 685 cells; physical acceptance remains `not_evaluated`. Existing Dune,
+673 and 685 cells; those synthesis-only runs have acceptance `not_evaluated`. Existing Dune,
 RTL/artifact and hierarchy workflows remain covered by installed tests.
 **FS1 now adds** synthesis resource/check metrics and explicit finalization import
 with aggregate timing, physical resources, check verdicts and declared-clock context.
@@ -24,7 +24,9 @@ cancellation are exercised. FS1 now also delivers retained timing-path explorati
 measured clock reports, stage-specific physical/routing/congestion tables and exact
 binary external handoff. These complete the adopted-evidence FS1 scope; embedded
 graphical editing, simulation helpers and appearance-gallery polish remain later work. See the
-[FS1 evidence and limits](docs/fs1_acceptance.md) and [delivery record](docs/construction_phase_plan.md).
+[current FS1 evidence and limits](docs/fs1_investigation.md) and [delivery record](docs/construction_phase_plan.md).
+The owner has confirmed the Escape-responsiveness fix. Inspector presentation
+polish and broader race/scaling coverage remain followups, not FS1 feature blockers.
 
 ## Documentation
 
@@ -90,67 +92,96 @@ Separate foreground startup is:
   --environment opam:PROJECT_SWITCH
 ```
 
-### Open the accepted real synthesis demo
+### Open the completed FS1 example
 
-The retained FS0 state includes real completed synthesis summaries: **balanced
-673 cells**, **synth_delay 685 cells**. Acceptance is **`not_evaluated`**; cached
-evidence is labeled **`Cached_unverified`** after restart. Open it using the
-already compiled binaries, from this checkout, with no build or EDA:
+This local demo inspects the retained `hardcaml_asic_example` physical execution
+and its accepted finalization; it does not rerun implementation or acceptance.
+Use the existing matching client/daemon binaries and a terminal around 120×40.
+The example's `hardcaml-workbench-asic.sexp` must select the inspection-capable
+provider (the manual-demo config has been updated to this generation):
 
-```sh
-# Terminal 1: one daemon owns this saved Workbench state.
-_build/default/daemon/main.exe --port 41733 \
-  --state-dir /tmp/opencode/workbench-fs0-91em64rl/real/state
-
-# Terminal 2: use a 120-column × 40-row terminal.
-_build/default/terminal/main.exe --connect http://127.0.0.1:41733 \
-  --project-root /home/wayne/devel/jane/hardcaml_asic_example \
-  --environment inherited
+```sexp
+(provider_executable /tmp/opencode/workbench-fs1-inspection-provider/generations/59466eda06df463e8d921678830ff5c2/bin/hardcaml-asic-flow)
 ```
 
-Use the printed daemon URL if you choose a different port.
+Changing that setting requires reopening with a daemon that rereads the config.
+ASIC registration/cache identity includes configuration, so re-register exact known
+references after a provider-path change. Existing layout/pin records are separate.
+The retained test harness's deadline-limited relay is not a permanent demo provider.
 
-**For a full dashboard:** press **Space c c → Switch to Overview**, then
-**Apply default layout (add missing tiles)**. The old acceptance state deliberately
-moved Overview's only selector into Timing, so it can initially be empty. This
-additive action supplies a run selector, synthesis, placement, CTS, routing, timing,
-checks, finalization, ASIC controls, execution/tests/logs and navigation. Existing
-tiles, pins and contexts are preserved. Unsupported/not-requested stages are labeled;
-no tool execution occurs merely from adding their views.
-
-**Layout: Fit tiles to window** (the new client default) fills the available surface.
-**Layout: Requested tile sizes** restores the earlier shelf sizing. Layout commands
-are separate from Appearance commands. At small sizes the focused tile is shown
-with a compact-mode notice; use Tab/zoom or hide tiles to inspect them.
-
-**For the focused two-run comparison:** in the client, press
-**Space c c**, type **Switch to FS0 Real Demo 1792063225057192206**, and press
-**Enter**. This saved workspace shows a **pinned balanced synthesis tile (673)**
-beside a **following synthesis tile (685)** linked to Main. The active workspace
-is client-local, so choose it again when starting a new client. Tab changes tile
-focus; the palette provides **Zoom focused tile** and **Unzoom workspace**. To
-add a synthesis view elsewhere, use the palette's **Add synthesis tile**. This saved
-workspace intentionally contains only two synthesis tiles; Fit expands them across
-the surface without adding stages or changing the saved 56×14 preferred sizes.
-
-Both tiles use real retained evidence. Opening them loads Workbench's cached
-summaries. Focus either synthesis tile and press **Enter** for its cell table;
-`/` filters, `s` cycles sort, Enter inspects the selected row, `e` shows full evidence,
-and Esc returns. These inspection controls are local and do not launch provider work.
-Keep the example configuration and retained
-`/tmp/opencode/workbench-fs0-6_1ymcsd/results` provider evidence in place. Exit the
-client with `q`; stop the foreground daemon with Ctrl-C before another daemon uses
-the same state directory.
-
-Reproduce the automated cached-data HTTP/PTY check with:
+From this checkout, **Terminal 1**, create fresh state and start the daemon:
 
 ```sh
-python3 -B scripts/test-fs0.py --reopen-real /tmp/opencode/workbench-fs0-91em64rl
+STATE=$(mktemp -d /tmp/opencode/workbench-manual-fs1-XXXXXX)
+./scripts/with-switch.sh _build/default/daemon/main.exe \
+  --port 41734 --state-dir "$STATE"
 ```
 
-It creates a new dedicated demo workspace in that state and fresh retained screen
-evidence, without EDA or builds. See [FS0 acceptance](docs/fs0_acceptance.md) for
-exact run identities, successful screens and limitations.
+Keep the chosen state path to reopen this arrangement later. Use an unused port
+and the same URL below; only one daemon may own a state directory. To reuse an
+existing session, use its intended daemon/state lifecycle instead of starting a
+second owner.
+
+In **Terminal 2**, also from this checkout, register the retained evidence once
+for this project/configuration namespace:
+
+```sh
+ROOT=/home/wayne/devel/jane/hardcaml_asic_example
+URL=http://127.0.0.1:41734
+wb() {
+  ./scripts/with-switch.sh _build/default/terminal/main.exe \
+    --connect "$URL" --project-root "$ROOT" --environment inherited \
+    --api --plain "$@"
+}
+
+wb --asic-operation \
+  '(Register ((attempt /tmp/opencode/workbench-fs1-physical-w0rftdi0/results/observations/20261015T192439611662Z_965b68b0) (stream_id 965b68b0f7454e14bc7d6f12f32ab9c7)))' \
+  --wait --wait-timeout-seconds 120
+
+# Exact Run_ref for this retained specimen, not a directory-derived new identity.
+RUN='((backend asic) (id 965b68b0f7454e14bc7d6f12f32ab9c7) (build ()) (label ()))'
+wb --asic-operation \
+  "(Inspect_finalization (run $RUN) (attempt /tmp/opencode/workbench-fs1-acceptance-5oa67d8u/operations/20261015T203811140090Z_3bbfa7f1))" \
+  --wait --wait-timeout-seconds 120
+
+./scripts/with-switch.sh _build/default/terminal/main.exe \
+  --connect "$URL" --project-root "$ROOT" --environment inherited
+```
+
+These API operations only read existing provider evidence and populate Workbench
+state. The specimen shows **673 synthesis cells**, aggregate setup/hold around
+**11.6755/0.125029 ns**, and terminal acceptance **pass**. Execution completion,
+individual checks and that explicit acceptance operation remain separate facts.
+
+In the client:
+
+1. **Space c c → Apply default layout (add missing tiles)** supplies the dashboard
+   while preserving existing tiles, pins and contexts.
+2. Use **Tab** to focus the run selector and **Enter** to select the registered run.
+3. Use the palette's **Inspect timing paths**, **Inspect clocks**, **Inspect physical**,
+   **Inspect routing**, or **Browse reports/artifacts** commands.
+
+Rich inspectors are full-window, client-local views attached to the initiating
+tile, **not additional workspaces**. Enter opens a row detail. **Esc returns to
+the table; Esc again closes the inspector and reveals the workspace.** Switching
+to the already-active Overview does not dismiss its retained inspector. `/`
+filters, `s` sorts, `c/g/p` cycle corner/group/producer, and `d` shows provenance.
+See [all controls and evidence](docs/fs1_investigation.md#timing-paths-and-navigation).
+
+**Finalize**, **Finalize and accept**, and flow-launch commands start work;
+Inspect/Browse commands read existing evidence. `q` exits from the normal workspace;
+Ctrl-C exits from every mode while daemon work continues. Domain refresh remains
+polled, but local input redraw is immediate. If tmux delays Escape, the explicit
+server-wide setting `tmux set-option -s escape-time 10` reduces its ambiguity wait;
+see the [measured followup](docs/fs1_investigation.md#escape-responsiveness-in-tmux--2026-10-16-followup).
+
+**Historical FS0 comparison:** the 673/685 two-run state at
+`/tmp/opencode/workbench-fs0-91em64rl/real/state` is retained with its original
+configuration identity. The upgraded example config does not automatically open
+that registry. Its original commands/screens remain in [FS0 acceptance](docs/fs0_acceptance.md);
+`test-fs0.py --reopen-real` mutates that selected state and is not the fresh-state
+manual demo above. Preserve it and use private copies with matching configuration
+for historical acceptance replay.
 
 Run repository checks serially because they share Dune's build lock:
 

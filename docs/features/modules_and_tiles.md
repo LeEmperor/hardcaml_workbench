@@ -1,10 +1,15 @@
 # F02 — Providers, modules and tiles
 
-Status (2026-10-15): **FS0 execution boundary, daemon ASIC service and tile host
-delivered**. See [Execution](../fs0_execution_module.md), [terminal](../fs0_terminal.md)
-and the [plan](../construction_phase_plan.md) for implementation/evidence and gaps.
-Requirements below remain normative; fully reactive publication/redraw and measured
-high-tile-count scaling remain followups (current redraw is clock-driven).
+Status (2026-10-16): **FS0 execution boundary, daemon ASIC service and tile host,
+plus FS1 shared typed inspection delivered**. See [Execution](../fs0_execution_module.md),
+[terminal](../fs0_terminal.md) and [FS1 investigation](../fs1_investigation.md).
+Timing/clock/physical/routing explorers share bounded indexes and on-demand detail,
+with independent tile-local filters/selection/scroll and stale-response fences.
+Local input and deferred/poll completion now invalidate the Bonsai view immediately;
+the owner confirms Escape works. Domain delivery still polls every 500 ms and a
+100 ms display clock serves time-dependent content. Fully subscription-driven
+domain publication and measured high-tile-count scaling remain followups.
+Requirements below remain normative beyond the adopted scope; FS2 is unstarted.
 
 ## Ownership
 
@@ -45,7 +50,14 @@ Utility tiles can consume host/session state instead of an EDA feature module.
   Context changes are revisioned session transitions, separate from provider updates.
 - Static typed assembly is sufficient initially; dynamic plugins are not required.
 
-## First demonstration
+## Demonstration requirements and current boundary
+
+FS0 establishes the synthesis/shared-service baseline; FS1 adds provider-free warm
+inspection and local browsing, including independent pinned/following explorers.
+The fan-out model below is the target contract, not a claim that every domain
+already uses subscriptions. Numerical read/cache limits are recorded in
+[provider integration](../fs0_provider_integration.md) and
+[FS1 bounds](../fs1_investigation.md#bounds-caches-and-responsiveness).
 
 ### Asynchronous access and fan-out
 
@@ -87,8 +99,9 @@ Tile instances (possibly in several windows)
 - Async concurrency is not a promise of CPU parallelism. Profile expensive decoding
   and isolate it when needed; initial modules remain statically assembled.
 
-The concrete limits and read scheduling are implementation choices to measure in
-FS0. Separate execution admission (existing per-root job queues) from safe concurrent
+The ASIC service currently admits four concurrent read queries and one launcher;
+artifact reads share the read budget. Separate execution admission (existing
+per-root job queues) from safe concurrent
 read/observation scheduling; provider locking rules still govern conflicting actions.
 
 [F11](run_summary_cache.md) specifies the cache layers: L1 decoded module summaries,

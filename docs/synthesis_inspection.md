@@ -60,6 +60,14 @@ saved real Workbench state, and its example project configuration. The script
 uses the `Session` and ANSI-screen emulator from `scripts/test-fs0.py`, and the
 PTY/inventory helpers from `scripts/test-fs0-dashboard.py`.
 
+**Historical replay prerequisite:** the saved state is keyed to its original
+project/environment/configuration identity. The current example selects the
+upgraded FS1 provider, so copying old state files alone does not make the old
+registry visible. Preserve the original state and use matching configuration in
+an isolated replay; do not revert the owner's live project configuration just
+to reproduce this historical test. For current manual use, follow the
+[FS1 example instructions](../README.md#open-the-completed-fs1-example).
+
 Optional paths:
 
 ```sh

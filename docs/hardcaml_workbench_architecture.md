@@ -1,6 +1,6 @@
 # Hardcaml Workbench — Architecture
 
-Updated 2026-10-15. This is the central product and system design document.
+Updated 2026-10-16. This is the central product and system design document.
 
 **Active review:** the [feature inventory](feature_list.md) records the October 15
 scope, and the [demo plan](construction_phase_plan.md) supersedes P0–P7. Named
@@ -8,9 +8,10 @@ i3-style arrangements, a command palette and snapshot-aware references are now
 explicit requirements. D1 and the bounded D2/D3 FS0 defaults are accepted in the
 [decision log](decisions.md). Workspaces follow shared run contexts and can detach
 for independent inspection; immutable snapshot support remains later scope.
-Provider descriptions below are dated source
-reviews; the current native/named-flow/observation foundation must be assessed at
-the adopted version rather than assumed absent.
+Provider reviews below are historical; the adopted public named-flow and durable
+observation boundary is implemented. Current FS1 evidence and the exact installed
+inspection provider are recorded in [FS1 investigation](fs1_investigation.md), not
+in the October 12 source review.
 The [construction plan](construction_phase_plan.md) owns phase order and evidence;
 [rendering](rendering.md) owns visual and interaction conventions;
 [backlog](backlog/README.md) holds explicitly deferred work. Historical decisions
@@ -50,13 +51,25 @@ Implemented today: installed native daemon/client, generic Dune operations,
 supervision/cancellation/logs, manifest/driver discovery, RTL/artifact/provenance
 handling and elaborated hierarchy inspection. These are the former 1A–1C milestones.
 FS0 now adds typed workspace/ASIC endpoints, persisted run contexts/layouts, a
-palette/tile host, generic test module boundary, synthesis-only installed-provider
+palette/tile host, generic test module boundary, installed-provider synthesis
 integration, explicit-reference run registration and L1/L2 summaries. Actual HTTP,
 PTY and two-profile real synthesis acceptance is in the [plan](construction_phase_plan.md).
-The richer contracts below remain design requirements where not covered by that
-bounded implementation: full store discovery, typed timing details, arbitrary
-layout/templates, multi-window adoption and fully reactive publication are not
-established merely by the FS0 demos.
+FS1's functional adopted-evidence scope is complete: capability-checked physical
+endpoints, collect/accept finalization lifecycle, bounded reports/artifacts, rich
+timing paths, measured clocks, stage-attributed physical/routing inspection and
+byte-exact external binary handoff. See [lifecycle](fs1_lifecycle_and_artifacts.md)
+and [investigation](fs1_investigation.md) for evidence, limits and provider identity.
+The owner also confirms Escape works after the local-redraw/tmux followup.
+Local input and deferred/poll completion invalidate the view immediately; domain
+refresh remains polled at 500 ms, with a 100 ms clock for time-dependent content.
+This is mixed reactive local rendering and polled domain delivery.
+
+The richer contracts below remain requirements where not covered by these bounded
+deliveries: broad store discovery, arbitrary layouts/templates, multi-window
+adoption and fully subscription-driven domain publication remain later scope.
+Embedded graphics and reliable source mapping remain later F06 work; exact external
+handoff does not establish embedded or interactive GUI rendering. FS2 structured
+simulation remains unstarted.
 
 ## 2. Runtime and dependency boundaries
 
@@ -213,7 +226,15 @@ APIs should be generally useful machine-readable flow APIs, not tile-specific AP
 requiring Workbench libraries. A versioned project driver can compose those APIs
 with project tests and regression commands.
 
-### Inspected foundation and missing integration
+### Historical inspected foundation and missing integration — 2026-10-12
+
+The next three subsections preserve the October 12 review and proposed contract,
+not a current upstream work queue. The adopted public observation/read/report
+integration is delivered; see [FS0 integration](fs0_provider_integration.md),
+[FS1 lifecycle](fs1_lifecycle_and_artifacts.md) and the current
+[inspection contract/provider generation](fs1_investigation.md#source-and-provider-boundary).
+Old Python source paths and missing-interface claims below describe that review's
+baseline, not the installed implementation used for current acceptance.
 
 Inspection on 2026-10-12 found the installed dispatcher and collector in
 `hardcaml_asic/flow/hardcaml_asic_flow/`, with `run.json`, `results.json`, distinct
@@ -232,7 +253,7 @@ For future FPGA work, Vivado is an expected tool provider; project-side
 have Dune/tests/simulation/artifact providers, not only Vivado. Live FPGA integration
 is deferred; shared contracts are exercised with fixtures first.
 
-### Provider integration review — 2026-10-12
+### Historical provider integration review — 2026-10-12
 
 Source review at ASIC commit `f6e8fd7` (clean checkout) confirms three existing
 layers: OCaml project/build/bundle generation in `lib/`, the installed Python
@@ -267,7 +288,7 @@ observation with explicit limits, or a narrowly scoped upstream instrumentation
 change. Avoid copying the flow engine's sequencing or guessing failures/skips from
 missing directories. Test the actual container/native path to which support applies.
 
-### Durable observation and result snapshots
+### Historical durable observation and result-snapshot proposal — 2026-10-12
 
 The proposed public boundary supplies:
 
@@ -356,7 +377,8 @@ After allocation, the new run appears in run selectors. A plain launch does not
 implicitly steal selection. An explicit launch-and-view action targets a run
 context: selection changes affect all workspaces linked to that context, not just
 the initiating window. Independent contexts and pinned tiles remain unchanged.
-D2 will settle capture/revalidation policy for context changes during allocation.
+D2's bounded FS0 capture/revalidation defaults are accepted in the
+[decision log](decisions.md#d2--command-and-context-semantics).
 Background arrivals do not steal selection. A report tile shows
 pending only when its measurement is expected for that requested operation; if
 power analysis was not requested or supported, show that instead of a spinner.
@@ -429,8 +451,15 @@ The [F11 cache specification](features/run_summary_cache.md) makes fast switchin
 an FS0 requirement. Use L1 decoded domain summaries in daemon memory and L2
 persistent normalized summaries in a separate Workbench store; canonical provider
 records remain the source of truth, not an expendable third cache tier. Cache typed
-facts rather than tile-rendered text or geometry. Cache location/format are not yet
-chosen; project-local ignored or user-cache storage must stay outside canonical runs.
+facts rather than tile-rendered text or geometry. Implemented files live in the
+daemon's configured Workbench state directory, outside canonical provider results:
+`asic-<identity-digest>.sexp` for the registry and
+`asic-<identity-digest>-summary-v1-<report-digest-hash>.summary.sexp` for summaries.
+The filename's v1 is distinct from the summary blob schema (writes v4, reads v1–v4).
+L1 holds 32 summaries; L2 indexes up to 128 runs, each summary at most 256 KiB
+(32 MiB indexed payload). The namespace includes project root, environment and
+complete ASIC configuration. [F11](features/run_summary_cache.md) also records the
+separate bounded inspection cache used by FS1.
 
 On context switch, use L1 when available, asynchronously load L2 on a memory miss,
 and only materialize provider results on a cold/invalid entry. Share equivalent
@@ -441,7 +470,9 @@ receive newer results. Adapter/schema changes invalidate incompatible derived da
 Keep small active/pinned/recent summaries hot within byte/entry budgets; a last-3–5
 run working set is a workload example, not an unlimited retention guarantee. Large
 path tables, waveforms and raw artifacts remain separately paginated/provider-backed.
-L2 hits may appear as cached/unverified while asynchronous source validation occurs.
+L2 hits appear as cached/unverified; ordinary switching does not validate provider
+edits. Explicit Refresh is required for current validation; the adopted summary
+contract has no cheap provider revision query.
 Source disappearance or refresh failure remains visible. Corrupt/incompatible cache
 entries rebuild safely; cache writes publish complete entries atomically.
 
@@ -481,9 +512,9 @@ Missing, moved or unreadable canonical data remains explicit. A persisted run
 selection cannot silently switch to a different run. Cached evidence can be shown
 as cached/unverified with its recorded source identity; it must not look freshly
 confirmed. Rebuild the index and reopen a named result after daemon restart
-without executing the flow. Database format, cache limits and layout serialization
-are implementation decisions for the storage phase, not reasons for a second
-authoritative result model.
+without executing the flow. Current cache formats/budgets are implemented in the
+Workbench store; they do not create a second authoritative result model or settle
+the later immutable-snapshot/archival retention policy.
 
 ## 8. Feature map
 

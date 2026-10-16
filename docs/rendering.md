@@ -15,8 +15,8 @@ the host/component seams and legibility, not a completed aesthetic gallery.
 
 The [architecture](hardcaml_workbench_architecture.md) owns semantic boundaries;
 the [plan](construction_phase_plan.md) owns implementation order. This document
-owns the intended Bonsai Term presentation. These are requirements for the new
-workspace, not descriptions of the current fixed terminal renderer.
+owns the intended Bonsai Term presentation. Normative requirements below remain
+distinct from the implemented host and inspection behavior linked above.
 
 ## 1. Workspaces, windows and monitor use
 
@@ -134,6 +134,16 @@ concise labels and full evidence drilldown. This delivered information-density
 cleanup is distinct from selecting a final skin or layout.
 
 ## 4. Focus and commands
+
+**Current FS1 explorers:** Inspect timing/clocks/physical/routing opens a
+full-window, client-local explorer attached to the initiating tile. The workspace
+continues to exist underneath; Enter opens row detail, Esc returns to the table,
+and another Esc closes the explorer. Selecting the already-active workspace does
+not clear its tile's inspector. Space c c still opens the global palette.
+Breadcrumbs, mode-specific help, an explicit Close inspector command and concise
+detail/provenance hierarchy are [usability followups](backlog/README.md#inspector-usability-polish),
+not current features. The owner confirmed the Escape-responsiveness fix; that
+confirmation does not imply final aesthetic approval.
 
 The window host routes input to the focused tile and visibly marks focus. A modal
 picker/help surface captures input before tiles and global actions. Text entry

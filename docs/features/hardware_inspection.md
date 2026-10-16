@@ -1,6 +1,6 @@
 # F06 — Hardware and stage evidence inspection
 
-Status (2026-10-15): RTL/artifact/provenance, elaborated hierarchy and **FS0 synthesis
+Status (2026-10-16): RTL/artifact/provenance, elaborated hierarchy and **FS0 synthesis
 cell count/breakdown with evidence context delivered**. [Acceptance](../fs0_acceptance.md)
 records real 673/685 counts, completed execution and `not_evaluated` acceptance.
 The original synthesis-only stage summary has no timing (`[]`), not zero slack.
@@ -78,9 +78,13 @@ evidence; similar instance names are not sufficient proof of correspondence.
 
 ## First demo / later
 
-First: synthesis resource evidence plus existing RTL/hierarchy/artifact access.
-The generic simulation/test module has its own early slice in F09, independent of
-ASIC report availability. Next: one meaningful timing/check drilldown, then placement/clock slices. Full
-timing explorers and embedded graphical/editor surfaces are later increments.
+The initial synthesis/RTL/hierarchy/artifact slice and the adopted-evidence
+timing, clock, physical, routing, lifecycle and external-viewer slices are delivered.
+The generic simulation/test module has its own delivered F09 baseline, independent
+of ASIC report availability; structured simulation belongs to FS2. Later F06
+extensions include embedded graphical/editor surfaces, reliable source mapping
+where supplied, and additional provider formats/coverage. Inspector breadcrumbs,
+contextual help and concise provenance are presentation followups; the owner has
+confirmed the Escape-responsiveness fix.
 
 Dependencies: F01 provider evidence; F02 shared modules; F05 scoped results.

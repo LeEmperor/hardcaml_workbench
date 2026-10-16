@@ -1,12 +1,16 @@
 # F11 — Tiered run-summary caching and fast switching
 
-Status (2026-10-15): **FS0 bounded L1/L2, coalesced reads, observation invalidation
-and explicit Refresh implemented**. [Provider integration](../fs0_provider_integration.md)
+Status (2026-10-16): **FS0 bounded summary L1/L2 and FS1 bounded inspection caches,
+coalesced reads, observation invalidation and explicit Refresh implemented**.
+[Provider integration](../fs0_provider_integration.md)
 defines numerical budgets/freshness. [Acceptance](../fs0_acceptance.md) proves fixture
 report calls 2→2 and exact real warm/restart identities with `Cached_unverified`.
 Requirements below remain normative: no cheap provider revision query exists,
 ordinary switching is not perpetual validation, and performance/size benchmarks
-remain open. Canonical evidence and retention remain provider-owned.
+remain open. [FS1 investigation](../fs1_investigation.md#bounds-caches-and-responsiveness)
+proves provider-free warm/restart inspection and local browsing; local input now
+invalidates the view immediately while domain delivery remains polled. The owner
+confirms Escape works. Canonical evidence and retention remain provider-owned.
 
 ## User outcome
 
@@ -35,10 +39,23 @@ provider evidence during eviction. L1/L2 can be discarded and rebuilt from avail
 source evidence. Generic test-history persistence is a separate F09 requirement;
 a summary cache does not establish durable records for daemon-memory-only jobs.
 
-L2 location is not settled: a project-local ignored `.workbench/cache/` or a user
-cache keyed by project identity are candidates. It is separate from committed
-layout/config files. Database/file format and numerical budgets remain implementation
-choices; this feature does not require a particular database or a fixed five-run limit.
+Implemented L2 lives in the daemon's configured Workbench state directory, checked
+to be outside canonical provider results. `backend/asic_service.ml` writes
+`asic-<identity-digest>.sexp` for the registry and
+`asic-<identity-digest>-summary-v1-<report-digest-hash>.summary.sexp` for normalized
+summary blobs. The namespace includes project root, selected environment and complete
+ASIC configuration. Summary blobs write schema v4 and read v1–v4; the filename's
+v1 is not the blob schema. Same-directory temporary files and atomic rename publish
+entries; this is a single-writer store, not an fsync-backed archive.
+
+Summary L1 retains **32** entries; L2 indexes up to **128** runs, with **256 KiB**
+per summary and **4096** cell types (at most **32 MiB** indexed summary payload).
+Run registrations and launch reservations are each bounded to **256**.
+FS1 inspection uses `asic-<identity-digest>-inspections-v1.sexp`: **8 L1 indexes**,
+**8 L1 details**, and **8 L2 indexes**, each index at most **4096 rows / 2 MiB**.
+The aggregate L2 inspection file bound is **8 × 2 MiB + 64 KiB**; detail text is
+bounded separately to **64 KiB** and fetched on demand. These are derived domain
+caches, not per-tile copies or immutable evidence retention.
 
 ## Summary identity and freshness
 
@@ -78,8 +95,10 @@ Provider access goes through F01, not tile-specific parsing of `_flow_results/`.
 Separate any lightweight freshness validation from expensive report materialization.
 No selection/cache miss implicitly launches EDA or new expensive analysis.
 
-L2 data may be displayed promptly with **cached/unverified** status while source
-validation runs. Distinguish validated current evidence, validation pending, source
+Implemented L2 data reopens with **cached/unverified** status; ordinary switching
+or inspection browsing does not start automatic source validation. Explicit Refresh
+is required for current validation. Distinguish validated current evidence,
+validation pending, source
 unavailable, and refresh failure. A failed refresh must not silently bless old data.
 Missing canonical evidence remains explicit even if a cached summary is retained.
 Long-term retention/export of orphaned evidence remains D3 policy; a cache hit does

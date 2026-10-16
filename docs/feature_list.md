@@ -1,7 +1,8 @@
 # Feature inventory
 
-Updated 2026-10-15 against current source and FS0 acceptance. **FS0 Demos A–C are
-delivered with bounded limitations.** **Requested** means desired support, not
+Updated 2026-10-16 against current source and FS0/FS1 evidence. **FS0 Demos A–C and
+FS1's adopted-evidence functional scope are delivered with explicit limits.**
+**Requested** means desired support, not
 delivered behavior. Demo scope is deliberately smaller than the full
 inventory. Dependencies below are semantic dependencies, not a demand to finish an
 entire feature before using its first slice.
@@ -14,7 +15,7 @@ land in FS0 without requiring all visual variants before functional demos.
 
 | ID / specification | User-facing purpose | Current state | First useful scope |
 | --- | --- | --- | --- |
-| [F01 Integration](features/integration.md) | Open generic or hardware-aware projects with only the capabilities they supply | Dune/driver plus configured public ASIC adapter delivered; real synthesis passed | Exact installed candidate, discover/describe/plan/run/observe/report |
+| [F01 Integration](features/integration.md) | Open generic or hardware-aware projects with only the capabilities they supply | Dune/driver plus configured public ASIC adapter delivered; physical, finalization and inspection interfaces exercised | Exact installed generation and public contracts; missing capabilities remain explicit |
 | [F02 Modules and tiles](features/modules_and_tiles.md) | Change presentation without rebuilding domain logic; share data across views | Execution boundary, daemon ASIC service and tile host delivered | Shared execution/log/test/synthesis views; reactive publication refinement remains |
 | [F03 Commands and flows](features/commands_and_flows.md) | Palette/buttons/keys select and launch project-owned flows | Palette, captured/revalidated commands, remembered Plan inputs, named flow launch and finalization/acceptance lifecycle delivered | Exact-preview launch; explicit finalization collateral, durable keys, phase/reconnect/cancel |
 | [F04 Workspaces and layouts](features/workspaces_and_layouts.md) | Switch Overview/Timing/Resources arrangements; save and restore them | Named autosaved workspaces and tile operations delivered; shelf geometry | Main-linked Overview/Timing, independent/relink; template export/clone absent |
@@ -79,9 +80,11 @@ windows need not block named workspace switching within one terminal surface.
 launch-and-view and follow/pin-run first; immutable snapshots are deferred.
 The [construction plan](construction_phase_plan.md) records delivered conditions,
 true leftovers and consolidated candidate/evidence links. [Acceptance](fs0_acceptance.md)
-and [installed checks](fs0_install_checks.md) record runtime results. FS1 synthesis
-inspection plus aggregate physical/terminal evidence and FS5's first appearance
-slice are delivered; FS2 remains unstarted. [FS1 acceptance](fs1_acceptance.md)
-separates implemented behavior, real evidence and remaining full-set scope.
+and [installed checks](fs0_install_checks.md) record runtime results. FS1's
+adopted-evidence scope and FS5's first appearance slice are delivered; no FS2
+structured-simulation delivery is claimed. [FS1 investigation](fs1_investigation.md)
+records current completion, real evidence, provider adoption and limits. The owner
+confirmed the Escape-responsiveness fix; inspector presentation polish and broader
+race/scaling coverage are followups, not FS1 feature blockers.
 Later feature scope remains recorded here without becoming a release
 prerequisite. [Backlog](backlog/README.md) retains unrelated deferred ideas.
