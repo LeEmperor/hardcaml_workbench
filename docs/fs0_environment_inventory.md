@@ -1,5 +1,11 @@
 # FS0 environment and acceptance inventory
 
+**Historical pre-integration inventory.** Executable selections, blockers and
+requested updates below describe the 2026-10-15 audit, not current setup
+instructions. FS0 integration and installed checks subsequently passed; current
+provider adoption and completed FS1 scope are in [FS1 investigation](fs1_investigation.md).
+Original hashes, checkout observations and audit results are retained unchanged.
+
 Read-only audit, 2026-10-15. Only this new inventory was written. No Dune,
 build, EDA, provisioning, installation or mutative Git command was executed.
 Public subprocesses were limited to provider version/observation description/

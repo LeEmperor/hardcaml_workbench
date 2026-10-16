@@ -1,6 +1,7 @@
 # Hardcaml Workbench — Demo construction plan
 
-Updated 2026-10-15. **FS0 Demos A–C delivered with bounded limitations.** This is
+Updated 2026-10-16. **FS0 Demos A–C and FS1's adopted-evidence functional scope are
+delivered with explicit limits.** This is
 the active status/checklist, replacing the October 12 P0–P7 plan in the
 [archive](archive/construction_phase_plan_2026_10_12.md). The
 [feature inventory](feature_list.md) owns product scope; the
@@ -30,8 +31,12 @@ Use these records together rather than interpreting an old audit as current stat
 | [Terminal host](fs0_terminal.md) | Controls, ownership, launch policy, renderer coverage and known UI limits |
 | [Installed checks](fs0_install_checks.md) | Native installed workflow, external fixture, legacy capture checks: all passed |
 | [Native acceptance](fs0_acceptance.md) | Actual HTTP/PTY fixtures, real serial synthesis, allocation/detach, warm/restart identity and live cached UI reopening |
+| [FS1 physical/terminal acceptance](fs1_acceptance.md) | Physical completion, independently accepted/rejected operations, cache reopening and real cancellation |
+| [FS1 lifecycle/artifacts](fs1_lifecycle_and_artifacts.md) | Workbench-owned collect/accept, postcheck cancellation, bounded report reads and external text handoff |
+| [FS1 investigation](fs1_investigation.md) | Current adopted-evidence completion, exact upgraded provider, timing/clock/physical/routing exploration, binary handoff and Escape responsiveness |
 
-Exact accepted candidate (not an assertion that today's sibling HEAD was linked):
+Historical FS0 accepted candidate (not the upgraded FS1 inspection provider, and
+not an assertion that today's sibling HEAD was linked):
 
 ```text
 project  /home/wayne/devel/jane/hardcaml_asic_example/_build_namedflow_real/default/bin/project.exe
@@ -148,9 +153,10 @@ Features: F01/F02/F03/F05/F06/F09/F11. **Demo A delivered.**
 - [x] Project synthesis resources into shared summaries with checkpoint origin.
 - [x] Fixture-owned process cancellation/deadline/output bounds; generic supervisor
   retains descendant cancellation coverage.
-- [ ] Broader real provider/container descendant termination acceptance. ASIC
-  process cleanup signals only owned PIDs; stopping a reader is not producer
-  termination. Full physical-operation acceptance belongs to FS1.
+- [x] Extend fixture cancellation to real owned backend/container and external-
+  postcheck cancellation specimens in M4. ASIC cleanup signals only owned PIDs;
+  stopping a reader is not producer termination. Broader boundary/race permutations
+  remain M4 coverage followups.
 
 **Demo A:** native HTTP client discovers/previews/runs both real synthesis profiles,
 observes allocation before launcher completion, detaches, and retrieves exact reports.
@@ -187,7 +193,9 @@ Features: F02–F06/F09–F12 (minimal F12 seams). **Demo B delivered.**
   RPC-driven live selection do not prove every interactive launch path.
 - [ ] Measure high-tile-count fan-out, responsiveness, latency and memory/disk use.
 - [ ] Fully reactive publication/redraw and richer capability-aware endpoint forms.
-  Current refresh/repaint is clock-driven; assignments are whitespace-separated.
+  Domain refresh remains clock-driven; local input/deferred completion now invalidates
+  the view immediately. Time-dependent displays retain a clock. Assignments are
+  whitespace-separated.
 
 **Demo B:** linked/independent workspaces, following/pinned synthesis comparison,
 palette operations and project-scoped tests/logs are delivered. Synthetic renderer
@@ -248,7 +256,8 @@ The unchecked M0–M3 items are bounded followups, not grounds to label delivere
 demos “not started.” Final parent-wide checks passed. Prioritize missing interactive
 race/reconnect/launch-and-view/cancellation coverage, then measured scaling and
 adoption choices. Template export/clone, freeform geometry, persisted local chrome
-and richer endpoint forms remain explicit gaps; clock-driven redraw remains current.
+and richer endpoint forms remain explicit gaps; domain refresh remains clock-driven,
+with immediate local input/completion redraw after the Escape-latency followup.
 
 ## M4 — Rich evidence and live acceptance (FS1/FS2)
 
@@ -414,6 +423,27 @@ comparisons). Five-mode interrupt regression: `workbench-terminal-interrupt-ou1s
 No full ASIC flow, sibling source changes, staging, commits or pushes were needed.
 Retention and slow-storage responsiveness limits are explicit in the acceptance record.
 
+### Inspector input responsiveness
+
+**Inspector Escape responsiveness:** the manual demo's delay was reproduced as
+tmux's 500 ms Escape wait plus the former 100 ms input repaint dependency. The
+client now invalidates its view immediately for local navigation and deferred
+completion. Actual private-tmux 10 ms tests with real path detail measured
+13–15 ms exits; private-tmux 500 ms still measured about 500 ms, distinguishing
+the two causes. The owner server was not changed. Final latency regression
+`/tmp/opencode/workbench-inspector-latency-pa1haj23` passed its 80 ms ceiling;
+terminal tests/build, format/lint, installed lifecycle and Ctrl-C matrix passed.
+See [evidence and commands](fs1_investigation.md#escape-responsiveness-in-tmux--2026-10-16-followup).
+
+**Owner confirmation, 2026-10-16:** after the fix and setup guidance, the owner
+reported Escape now works fine. This closes the manual latency report, without
+claiming exhaustive terminal or provider coverage. FS1 has no remaining functional
+blockers for the adopted evidence. Breadcrumbs, mode-specific help, an explicit
+Close inspector command and more concise detail presentation are
+[usability followups](backlog/README.md#inspector-usability-polish); broader lifecycle
+race matrices and larger-design performance remain coverage work. FS2's independent
+structured-simulation delivery and acceptance are recorded above.
+
 ### Earlier proposed execution followup — generic detail remains deferred
 
 The initial takeover review proposed an identity-safe selected-attempt detail view. This
@@ -489,7 +519,7 @@ This is a reusable renderer over actual FS0 tiles, not a selected final aestheti
 | Phase | Current status |
 | --- | --- |
 | M0 | Accepted FS0 defaults and candidate/fixture baseline delivered; broader matrix remains |
-| M1 | Headless Demo A delivered; full physical/container cancellation acceptance later |
+| M1 | Headless Demo A delivered; physical/container cancellation evidence extended in M4 |
 | M2 | Tile-host Demo B delivered; bounded UI/coverage/performance gaps above |
 | M3 | Autosaved-session/L2 Demo C delivered; templates and appearance persistence gaps above |
 | M4 | FS1 adopted-evidence investigation/operation scope delivered; substantial FS2 project-scoped simulation delivered with real Cyclesim/native HTTP/PTY evidence; later F06 extensions remain |

@@ -1,6 +1,6 @@
 # Feature sets
 
-Updated 2026-10-15. **FS numbers group product work**, F numbers identify individual
+Updated 2026-10-16. **FS numbers group product work**, F numbers identify individual
 feature specs, and M numbers order implementation/acceptance in the construction
 plan. One feature can contribute slices to several sets; completing a set does not
 mean every linked feature is finished. Later set scope is provisional and can be
@@ -120,6 +120,12 @@ evidence remains unavailable rather than inferred; embedded graphical editors,
 spatial heatmaps, arbitrary-tool adoption and exhaustive lifecycle-race coverage
 remain later extensions. No new physical execution or signoff verdict was produced
 by the final read-only inspection acceptance.
+
+The owner subsequently confirmed that Escape responsiveness works well in the
+manual timing-inspection workflow. There are no remaining FS1 feature blockers
+for this adoption. [Inspector presentation polish](backlog/README.md#inspector-usability-polish)
+and additional lifecycle/performance coverage can proceed alongside later sets;
+they do not turn FS1 into an open-ended implementation gate for FS2.
 
 Timing summaries/path detail, checks, clocks and physical/resource slices with
 original evidence and context. Full physical operation/cancellation acceptance

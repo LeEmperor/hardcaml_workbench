@@ -84,7 +84,11 @@ Synthesis views now support the first FS1/F06 inspection slice: Enter opens the
 cell table; `/` filters, `s` cycles sort, Enter opens row details, `e` opens full
 evidence and Esc returns. `j`/`k` selects rows or scrolls details. See
 [synthesis inspection](synthesis_inspection.md) for exact semantics and acceptance.
-The underlying ASIC wire/storage schema and cached summaries are unchanged.
+That original cell-table slice reused the underlying summary schema. Subsequent
+[FS1 metrics](fs1_acceptance.md), [lifecycle/artifact](fs1_lifecycle_and_artifacts.md)
+and [rich investigation](fs1_investigation.md) work extends the contracts/caches;
+their records own current compatibility and controls. Rich explorers cover the
+window while retaining tile-local state: Esc returns detail → table → workspace.
 
 Filter entry is explicitly marked by a persistent footer. Ctrl-U clears the focused
 filter even outside entry mode (or clears the palette query when the palette is
@@ -159,9 +163,12 @@ these establish renderer behavior, not live tool metrics. Additional follow-up
 coverage should expand transport completion ordering, concurrent-client races,
 reconnect during allocation, interactive launch-and-view and actual generic-test
 cancellation. Real ASIC plan/launch/read and stale CAS rejection have since passed
-through actual HTTP; this does not prove every interactive path. The host retains the existing
-clock-driven repaint loop; fully reactive publication and richer capability forms
-remain future refinements. The endpoint form currently accepts whitespace-separated
+through actual HTTP; this does not prove every interactive path. Local input and
+deferred completion now invalidate the view immediately; domain refresh remains
+polled and the display clock serves time-dependent content. Fully subscription-
+driven transport and richer capability forms remain refinements. See the
+[owner-confirmed Escape followup](fs1_investigation.md#escape-responsiveness-in-tmux--2026-10-16-followup).
+The endpoint form currently accepts whitespace-separated
 assignments, not quoted values with spaces.
 
 [Installed checks](fs0_install_checks.md) passed native lifecycle, external fixture
@@ -171,8 +178,9 @@ synthesis (673/685, completed, `not_evaluated`), early allocation/detach and ful
 workspace/L2 restart identity. The live real reopening check at
 `/tmp/opencode/workbench-fs0-unzwt0kn/` used actual current-screen assertions for
 673→685, pinned 673 and simultaneous PIN 673/FOLLOW 685. These metrics are distinct
-from synthetic capture fixtures. Parent-wide checks previously passed; latest final
-parent checks passed, including current HTTP/PTY and installed workflows.
+from synthetic capture fixtures. Parent-wide checks for this recorded FS0 slice
+passed, including its HTTP/PTY and installed workflows; subsequent FS1 results
+are recorded separately in the linked delivery records.
 Candidate/evidence inventory is consolidated in the
 [active plan](construction_phase_plan.md#evidence-and-candidate-baseline).
 

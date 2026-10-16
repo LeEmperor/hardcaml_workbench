@@ -1,10 +1,17 @@
 # F01 — Project integration and capabilities
 
-Status (2026-10-15): **FS0 configured public ASIC adapter delivered**, alongside
-generic Dune and driver integration. Installed real synthesis passed with the exact
-candidate in the [plan](../construction_phase_plan.md#evidence-and-candidate-baseline).
-See [integration limits](../fs0_provider_integration.md) and [acceptance](../fs0_acceptance.md).
-Requirements below remain normative; broader provider-store discovery is absent.
+Status (2026-10-16): **FS0 public ASIC adapter and FS1 adopted-evidence integration
+delivered**, alongside generic Dune and driver integration. Public named-flow
+launch, durable observation/read/report, capability-checked physical endpoints,
+finalization collect/accept and read-only rich inspection are implemented.
+See [FS0 limits](../fs0_provider_integration.md),
+[FS1 lifecycle](../fs1_lifecycle_and_artifacts.md) and
+[FS1 investigation](../fs1_investigation.md) for exact contracts, installed provider
+generation and evidence. Requirements below remain normative; broader provider-store
+discovery is absent and later F06 graphics/source mapping remain open. FS2's versioned
+project-owned simulation provider/configuration is delivered and its substantial
+milestone accepted; see [FS2 acceptance](../fs2_acceptance.md) and the
+[simulation contract](../fs2_simulation_contract.md).
 
 ## User outcome
 
@@ -35,9 +42,13 @@ Existing contracts: `project_integration/manifest.ml`, `driver_protocol.ml`,
 Do not force the existing RTL driver to implement every ASIC operation.
 
 The sibling FIFO specimen's `flow list/describe/plan/run` and provider observation
-interfaces are the candidate first ASIC path. Its standalone headless client is a
-behavioral reference, not a required runtime dependency. Pin/verify exact contract
-versions and installation before claiming support.
+interfaces are the adopted first ASIC path. Its standalone headless client is a
+behavioral reference, not a required runtime dependency. Adoption is tied to the
+recorded installed generation, not the sibling checkout's current HEAD. The FS1
+inspection generation advertises `inspection1=true` and schema 1; its local receipt
+does not supply the absent verified provider source stamp. Provider configuration
+changes require reopening and exact-reference re-registration as documented in
+[deployment notes](../fs1_investigation.md#installed-development-provider-and-deployment-caveat).
 
 The initial adapter uses configured public project/provider executables, not sibling
 source paths or private helper binaries. Building the project entry point requires
@@ -54,8 +65,9 @@ than promise fresh zero-I/O reads or parse tool-specific directory trees in tile
 
 ## First demo / later
 
-First: configure the existing specimen, negotiate capabilities and run synthesis.
-Later: additional providers and FPGA workflows. Tool interoperability and recipe
+Delivered: configure the specimen, negotiate capabilities, run synthesis/known
+physical endpoints and inspect/finalize exact adopted evidence. Later: additional
+providers and FPGA workflows. Tool interoperability and recipe
 validation remain project/provider responsibilities.
 
 Dependencies: F03 commands; supplies F02 domain data and F05 evidence identity.

@@ -138,10 +138,14 @@ stamp. CLI4 compatibility is separate from source-artifact identity.
 Manual-demo followup: an `invalid command: inspect` error was traced to the
 example configuration still selecting the older provider. Its `provider_executable`
 now selects the final generation above, whose metadata was checked to advertise
-`inspection1: true`. The owner's active daemon/client were left running; restart
-and re-registration under the new configuration are still required. This config
+`inspection1: true`. The owner's active daemon/client were left running at that
+point; restart and re-registration were required to adopt the new configuration. This config
 correction is not a claim that the already-running daemon hot-reloaded it.
 The acceptance harness used its own project configuration and read-only relay.
+The owner subsequently opened the retained timing path in the manual client.
+That observation establishes the viewed workflow, not migration of every saved
+configuration namespace. The [README manual route](../README.md#open-the-completed-fs1-example)
+records the exact registration and launch steps for the current provider.
 
 To adopt the new provider in the owner application, `provider_executable` must
 explicitly select the generation above and the project must be reopened so the
@@ -155,6 +159,77 @@ The accepted test state's private relay has an ephemeral deadline and is not a
 production/demo provider configuration to activate.
 
 ## Timing paths and navigation
+
+### Escape responsiveness in tmux — 2026-10-16 followup
+
+The reported pause when closing a table or path detail was reproduced with a
+private tmux server. The owner's server reported `escape-time 500`: tmux waits
+up to 500 ms to disambiguate a standalone Escape from a key sequence. Installed
+Notty_async itself has no corresponding Escape timer. Workbench also previously
+waited for its 100 ms display clock after mutating local navigation state.
+
+The TUI now invalidates the Bonsai view immediately after local input and after
+deferred actions/poll completion. Domain refresh still polls every 500 ms; the
+100 ms display clock remains for time-dependent content. This is a local feedback
+fix, not a claim of a fully subscription-driven transport rewrite.
+
+Actual 200×60 PTY observations (three samples per transition):
+
+| Candidate / private tmux setting | Timing table → workspace | Detail → table |
+| --- | --- | --- |
+| Before, 500 ms | 586–592 ms | 589–608 ms (cached source-detail pane) |
+| Before, 0 ms | 3–108 ms | 105–107 ms (cached source-detail pane) |
+| After, 500 ms | 503–505 ms | 502–505 ms (cached source-detail pane) |
+| After, 10 ms | 13.5–14.3 ms | 12.7–14.7 ms (actual provider path detail) |
+
+These are host-PTY-observation bounds, not remote display/compositor guarantees.
+Evidence: `workbench-inspector-latency-03a5e823`, `...-9d3gcbak`, `...-pgsdv2mg`,
+and final `...-pa1haj23`, all below `/tmp/opencode`. The final run passed an 80 ms
+regression ceiling for palette/table/real-detail/filtered-table exits. Cached
+indexes contain all 1020 actual timing paths; provider detail reads are allowed
+only during setup, with no provider calls during measured Escape transitions.
+Private source state/config inventories were unchanged. Format/lint, terminal
+unit tests/build, installed native workflow, and all five Ctrl-C modes passed
+(`workbench-terminal-interrupt-_1pdl_38`).
+
+To reduce the tmux delay, explicitly run `tmux set-option -s escape-time 10` in
+the relevant tmux server; this is a server-wide setting. Persist it with
+`set -s escape-time 10` in the user's tmux configuration if desired. Workbench
+does not change that setting automatically. Reopen only the rebuilt client to
+get immediate local redraw; the existing daemon can remain running.
+
+**Owner confirmation, 2026-10-16:** after the fix and setup guidance the owner
+reported that it works fine. This closes the reported manual Escape-latency issue.
+It is distinct from the measured private-tmux acceptance above and does not select
+a final visual design or establish all lifecycle/terminal permutations.
+
+Reproduce without affecting the owner's tmux server or application processes:
+
+```sh
+./scripts/with-switch.sh python3 -B scripts/test-inspector-latency.py \
+  --detail-mode real \
+  --provider /tmp/opencode/workbench-fs1-inspection-provider/generations/59466eda06df463e8d921678830ff5c2/bin/hardcaml-asic-flow \
+  --tmux-escape-time 10 --single-escape-only --iterations 3 --max-latency-ms 80
+```
+
+The script owns its tmux socket, daemon, client, and rekeyed state copies. Omit
+`--max-latency-ms` for diagnostic runs with an intentionally large Escape wait.
+Its incremental screen parser has a pure `--self-test-screen` check, including
+fragmented UTF-8/escape sequences and tmux erasure/charset controls.
+
+### Current inspector mode and controls
+
+Opening **Inspect timing paths** attaches a client-local explorer to the focused
+tile and covers the current window. It is not another workspace or a persisted
+layout change. Enter opens the selected path's detail; **Esc returns to its table,
+then Esc again closes the explorer**. Switching to the already-active Overview
+does not dismiss the inspector remembered by its focused tile. The global palette
+remains available with Space c c, and Ctrl-C exits the client from every mode.
+
+This behavior is functional but not sufficiently self-describing. Breadcrumbs,
+mode-specific help, an explicit Close inspector palette command and less prominent
+raw JSON/full paths are [presentation followups](backlog/README.md#inspector-usability-polish),
+not implemented controls or remaining FS1 feature blockers.
 
 The signoff timing index contains **1020 actual timing paths**, plus its recorded
 input-reference row. Every max/min block matches the independently read original

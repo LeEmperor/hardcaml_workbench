@@ -3722,102 +3722,119 @@ let capture_appearance_frames ~directory =
 
 let tui session ~exit ~dimensions graph =
   let open Bonsai_term in
-  let poll = Effect.of_deferred_thunk (fun () -> refresh session) in
+  (* Session navigation is currently mutable. Give those mutations a reactive invalidation
+     edge instead of waiting for the display clock to repaint. The clock below remains for
+     time-dependent displays, not input acknowledgement. *)
+  let revision, update_revision = Bonsai.state' 0 graph in
+  let invalidate update = update (fun revision -> revision + 1) in
+  let poll =
+    Bonsai.map update_revision ~f:(fun update ->
+      Effect.bind
+        (Effect.of_deferred_thunk (fun () -> refresh session))
+        ~f:(fun () -> invalidate update))
+  in
   Bonsai.Clock.every
     ~when_to_start_next_effect:`Wait_period_after_previous_effect_finishes_blocking
     ~trigger_on_activate:true
     (Bonsai.return (Time_ns.Span.of_ms 500.))
-    (Bonsai.return poll)
+    poll
     graph;
   let view =
-    Bonsai.map2
+    Bonsai.map3
       dimensions
       (Bonsai.Clock.approx_now ~tick_every:(Time_ns.Span.of_ms 100.) graph)
-      ~f:(fun dimensions _now -> render session dimensions)
+      revision
+      ~f:(fun dimensions _now _revision -> render session dimensions)
+  in
+  let handle (event : Event.t) =
+    if Host.is_interrupt event
+    then exit ()
+    else (
+      let hosted =
+        if Option.is_some session.host.registry
+           && Option.is_none session.hierarchy_view
+           && Option.is_none session.artifact_view
+           && not session.show_connection_details
+        then host_handler session event ~exit
+        else None
+      in
+      match hosted with
+      | Some effect -> effect
+      | None ->
+        (match event with
+         | Key_press { key; mods = [] } when key_is 'q' key -> exit ()
+         | Key_press { key; mods = [ Ctrl ] } when key_is 'c' key || key_is 'C' key ->
+           exit ()
+         | Key_press { key; mods = [] } when key_is 'b' key ->
+           Effect.of_deferred_thunk (fun () -> submit session `Build)
+         | Key_press { key; mods = [] } when key_is 't' key ->
+           Effect.of_deferred_thunk (fun () -> submit session `Test)
+         | Key_press { key; mods = [] } when key_is 'c' key ->
+           Effect.of_deferred_thunk (fun () -> cancel_selected session)
+         | Key_press { key; mods = [] } when key_is 'i' key ->
+           Effect.of_deferred_thunk (fun () -> refresh_integration session)
+         | Key_press { key; mods = [] } when key_is 'n' key ->
+           cycle_target session;
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'm' key ->
+           cycle_configuration session;
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'g' key ->
+           Effect.of_deferred_thunk (fun () -> generate_rtl session)
+         | Key_press { key; mods = [] } when key_is 'a' key ->
+           cycle_artifact session;
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'v' key ->
+           Effect.of_deferred_thunk (fun () -> inspect_artifact session)
+         | Key_press { key; mods = [] } when key_is 'h' key ->
+           Effect.of_deferred_thunk (fun () -> inspect_hierarchy session)
+         | Key_press { key; mods = [] } when key_is 'u' key ->
+           move_hierarchy_selection session (-1);
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'o' key ->
+           move_hierarchy_selection session 1;
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'e' key ->
+           toggle_hierarchy_expansion session;
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'j' key ->
+           let count = List.length (project_jobs session) in
+           session.selected <- Int.min (Int.max 0 (count - 1)) (session.selected + 1);
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'k' key ->
+           session.selected <- Int.max 0 (session.selected - 1);
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'd' key ->
+           session.show_connection_details <- not session.show_connection_details;
+           session.connection_details_scroll <- 0;
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is '[' key ->
+           if session.show_connection_details
+           then
+             session.connection_details_scroll
+             <- Int.max 0 (session.connection_details_scroll - 1)
+           else
+             Option.iter session.hierarchy_view ~f:(fun view ->
+               view.pane_scroll <- Int.max 0 (view.pane_scroll - 1));
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is ']' key ->
+           if session.show_connection_details
+           then session.connection_details_scroll <- session.connection_details_scroll + 1
+           else
+             Option.iter session.hierarchy_view ~f:(fun view ->
+               view.pane_scroll <- view.pane_scroll + 1);
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'r' key ->
+           Effect.of_deferred_thunk (fun () -> reconnect session)
+         | _ -> Effect.Ignore))
   in
   let handler =
-    Bonsai.return (fun (event : Event.t) ->
-      if Host.is_interrupt event
-      then exit ()
-      else (
-        let hosted =
-          if Option.is_some session.host.registry
-             && Option.is_none session.hierarchy_view
-             && Option.is_none session.artifact_view
-             && not session.show_connection_details
-          then host_handler session event ~exit
-          else None
-        in
-        match hosted with
-        | Some effect -> effect
-        | None ->
-          (match event with
-           | Key_press { key; mods = [] } when key_is 'q' key -> exit ()
-           | Key_press { key; mods = [ Ctrl ] } when key_is 'c' key || key_is 'C' key ->
-             exit ()
-           | Key_press { key; mods = [] } when key_is 'b' key ->
-             Effect.of_deferred_thunk (fun () -> submit session `Build)
-           | Key_press { key; mods = [] } when key_is 't' key ->
-             Effect.of_deferred_thunk (fun () -> submit session `Test)
-           | Key_press { key; mods = [] } when key_is 'c' key ->
-             Effect.of_deferred_thunk (fun () -> cancel_selected session)
-           | Key_press { key; mods = [] } when key_is 'i' key ->
-             Effect.of_deferred_thunk (fun () -> refresh_integration session)
-           | Key_press { key; mods = [] } when key_is 'n' key ->
-             cycle_target session;
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is 'm' key ->
-             cycle_configuration session;
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is 'g' key ->
-             Effect.of_deferred_thunk (fun () -> generate_rtl session)
-           | Key_press { key; mods = [] } when key_is 'a' key ->
-             cycle_artifact session;
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is 'v' key ->
-             Effect.of_deferred_thunk (fun () -> inspect_artifact session)
-           | Key_press { key; mods = [] } when key_is 'h' key ->
-             Effect.of_deferred_thunk (fun () -> inspect_hierarchy session)
-           | Key_press { key; mods = [] } when key_is 'u' key ->
-             move_hierarchy_selection session (-1);
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is 'o' key ->
-             move_hierarchy_selection session 1;
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is 'e' key ->
-             toggle_hierarchy_expansion session;
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is 'j' key ->
-             let count = List.length (project_jobs session) in
-             session.selected <- Int.min (Int.max 0 (count - 1)) (session.selected + 1);
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is 'k' key ->
-             session.selected <- Int.max 0 (session.selected - 1);
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is 'd' key ->
-             session.show_connection_details <- not session.show_connection_details;
-             session.connection_details_scroll <- 0;
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is '[' key ->
-             if session.show_connection_details
-             then
-               session.connection_details_scroll
-               <- Int.max 0 (session.connection_details_scroll - 1)
-             else
-               Option.iter session.hierarchy_view ~f:(fun view ->
-                 view.pane_scroll <- Int.max 0 (view.pane_scroll - 1));
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is ']' key ->
-             if session.show_connection_details
-             then
-               session.connection_details_scroll <- session.connection_details_scroll + 1
-             else
-               Option.iter session.hierarchy_view ~f:(fun view ->
-                 view.pane_scroll <- view.pane_scroll + 1);
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is 'r' key ->
-             Effect.of_deferred_thunk (fun () -> reconnect session)
-           | _ -> Effect.Ignore)))
+    Bonsai.map update_revision ~f:(fun update event ->
+      let effect = handle event in
+      (* Publish local state immediately; publish any deferred response when it completes
+         too. Do not await a provider/HTTP read before local feedback. *)
+      Effect.Many
+        [ invalidate update; Effect.bind effect ~f:(fun () -> invalidate update) ])
   in
   ~view, ~handler
 ;;
