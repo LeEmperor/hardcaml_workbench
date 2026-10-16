@@ -49,7 +49,7 @@ type project_session =
   }
 
 and job_entry =
-  { operation : job_operation
+  { mutable operation : job_operation
   ; session : project_session
   ; mutable job : Job.t
   ; log_path : string
@@ -71,6 +71,7 @@ and job_entry =
 
 and job_operation =
   | Dune_action of V1.Dune_action.t
+  | Simulation_task of Simulation_task.t
   | Driver_describe
   | Driver_generate_rtl of
       { target : Target_id.t
@@ -84,6 +85,7 @@ and job_operation =
 
 type submission_operation =
   | Submit_dune of V1.Dune_action.t
+  | Submit_simulation of string
   | Submit_generate_rtl of
       { target : Target_id.t
       ; configuration : Configuration_id.t
@@ -103,6 +105,7 @@ type t =
   ; output_dir : string
   ; workspace_service : Workspace_service.t
   ; asic_service : Asic_service.t
+  ; simulation_service : Simulation_service.t
   ; projects_by_key : (string, project_session) Hashtbl.t
   ; projects : (Project_id.t, project_session) Hashtbl.t
   ; root_queues : (string, job_entry Queue.t) Hashtbl.t
@@ -178,6 +181,7 @@ let create
     ; output_dir
     ; workspace_service = Workspace_service.create ~state_dir
     ; asic_service = Asic_service.create ~state_dir
+    ; simulation_service = Simulation_service.create ~state_dir
     ; projects_by_key = Hashtbl.create (module String)
     ; projects = Project_id.Table.create ()
     ; root_queues = Hashtbl.create (module String)
@@ -558,6 +562,7 @@ let update_job t entry job =
 
 let append_log t (entry : job_entry) stream data =
   (match entry.operation, stream with
+   | Simulation_task task, V1.Read_log.Stream.Stdout -> task.stdout data
    | (Driver_describe | Driver_generate_rtl _), V1.Read_log.Stream.Stdout ->
      let remaining = Integration.Driver_protocol.max_stdout_bytes - entry.stdout_bytes in
      if remaining <= 0
@@ -567,7 +572,8 @@ let append_log t (entry : job_entry) stream data =
        entry.stdout_parts <- kept :: entry.stdout_parts;
        entry.stdout_bytes <- entry.stdout_bytes + String.length kept;
        if String.length kept < String.length data then entry.stdout_overflow <- true)
-   | Dune_action _, _ | (Driver_describe | Driver_generate_rtl _), Stderr -> ());
+   | (Dune_action _ | Simulation_task _), _
+   | (Driver_describe | Driver_generate_rtl _), Stderr -> ());
   let pieces = String.to_list data |> List.chunks_of ~length:(16 * 1024) in
   List.iter pieces ~f:(fun chars ->
     let data = String.of_char_list chars in
@@ -615,7 +621,53 @@ let begin_escalation t entry process =
        return ()))
 ;;
 
-let finish_entry t entry state status failure =
+let prune_simulation_jobs t root =
+  Option.iter (Hashtbl.find t.root_queues root) ~f:(fun queue ->
+    Queue.filter_inplace queue ~f:(fun entry -> not (Job.is_terminal entry.job)));
+  let terminal =
+    Hashtbl.data t.jobs
+    |> List.filter ~f:(fun entry ->
+      String.equal entry.session.root root
+      && String.equal entry.job.kind.namespace "simulation"
+      && Job.is_terminal entry.job)
+    |> List.sort ~compare:(fun a b -> Timestamp.compare b.job.created_at a.job.created_at)
+  in
+  let discovery =
+    Option.bind (Hashtbl.find t.simulation_service.projects root) ~f:(fun project ->
+      project.discovery_job)
+  in
+  let pinned entry = Option.exists discovery ~f:(Job_id.equal entry.job.id) in
+  let budget = Simulation.Limits.history_attempts - List.count terminal ~f:pinned in
+  List.iter
+    (List.drop (List.filter terminal ~f:(fun entry -> not (pinned entry))) budget)
+    ~f:(fun entry ->
+      Hashtbl.remove t.jobs entry.job.id;
+      Hashtbl.clear entry.log_records;
+      emit t (Job_removed entry.job.id);
+      don't_wait_for
+        (Monitor.try_with (fun () ->
+           In_thread.run (fun () -> Core_unix.unlink entry.log_path))
+         >>| ignore))
+;;
+
+let finish_entry t (entry : job_entry) state status failure =
+  let state, failure =
+    match entry.operation with
+    | Simulation_task task ->
+      (match
+         Or_error.try_with (fun () ->
+           task.finish ~cancelled:(Job.State.equal state Cancelled) status)
+       with
+       | Ok None -> state, failure
+       | Ok (Some message) ->
+         ( (if Job.State.equal state Cancelled then state else Job.State.Failed)
+         , Some message )
+       | Error error -> Job.State.Failed, Some (Error.to_string_hum error))
+    | _ -> state, failure
+  in
+  (match entry.operation with
+   | Simulation_task _ -> entry.operation <- Simulation_task Simulation_task.released
+   | _ -> ());
   let now = Timestamp.of_time_ns (Time_ns.now ()) in
   update_job
     t
@@ -627,7 +679,10 @@ let finish_entry t entry state status failure =
     ; failure
     ; finished_at = Some now
     };
-  Ivar.fill_if_empty entry.finished ()
+  Ivar.fill_if_empty entry.finished ();
+  match entry.operation with
+  | Simulation_task _ -> prune_simulation_jobs t entry.session.root
+  | _ -> ()
 ;;
 
 let publish_driver_state t entry status targets configurations =
@@ -1084,7 +1139,7 @@ let rec run_next t root =
        let session = entry.session in
        let preflight =
          match entry.operation with
-         | Dune_action _ | Driver_describe -> Ok ()
+         | Dune_action _ | Driver_describe | Simulation_task _ -> Ok ()
          | Driver_generate_rtl
              { target
              ; configuration
@@ -1111,7 +1166,7 @@ let rec run_next t root =
          let%bind () =
            match entry.operation with
            | Driver_generate_rtl { output_dir; _ } -> cleanup_path output_dir
-           | Dune_action _ | Driver_describe -> return ()
+           | Dune_action _ | Driver_describe | Simulation_task _ -> return ()
          in
          run_next t root;
          return ()
@@ -1122,10 +1177,11 @@ let rec run_next t root =
              update_job t entry { entry.job with phase = Some "capturing source" };
              let%map source = capture_source session.root in
              entry.source_start <- Some source
-           | Dune_action _ | Driver_describe -> return ()
+           | Dune_action _ | Driver_describe | Simulation_task _ -> return ()
          in
          let invocation =
            match entry.operation with
+           | Simulation_task task -> task.invocation
            | Dune_action action ->
              (match t.action_invocation with
               | None ->
@@ -1175,7 +1231,7 @@ let rec run_next t root =
                  (Unusable { reason = "driver launch failed: " ^ reason })
                  []
                  []
-             | Dune_action _ | Driver_generate_rtl _ -> ());
+             | Dune_action _ | Driver_generate_rtl _ | Simulation_task _ -> ());
             if entry.cancel_requested || t.shutting_down
             then finish_entry t entry Cancelled (Some (Launch_failed { reason })) None
             else
@@ -1184,21 +1240,68 @@ let rec run_next t root =
             let%bind () =
               match entry.operation with
               | Driver_generate_rtl { output_dir; _ } -> cleanup_path output_dir
-              | Dune_action _ | Driver_describe -> return ()
+              | Dune_action _ | Driver_describe | Simulation_task _ -> return ()
             in
             run_next t root;
             return ()
           | Ok process ->
             entry.process <- Some process;
+            let polling = ref true in
             don't_wait_for (Writer.close (Process.stdin process));
             update_job t entry { entry.job with state = Running; phase = Some "running" };
+            (match entry.operation with
+             | Simulation_task task ->
+               (match Or_error.try_with task.start with
+                | Ok () -> ()
+                | Error error ->
+                  task.fail (Error.to_string_hum error);
+                  begin_escalation t entry process);
+               don't_wait_for
+                 (let rec poll () =
+                    match entry.process with
+                    | None -> return ()
+                    | Some _ when not !polling -> return ()
+                    | Some _ ->
+                      let healthy =
+                        match Or_error.try_with task.poll with
+                        | Ok healthy -> healthy
+                        | Error error ->
+                          task.fail (Error.to_string_hum error);
+                          false
+                      in
+                      if not healthy then begin_escalation t entry process;
+                      let%bind () = Clock.after (Time_float.Span.of_ms 50.) in
+                      poll ()
+                  in
+                  poll ());
+               don't_wait_for
+                 (let%map result =
+                    Clock.with_timeout
+                      (Time_float.Span.of_sec (Float.of_int task.timeout_seconds))
+                      (Ivar.read entry.finished)
+                  in
+                  if Poly.equal result `Timeout && not (Ivar.is_full entry.finished)
+                  then (
+                    task.fail "Simulation provider timeout";
+                    begin_escalation t entry process))
+             | _ -> ());
             if entry.cancel_requested || t.shutting_down
             then begin_escalation t entry process;
             let stdout = drain t entry Stdout (Process.stdout process) in
             let stderr = drain t entry Stderr (Process.stderr process) in
             let%bind status = Process.wait process in
-            entry.process <- None;
             let%bind () = Deferred.all_unit [ stdout; stderr; entry.log_tail ] in
+            polling := false;
+            let%bind () =
+              match entry.operation with
+              | Simulation_task task ->
+                let%map drained = Monitor.try_with_or_error task.drain in
+                (match drained with
+                 | Ok () -> ()
+                 | Error error -> task.fail (Error.to_string_hum error))
+              | _ -> return ()
+            in
+            entry.process <- None;
             let%bind () = Writer.close entry.log_writer in
             let status = exit_status status in
             let%bind () =
@@ -1213,17 +1316,17 @@ let rec run_next t root =
                      (Unusable { reason = "driver discovery was cancelled" })
                      []
                      []
-                 | Dune_action _ | Driver_generate_rtl _ -> ());
+                 | Dune_action _ | Driver_generate_rtl _ | Simulation_task _ -> ());
                 let%bind () =
                   match entry.operation with
                   | Driver_generate_rtl { output_dir; _ } -> cleanup_path output_dir
-                  | Dune_action _ | Driver_describe -> return ()
+                  | Dune_action _ | Driver_describe | Simulation_task _ -> return ()
                 in
                 finish_entry t entry Cancelled (Some status) None;
                 return ())
               else (
                 match entry.operation with
-                | Dune_action _ ->
+                | Dune_action _ | Simulation_task _ ->
                   (match status with
                    | Exited 0 -> finish_entry t entry Complete (Some status) None
                    | Exited _ | Signaled _ ->
@@ -1487,7 +1590,7 @@ let active_driver_job t session =
     &&
     match entry.operation with
     | Driver_describe -> not (Job.is_terminal entry.job)
-    | Dune_action _ | Driver_generate_rtl _ -> false)
+    | Dune_action _ | Driver_generate_rtl _ | Simulation_task _ -> false)
 ;;
 
 let apply_manifest_load t session manifest_load =
@@ -1679,13 +1782,13 @@ let cancel_entry t entry =
            (Unusable { reason = "driver discovery was cancelled" })
            []
            []
-       | Dune_action _ | Driver_generate_rtl _ -> ());
+       | Dune_action _ | Driver_generate_rtl _ | Simulation_task _ -> ());
       finish_entry t entry Cancelled None None;
       let%bind () = Writer.close entry.log_writer in
       let%bind () =
         match entry.operation with
         | Driver_generate_rtl { output_dir; _ } -> cleanup_path output_dir
-        | Dune_action _ | Driver_describe -> return ()
+        | Dune_action _ | Driver_describe | Simulation_task _ -> return ()
       in
       return ()
     | None -> Ivar.read entry.finished)
@@ -1904,6 +2007,234 @@ let asic t (request : Asic.Request.t) =
           ~root:session.root
           ~environment:session.environment
           request.operation)
+;;
+
+let simulation t (request : Simulation.Request.t) =
+  match check_instance t request.instance_id with
+  | Error error -> return (Error error)
+  | Ok () when t.shutting_down -> return (error Conflict "Daemon is shutting down")
+  | Ok () ->
+    (match Hashtbl.find t.projects request.project with
+     | None -> return (error Not_found "Unknown project")
+     | Some session ->
+       let verified_asic = ref [] in
+       let catalog_matches snapshot (input : Simulation.Asic_input.t) =
+         List.exists snapshot.Asic.Snapshot.summaries ~f:(fun summary ->
+           Run_ref.equal summary.Asic.Summary.run input.run
+           && Asic.Summary.Freshness.equal summary.freshness Validated
+           && Option.exists summary.terminal ~f:(fun terminal ->
+             String.equal terminal.Asic.Terminal_result.attempt input.attempt))
+         && List.exists snapshot.artifacts ~f:(fun reference ->
+           Run_ref.equal reference.Asic_artifact.Reference.run input.run
+           && String.equal reference.terminal_attempt input.attempt
+           && String.equal reference.id input.artifact_id
+           && String.equal reference.sha256 input.sha256)
+       in
+       let schedule ~name ~reservation ~prepare =
+         let reservation =
+           Option.map reservation ~f:(fun (key, payload) ->
+             let key = "simulation:" ^ session.root ^ ":" ^ key in
+             if Hashtbl.mem t.submissions key
+             then
+               Simulation_service.rpc_error
+                 Conflict
+                 "Simulation submission is already reserved";
+             let submission =
+               { project = request.project
+               ; operation = Submit_simulation payload
+               ; ready = Ivar.create ()
+               }
+             in
+             Hashtbl.set t.submissions ~key ~data:submission;
+             key, submission)
+         in
+         let id = mint_job_id t in
+         let job =
+           Job.create
+             ~id
+             ~kind:{ namespace = "simulation"; name }
+             ~project:request.project
+             ~created_at:(Timestamp.of_time_ns (Time_ns.now ()))
+         in
+         let log_path = Filename.concat t.log_dir (Job_id.to_string id ^ ".log") in
+         let%bind opened =
+           Monitor.try_with_or_error (fun () ->
+             Writer.open_file ~append:true ~perm:0o600 log_path)
+         in
+         let release error =
+           Option.iter reservation ~f:(fun (key, submission) ->
+             Ivar.fill_if_empty
+               submission.ready
+               (Error (V1.Error.create Internal_failure (Error.to_string_hum error)));
+             Hashtbl.remove t.submissions key)
+         in
+         let log_writer =
+           match opened with
+           | Ok writer -> writer
+           | Error error ->
+             release error;
+             raise (Error.to_exn error)
+         in
+         match
+           Result.try_with (fun () ->
+             if not (List.is_empty !verified_asic)
+             then (
+               let current =
+                 Asic_service.peek_snapshot
+                   t.asic_service
+                   ~root:session.root
+                   ~environment:session.environment
+               in
+               if not
+                    (Option.exists current ~f:(fun snapshot ->
+                       List.for_all !verified_asic ~f:(catalog_matches snapshot)))
+               then
+                 Simulation_service.rpc_error
+                   Conflict
+                   "ASIC adoption changed before simulation reservation");
+             prepare id)
+         with
+         | Error failure ->
+           release (Error.of_exn failure);
+           let%bind () = Writer.close log_writer in
+           raise failure
+         | Ok (task : Simulation_task.t) ->
+           let task =
+             { task with
+               finish =
+                 (fun ~cancelled status ->
+                   Exn.protect
+                     ~f:(fun () -> task.finish ~cancelled status)
+                     ~finally:(fun () ->
+                       Option.iter reservation ~f:(fun (key, _) ->
+                         Hashtbl.remove t.submissions key)))
+             }
+           in
+           let entry =
+             { operation = Simulation_task task
+             ; session
+             ; job
+             ; log_path
+             ; log_writer
+             ; log_records = Hashtbl.create (module Int)
+             ; log_position = 0
+             ; next_log_offset = 0
+             ; log_tail = return ()
+             ; stdout_parts = []
+             ; stdout_bytes = 0
+             ; stdout_overflow = false
+             ; process = None
+             ; cancel_requested = false
+             ; escalation_started = false
+             ; escalation_finished = Ivar.create ()
+             ; finished = Ivar.create ()
+             ; source_start = None
+             }
+           in
+           Hashtbl.set t.jobs ~key:id ~data:entry;
+           Option.iter reservation ~f:(fun (_, submission) ->
+             Ivar.fill_exn submission.ready (Ok entry));
+           let queue =
+             Hashtbl.find_or_add t.root_queues session.root ~default:Queue.create
+           in
+           Queue.enqueue queue entry;
+           emit t (Job_upsert job);
+           if not (Hash_set.mem t.running_roots session.root)
+           then (
+             Hash_set.add t.running_roots session.root;
+             run_next t session.root);
+           return id
+       in
+       let cancel job =
+         match Hashtbl.find t.jobs job with
+         | None -> return ()
+         | Some entry -> cancel_entry t entry
+       in
+       let verify_asic inputs =
+         if List.is_empty inputs
+         then return ()
+         else (
+           let%bind result =
+             Asic_service.handle
+               t.asic_service
+               ~root:session.root
+               ~environment:session.environment
+               Asic.Operation.Get
+           in
+           let snapshot =
+             match result with
+             | Ok snapshot -> snapshot
+             | Error error -> raise (Simulation_service.Rpc_error error)
+           in
+           let adopted snapshot (input : Simulation.Asic_input.t) =
+             List.exists snapshot.Asic.Snapshot.summaries ~f:(fun summary ->
+               Run_ref.equal summary.Asic.Summary.run input.run
+               && Asic.Summary.Freshness.equal summary.freshness Validated
+               && Option.exists summary.terminal ~f:(fun terminal ->
+                 String.equal terminal.Asic.Terminal_result.attempt input.attempt))
+           in
+           let%map () =
+             Deferred.List.iter
+               inputs
+               ~how:`Sequential
+               ~f:(fun (input : Simulation.Asic_input.t) ->
+                 if not (adopted snapshot input)
+                 then
+                   Simulation_service.rpc_error
+                     Conflict
+                     "ASIC input requires the currently adopted validated terminal \
+                      attempt";
+                 let reference =
+                   List.find snapshot.artifacts ~f:(fun reference ->
+                     Run_ref.equal reference.Asic_artifact.Reference.run input.run
+                     && String.equal reference.terminal_attempt input.attempt
+                     && String.equal reference.id input.artifact_id
+                     && String.equal reference.sha256 input.sha256)
+                 in
+                 match reference with
+                 | None ->
+                   Simulation_service.rpc_error
+                     Conflict
+                     "ASIC input is not in the adopted artifact catalog"
+                 | Some reference ->
+                   let%bind page =
+                     In_thread.run (fun () ->
+                       Asic_artifacts.read_bytes ~reference ~offset:0 ~limit:1)
+                   in
+                   Option.iter page.error ~f:(fun message ->
+                     Simulation_service.rpc_error Conflict message);
+                   let%map current =
+                     Asic_service.handle
+                       t.asic_service
+                       ~root:session.root
+                       ~environment:session.environment
+                       Asic.Operation.Get
+                   in
+                   let current =
+                     match current with
+                     | Ok snapshot -> snapshot
+                     | Error error -> raise (Simulation_service.Rpc_error error)
+                   in
+                   if not
+                        (adopted current input
+                         && List.exists
+                              current.artifacts
+                              ~f:(Asic_artifact.Reference.equal reference))
+                   then
+                     Simulation_service.rpc_error
+                       Conflict
+                       "ASIC catalog changed while validating simulation inputs")
+           in
+           verified_asic := inputs)
+       in
+       Simulation_service.handle
+         t.simulation_service
+         ~root:session.root
+         ~environment:session.environment
+         ~schedule
+         ~cancel
+         ~verify_asic
+         request.operation)
 ;;
 
 let shutdown t =

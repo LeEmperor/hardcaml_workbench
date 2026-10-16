@@ -18,6 +18,7 @@ type local =
   ; artifact_generation : int
   ; inspection : Inspection_view.t option
   ; inspection_generation : int
+  ; simulation : Simulation_view.t
   }
 
 type layout_mode =
@@ -56,6 +57,12 @@ type action =
   | Synthesis_cycle_sort
   | Synthesis_clear_filter
   | Exit
+  | Simulation of W.Tile_id.t * Simulation.Operation.t
+  | Simulation_form of W.Tile_id.t * string * Simulation.Suite.t * string
+  | Simulation_edit of W.Tile_id.t * string * string * Simulation_view.Form.t
+  | Simulation_case of W.Tile_id.t * string
+  | Simulation_logs of W.Tile_id.t
+  | Simulation_export of Simulation.Artifact.t * bool
 
 type command =
   { id : string
@@ -75,6 +82,7 @@ type argument =
   | Plan_endpoint of string * string
   | Finalization_attempt of Run_ref.t
   | Acceptance of Run_ref.t * string * string
+  | Simulation_selection of W.Tile_id.t * string * string * Simulation_view.Form.t
 
 type palette =
   { capture : capture
@@ -133,6 +141,7 @@ let default_local =
   ; artifact_generation = 0
   ; inspection = None
   ; inspection_generation = 0
+  ; simulation = Simulation_view.empty
   }
 ;;
 
@@ -313,7 +322,12 @@ let receive t (s : W.Snapshot.t) =
       |> fun selected ->
       Option.first_some selected (Option.map (List.hd s.workspaces) ~f:(fun w -> w.id))
     in
-    let t = { t with registry = Some s; active; notice = "" } in
+    let notice =
+      match t.palette with
+      | Some { argument = Some (Simulation_selection _); _ } -> t.notice
+      | _ -> ""
+    in
+    let t = { t with registry = Some s; active; notice } in
     let focus =
       Option.filter t.focus ~f:(fun id ->
         List.exists (tiles t) ~f:(fun tile -> W.Tile_id.equal tile.id id))
@@ -484,7 +498,8 @@ let asic_cancel_commands (snapshot : Asic.Snapshot.t) =
 
 let project_scoped_kind kind =
   List.mem
-    [ "execution"
+    [ "simulation"
+    ; "execution"
     ; "project-tests"
     ; "logs"
     ; "project"
@@ -684,6 +699,7 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
         ; "finalization"
         ; "execution"
         ; "project-tests"
+        ; "simulation"
         ; "logs"
         ; "timing"
         ; "synthesis"
@@ -911,8 +927,14 @@ let decode_event (event : Bonsai_term.Event.t) : input option =
 let finalization_form t =
   Option.exists t.palette ~f:(fun p ->
     match p.argument with
-    | Some (Finalization_attempt _ | Acceptance _) -> true
+    | Some (Finalization_attempt _ | Acceptance _ | Simulation_selection _) -> true
     | _ -> false)
+;;
+
+let reference_limit t =
+  match Option.bind t.palette ~f:(fun p -> p.argument) with
+  | Some (Simulation_selection (_, _, _, form)) when form.field = 0 -> 256 * 1024
+  | _ -> 4096
 ;;
 
 let printable_utf8 text =
@@ -946,7 +968,7 @@ let append_reference t text =
     match t.palette with
     | None -> t, No_effect
     | Some p ->
-      let remaining = Int.max 0 (4096 - String.length p.query) in
+      let remaining = Int.max 0 (reference_limit t - String.length p.query) in
       let rec prefix offset =
         if offset >= String.length text
         then offset
@@ -1236,7 +1258,7 @@ let input t event ~commands : t * effect =
         | Escape -> { t with palette = None; prefix = 0 }, No_effect
         | Character _
           when match p.argument with
-               | Some (Finalization_attempt _ | Acceptance _) ->
+               | Some (Finalization_attempt _ | Acceptance _ | Simulation_selection _) ->
                  String.length p.query >= 4096
                | None | Some (Plan_endpoint _) -> false ->
           { t with notice = "Finalization reference is limited to 4096 bytes" }, No_effect
@@ -1269,14 +1291,18 @@ let input t event ~commands : t * effect =
           else if finalization_form t && not (printable_utf8 p.query)
           then reject_reference_text t
           else if String.is_empty (String.strip p.query)
+                  && not
+                       (Option.exists p.argument ~f:(function
+                         | Simulation_selection _ -> true
+                         | _ -> false))
           then
             ( { t with
                 notice = "An explicit endpoint or exact finalization attempt is required"
               }
             , No_effect )
           else if match p.argument with
-                  | Some (Finalization_attempt _ | Acceptance _) ->
-                    String.length p.query > 4096
+                  | Some (Finalization_attempt _ | Acceptance _ | Simulation_selection _)
+                    -> String.length p.query > reference_limit t
                   | None | Some (Plan_endpoint _) -> false
           then
             ( { t with notice = "Finalization reference is limited to 4096 bytes" }
@@ -1286,11 +1312,19 @@ let input t event ~commands : t * effect =
               Or_error.try_with (fun () ->
                 match Option.value_exn p.argument with
                 | Finalization_attempt run ->
-                  Asic.Operation.Inspect_finalization { run; attempt = p.query }
+                  Asic (Asic.Operation.Inspect_finalization { run; attempt = p.query })
                 | Acceptance (run, execution_file, key) ->
                   let acceptance = Asic.Acceptance.t_of_sexp (Sexp.of_string p.query) in
-                  Asic.Operation.Finalize
-                    { key; run; execution_file; acceptance = Some acceptance }
+                  Asic
+                    (Asic.Operation.Finalize
+                       { key; run; execution_file; acceptance = Some acceptance })
+                | Simulation_selection (tile, discovery_digest, submission_key, form) ->
+                  (match Simulation_view.Form.accept form p.query |> Or_error.ok_exn with
+                   | `Next form ->
+                     Simulation_edit (tile, discovery_digest, submission_key, form)
+                   | `Launch selection ->
+                     Simulation
+                       (tile, Launch { submission_key; discovery_digest; selection }))
                 | Plan_endpoint (flow, profile) ->
                   let args =
                     String.split (String.strip p.query) ~on:' '
@@ -1298,11 +1332,10 @@ let input t event ~commands : t * effect =
                   in
                   let endpoint = List.hd_exn args
                   and assignments = List.tl_exn args in
-                  Asic.Operation.Plan { flow; profile; endpoint; assignments })
+                  Asic (Asic.Operation.Plan { flow; profile; endpoint; assignments }))
             in
             match operation with
-            | Ok operation ->
-              { t with palette = None }, Execute (p.capture, Asic operation)
+            | Ok operation -> { t with palette = None }, Execute (p.capture, operation)
             | Error error ->
               ( { t with notice = "Invalid typed input: " ^ Error.to_string_hum error }
               , No_effect ))
@@ -1389,6 +1422,55 @@ let input t event ~commands : t * effect =
           , No_effect )
         | Enter, _ -> { t with prefix = 0 }, Activate
         | _, _ -> { t with prefix = 0 }, No_effect))
+;;
+
+let%test_unit "simulation palette paste captures cases without launching or losing \
+               identity"
+  =
+  let host =
+    receive empty (W.initial ~session_id:(W.Session_id.of_string "simulation-form"))
+  in
+  let capture = Option.value_exn (capture host) in
+  let tile = (Option.value_exn (focused host)).id in
+  let suite : Simulation.Suite.t =
+    { id = "suite"
+    ; label = "Suite"
+    ; cases = [ { id = "a"; label = "A" } ]
+    ; parameters = []
+    ; default_seed = "42"
+    }
+  in
+  let form = Simulation_view.Form.create suite in
+  let host =
+    { host with
+      palette =
+        Some
+          { capture
+          ; commands = []
+          ; query = ""
+          ; index = 0
+          ; argument =
+              Some (Simulation_selection (tile, "exact-digest", "exact-key", form))
+          }
+    }
+  in
+  let step host event =
+    let host, effect = input host event ~commands:[] in
+    (match effect with
+     | No_effect -> ()
+     | _ -> assert false);
+    host
+  in
+  let host = List.fold [ Paste_start; Text "a"; Paste_end ] ~init:host ~f:step in
+  let _, effect = input host Enter ~commands:[] in
+  match effect with
+  | Execute (_, Simulation_edit (actual_tile, digest, key, next)) ->
+    assert (
+      W.Tile_id.equal tile actual_tile
+      && String.equal digest "exact-digest"
+      && String.equal key "exact-key");
+    assert (next.field = 1 && List.equal String.equal next.selection.cases [ "a" ])
+  | _ -> assert false
 ;;
 
 let select_run t run =

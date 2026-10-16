@@ -2273,6 +2273,17 @@ let handle t ~root ~environment operation : Asic.Response.t Deferred.t =
   | Error exn -> Error (V1.Error.create Invalid_request (Exn.to_string exn))
 ;;
 
+let peek_snapshot t ~root ~environment =
+  let key =
+    Sexp.to_string_mach
+      [%sexp (root : string), (environment : V1.Environment_selection.t)]
+  in
+  Option.bind (Hashtbl.find t.projects key) ~f:(fun loaded ->
+    match Deferred.peek loaded with
+    | Some (Ok project) -> Some (snapshot project)
+    | Some (Error _) | None -> None)
+;;
+
 (** Client detach does not call this. Daemon shutdown cancels/reaps owned launchers and
     bounded readers, then flushes registered references. Reconnected readers never signal
     a historical producer PID. *)

@@ -135,13 +135,29 @@ intermediate snapshots and fine-grained progress may depend on further ASIC work
 
 ## FS2 — Simulation helpers and test views
 
-Status: **not started**; FS0's generic test attempts do not implement structured suites.
+Status: **milestone closed — structured project-scoped simulation delivered and
+accepted**, 2026-10-16; see
+[controls and acceptance](fs2_acceptance.md) and the
+[versioned provider/RPC contract](fs2_simulation_contract.md). Structured suites,
+cases, seeds/parameters, live progress/outcomes, targeted reruns, durable history,
+failure reports and byte-exact trace export are implemented over the existing
+supervisor. Actual Cyclesim, native HTTP and terminal PTY acceptance passed.
+The owner confirmed the basic demo works and authorized closure. Manual acceptance
+is scoped to that workflow; broader checks retain their automated evidence.
 
 Extend FS0's generic test runner with project-declared suites, cases, seeds,
 structured progress/outcomes, targeted reruns and failure/trace artifacts. Rich
 adapters can proceed without ASIC for Cyclesim or ordinary RTL tests. Gate-level
 association depends on real build/output provenance. Embedded waveform exploration
 is a separately activated extension, not an automatic FS2 prerequisite.
+
+FS0 supplies execution/host contracts; completed FS1 supplies artifact patterns and
+optional ASIC evidence. FS2 owns simulation semantics and supplies configuration/view
+identifiers for later FS3 setup/templates. No unfinished FS1 or FS3 gate remains.
+Gate-level adapters, exact archived-build replay and ASIC acceptance contribution
+remain explicit later integrations, not claims of this project-scoped delivery.
+They and adoption/performance improvements are tracked in
+[named followups](backlog/fs2_followups.md), not as blockers to the closed milestone.
 
 ## FS3 — Workspace adoption and project setup
 

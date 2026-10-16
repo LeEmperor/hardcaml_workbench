@@ -8,7 +8,10 @@ See [FS0 limits](../fs0_provider_integration.md),
 [FS1 lifecycle](../fs1_lifecycle_and_artifacts.md) and
 [FS1 investigation](../fs1_investigation.md) for exact contracts, installed provider
 generation and evidence. Requirements below remain normative; broader provider-store
-discovery is absent, later F06 graphics/source mapping remain open, and FS2 is unstarted.
+discovery is absent and later F06 graphics/source mapping remain open. FS2's versioned
+project-owned simulation provider/configuration is delivered and its substantial
+milestone accepted; see [FS2 acceptance](../fs2_acceptance.md) and the
+[simulation contract](../fs2_simulation_contract.md).
 
 ## User outcome
 

@@ -5,7 +5,8 @@ A development workbench for inspecting, running, measuring, and debugging Hardca
 **Current direction (2026-10-16):** configurable Bonsai Term tiles over typed
 provider/module contracts, a command palette and named workspaces linked to a shared
 Main run context by default. Workspaces can inspect independently; tiles can pin
-references. Simulation/testing starts with a generic supervised test runner. ASIC
+references. Simulation/testing includes generic tests and structured suites/cases,
+seeds, reruns and trace evidence over the existing supervisor. ASIC
 flow ownership stays with the project and `hardcaml_asic`; development uses the
 sibling FIFO specimen and headless tests.
 
@@ -23,10 +24,17 @@ Real physical completion, external acceptance pass/fail inspection and owned-con
 cancellation are exercised. FS1 now also delivers retained timing-path exploration,
 measured clock reports, stage-specific physical/routing/congestion tables and exact
 binary external handoff. These complete the adopted-evidence FS1 scope; embedded
-graphical editing, simulation helpers and appearance-gallery polish remain later work. See the
+graphical editing and appearance-gallery polish remain later work. See the
 [current FS1 evidence and limits](docs/fs1_investigation.md) and [delivery record](docs/construction_phase_plan.md).
 The owner has confirmed the Escape-responsiveness fix. Inspector presentation
 polish and broader race/scaling coverage remain followups, not FS1 feature blockers.
+
+**Substantial FS2 is delivered and accepted; milestone closed:** project-declared suites/cases, explicit seeds and
+parameters, live progress/failure detail, targeted reruns, durable bounded history
+and byte-exact trace export. Actual Hardcaml Cyclesim and native HTTP/terminal PTY
+acceptance passed. Start with the [Cyclesim example](examples/fs2_cyclesim/README.md)
+and [FS2 controls/acceptance](docs/fs2_acceptance.md). ASIC association is optional;
+embedded waveforms and real gate-level adapters remain later integrations.
 
 ## Documentation
 
@@ -36,6 +44,8 @@ polish and broader race/scaling coverage remain followups, not FS1 feature block
 - [FS1 physical inspection](docs/fs1_acceptance.md) — metrics, timing/check/resource views, exact finalization import, real acceptance and limits.
 - [Finalization and reports](docs/fs1_lifecycle_and_artifacts.md) — collect/accept palette commands, reconnect/cancel, paged artifact reading and configured external text viewing.
 - [FS1 investigation completion](docs/fs1_investigation.md) — timing paths, measured clocks, physical/routing evidence, binary handoff, exact installed provider and adoption instructions.
+- [FS2 simulation controls and acceptance](docs/fs2_acceptance.md) — suites, seeds, failures, reruns, history and trace export; real Cyclesim/native HTTP/PTY evidence.
+- [FS2 provider/RPC contract](docs/fs2_simulation_contract.md) — configure a project-owned simulation provider and implement structured discovery/events.
 - [Feature list](docs/feature_list.md) — concise scope/status and focused feature specs.
 - [Feature sets](docs/feature_sets.md) — FS0 initial demos and later themed work groups.
 - [Decision log](docs/decisions.md) — accepted run contexts; remaining command/snapshot policy.

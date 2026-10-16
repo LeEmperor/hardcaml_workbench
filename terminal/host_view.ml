@@ -519,6 +519,9 @@ let rows host data tile ~width ~height =
     | None, None ->
       (match tile.kind with
        | "run-selector" -> run_rows ()
+       | "simulation" ->
+         Simulation_view.rows local.simulation ~log_lines:data.log_lines
+         |> List.concat_map ~f:(wrap_cells ~width)
        | "execution" | "project-tests" ->
          [ (if String.equal tile.kind "project-tests"
             then "Project tests (not ASIC-run scoped)"
@@ -599,6 +602,8 @@ let rows host data tile ~width ~height =
     match rows with
     | [] -> []
     | scope :: rest -> scope :: List.drop rest local.scroll)
+  else if String.equal tile.kind "simulation"
+  then List.drop rows (Int.min local.scroll (Int.max 0 (List.length rows - height)))
   else List.drop rows local.scroll
 ;;
 
@@ -988,6 +993,29 @@ let scroll_run_focused host data dimensions ~delta =
          |> Result.ok
          |> Option.bind ~f:(fun reference -> reference.run) )
      with
+     | Some (_, g), _ when String.equal tile.kind "simulation" ->
+       let _, _, _, width, height =
+         body_geometry host tile ~width:g.width ~height:g.height
+       in
+       let local = H.local host tile.id in
+       let full =
+         rows
+           (H.set_local host tile.id { local with scroll = 0 })
+           data
+           tile
+           ~width
+           ~height
+       in
+       let maximum = Int.max 0 (List.length full - height) in
+       let scroll = Int.max 0 (Int.min maximum local.scroll) in
+       let scroll =
+         if delta >= 0
+         then scroll + Int.min delta (maximum - scroll)
+         else
+           scroll
+           - Int.min scroll (if delta = Int.min_value then Int.max_value else -delta)
+       in
+       H.set_local host tile.id { local with scroll }
      | Some (_, g), Some run ->
        let _, _, _, width, height =
          body_geometry host tile ~width:g.width ~height:g.height
@@ -1208,9 +1236,12 @@ let render_workspace host data ({ Dimensions.width; height } as dimensions) =
               ^ " - exact returned attempt; Enter imports; Esc closes"
             | Some (H.Acceptance (run, _, _)) ->
               "FINALIZE AND ACCEPT " ^ run_label run ^ " — Enter submits; Esc closes"
+            | Some (H.Simulation_selection _) ->
+              "SIMULATION LAUNCH FORM — explicit inputs; Enter accepts each field"
             | None -> "COMMAND PALETTE - Esc closes; Enter executes captured target")
          ]
          @ (match p.argument with
+            | Some (H.Simulation_selection _) -> wrap_cells ~width ("> " ^ p.query)
             | Some (H.Acceptance _) ->
               wrap_cells ~width ("> " ^ p.query)
               |> List.rev
@@ -1218,6 +1249,8 @@ let render_workspace host data ({ Dimensions.width; height } as dimensions) =
               |> List.rev
             | _ -> [ "> " ^ p.query ])
          @ (match p.argument with
+            | Some (H.Simulation_selection (_, _, _, form)) ->
+              Simulation_view.Form.help form |> List.concat_map ~f:(wrap_cells ~width)
             | Some (H.Acceptance _) ->
               [ "Acceptance S-expression (≤4096 UTF-8 bytes; quote paths with spaces):"
               ; "((support_tools /tools) (precheck_python /python)"
@@ -1563,6 +1596,87 @@ let%test_unit "checklist follows exact run and pin with selected-stage detail an
       assert (Option.is_none (checklist_preview host unrelated following));
       let text = tile_view host unrelated following ~width:40 ~height:14 |> plain_text in
       assert (not (String.is_substring text ~substring:"Space c c: Launch")))
+;;
+
+let%test_unit "simulation tile renders project scope and independent selection at real \
+               cell bounds"
+  =
+  let s = W.initial ~session_id:(W.Session_id.of_string "simulation-render") in
+  let s =
+    W.apply
+      s
+      (Mutate
+         { expected_revision = s.revision
+         ; mutation =
+             Create_tile
+               { workspace = (List.hd_exn s.workspaces).id
+               ; kind = "simulation"
+               ; geometry = { x = 0; y = 0; width = 80; height = 20 }
+               }
+         })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let tile = List.last_exn s.tiles in
+  let host = H.receive H.empty s in
+  let host =
+    H.set_local
+      host
+      tile.id
+      { H.default_local with
+        simulation =
+          { Simulation_view.empty with
+            notice = Some "Verified simulation bytes retained: /host/trace.vcd"
+          }
+      }
+  in
+  let data =
+    { project = None
+    ; jobs = []
+    ; runs = []
+    ; log_lines = (fun _ -> [])
+    ; run_lines = (fun _ _ -> [])
+    ; run_context = (fun _ -> [])
+    ; summary = (fun _ -> None)
+    ; asic = None
+    ; status = "fixture"
+    ; environment = "fixture"
+    ; asic_lines = []
+    }
+  in
+  List.iter
+    [ 80, 24; 120, 40; 32, 8; 1, 1 ]
+    ~f:(fun (width, height) ->
+      let view = tile_view host data tile ~width ~height in
+      assert (View.width view = width && View.height view = height));
+  let text = tile_view host data tile ~width:120 ~height:24 |> plain_text in
+  assert (String.is_substring text ~substring:"Structured simulation");
+  assert (String.is_substring text ~substring:"[PROJECT]");
+  assert (String.is_substring text ~substring:"/host/trace.vcd");
+  assert (not (String.is_substring text ~substring:"No run selected"));
+  let local = H.local host tile.id in
+  let host =
+    H.set_local
+      { host with focus = Some tile.id }
+      tile.id
+      { local with
+        simulation =
+          { local.simulation with notice = Some (String.make 512 'x' ^ "HORIZONTAL-END") }
+      }
+  in
+  let dimensions : Dimensions.t = { width = 32; height = 8 } in
+  let bottom = scroll_focused host data dimensions ~delta:Int.max_value in
+  assert ((H.local bottom tile.id).scroll > 0);
+  assert (
+    String.is_substring
+      (render bottom data dimensions |> plain_text)
+      ~substring:"HORIZONTAL-END");
+  let stopped = scroll_focused bottom data dimensions ~delta:1 in
+  assert ((H.local stopped tile.id).scroll = (H.local bottom tile.id).scroll);
+  let back = scroll_focused stopped data dimensions ~delta:(-1) in
+  assert ((H.local back tile.id).scroll = (H.local stopped tile.id).scroll - 1);
+  let top = scroll_focused bottom data dimensions ~delta:Int.min_value in
+  assert ((H.local top tile.id).scroll = 0)
 ;;
 
 let%test_unit "fit geometry fills tracks, keeps thirteen tiles visible, and falls back" =

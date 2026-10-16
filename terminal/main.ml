@@ -18,6 +18,8 @@ module Artifact_export = Terminal_presentation.Artifact_export
 module Artifact_binary_export = Terminal_presentation.Artifact_binary_export
 module Inspection_view = Terminal_presentation.Inspection_view
 module Fs0_fixture = Terminal_presentation.Fs0_fixture
+module Simulation_view = Terminal_presentation.Simulation_view
+module Simulation_export = Terminal_presentation.Simulation_export
 
 let console_limit = 500
 let minimum_width = 68
@@ -384,11 +386,11 @@ let log_state session job =
     { next_offset = 0; records = []; fetch = Presentation.Log_fetch.Not_requested })
 ;;
 
-let read_job_log session (job : Job.t option) =
+let read_job_log_id session (job : Job_id.t option) =
   match job with
   | None -> return ()
   | Some job ->
-    let state = log_state session job.id in
+    let state = log_state session job in
     (match state.fetch with
      | Presentation.Log_fetch.Received { eof = true } -> return ()
      | _ ->
@@ -399,7 +401,7 @@ let read_job_log session (job : Job.t option) =
            Http.Client.read_log
              session.client
              { instance_id = session.hello.instance_id
-             ; job = job.id
+             ; job
              ; offset = state.next_offset
              ; max_records = 128
              ; max_bytes = V1.max_log_bytes
@@ -420,6 +422,10 @@ let read_job_log session (job : Job.t option) =
           state.next_offset <- payload.next_offset;
           state.records <- take_end (state.records @ records) console_limit;
           state.fetch <- Presentation.Log_fetch.Received { eof = payload.eof }))
+;;
+
+let read_job_log session job =
+  read_job_log_id session (Option.map job ~f:(fun (j : Job.t) -> j.id))
 ;;
 
 let read_selected_log session = read_job_log session (selected_job session)
@@ -1065,10 +1071,65 @@ let initialize_host_layout session =
   | _ -> return ()
 ;;
 
+let simulation_request session tile_id operation =
+  match current_project session with
+  | None -> return ()
+  | Some project ->
+    let instance_id = session.hello.instance_id in
+    let local = Host.local session.host tile_id in
+    let client = session.client in
+    let view = Simulation_view.begin_request local.simulation in
+    session.host <- Host.set_local session.host tile_id { local with simulation = view };
+    let%bind response =
+      request session.diagnostics_file (fun () ->
+        Http.Client.simulation client { instance_id; project = project.id; operation })
+    in
+    if phys_equal client session.client
+       && V1.Daemon_instance_id.equal instance_id session.hello.instance_id
+       && Option.value_map (current_project session) ~default:false ~f:(fun p ->
+         Project_id.equal p.id project.id)
+    then (
+      let local = Host.local session.host tile_id in
+      let simulation =
+        Simulation_view.receive
+          local.simulation
+          ~ticket:view.request
+          ~selected:view.attempt
+          operation
+          response
+      in
+      session.host <- Host.set_local session.host tile_id { local with simulation };
+      match Simulation_view.detail simulation with
+      | Some d when simulation.logs ->
+        (match List.find (project_jobs session) ~f:(fun j -> Job_id.equal j.id d.job) with
+         | Some job -> read_job_log session (Some job)
+         | None ->
+           (log_state session d.job).fetch
+           <- Presentation.Log_fetch.Error
+                "Job logs unavailable in this daemon; normalized historical results \
+                 remain readable";
+           return ())
+      | _ -> return ())
+    else return ()
+;;
+
+let refresh_simulation session =
+  Host.tiles session.host
+  |> List.filter ~f:(fun tile -> String.equal tile.kind "simulation")
+  |> Deferred.List.iter ~how:`Sequential ~f:(fun tile ->
+    let view = (Host.local session.host tile.id).simulation in
+    match view.attempt with
+    | _ when view.busy -> return ()
+    | Some id -> simulation_request session tile.id (Observe id)
+    | None when not view.older -> simulation_request session tile.id Get
+    | None -> return ())
+;;
+
 let refresh_host session =
   let%bind () = load_preferences session in
   let%bind () = workspace_request session Get in
   let%bind () = initialize_host_layout session in
+  let%bind () = refresh_simulation session in
   let%bind () = asic_request session Get in
   let%bind () =
     match session.view_on_allocation, session.host.registry, session.asic with
@@ -1235,6 +1296,20 @@ and reconnect session =
        ; editing_filter = false
        };
     session.asic <- None;
+    session.host
+    <- { session.host with
+         locals =
+           List.map session.host.locals ~f:(fun (id, local) ->
+             ( id
+             , { local with
+                 simulation =
+                   { local.simulation with
+                     snapshot = None
+                   ; busy = false
+                   ; request = local.simulation.request + 1
+                   }
+               } ))
+       };
     if instance_changed
     then (
       session.host
@@ -2384,6 +2459,94 @@ let host_catalog session =
     session.host
     ~project:(current_project session)
     ~jobs:(project_jobs session)
+  @ (match Host.focused session.host with
+     | Some tile when String.equal tile.kind "simulation" ->
+       let v = (Host.local session.host tile.id).simulation in
+       let cmd id title operation =
+         Host.command
+           ("simulation." ^ id)
+           ("Simulation: " ^ title)
+           "suite cases seed history"
+           (Host.Simulation (tile.id, operation))
+       in
+       [ cmd "discover" "Discover suites explicitly" Discover
+       ; cmd "history" "Newest history page" (History { before = None; limit = 25 })
+       ]
+       @ Option.value_map v.snapshot ~default:[] ~f:(fun s ->
+         Option.value_map s.next_before ~default:[] ~f:(fun before ->
+           [ cmd
+               "older"
+               "Older history page"
+               (History { before = Some before; limit = 25 })
+           ])
+         @ List.map s.attempts ~f:(fun a ->
+           cmd ("open." ^ a.id) ("Reopen " ^ a.id ^ " " ^ a.suite) (Observe a.id))
+         @ Option.value_map s.discovery ~default:[] ~f:(fun d ->
+           List.map d.suites ~f:(fun suite ->
+             Host.command
+               ("simulation.launch." ^ suite.id)
+               ("Simulation: Launch form " ^ suite.label)
+               "seed parameters cases"
+               (Simulation_form
+                  ( tile.id
+                  , Option.value s.discovery_digest ~default:""
+                  , suite
+                  , submission_key "simulation" )))))
+       @ Option.value_map (Simulation_view.detail v) ~default:[] ~f:(fun d ->
+         [ cmd "cancel" ("Cancel " ^ d.id) (Cancel d.id)
+         ; Host.command
+             "simulation.logs"
+             "Simulation: Toggle stream-labelled job logs"
+             "stdout stderr"
+             (Simulation_logs tile.id)
+         ]
+         @ List.map d.cases ~f:(fun c ->
+           Host.command
+             ("simulation.case." ^ c.case_id)
+             ("Simulation: Select case " ^ c.case_id)
+             "detail failure"
+             (Simulation_case (tile.id, c.case_id)))
+         @ (let failed =
+              List.filter_map d.cases ~f:(fun c ->
+                if Simulation.Case_status.equal c.status Failed
+                then Some c.case_id
+                else None)
+            in
+            if List.is_empty failed
+            then []
+            else
+              [ cmd
+                  "rerun-failed"
+                  "Rerun all failed (original inputs; current project)"
+                  (Rerun
+                     { submission_key = submission_key "simulation-rerun"
+                     ; attempt_id = d.id
+                     ; cases = failed
+                     })
+              ])
+         @ Option.value_map v.case_id ~default:[] ~f:(fun id ->
+           [ cmd
+               "rerun-case"
+               ("Rerun case " ^ id ^ " (original inputs; current project)")
+               (Rerun
+                  { submission_key = submission_key "simulation-rerun"
+                  ; attempt_id = d.id
+                  ; cases = [ id ]
+                  })
+           ])
+         @ List.concat_map d.artifacts ~f:(fun a ->
+           [ Host.command
+               ("simulation.export." ^ a.id)
+               ("Simulation: Export exact bytes " ^ a.label)
+               "trace waveform"
+               (Simulation_export (a, false))
+           ; Host.command
+               ("simulation.viewer." ^ a.id)
+               ("Simulation: Open external viewer " ^ a.label)
+               "trace waveform"
+               (Simulation_export (a, true))
+           ]))
+     | _ -> [])
   @ Option.value_map session.remembered_selection ~default:[] ~f:(fun selection ->
     let available =
       Option.value_map session.asic ~default:false ~f:(fun asic ->
@@ -2496,9 +2659,16 @@ let host_catalog session =
 
 let execute_host session captured action ~exit =
   let open Bonsai_term in
+  let captured_client = session.client in
+  let captured_project = Option.map (current_project session) ~f:(fun p -> p.id) in
   let async f =
     Effect.of_deferred_thunk (fun () ->
       if Host.current session.host captured
+         && phys_equal captured_client session.client
+         && Option.equal
+              Project_id.equal
+              captured_project
+              (Option.map (current_project session) ~f:(fun p -> p.id))
       then f ()
       else (
         session.host
@@ -2514,6 +2684,156 @@ let execute_host session captured action ~exit =
     Effect.Ignore)
   else (
     match action with
+    | Host.Simulation (tile, operation) ->
+      let local = Host.local session.host tile in
+      (match operation with
+       | Observe id ->
+         session.host
+         <- Host.set_local
+              session.host
+              tile
+              { local with
+                simulation = Simulation_view.select local.simulation id
+              ; scroll = 0
+              }
+       | _ -> ());
+      async (fun () -> simulation_request session tile operation)
+    | Simulation_case (tile, case_id) ->
+      let local = Host.local session.host tile in
+      session.host
+      <- Host.set_local
+           session.host
+           tile
+           { local with
+             simulation = { local.simulation with case_id = Some case_id }
+           ; scroll = 0
+           };
+      Effect.Ignore
+    | Simulation_logs tile ->
+      let local = Host.local session.host tile in
+      session.host
+      <- Host.set_local
+           session.host
+           tile
+           { local with
+             simulation = { local.simulation with logs = not local.simulation.logs }
+           };
+      Effect.Ignore
+    | Simulation_form (tile, digest, suite, key) ->
+      let form = Simulation_view.Form.create suite in
+      session.host
+      <- { session.host with
+           palette =
+             Some
+               { capture = captured
+               ; commands = []
+               ; query = Simulation_view.Form.query form
+               ; index = 0
+               ; argument = Some (Simulation_selection (tile, digest, key, form))
+               }
+         };
+      Effect.Ignore
+    | Simulation_edit (tile, digest, key, form) ->
+      session.host
+      <- { session.host with
+           notice = ""
+         ; palette =
+             Some
+               { capture = captured
+               ; commands = []
+               ; query = Simulation_view.Form.query form
+               ; index = 0
+               ; argument = Some (Simulation_selection (tile, digest, key, form))
+               }
+         };
+      Effect.Ignore
+    | Simulation_export (artifact, open_viewer) ->
+      let tile = Option.map (Host.focused session.host) ~f:(fun t -> t.id) in
+      let notice message =
+        let message =
+          Artifact_view.safe
+            (sprintf "Simulation %s / %s: %s" artifact.attempt_id artifact.id message)
+        in
+        session.host <- { session.host with notice = message };
+        Option.iter tile ~f:(fun id ->
+          let local = Host.local session.host id in
+          session.host
+          <- Host.set_local
+               session.host
+               id
+               { local with simulation = { local.simulation with notice = Some message } })
+      in
+      async (fun () ->
+        if session.artifact_export_busy
+        then (
+          notice "Another artifact export is in progress";
+          return ())
+        else (
+          session.artifact_export_busy <- true;
+          Monitor.protect
+            ~finally:(fun () ->
+              session.artifact_export_busy <- false;
+              return ())
+            (fun () ->
+              match current_project session with
+              | None -> return ()
+              | Some project ->
+                let instance_id = session.hello.instance_id in
+                let client = session.client in
+                let current () =
+                  phys_equal client session.client
+                  && V1.Daemon_instance_id.equal instance_id session.hello.instance_id
+                  && Option.value_map
+                       (current_project session)
+                       ~default:false
+                       ~f:(fun p -> Project_id.equal p.id project.id)
+                in
+                let viewer =
+                  if open_viewer then session.artifact_binary_viewer else None
+                in
+                if open_viewer && Option.is_none viewer
+                then (
+                  notice
+                    "Configure --simulation-viewer /absolute/viewer for simulation traces";
+                  return ())
+                else (
+                  notice
+                    "Exporting simulation bytes (<=64 MiB); verifying identity and SHA256";
+                  let%map result =
+                    Simulation_export.run
+                      ~artifact
+                      ~current
+                      ~viewer
+                      ~fetch:(fun ~offset ~limit ->
+                        let%map r =
+                          request session.diagnostics_file (fun () ->
+                            Http.Client.simulation
+                              client
+                              { instance_id
+                              ; project = project.id
+                              ; operation =
+                                  Read_artifact_bytes
+                                    { attempt_id = artifact.attempt_id
+                                    ; artifact_id = artifact.id
+                                    ; sha256 = Option.value artifact.sha256 ~default:""
+                                    ; offset
+                                    ; limit
+                                    }
+                              })
+                        in
+                        match r with
+                        | Error e -> Or_error.error_string e
+                        | Ok s ->
+                          Or_error.of_option
+                            s.byte_page
+                            ~error:(Error.of_string "Missing simulation byte page"))
+                      ~publish:Simulation_export.publish_private
+                      ~launch:Artifact_export.launch_viewer
+                  in
+                  notice
+                    (match result with
+                     | Ok path -> "Verified simulation bytes retained: " ^ path
+                     | Error e -> "Simulation export: " ^ Error.to_string_hum e)))))
     | Host.Registry mutation -> async (fun () -> mutate_workspace session mutation)
     | Switch id ->
       session.host <- Host.switch session.host id;
@@ -2991,6 +3311,48 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
           execute_host session capture command.action ~exit))
     in
     (match input with
+     | Some (Character (('j' | 'k' | 'n' | 'p' | 'l') as key))
+       when Option.value_map (Host.focused session.host) ~default:false ~f:(fun t ->
+              String.equal t.kind "simulation") ->
+       let tile = Option.value_exn (Host.focused session.host) in
+       let local = Host.local session.host tile.id in
+       let v = local.simulation in
+       let choose values selected delta =
+         let index =
+           Option.bind selected ~f:(fun id ->
+             List.findi values ~f:(fun _ s -> String.equal id s) |> Option.map ~f:fst)
+           |> Option.value ~default:(if delta > 0 then -1 else 1)
+         in
+         List.nth values (Int.max 0 (Int.min (List.length values - 1) (index + delta)))
+       in
+       if Char.equal key 'j' || Char.equal key 'k'
+       then (
+         let values =
+           Option.value_map v.snapshot ~default:[] ~f:(fun s ->
+             List.map s.attempts ~f:(fun a -> a.id))
+         in
+         match
+           choose values v.attempt (if Char.equal key 'j' then 1 else -1), captured
+         with
+         | Some id, Some capture ->
+           Some (execute_host session capture (Simulation (tile.id, Observe id)) ~exit)
+         | _ -> Some Effect.Ignore)
+       else (
+         let simulation =
+           if Char.equal key 'l'
+           then { v with logs = not v.logs }
+           else (
+             let values =
+               Option.value_map (Simulation_view.detail v) ~default:[] ~f:(fun d ->
+                 List.map d.cases ~f:(fun c -> c.case_id))
+             in
+             { v with
+               case_id = choose values v.case_id (if Char.equal key 'n' then 1 else -1)
+             })
+         in
+         session.host
+         <- Host.set_local session.host tile.id { local with simulation; scroll = 0 };
+         Some Effect.Ignore)
      | Some (Character 'b') -> dispatch "project.build"
      | Some (Character 't') -> dispatch "project.test"
      | Some (Character 'i') -> dispatch "project.discover"
@@ -3088,6 +3450,7 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
        (match Host.focused session.host with
         | Some tile
           when Terminal_result_view.supports tile.kind
+               || String.equal tile.kind "simulation"
                || String.equal tile.kind "synthesis"
                || String.equal tile.kind "live-status"
                || String.equal tile.kind "stage-checklist" ->
@@ -4383,12 +4746,14 @@ let command =
      and artifact_binary_viewer =
        flag
          "--artifact-binary-viewer"
+         ~aliases:[ "--simulation-viewer" ]
          (optional
             (Command.Arg_type.create (fun path ->
                Artifact_binary_export.executable path |> Or_error.ok_exn)))
          ~doc:
-           "ABSOLUTE_EXECUTABLE enable b to export verified exact .gds/.png/.def/.odb \
-            bytes and open a private local file (no shell; disabled by default)"
+           "ABSOLUTE_EXECUTABLE external viewer for verified ASIC binary files (b) and \
+            simulation traces (palette, <=64 MiB); alias --simulation-viewer; receives \
+            one private terminal-host path, no shell; disabled by default"
      and hierarchy =
        flag
          "--hierarchy"
