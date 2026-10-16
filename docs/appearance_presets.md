@@ -2,8 +2,8 @@
 
 First FS5 slice implemented 2026-10-15. These are skins over the actual FS0 tile
 host, not a separate renderer or synthetic-only application. No final product
-default has been selected; the initial skin is B/Structured with selective color,
-ASCII markers and compact density.
+default has been selected. The aesthetics worktree now starts with A/Instrument,
+vivid color, Unicode markers and comfortable density as an experimental review preset.
 
 ## Try them
 
@@ -51,9 +51,9 @@ Generate plain-text and ANSI terminal frames without a daemon or EDA:
 _build/default/terminal/main.exe --capture-appearance /tmp/opencode/wb-appearance-review
 ```
 
-The command emits A–E × compact/comfortable × four identical synthetic scenarios
-(synthesis, timing-unavailable, pinned synthesis, palette) × 80×24/120×40, in `.txt`
-and `.ansi`: 160 files. ANSI files retain colors for terminal viewing. The synthetic
+The command emits A–E × compact/comfortable × five identical synthetic scenarios
+(aesthetic Overview, synthesis, timing-unavailable, pinned synthesis, palette)
+× 80×24/120×40, in `.txt` and `.ansi`: 200 files. ANSI files retain colors for terminal viewing. The synthetic
 50/73 counts are labeled fixtures; this is not new ASIC evidence or a complete rich
 Timing gallery. Current captures: `/tmp/opencode/workbench-appearance-20261015/`.
 
@@ -71,6 +71,38 @@ Timing gallery. Current captures: `/tmp/opencode/workbench-appearance-20261015/`
   passed after integration. No real EDA run was needed for this appearance change.
 
 ## Empty or sparse saved workspaces
+
+### Aesthetics worktree first pass (2026-10-16)
+
+Use **Apply default layout (add missing tiles)** from Overview to add the new
+**Session**, **Workspaces**, and **Stage checklist** tiles to an existing layout.
+**Layout: Fit tiles to window** gives Overview a compact workspace strip across
+the top, session/run/checklist sidebar, and larger content panels when space permits.
+Requested sizes remain available through the separate Requested layout mode.
+Narrow surfaces fall back to a grid or focused-tile view.
+
+- **Tab / Shift-Tab** focus the next/previous visible tile.
+- In **Workspaces**, **j/k or arrows** browse and **Enter** opens the destination;
+  **1–9** also switch registry workspaces. **Create Testing workspace** explicitly
+  adds a testing arrangement. These are workspaces within a terminal window.
+- **Session** shows project, context linkage, connection/status and selected run.
+  Its presence removes the redundant global header. **Enter** opens full details,
+  **[ / ]** scroll, and **Esc** returns. Long opaque run IDs use six leading and
+  six trailing characters; identities used for actions remain exact.
+- **Stage checklist** uses explicit stage statuses, symbols and semantic colors.
+  The current ASIC snapshot does not expose per-stage observations, so its stage
+  entries say **not reported**. Imported aggregate outcomes/check verdicts and
+  evidence freshness appear separately below them; scroll or use **Enter** for
+  details. Aggregate completion does not manufacture completed stages.
+- Rounded Instrument frames, brighter semantic colors and comfortable padding
+  are the provisional startup combination. Palette appearance controls still work;
+  ASCII/off modes provide font-independent alternatives. Decoration degrades at
+  small sizes to keep evidence readable.
+
+`bonsai_term_spinners` was not installed in the selected switch during this slice;
+animated indicators and Nerd Font experiments remain follow-ups.
+
+### Earlier saved layouts
 
 The original acceptance state left Overview empty by moving its only tile into
 Timing, and its FS0 comparison workspace contains just two small synthesis tiles.

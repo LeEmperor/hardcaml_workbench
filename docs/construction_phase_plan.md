@@ -386,6 +386,23 @@ Synthesis area/check counters are now projected into the current summary.
 
 ## V1 — Independent appearance gallery (FS5)
 
+**Aesthetics worktree slice (2026-10-16):** added pure utility-tile presentation
+and nonuniform Overview geometry, a three-row workspace navigation tile, session
+status and stage checklist, explicit Testing workspace creation, Shift-Tab reverse
+focus, brighter Instrument defaults and comfortable padding. Opaque run IDs are
+shortened in compact labels with full session inspection available. Stage entries
+remain `not reported` until explicit stage observations reach the ASIC snapshot;
+available aggregate outcomes/checks are displayed separately. See
+[controls and limits](appearance_presets.md#aesthetics-worktree-first-pass-2026-10-16).
+
+Verification: `@fmt`, `@lint`, full `dune runtest -j20` and default build passed;
+terminal tests were repeated after navigation/inspection fixes. The raw Ctrl-C PTY
+matrix passed all five modes at
+`/tmp/opencode/workbench-terminal-interrupt-vqupx_j0/`. Production-renderer A–E
+captures now include an aesthetic Overview fixture at 80×24 and 120×40 under
+`/tmp/opencode/aesthetics-review/` (synthetic evidence). Owner visual review and
+spinner/Nerd Font experiments remain open.
+
 **First skin slice delivered; richer gallery/review pending.** See
 [appearance presets](appearance_presets.md) for controls, captures and tests.
 This is a reusable renderer over actual FS0 tiles, not a selected final aesthetic.

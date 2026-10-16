@@ -10,6 +10,7 @@ type local =
   ; scroll : int
   ; follow : bool
   ; headers : bool
+  ; utility_detail : bool
   ; synthesis : Synthesis_view.State.t
   ; terminal_result : Terminal_result_view.State.t
   ; artifacts : Artifact_view.t option
@@ -40,6 +41,7 @@ type action =
   | Browse_artifacts of Run_ref.t
   | Launch_asic of Asic.Preview.t * bool
   | Apply_default_layout
+  | Create_testing_workspace
   | Local_headers
   | Resume_log
   | Toggle_chrome
@@ -117,6 +119,7 @@ let default_local =
   ; scroll = 0
   ; follow = true
   ; headers = true
+  ; utility_detail = false
   ; synthesis = Synthesis_view.State.empty
   ; terminal_result = Terminal_result_view.State.empty
   ; artifacts = None
@@ -162,6 +165,20 @@ let receive t (s : W.Snapshot.t) =
     when W.Session_id.equal previous.session_id s.session_id
          && previous.revision > s.revision -> t
   | _ ->
+    let t =
+      match t.registry with
+      | Some previous when not (W.Session_id.equal previous.session_id s.session_id) ->
+        { t with
+          active = None
+        ; focus = None
+        ; locals = []
+        ; workspace_focus = []
+        ; palette = None
+        ; prefix = 0
+        ; editing_filter = false
+        }
+      | _ -> t
+    in
     let active =
       Option.filter t.active ~f:(fun id ->
         List.exists s.workspaces ~f:(fun w -> W.Workspace_id.equal w.id id))
@@ -186,20 +203,64 @@ let capture t =
 ;;
 
 let switch t id =
-  let workspace_focus =
-    Option.value_map t.active ~default:t.workspace_focus ~f:(fun old ->
-      List.Assoc.add
-        t.workspace_focus
-        ~equal:String.equal
-        (W.Workspace_id.to_string old)
-        t.focus)
+  if not
+       (Option.exists t.registry ~f:(fun s ->
+          List.exists s.workspaces ~f:(fun w -> W.Workspace_id.equal w.id id)))
+  then t
+  else (
+    let workspace_focus =
+      Option.value_map t.active ~default:t.workspace_focus ~f:(fun old ->
+        List.Assoc.add
+          t.workspace_focus
+          ~equal:String.equal
+          (W.Workspace_id.to_string old)
+          t.focus)
+    in
+    let focus =
+      List.Assoc.find workspace_focus ~equal:String.equal (W.Workspace_id.to_string id)
+      |> Option.join
+    in
+    let t = { t with active = Some id; focus; workspace_focus } in
+    Option.value_map t.registry ~default:t ~f:(receive t))
+;;
+
+(** Cursor identity is a registry ID, never a display name or an ordinal. An unset or
+    removed cursor starts from the active workspace. Browsing is client-local. *)
+let workspace_choices t id =
+  let filter = String.lowercase (local t id).filter in
+  Option.value_map t.registry ~default:[] ~f:(fun s ->
+    List.filter s.workspaces ~f:(fun w ->
+      String.is_substring
+        (String.lowercase (w.name ^ " " ^ W.Workspace_id.to_string w.id))
+        ~substring:filter))
+;;
+
+let workspace_cursor t id =
+  let choices = workspace_choices t id in
+  let selected =
+    Option.bind (local t id).cursor ~f:(fun cursor ->
+      List.find choices ~f:(fun w -> String.equal cursor (W.Workspace_id.to_string w.id)))
   in
-  let focus =
-    List.Assoc.find workspace_focus ~equal:String.equal (W.Workspace_id.to_string id)
-    |> Option.join
+  Option.first_some
+    selected
+    (Option.bind t.active ~f:(fun active ->
+       List.find choices ~f:(fun w -> W.Workspace_id.equal active w.id)))
+;;
+
+let browse_workspaces t id ~delta =
+  let choices = workspace_choices t id in
+  let index =
+    Option.bind (workspace_cursor t id) ~f:(fun selected ->
+      List.findi choices ~f:(fun _ w -> W.Workspace_id.equal selected.id w.id)
+      |> Option.map ~f:fst)
+    |> Option.value ~default:(if delta > 0 then -1 else 1)
   in
-  let t = { t with active = Some id; focus; workspace_focus } in
-  Option.value_map t.registry ~default:t ~f:(receive t)
+  let index = Int.max 0 (Int.min (List.length choices - 1) (index + delta)) in
+  let cursor =
+    Option.map (List.nth choices index) ~f:(fun w -> W.Workspace_id.to_string w.id)
+  in
+  let l = local t id in
+  set_local t id { l with cursor; scroll = index }
 ;;
 
 let current t c =
@@ -295,7 +356,15 @@ let asic_cancel_commands (snapshot : Asic.Snapshot.t) =
 
 let project_scoped_kind kind =
   List.mem
-    [ "execution"; "project-tests"; "logs"; "project"; "navigation"; "asic" ]
+    [ "execution"
+    ; "project-tests"
+    ; "logs"
+    ; "project"
+    ; "navigation"
+    ; "asic"
+    ; "live-status"
+    ; "workspace-tabs"
+    ]
     kind
     ~equal:String.equal
 ;;
@@ -319,10 +388,21 @@ let evidence_runs t =
 ;;
 
 let default_tile_specs ~workspace_name =
-  if String.equal workspace_name "Timing"
+  if String.equal workspace_name "Testing"
+  then
+    [ "live-status", 28, 6
+    ; "workspace-tabs", 28, 6
+    ; "project-tests", 64, 12
+    ; "execution", 48, 10
+    ; "logs", 64, 10
+    ]
+  else if String.equal workspace_name "Timing"
   then [ "run-selector", 28, 6; "timing", 64, 12; "logs", 64, 10 ]
   else
-    [ "run-selector", 32, 12
+    [ "live-status", 28, 6
+    ; "workspace-tabs", 28, 6
+    ; "run-selector", 32, 12
+    ; "stage-checklist", 32, 12
     ; "synthesis", 64, 10
     ; "placement", 40, 10
     ; "cts", 40, 10
@@ -435,8 +515,17 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
       command
         ("workspace." ^ W.Workspace_id.to_string w.id)
         ("Switch to " ^ w.name)
-        "overview timing"
+        "workspace navigation tabs"
         (Switch w.id))
+    @ (if List.exists s.workspaces ~f:(fun w -> String.equal w.name "Testing")
+       then []
+       else
+         [ command
+             "workspace.create-testing"
+             "Create Testing workspace"
+             "tests simulation layout"
+             Create_testing_workspace
+         ])
     @ [ mutation
           "context.independent"
           "Make workspace independent"
@@ -456,7 +545,10 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
           Apply_default_layout
       ]
     @ List.map
-        [ "run-selector"
+        [ "live-status"
+        ; "workspace-tabs"
+        ; "stage-checklist"
+        ; "run-selector"
         ; "placement"
         ; "cts"
         ; "routing"
@@ -628,6 +720,7 @@ type input =
   | Next
   | Previous
   | Focus
+  | Focus_previous
   | Paste_start
   | Paste_end
 
@@ -666,6 +759,7 @@ let decode_event (event : Bonsai_term.Event.t) : input option =
   match event with
   | Paste `Start -> Some Paste_start
   | Paste `End -> Some Paste_end
+  | Key_press { key = Tab; mods = [ Shift ] } -> Some Focus_previous
   | Key_press { key = ASCII ('u' | 'U'); mods = [ Ctrl ] } -> Some Clear_filter
   | Key_press { key = Uchar value; mods = [ Ctrl ] }
     when Uchar.equal value (Uchar.of_char 'u') || Uchar.equal value (Uchar.of_char 'U') ->
@@ -910,22 +1004,53 @@ let input t event ~commands : t * effect =
             ; notice = "Filter: type text; Enter/Esc returns to browsing"
             }
           , No_effect )
-        | Focus, _ ->
+        | (Focus | Focus_previous), _ ->
           let visible = tiles t in
           let index =
             List.findi visible ~f:(fun _ tile ->
               Option.value_map t.focus ~default:false ~f:(W.Tile_id.equal tile.id))
-            |> Option.value_map ~default:(-1) ~f:fst
+            |> Option.value_map
+                 ~default:
+                   (match event with
+                    | Focus_previous -> 0
+                    | _ -> -1)
+                 ~f:fst
           in
           let focus =
             if List.is_empty visible
             then None
             else
               Option.map
-                (List.nth visible ((index + 1) mod List.length visible))
+                (List.nth
+                   visible
+                   ((index
+                     + List.length visible
+                     +
+                     match event with
+                     | Focus_previous -> -1
+                     | _ -> 1)
+                    mod List.length visible))
                 ~f:(fun tile -> tile.id)
           in
           { t with focus; prefix = 0 }, No_effect
+        | (Character 'j' | Next | Character 'k' | Previous), _
+          when Option.exists (focused t) ~f:(fun tile ->
+                 String.equal tile.kind "workspace-tabs") ->
+          let tile = Option.value_exn (focused t) in
+          let delta =
+            match event with
+            | Character 'k' | Previous -> -1
+            | _ -> 1
+          in
+          browse_workspaces { t with prefix = 0 } tile.id ~delta, No_effect
+        | Enter, _
+          when Option.exists (focused t) ~f:(fun tile ->
+                 String.equal tile.kind "workspace-tabs") ->
+          let tile = Option.value_exn (focused t) in
+          let t = { t with prefix = 0 } in
+          ( Option.value_map (workspace_cursor t tile.id) ~default:t ~f:(fun w ->
+              switch t w.id)
+          , No_effect )
         | Enter, _ -> { t with prefix = 0 }, Activate
         | _, _ -> { t with prefix = 0 }, No_effect))
 ;;
@@ -942,6 +1067,112 @@ let select_run t run =
          ; run
          })
   | _ -> None
+;;
+
+let%test_unit "Tab and Shift-Tab wrap only visible tiles and honor zoom and modals" =
+  let s = W.initial ~session_id:(W.Session_id.of_string "reverse-focus") in
+  let first = List.hd_exn s.tiles in
+  let extra = { first with id = W.Tile_id.of_string "extra"; kind = "live-status" } in
+  let hidden = { extra with id = W.Tile_id.of_string "hidden"; hidden = true } in
+  let s = { s with tiles = s.tiles @ [ hidden; extra ] } in
+  let host = receive empty s in
+  let reverse =
+    decode_event (Key_press { key = Tab; mods = [ Shift ] }) |> Option.value_exn
+  in
+  let step t event = fst (input t event ~commands:[]) in
+  let previous = step host reverse in
+  assert (Option.equal W.Tile_id.equal previous.focus (Some extra.id));
+  assert (Option.equal W.Tile_id.equal (step previous Focus).focus host.focus);
+  let modal = step { host with editing_filter = true } reverse in
+  assert (Option.equal W.Tile_id.equal modal.focus host.focus);
+  let pasted = step { host with paste = true } reverse in
+  assert (Option.equal W.Tile_id.equal pasted.focus host.focus);
+  let workspace = List.hd_exn s.workspaces in
+  let zoomed =
+    { s with
+      workspaces =
+        List.map s.workspaces ~f:(fun w ->
+          if W.Workspace_id.equal workspace.id w.id
+          then { w with zoomed_tile = Some first.id }
+          else w)
+    }
+  in
+  let zoomed = step (receive host zoomed) reverse in
+  assert (Option.equal W.Tile_id.equal zoomed.focus (Some first.id));
+  let no_tiles = step (receive host { s with tiles = [] }) reverse in
+  assert (Option.is_none no_tiles.focus)
+;;
+
+let%test_unit "workspace tabs browse registry IDs and switch without mutating contexts" =
+  let s = W.initial ~session_id:(W.Session_id.of_string "workspace-tabs") in
+  let overview = List.hd_exn s.workspaces
+  and timing = List.last_exn s.workspaces in
+  let tile = { (List.hd_exn s.tiles) with kind = "workspace-tabs" } in
+  (* Duplicate labels must not merge destinations; registry ordering is authoritative. *)
+  let s =
+    { s with
+      tiles = tile :: List.tl_exn s.tiles
+    ; workspaces = [ overview; { timing with name = overview.name } ]
+    }
+  in
+  let host = receive empty s in
+  let step t key = fst (input t key ~commands:[]) in
+  assert (
+    W.Workspace_id.equal (Option.value_exn (workspace_cursor host tile.id)).id overview.id);
+  let browsed = step host (Character 'j') in
+  assert (phys_equal browsed.registry host.registry);
+  assert (Option.equal W.Workspace_id.equal browsed.active host.active);
+  assert (
+    W.Workspace_id.equal
+      (Option.value_exn (workspace_cursor browsed tile.id)).id
+      timing.id);
+  let selected = step browsed Enter in
+  assert (Option.equal W.Workspace_id.equal selected.active (Some timing.id));
+  assert (Option.equal W.Snapshot.equal selected.registry host.registry);
+  let returned = switch selected overview.id in
+  assert (Option.equal W.Tile_id.equal returned.focus (Some tile.id));
+  assert (
+    W.Workspace_id.equal
+      (Option.value_exn (workspace_cursor returned tile.id)).id
+      timing.id);
+  assert (phys_equal (switch returned (W.Workspace_id.of_string "missing")) returned);
+  let removed = receive browsed { s with workspaces = [ overview ] } in
+  assert (
+    W.Workspace_id.equal
+      (Option.value_exn (workspace_cursor removed tile.id)).id
+      overview.id);
+  let renewed =
+    receive browsed { s with session_id = W.Session_id.of_string "replacement" }
+  in
+  assert (List.is_empty renewed.locals && List.is_empty renewed.workspace_focus);
+  assert (
+    W.Workspace_id.equal
+      (Option.value_exn (workspace_cursor renewed tile.id)).id
+      overview.id)
+;;
+
+let%test_unit "overview utilities and explicit Testing creation are available additively" =
+  let s = W.initial ~session_id:(W.Session_id.of_string "overview-commands") in
+  let host = receive empty s in
+  let commands = catalog host ~project:None ~jobs:[] in
+  List.iter [ "live-status"; "workspace-tabs"; "stage-checklist" ] ~f:(fun kind ->
+    assert (List.exists commands ~f:(fun c -> String.equal c.id ("tile.add." ^ kind)));
+    assert (
+      List.exists
+        (missing_default_tiles s (List.hd_exn s.workspaces))
+        ~f:(function
+          | Create_tile spec -> String.equal spec.kind kind
+          | _ -> false)));
+  assert (project_scoped_kind "live-status" && project_scoped_kind "workspace-tabs");
+  assert (not (project_scoped_kind "stage-checklist"));
+  assert (List.exists commands ~f:(fun c -> String.equal c.id "workspace.create-testing"));
+  let testing = { (List.last_exn s.workspaces) with name = "Testing" } in
+  let s = { s with workspaces = [ List.hd_exn s.workspaces; testing ] } in
+  assert (
+    not
+      (List.exists
+         (catalog (receive host s) ~project:None ~jobs:[])
+         ~f:(fun c -> String.equal c.id "workspace.create-testing")))
 ;;
 
 let%test_unit "finalization form dispatches only an explicit exact attempt and captured \
