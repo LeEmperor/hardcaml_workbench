@@ -24,18 +24,20 @@ Project/provider commands remain useful without the application.
 | [FS1 acceptance](fs1_acceptance.md) | Aggregate timing/resources/checks, declared-clock context, finalization import, real physical/acceptance/cancellation evidence and remaining scope |
 | [Finalization and artifacts](fs1_lifecycle_and_artifacts.md) | Workbench-owned collect/accept, live phases, cancel/reconnect, bounded report paging and explicit external text export |
 | [FS1 investigation](fs1_investigation.md) | Completed adopted-evidence scope: paths, measured clocks, physical/routing tables, binary handoff, verified provider generation and activation |
+| [FS2 simulation](fs2_acceptance.md) | Structured suites/cases/seeds, live failures, reruns, history and trace controls with real Cyclesim/native HTTP/PTY evidence |
+| [FS2 provider contract](fs2_simulation_contract.md) / [implementation plan](fs2_implementation_plan.md) | Versioned configuration/events/RPC, bounds and feature-set ownership |
 | [Formatting](formatting_guide.md) | Source conventions |
 | [Backlog](backlog/README.md) | Deferred work and reactivation triggers |
 | [Archive](archive/README.md) | Superseded plans and historical acceptance evidence |
 
 The feature list is the concise product inventory; feature sets group delivery
-themes (FS0 delivered; bounded FS1 and FS5 slices underway). Focused feature documents record
+themes (FS0 and adopted FS1 delivered; substantial FS2 and the first FS5 slice delivered). Focused feature documents record
 behavior and boundaries; the construction plan alone owns implementation order and
 completion checklist. Focused acceptance records linked there own exact runtime
 evidence. A feature request or a provider capability is not proof
 of an implemented Workbench feature.
 
-## Current orientation — 2026-10-15
+## Current orientation — 2026-10-16
 
 - **FS0 Demos A–C delivered with bounded limitations:** typed execution boundary,
   tile host/palette, project-scoped tests/logs, named workspaces, linked/independent
@@ -49,9 +51,13 @@ of an implemented Workbench feature.
 - **D1 accepted:** windows are attached surfaces; Overview/Timing/Resources are
   workspaces. Their selectors control a shared Main run context by default, with
   explicit independence/relink and per-tile references. See [F10](features/run_contexts.md).
-- [F09 simulation/tests](features/simulation_and_tests.md) now use the existing
-  generic Dune supervisor through the Execution module and project-scoped tiles.
-  Rich cases/seeds/traces remain later FS2 work.
+- [F09 simulation/tests](features/simulation_and_tests.md) retain generic Dune tests
+  and add structured FS2 suites/cases/seeds, live outcomes, targeted reruns, bounded
+  history and exact trace export over the existing supervisor. Real Cyclesim and
+  native HTTP/PTY acceptance passed. The owner accepted the basic demo and authorized
+  milestone closure; [controls and evidence](fs2_acceptance.md),
+  [followups](backlog/fs2_followups.md), and
+  [integration handoff](fs2_acceptance.md#integration-handoff).
 - **D2/D3 FS0 defaults accepted:** captured/revalidated targets, no missing-flow
   fallback, ordinary launch does not select, guarded launch-and-view, follow/pin-run
   first. Immutable snapshots/archival retention and richer command policy are later.
@@ -73,7 +79,8 @@ of an implemented Workbench feature.
   import. Real six-stage execution, external acceptance and owned-container
   cancellation have separate retained evidence. The final [FS1 investigation](fs1_investigation.md)
   delivers path/corner/group navigation, measured clock evidence and stage-specific
-  physical/routing/congestion tables. FS2 structured simulation remains unstarted.
+  physical/routing/congestion tables. FS2 project-scoped structured simulation is
+  now delivered independently of ASIC configuration.
 - Workbench-owned finalization/acceptance and report/artifact text viewing are
   delivered, with real palette/transport detach, cancellation, idempotency and
   restart checks. External text opening uses a private terminal-host export,

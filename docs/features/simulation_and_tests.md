@@ -1,11 +1,20 @@
 # F09 — Simulation and test module, runner and tiles
 
-Status (2026-10-15): **FS0 generic execution/test module and project-scoped tile
-delivered** over the existing supervisor, with attempts/status/log/cancel and no
-second scheduler. See [Execution](../fs0_execution_module.md),
-[installed checks](../fs0_install_checks.md) and [acceptance](../fs0_acceptance.md).
-Requirements remain normative: structured cases/seeds/regressions/traces (FS2) and
-generic test-history restart persistence are not implemented.
+Status (2026-10-16): **FS0 generic execution/test module and FS2 structured
+project-scoped simulation delivered; agreed FS2 milestone accepted and closed**
+over the existing supervisor, without a second
+scheduler. FS2 adds versioned suite/case discovery, explicit seeds/parameters, live
+progress/outcomes, failure detail/reports, targeted reruns, independent tiles,
+bounded durable simulation history and byte-exact trace export/external handoff.
+Actual Cyclesim and native HTTP/PTY acceptance passed; see
+[FS2 controls and evidence](../fs2_acceptance.md) and
+[provider/RPC contract](../fs2_simulation_contract.md).
+Owner acceptance covers the basic demo workflow; additional adoption/performance
+work is in [FS2 followups](../backlog/fs2_followups.md).
+Generic Dune test jobs still do not acquire structured cases or restart history
+automatically. Gate-level adapters, archived-build replay and embedded waveform
+exploration remain later integrations. Historical FS0 evidence is in
+[Execution](../fs0_execution_module.md) and [acceptance](../fs0_acceptance.md).
 
 ## User outcome
 
@@ -52,7 +61,7 @@ show unrelated project results beneath a new run label.
 Shared run contexts (F10) govern ASIC evidence selection, not every local control
 inside every tile. Test-attempt selection is a separate, typed view context.
 
-## Later structured simulation/regression adapters
+## Structured simulation/regression adapters
 
 - Project-declared suites/cases, seeds, parameters, durations and outcomes with
   explicit schema/capability discovery. Test semantics remain project-owned.
@@ -64,8 +73,9 @@ inside every tile. Test-attempt selection is a separate, typed view context.
   actions. Embedded waveform/signal exploration remains deferred, not a first-demo
   dependency. Registering a trace is distinct from implementing a waveform viewer.
 - Persistent historical test evidence when a provider supplies durable records or
-  a separately specified Workbench-owned test record store is implemented. Current
-  daemon-memory job state does not establish restart-persistent test history.
+  a separately specified Workbench-owned test record store is implemented. FS2 now
+  supplies that bounded record store for structured simulations; generic
+  daemon-memory job state still does not establish restart-persistent test history.
 
 ## Acceptance and delivery
 

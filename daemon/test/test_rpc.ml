@@ -139,6 +139,7 @@ let run () =
            ; "read-hierarchy"
            ; "workspace"
            ; "asic"
+           ; "simulation"
            ])
         "hello did not advertise the complete V1 capability set";
       let snapshot = Rpc.snapshot rpc { instance_id } in
@@ -431,6 +432,39 @@ let run () =
              })
       in
       let opened = decode_exn V1.Open_project.Response.t_of_sexp opened_body |> ok in
+      let%bind simulation_body =
+        post
+          rpc
+          Simulation.rpc_path
+          (Simulation.Request.sexp_of_t
+             { instance_id; project = opened.project.id; operation = Get })
+      in
+      let simulation = decode_exn Simulation.Response.t_of_sexp simulation_body |> ok in
+      require
+        ((not simulation.configured) && List.is_empty simulation.attempts)
+        "Unconfigured simulation snapshot failed";
+      let%bind simulation_changed =
+        post
+          rpc
+          Simulation.rpc_path
+          (Simulation.Request.sexp_of_t
+             { instance_id = "other"; project = opened.project.id; operation = Get })
+      in
+      require_instance_changed
+        (decode_exn Simulation.Response.t_of_sexp simulation_changed)
+        "Simulation omitted instance fence";
+      let%bind simulation_discover =
+        post
+          rpc
+          Simulation.rpc_path
+          (Simulation.Request.sexp_of_t
+             { instance_id; project = opened.project.id; operation = Discover })
+      in
+      require
+        (match decode_exn Simulation.Response.t_of_sexp simulation_discover with
+         | Error error -> V1.Error.Kind.equal error.kind Unsupported_operation
+         | Ok _ -> false)
+        "Simulation discovery invented a provider";
       require
         (V1.Environment_selection.equal opened.environment.selection Inherit_daemon)
         "open-project did not preserve inherited environment selection";

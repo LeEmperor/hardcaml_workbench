@@ -1,6 +1,6 @@
 # Feature inventory
 
-Updated 2026-10-15 against current source and FS0 acceptance. **FS0 Demos A–C are
+Updated 2026-10-16 against current source and FS0/FS2 acceptance. **FS0 Demos A–C are
 delivered with bounded limitations.** **Requested** means desired support, not
 delivered behavior. Demo scope is deliberately smaller than the full
 inventory. Dependencies below are semantic dependencies, not a demand to finish an
@@ -22,7 +22,7 @@ land in FS0 without requiring all visual variants before functional demos.
 | [F06 Hardware inspection](features/hardware_inspection.md) | Inspect synthesis, hierarchy, timing, physical evidence and checks | RTL/hierarchy, synthesis, timing paths, measured clocks, stage-specific physical/routing/congestion, checks, report paging and text/binary handoff delivered | FS1 complete for adopted evidence; embedded graphics, unsupported mappings and later provider extensions remain |
 | [F07 Project setup](features/project_setup.md) | Initialize existing repositories and offer approachable starter layouts | Root manifest exists; initialization/templates pending | Configure existing specimen; creation later |
 | [F08 External clients](features/external_clients.md) | Ches summaries/source jumps, automation, MCP and eventual embedded editing | Application RPC exists; integrations pending | Keep contracts usable outside the TUI; clients later |
-| [F09 Simulation and tests](features/simulation_and_tests.md) | Run tests/simulations, inspect attempts/logs/failures, later explore structured cases/traces | Project-scoped module/tile, attempts/logs/cancel delivered over existing supervisor | Real PDK-free tests passed; no structured cases/seeds/traces (FS2) |
+| [F09 Simulation and tests](features/simulation_and_tests.md) | Run tests/simulations, inspect cases/seeds/failures and traces | Generic tests plus structured FS2 suites, progress, reruns, durable history and exact trace export delivered over existing supervisor | Real Cyclesim/native HTTP/PTY passed; gate-level adapters, archived-build replay and embedded waveforms remain later |
 | [F10 Run contexts](features/run_contexts.md) | Link selectors across workspaces, detach for investigation and relink | Daemon-owned revisioned Main/independent contexts and pins delivered/persisted | Linked selectors, independent/relink, move semantics; multi-monitor acceptance later |
 | [F11 Run-summary cache](features/run_summary_cache.md) | Switch runs quickly without repeatedly parsing reports; reuse summaries after restart | Bounded L1/L2, coalescing, observation invalidation and explicit Refresh delivered | Fixture 2→2 report calls; real exact restart identity with Cached_unverified; no cheap revision query |
 | [F12 Appearance and gallery](features/appearance.md) | Mix skins/tabs/color/icons/density over composable tiles; compare A–E before selecting defaults | First A–E skins and independent presentation controls delivered; richer gallery/review pending | Actual host palette controls and shared synthetic captures |
@@ -81,7 +81,10 @@ The [construction plan](construction_phase_plan.md) records delivered conditions
 true leftovers and consolidated candidate/evidence links. [Acceptance](fs0_acceptance.md)
 and [installed checks](fs0_install_checks.md) record runtime results. FS1 synthesis
 inspection plus aggregate physical/terminal evidence and FS5's first appearance
-slice are delivered; FS2 remains unstarted. [FS1 acceptance](fs1_acceptance.md)
+slice are delivered; [substantial FS2 delivery](fs2_acceptance.md) now includes
+structured project-scoped simulation and real Cyclesim acceptance. The agreed FS2
+milestone is accepted and closed; [followups](backlog/fs2_followups.md) preserve later
+scope independently of closure. [FS1 acceptance](fs1_acceptance.md)
 separates implemented behavior, real evidence and remaining full-set scope.
 Later feature scope remains recorded here without becoming a release
 prerequisite. [Backlog](backlog/README.md) retains unrelated deferred ideas.

@@ -11,8 +11,11 @@ requests, including project setup, Ches integration and automation. A focused sp
 preserves desired behavior without making every feature a first-demo requirement.
 Shared run contexts and workspace terminology are accepted in D1; D2/D3 retain
 command-policy and exact-snapshot questions in the [decision log](../decisions.md).
-The [simulation/test module](../features/simulation_and_tests.md) is active demo
-scope; embedded waveform exploration remains deferred separately.
+The agreed [FS2 simulation/test milestone](../fs2_acceptance.md) is delivered,
+accepted and closed. [Named FS2 followups](fs2_followups.md) preserve FIFO adoption,
+trace streaming, responsiveness/reconnect/log retention and additional simulation
+capabilities with explicit activation and acceptance criteria. Embedded waveform
+exploration remains deferred separately.
 
 | Deferred item | Preserved intent | Reactivation trigger |
 | --- | --- | --- |

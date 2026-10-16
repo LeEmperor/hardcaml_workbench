@@ -16,7 +16,9 @@
   host_view
   plain_rpc
   launch_preferences
-  asic_intents)
+  asic_intents
+  simulation_view
+  simulation_export)
  (libraries
   async
   core

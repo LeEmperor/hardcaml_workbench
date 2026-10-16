@@ -46,6 +46,7 @@ let create ~application_version ~instance_id ~service =
             ; "read-hierarchy"
             ; "workspace"
             ; "asic"
+            ; "simulation"
             ]
         }
     ; service
@@ -298,6 +299,14 @@ let handle_post t ~path ~headers ~body =
          | Error error -> boundary_error `Bad_request error.kind "malformed ASIC request"
          | Ok request ->
            operation_response (Service.asic t.service request) Asic.Response.sexp_of_t)
+      | Ok body when String.equal path Simulation.rpc_path ->
+        (match decode body Simulation.Request.t_of_sexp with
+         | Error error ->
+           boundary_error `Bad_request error.kind "malformed simulation request"
+         | Ok request ->
+           operation_response
+             (Service.simulation t.service request)
+             Simulation.Response.sexp_of_t)
       | Ok _ -> boundary_error `Not_found Not_found "unknown operation")
   | _ ->
     boundary_error
@@ -332,7 +341,8 @@ let callback t ~body _peer request =
          | "/api/v1/read-artifact"
          | "/api/v1/read-hierarchy"
          | "/api/v1/workspace"
-         | "/api/v1/asic" ) ) -> handle_post t ~path ~headers ~body
+         | "/api/v1/asic"
+         | "/api/v1/simulation" ) ) -> handle_post t ~path ~headers ~body
      | _ -> boundary_error `Not_found Not_found "unknown endpoint or protocol version")
 ;;
 

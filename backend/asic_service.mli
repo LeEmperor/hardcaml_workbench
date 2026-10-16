@@ -21,6 +21,14 @@ val handle
     acceptance/barriers, not the interactive read path. *)
 val completion : t -> unit Deferred.t
 
+(** Pure, already-loaded observation for a reservation fence. Never loads configuration,
+    starts work, waits or performs I/O. *)
+val peek_snapshot
+  :  t
+  -> root:string
+  -> environment:V1.Environment_selection.t
+  -> Asic.Snapshot.t option
+
 (** Daemon shutdown only: cancel and reap owned processes and flush registry writes.
     Historical producers are never signalled by reader cancellation/shutdown. *)
 val shutdown : t -> unit Deferred.t

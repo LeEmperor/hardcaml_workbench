@@ -1,5 +1,6 @@
 (test
  (name test_service)
+ (modules test_service)
  (libraries
   async
   core
@@ -12,3 +13,20 @@
   (pps ppx_jane))
  (lint
   (pps ppx_js_style)))
+
+(test
+ (name test_simulation)
+ (modules test_simulation)
+ (libraries
+  async
+  core
+  core_unix
+  core_unix.command_unix
+  hardcaml_workbench_backend
+  hardcaml_workbench_project_integration
+  hardcaml_workbench_protocol)
+ (preprocess
+  (pps ppx_jane))
+ (deps fs2_provider.py)
+ (action
+  (run %{test} %{dep:fs2_provider.py})))

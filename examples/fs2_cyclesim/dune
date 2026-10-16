@@ -1,0 +1,5 @@
+(executable
+ (name counter)
+ (libraries core hardcaml)
+ (preprocess
+  (pps ppx_jane)))
