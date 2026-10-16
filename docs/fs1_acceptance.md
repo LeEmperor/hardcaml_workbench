@@ -1,5 +1,10 @@
 # FS1 — ASIC evidence investigation: implementation and acceptance
 
+**Historical slice record.** The subsequent [FS1 investigation completion](fs1_investigation.md)
+delivers the timing-path, measured-clock, physical/routing and binary-handoff work
+listed as remaining here. Its final provider generation and verification record
+own the current adopted-evidence completion status; the evidence below is preserved.
+
 Recorded 2026-10-15 from current Workbench code and retained evidence.
 **FS1 is substantially delivered, with bounded aggregate investigation and real
 physical/acceptance/cancellation evidence; the full normative FS1/F06 scope is

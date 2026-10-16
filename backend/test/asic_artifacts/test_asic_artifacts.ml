@@ -19,6 +19,18 @@ let rejects f =
   require (Result.is_error (Or_error.try_with f)) "Expected invalid evidence"
 ;;
 
+let byte_error r ~offset ~limit =
+  let page = Artifacts.read_bytes ~reference:r ~offset ~limit in
+  require
+    (Option.is_some page.error
+     && String.is_empty page.bytes_hex
+     && page.offset = offset
+     && page.limit = limit
+     && page.next_offset = offset
+     && not page.eof)
+    "Byte read error leaked bytes, advanced offset, or lost request identity"
+;;
+
 let read_error r =
   let page = Artifacts.read ~reference:r ~offset:0 ~limit:1024 in
   require
@@ -151,10 +163,21 @@ let test_catalog () =
   read_error { metrics with run = { metrics.run with id = "other-run" } };
   read_error { metrics with terminal_attempt = "/other-attempt" };
   read_error { metrics with sha256 = String.make 64 '0' };
+  List.iter
+    [ { metrics with path = "/etc/passwd" }
+    ; { metrics with id = "unlisted-id" }
+    ; { metrics with run = { metrics.run with id = "other-run" } }
+    ; { metrics with terminal_attempt = "/other-attempt" }
+    ; { metrics with sha256 = String.make 64 '0' }
+    ; { metrics with size = metrics.size + 1 }
+    ; { metrics with kind = "binary" }
+    ]
+    ~f:(fun r -> byte_error r ~offset:0 ~limit:1024);
   rejects (fun () ->
     Artifacts.list ~summary:{ summary with run = { summary.run with id = "other-run" } });
   write (Filename.concat root "metrics.csv") "tampered";
   read_error metrics;
+  byte_error metrics ~offset:0 ~limit:1024;
   rejects (fun () -> Artifacts.list ~summary);
   let root, summary = fixture () in
   write (Filename.concat root "results.json") "{}";
@@ -271,17 +294,127 @@ let test_containment_and_replacement () =
   Core_unix.unlink path;
   Core_unix.symlink ~target:absolute ~link_name:path;
   read_error r;
+  byte_error r ~offset:0 ~limit:1024;
   Core_unix.unlink path;
   Core_unix.mkfifo path ~perm:0o600;
   read_error r;
+  byte_error r ~offset:0 ~limit:1024;
   Core_unix.unlink path;
   write path (String.make ((16 * 1024 * 1024) + 1) 'x');
   read_error r;
+  byte_error r ~offset:0 ~limit:1024;
   rejects (fun () -> Artifacts.list ~summary);
   let _, summary =
     fixture ~extra:(List.init 30 ~f:(fun i -> Int.to_string i ^ ".txt", "x")) ()
   in
   rejects (fun () -> Artifacts.list ~summary)
+;;
+
+let test_byte_pages () =
+  let raw =
+    "\000\255\192\128\r\n\027\195\169"
+    ^ String.init 65539 ~f:(fun i -> Char.of_int_exn (i mod 256))
+  in
+  let text = "\195\169\r\n\027[31m\ttext" in
+  let root, summary =
+    fixture ~extra:[ "chip.gds", raw; "empty.gds", ""; "raw.txt", text ] ()
+  in
+  let catalog = Artifacts.list ~summary in
+  let reference = find catalog "chip.gds" in
+  require
+    (String.equal reference.kind "binary" && String.equal reference.sha256 (hash raw))
+    "GDS not cataloged with full raw SHA-256";
+  let page offset limit = Artifacts.read_bytes ~reference ~offset ~limit in
+  let decode (page : Asic_artifact.Byte_page.t) =
+    require (Option.is_none page.error) "Unexpected byte read error";
+    Cryptokit.transform_string (Cryptokit.Hexa.decode ()) page.bytes_hex
+  in
+  let first = page 0 65536 in
+  let last = page first.next_offset 65536 in
+  let reconstructed = decode first ^ decode last in
+  require
+    (String.length first.bytes_hex = 2 * 65536
+     && first.next_offset = 65536
+     && (not first.eof)
+     && last.next_offset = String.length raw
+     && last.eof
+     && String.equal reconstructed raw
+     && String.equal (hash reconstructed) reference.sha256
+     && String.equal first.artifact_id reference.id
+     && Run_ref.equal first.run reference.run
+     && String.equal first.terminal_attempt reference.terminal_attempt
+     && String.equal first.sha256 reference.sha256)
+    "Raw page boundaries, metadata, reconstruction or full SHA-256 incorrect";
+  let eof = page (String.length raw) 1 in
+  require
+    (String.is_empty (decode eof) && eof.eof && eof.next_offset = String.length raw)
+    "Byte EOF incorrect";
+  let exact = page (String.length raw - 1) 1 in
+  require
+    (exact.eof && String.equal (decode exact) (String.suffix raw 1))
+    "Exact boundary EOF incorrect";
+  require (String.equal (page 0 2).bytes_hex "00ff") "Raw hex encoding incorrect";
+  require
+    (Asic_artifact.Byte_page.equal (page 0 1) (page 0 1)
+     && not (Asic_artifact.Byte_page.equal (page 0 1) (page 0 2)))
+    "Duplicate/cross-limit byte page identities incorrect";
+  let key offset limit =
+    Asic_artifact.byte_read_key
+      ~run:reference.run
+      ~artifact_id:reference.id
+      ~offset
+      ~limit
+  in
+  require
+    (String.equal (key 0 2) ("artifact-bytes:run-1:" ^ reference.id ^ ":0:2")
+     && String.equal (key 0 2) (key 0 2)
+     && (not (String.equal (key 0 1) (key 0 2)))
+     && (not (String.equal (key 0 2) (key 1 2)))
+     && not
+          (String.equal
+             (key 0 2)
+             (Asic_artifact.read_key
+                ~run:reference.run
+                ~artifact_id:reference.id
+                ~offset:0
+                ~limit:2)))
+    "Byte scheduling key collides or omits paging arguments";
+  (* At EOF different requested limits still have distinct identities. *)
+  require
+    (not (Asic_artifact.Byte_page.equal eof (page (String.length raw) 2)))
+    "Empty byte pages lost requested limit";
+  List.iter
+    [ -1, 1; 0, 0; 0, -1; 0, 65537; 0, Int.max_value; String.length raw + 1, 1 ]
+    ~f:(fun (offset, limit) -> byte_error reference ~offset ~limit);
+  let empty =
+    Artifacts.read_bytes ~reference:(find catalog "empty.gds") ~offset:0 ~limit:65536
+  in
+  require
+    (String.is_empty (decode empty) && empty.eof && empty.next_offset = 0)
+    "Empty artifact byte transfer failed";
+  let text_ref = find catalog "raw.txt" in
+  let text_page = Artifacts.read_bytes ~reference:text_ref ~offset:0 ~limit:65536 in
+  require
+    (String.equal text_ref.kind "text" && String.equal (decode text_page) text)
+    "Byte reader changed text controls or newlines";
+  let continuation = Artifacts.read_bytes ~reference:text_ref ~offset:1 ~limit:1 in
+  require
+    (String.equal (decode continuation) "\169" && continuation.next_offset = 2)
+    "Byte reader applied UTF-8 scalar boundaries";
+  (* A forwarded exact server reference works on read-only files and leaves bytes intact. *)
+  let forwarded = Reference.t_of_sexp (Reference.sexp_of_t reference) in
+  let path = Filename.concat root "chip.gds" in
+  Core_unix.chmod path ~perm:0o400;
+  let readonly = Artifacts.read_bytes ~reference:forwarded ~offset:0 ~limit:65536 in
+  require
+    (String.equal (decode readonly) (String.prefix raw 65536)
+     && String.equal (In_channel.read_all path) raw)
+    "Forwarded known read-only artifact failed or changed";
+  Core_unix.chmod path ~perm:0o600;
+  (* Same-size tampering outside the requested slice must invalidate every page. *)
+  write path (String.prefix raw (String.length raw - 1) ^ "x");
+  byte_error reference ~offset:0 ~limit:1;
+  byte_error reference ~offset:(String.length raw) ~limit:1
 ;;
 
 let test_selected_checkpoint_sources () =
@@ -324,9 +457,57 @@ let test_selected_checkpoint_sources () =
     "Unhashed external source entered catalog"
 ;;
 
+let test_explicit_checkpoint_image () =
+  let png = "\137PNG\r\n\026\n\000\255image" in
+  let outside, _ = fixture ~extra:[ "layout.png", png; "unselected.png", png ] () in
+  let source = Filename.concat outside "layout.png" in
+  let selected sha256 =
+    json
+      [ "source", str source
+      ; "sha256", str sha256
+      ; "mapped", str "layout.png"
+      ; "boundary", str "signoff"
+      ]
+  in
+  let checkpoints = [ json [ "boundary", str "signoff"; "path", str outside ] ] in
+  let _, summary =
+    fixture ~extra:[ "layout.png", png ] ~selected:[ selected (hash png) ] ~checkpoints ()
+  in
+  let catalog = Artifacts.list ~summary in
+  let reference =
+    List.find_exn catalog ~f:(fun r -> String.equal r.Reference.path source)
+  in
+  let page = Artifacts.read_bytes ~reference ~offset:0 ~limit:65536 in
+  require
+    (String.equal reference.kind "binary"
+     && Option.is_none page.error
+     && page.eof
+     && String.equal
+          (Cryptokit.transform_string (Cryptokit.Hexa.decode ()) page.bytes_hex)
+          png)
+    "Explicit hash-bearing checkpoint PNG could not transfer raw bytes";
+  require
+    (not
+       (List.exists catalog ~f:(fun r ->
+          String.equal (Filename.basename r.Reference.path) "unselected.png")))
+    "Checkpoint directory was scanned for unselected images";
+  let _, summary =
+    fixture
+      ~extra:[ "layout.png", png ]
+      ~selected:[ selected (String.make 64 '0') ]
+      ~checkpoints
+      ()
+  in
+  rejects (fun () -> Artifacts.list ~summary);
+  write source (png ^ "tampered");
+  byte_error reference ~offset:0 ~limit:1
+;;
+
 let () =
   test_catalog ();
   test_pages ();
+  test_byte_pages ();
   test_containment_and_replacement ();
-  test_selected_checkpoint_sources ()
+  test_selected_checkpoint_sources ();
+  test_explicit_checkpoint_image ()
 ;;

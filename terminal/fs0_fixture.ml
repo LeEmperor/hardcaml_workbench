@@ -57,5 +57,8 @@ let snapshot : Asic.Snapshot.t =
   ; finalizations = []
   ; artifacts = []
   ; artifact_pages = []
+  ; artifact_byte_pages = []
+  ; inspections = []
+  ; inspection_details = []
   }
 ;;

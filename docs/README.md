@@ -23,18 +23,20 @@ Project/provider commands remain useful without the application.
 | [Synthesis inspection](synthesis_inspection.md) | FS1/F06 cell table, filter/sort, row detail and evidence controls |
 | [FS1 acceptance](fs1_acceptance.md) | Aggregate timing/resources/checks, declared-clock context, finalization import, real physical/acceptance/cancellation evidence and remaining scope |
 | [Finalization and artifacts](fs1_lifecycle_and_artifacts.md) | Workbench-owned collect/accept, live phases, cancel/reconnect, bounded report paging and explicit external text export |
+| [FS1 investigation](fs1_investigation.md) | Completed adopted-evidence scope: paths, measured clocks, physical/routing tables, binary handoff, verified provider generation and activation |
 | [Formatting](formatting_guide.md) | Source conventions |
 | [Backlog](backlog/README.md) | Deferred work and reactivation triggers |
 | [Archive](archive/README.md) | Superseded plans and historical acceptance evidence |
 
 The feature list is the concise product inventory; feature sets group delivery
-themes (FS0 delivered; bounded FS1 and FS5 slices underway). Focused feature documents record
+themes (FS0 and adopted-evidence FS1 delivered; FS5's first appearance slice delivered).
+Focused feature documents record
 behavior and boundaries; the construction plan alone owns implementation order and
 completion checklist. Focused acceptance records linked there own exact runtime
 evidence. A feature request or a provider capability is not proof
 of an implemented Workbench feature.
 
-## Current orientation — 2026-10-15
+## Current orientation — 2026-10-16
 
 - **FS0 Demos A–C delivered with bounded limitations:** typed execution boundary,
   tile host/palette, project-scoped tests/logs, named workspaces, linked/independent
@@ -64,20 +66,30 @@ of an implemented Workbench feature.
   independent color/icon/density controls are delivered; richer gallery fixtures,
   reusable tabs and final aesthetic review remain pending. No embedded editor is selected.
 - Limits: shelf layout rather than freeform geometry; no template export/clone;
-  local chrome/header preferences do not persist; clock-driven redraw and a basic
-  endpoint/assignment form; rich timing paths and measured CTS remain unsupported. Remaining frontend race/reconnect/
-  cancellation coverage and scaling measurements are explicit in M0–M3.
+  local chrome/header preferences do not persist; domain refresh is polled and
+  the endpoint/assignment form remains basic. Local input redraw is immediate.
+  Embedded graphical editing and unsupported source mappings remain later work.
+  Broader frontend race/reconnect/cancellation coverage and scaling measurements
+  remain explicit followups.
 - FS1 now includes [synthesis metrics and aggregate physical evidence](fs1_acceptance.md),
   signed timing, check verdicts, verified declared clocks and exact finalization
   import. Real six-stage execution, external acceptance and owned-container
-  cancellation have separate retained evidence. Full FS1 remains open for richer
-  path/CTS/physical explorers. FS2 structured simulation remains unstarted.
+  cancellation have separate retained evidence. The final [FS1 investigation](fs1_investigation.md)
+  delivers path/corner/group navigation, measured clock evidence and stage-specific
+  physical/routing/congestion tables. FS2 structured simulation remains unstarted.
 - Workbench-owned finalization/acceptance and report/artifact text viewing are
   delivered, with real palette/transport detach, cancellation, idempotency and
   restart checks. External text opening uses a private terminal-host export,
-  not the daemon's original path; binary viewers remain later work.
+  not the daemon's original path. Exact binary handoff is also delivered, with
+  a real exported GDS loaded headlessly by KLayout; interactive GUI rendering and
+  embedded editing are not claimed by that test.
 - Parent format/lint, full runtest/build, installed workflow, actual metrics/physical
   HTTP/PTY/L2 checks, original synthesis inspection and the five-mode interrupt
   matrix passed. Evidence and limitations are recorded in the active plan.
+- **Owner usability confirmation:** Escape now works well in the timing-inspection
+  workflow. This closes the reported latency followup; clearer inspector breadcrumbs,
+  contextual help, a Close inspector command, and less prominent raw JSON remain
+  [usability polish](backlog/README.md#inspector-usability-polish). FS2 can proceed
+  independently; no structured-simulation delivery is asserted by FS1 completion.
 
 Build, launch and check commands are in the repository [README](../README.md).

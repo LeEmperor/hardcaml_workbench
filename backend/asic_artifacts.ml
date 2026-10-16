@@ -363,3 +363,44 @@ let read ~(reference : Reference.t) ~offset ~limit : Asic_artifact.Page.t =
     let error = if is_text error then sanitized error else "Artifact read failed" in
     page ~error ~next_offset:offset ~eof:false ""
 ;;
+
+let read_bytes ~(reference : Reference.t) ~offset ~limit : Asic_artifact.Byte_page.t =
+  let page ?error ~next_offset ~eof bytes_hex =
+    { Asic_artifact.Byte_page.artifact_id = reference.id
+    ; run = reference.run
+    ; terminal_attempt = reference.terminal_attempt
+    ; sha256 = reference.sha256
+    ; offset
+    ; limit
+    ; next_offset
+    ; eof
+    ; bytes_hex
+    ; error
+    }
+  in
+  match
+    Or_error.try_with (fun () ->
+      require
+        (locked (fun () -> List.exists !references ~f:(Reference.equal reference)))
+        "Artifact reference was not listed (or expired); relist artifacts";
+      require (offset >= 0 && offset <= reference.size) "Artifact offset out of range";
+      require (limit > 0 && limit <= max_page) "Artifact limit must be 1..65536 bytes";
+      let bytes = contents reference.path in
+      require
+        (String.length bytes = reference.size
+         && String.equal (digest bytes) reference.sha256)
+        "Artifact changed since listing (SHA-256/size mismatch)";
+      let length = Int.min limit (String.length bytes - offset) in
+      let next_offset = offset + length in
+      let bytes_hex =
+        String.sub bytes ~pos:offset ~len:length
+        |> Cryptokit.transform_string (Cryptokit.Hexa.encode ())
+      in
+      page ~next_offset ~eof:(next_offset = String.length bytes) bytes_hex)
+  with
+  | Ok page -> page
+  | Error error ->
+    let error = Error.to_string_hum error in
+    let error = if is_text error then sanitized error else "Artifact read failed" in
+    page ~error ~next_offset:offset ~eof:false ""
+;;

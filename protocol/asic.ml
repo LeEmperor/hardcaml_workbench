@@ -182,6 +182,9 @@ module Snapshot = struct
     ; finalizations : Finalization.t list [@sexp.default []]
     ; artifacts : Asic_artifact.Reference.t list [@sexp.default []]
     ; artifact_pages : Asic_artifact.Page.t list [@sexp.default []]
+    ; artifact_byte_pages : Asic_artifact.Byte_page.t list [@sexp.default []]
+    ; inspections : Asic_inspection.Index.t list [@sexp.default []]
+    ; inspection_details : Asic_inspection.Detail.t list [@sexp.default []]
     ; cache_error : string option
     }
   [@@deriving bin_io, compare, equal, sexp]
@@ -196,7 +199,11 @@ module Operation = struct
       [Load_summary] may return cached/unverified evidence. [Inspect_finalization] adopts
       an existing public operation reference; it never starts finalization. [Finalize]
       reserves exact inputs persistently before scheduling the sole owned producer.
-      [Observe_finalization] is read-only and never reacquires process ownership. *)
+      [Observe_finalization] is read-only and never reacquires process ownership.
+      [Inspect] with [refresh=false] uses the bounded derived inspection cache or a
+      bounded cold public read; [refresh=true] revalidates public evidence. Neither starts
+      EDA. [Inspect_detail] fences the exact index digest and row. Artifact reads accept
+      only catalog IDs for the current adopted terminal attempt, never client paths. *)
   type t =
     | Get
     | Discover
@@ -222,6 +229,25 @@ module Operation = struct
         }
     | Observe_finalization of string
     | List_artifacts of Run_ref.t
+    | Inspect of
+        { run : Run_ref.t
+        ; domain : string
+        ; stage : string
+        ; refresh : bool
+        }
+    | Inspect_detail of
+        { run : Run_ref.t
+        ; domain : string
+        ; stage : string
+        ; source_digest : string
+        ; row_id : string
+        }
+    | Read_artifact_bytes of
+        { run : Run_ref.t
+        ; artifact_id : string
+        ; offset : int
+        ; limit : int
+        }
     | Read_artifact of
         { run : Run_ref.t
         ; artifact_id : string

@@ -1,6 +1,7 @@
 # Hardcaml Workbench — Demo construction plan
 
-Updated 2026-10-15. **FS0 Demos A–C delivered with bounded limitations.** This is
+Updated 2026-10-16. **FS0 Demos A–C and FS1's adopted-evidence functional scope are
+delivered with explicit limits.** This is
 the active status/checklist, replacing the October 12 P0–P7 plan in the
 [archive](archive/construction_phase_plan_2026_10_12.md). The
 [feature inventory](feature_list.md) owns product scope; the
@@ -11,8 +12,10 @@ FS0 covers M0–M3's functional slices, not every normative feature requirement.
 FS1/FS2 map to richer M4 evidence and simulation; FS3 maps to M5 adoption.
 FS5/V1 is an independent appearance gallery, not a functional-demo gate.
 FS1's synthesis and aggregate terminal/physical investigation slices and FS5's
-first appearance slice are recorded below. FS1 remains open for richer paths,
-measured CTS, stage-specific physical/routing investigation and artifact viewers.
+first appearance slice are recorded below. FS1's adopted-evidence functional scope
+is now delivered, including richer paths, measured clock evidence, stage-specific
+physical/routing investigation and external binary handoff. Later F06 extensions
+remain separately qualified in the investigation record.
 No FS2 structured simulation implementation is claimed.
 
 ## Evidence and candidate baseline
@@ -27,8 +30,12 @@ Use these records together rather than interpreting an old audit as current stat
 | [Terminal host](fs0_terminal.md) | Controls, ownership, launch policy, renderer coverage and known UI limits |
 | [Installed checks](fs0_install_checks.md) | Native installed workflow, external fixture, legacy capture checks: all passed |
 | [Native acceptance](fs0_acceptance.md) | Actual HTTP/PTY fixtures, real serial synthesis, allocation/detach, warm/restart identity and live cached UI reopening |
+| [FS1 physical/terminal acceptance](fs1_acceptance.md) | Physical completion, independently accepted/rejected operations, cache reopening and real cancellation |
+| [FS1 lifecycle/artifacts](fs1_lifecycle_and_artifacts.md) | Workbench-owned collect/accept, postcheck cancellation, bounded report reads and external text handoff |
+| [FS1 investigation](fs1_investigation.md) | Current adopted-evidence completion, exact upgraded provider, timing/clock/physical/routing exploration, binary handoff and Escape responsiveness |
 
-Exact accepted candidate (not an assertion that today's sibling HEAD was linked):
+Historical FS0 accepted candidate (not the upgraded FS1 inspection provider, and
+not an assertion that today's sibling HEAD was linked):
 
 ```text
 project  /home/wayne/devel/jane/hardcaml_asic_example/_build_namedflow_real/default/bin/project.exe
@@ -145,9 +152,10 @@ Features: F01/F02/F03/F05/F06/F09/F11. **Demo A delivered.**
 - [x] Project synthesis resources into shared summaries with checkpoint origin.
 - [x] Fixture-owned process cancellation/deadline/output bounds; generic supervisor
   retains descendant cancellation coverage.
-- [ ] Broader real provider/container descendant termination acceptance. ASIC
-  process cleanup signals only owned PIDs; stopping a reader is not producer
-  termination. Full physical-operation acceptance belongs to FS1.
+- [x] Extend fixture cancellation to real owned backend/container and external-
+  postcheck cancellation specimens in M4. ASIC cleanup signals only owned PIDs;
+  stopping a reader is not producer termination. Broader boundary/race permutations
+  remain M4 coverage followups.
 
 **Demo A:** native HTTP client discovers/previews/runs both real synthesis profiles,
 observes allocation before launcher completion, detaches, and retrieves exact reports.
@@ -184,7 +192,9 @@ Features: F02–F06/F09–F12 (minimal F12 seams). **Demo B delivered.**
   RPC-driven live selection do not prove every interactive launch path.
 - [ ] Measure high-tile-count fan-out, responsiveness, latency and memory/disk use.
 - [ ] Fully reactive publication/redraw and richer capability-aware endpoint forms.
-  Current refresh/repaint is clock-driven; assignments are whitespace-separated.
+  Domain refresh remains clock-driven; local input/deferred completion now invalidates
+  the view immediately. Time-dependent displays retain a clock. Assignments are
+  whitespace-separated.
 
 **Demo B:** linked/independent workspaces, following/pinned synthesis comparison,
 palette operations and project-scoped tests/logs are delivered. Synthetic renderer
@@ -245,11 +255,12 @@ The unchecked M0–M3 items are bounded followups, not grounds to label delivere
 demos “not started.” Final parent-wide checks passed. Prioritize missing interactive
 race/reconnect/launch-and-view/cancellation coverage, then measured scaling and
 adoption choices. Template export/clone, freeform geometry, persisted local chrome
-and richer endpoint forms remain explicit gaps; clock-driven redraw remains current.
+and richer endpoint forms remain explicit gaps; domain refresh remains clock-driven,
+with immediate local input/completion redraw after the Escape-latency followup.
 
 ## M4 — Rich evidence and live acceptance (FS1/FS2)
 
-**FS1 in progress: synthesis and aggregate physical/terminal inspection delivered.
+**FS1 adopted-evidence functional scope delivered: synthesis, aggregate and rich inspection.
 FS2 remains unstarted.** Exact commands/results are in [FS1 acceptance](fs1_acceptance.md).
 Features: F06/F09 and execution/regression extensions.
 
@@ -287,14 +298,23 @@ Features: F06/F09 and execution/regression extensions.
 - [x] Actual native HTTP/PTY import of collection-only, accepted and rejected
   operations; independent tiles/pins, exact reference form, restart/L2, no warm
   provider reads, Unicode/paste entry and bottom/reverse-scroll recovery.
-- [ ] Rich timing path/corner/group exploration, measured CTS/skew/coverage and
-  stage-specific placement/routing/congestion views.
+- [x] Retained setup/hold path tables with corner/group/producer/stage selection,
+  literal filtering, numeric/name sorting, violated/near-limit filtering and
+  source-fenced detail. Real acceptance independently checks all 1020 path spans.
+- [x] Measured clock latency/network skew and setup/hold check skew, supplied
+  source/generated headers and relationships, propagation/coverage excerpts and
+  explicit conflicting-header diagnostics; absent relationships are not inferred.
+- [x] Stage-specific die/core/cell/macro/placement metrics and global/detailed
+  routing/congestion tables with original units, step/occurrence and carry-forward
+  attribution. Native repeated/nonfinite metric diagnostics remain explicit.
+- [x] Byte-preserving bounded binary transfer and configured terminal-host external
+  opening. Actual exported GDS SHA-256 matches; installed KLayout loads it headlessly.
 - [ ] Project-declared simulation/regression cases, seeds and failure/trace artifacts.
 - [x] Bounded terminal-result report/artifact catalog and text paging, exact
   run/attempt/hash/offset/limit identity and explicit stale/expired-page recovery.
   Optional external text opening exports verified sanitized text to the terminal
   host before invoking a configured executable, never opening a daemon path locally.
-- [ ] General source viewers, binary/graphical artifact rendering and provenance
+- [ ] General source viewers, embedded graphical artifact rendering and provenance
   navigation beyond the selected adopted terminal result.
 - [x] Real synthesis→floorplan→placement→CTS→routing→signoff completion; separate
   external precheck/gate-level acceptance pass. Earlier 600-second signoff timeout
@@ -335,7 +355,48 @@ without replay. Artifact reads launch no provider work. External text handoff wa
 verified with a local observer executable, not a claim about a real GUI renderer.
 Final format/lint, full build/runtest, installed workflow and five-mode interrupts
 passed after integration. No provider upgrade or new physical implementation run
-was needed for this followup.
+was needed for that lifecycle followup.
+
+**Final FS1 investigation delivery (2026-10-16):** [scope, controls and evidence](fs1_investigation.md).
+Provider-owned `inspect` schema 1 is installed privately at
+`/tmp/opencode/workbench-fs1-inspection-provider/generations/59466eda06df463e8d921678830ff5c2`.
+Its receipt identifies captured snapshot `0423a76848cdc41f79ec5fd67502445b08b783050d8eba9de83991e8550cda09`,
+not an authoritative linked-source stamp. All four domains passed actual HTTP/PTY
+and L2 restart acceptance at `/tmp/opencode/workbench-fs1-investigation-hd0uuqio`;
+binary handoff preserves the exact GDS bytes, and actual headless KLayout loading
+passed. Original provider results/config/state were unchanged. The owner's existing
+example config was initially left pinned to its prior provider. A subsequent manual
+demo reported `invalid command: inspect`; its provider setting was then updated to
+the verified generation above. The active owner processes were not stopped. Restart
+and explicit re-registration preserve the saved workspace and adopt the new config.
+
+Final provider focused tests, Workbench format/lint/full build/full runtest,
+installed native workflow, five-mode interrupts (`...-xth8tynj`) and original
+synthesis inspector (`...-arle_91_`) passed. Inspection is read-only over the
+previous physical run; no new physical/signoff execution was needed. Embedded
+graphical editing, spatial heatmaps and unsupported source mapping remain F06
+extensions, not inferred capabilities of these tables or the external handoff.
+
+### Inspector input responsiveness
+
+**Inspector Escape responsiveness:** the manual demo's delay was reproduced as
+tmux's 500 ms Escape wait plus the former 100 ms input repaint dependency. The
+client now invalidates its view immediately for local navigation and deferred
+completion. Actual private-tmux 10 ms tests with real path detail measured
+13–15 ms exits; private-tmux 500 ms still measured about 500 ms, distinguishing
+the two causes. The owner server was not changed. Final latency regression
+`/tmp/opencode/workbench-inspector-latency-pa1haj23` passed its 80 ms ceiling;
+terminal tests/build, format/lint, installed lifecycle and Ctrl-C matrix passed.
+See [evidence and commands](fs1_investigation.md#escape-responsiveness-in-tmux--2026-10-16-followup).
+
+**Owner confirmation, 2026-10-16:** after the fix and setup guidance, the owner
+reported Escape now works fine. This closes the manual latency report, without
+claiming exhaustive terminal or provider coverage. FS1 has no remaining functional
+blockers for the adopted evidence. Breadcrumbs, mode-specific help, an explicit
+Close inspector command and more concise detail presentation are
+[usability followups](backlog/README.md#inspector-usability-polish); broader lifecycle
+race matrices and larger-design performance remain coverage work. FS2 may proceed
+independently; its structured-simulation scope has not been delivered by this work.
 
 ### Earlier proposed execution followup — deferred in favor of FS1
 
@@ -427,10 +488,10 @@ This is a reusable renderer over actual FS0 tiles, not a selected final aestheti
 | Phase | Current status |
 | --- | --- |
 | M0 | Accepted FS0 defaults and candidate/fixture baseline delivered; broader matrix remains |
-| M1 | Headless Demo A delivered; full physical/container cancellation acceptance later |
+| M1 | Headless Demo A delivered; physical/container cancellation evidence extended in M4 |
 | M2 | Tile-host Demo B delivered; bounded UI/coverage/performance gaps above |
 | M3 | Autosaved-session/L2 Demo C delivered; templates and appearance persistence gaps above |
-| M4 | FS1 synthesis/aggregate terminal timing/check/resources/declared clocks delivered with real physical/acceptance/cancellation evidence; rich explorers and FS2 pending |
+| M4 | FS1 adopted-evidence investigation/operation scope delivered, including rich paths, measured clocks, physical/routing tables and binary handoff; FS2 and later F06 extensions pending |
 | M5 | Later adoption scope; no full multi-monitor acceptance claim |
 | V1 | A–E skins/axes/captures delivered; rich gallery and default review pending |
 

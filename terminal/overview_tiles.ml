@@ -545,6 +545,9 @@ let%test_unit "process completion is not stage evidence; mismatched and duplicat
     ; finalizations = []
     ; artifacts = []
     ; artifact_pages = []
+    ; artifact_byte_pages = []
+    ; inspections = []
+    ; inspection_details = []
     ; cache_error = None
     }
   in

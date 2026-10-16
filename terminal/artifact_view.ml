@@ -26,10 +26,17 @@ type t =
   ; acknowledged : bool
   ; transport_error : string option
   ; viewer_configured : bool
+  ; binary_viewer_configured : bool
   ; external_notice : string option
   }
 
-let create ?scope ?(generation = 0) ?(viewer_configured = false) run =
+let create
+  ?scope
+  ?(generation = 0)
+  ?(viewer_configured = false)
+  ?(binary_viewer_configured = false)
+  run
+  =
   { run
   ; scope
   ; catalog = []
@@ -41,6 +48,7 @@ let create ?scope ?(generation = 0) ?(viewer_configured = false) run =
   ; acknowledged = false
   ; transport_error = None
   ; viewer_configured
+  ; binary_viewer_configured
   ; external_notice = None
   }
 ;;
@@ -271,7 +279,7 @@ let external_reference t ~viewer =
 
 let notice_rows t ~width =
   Option.value_map t.external_notice ~default:[] ~f:(fun notice ->
-    wrap ~width ("External text view: " ^ safe notice))
+    wrap ~width ("External view: " ^ safe notice))
 ;;
 
 (* The inspector uses one heading and six fixed metadata/control rows. Clamp the persisted
@@ -355,19 +363,23 @@ let rows ?(width = 80) t ~height =
   let t = clamp t ~width ~height in
   let heading = "REPORTS / ARTIFACTS — run " ^ t.run.id in
   let external_control =
-    if not t.viewer_configured
-    then "x: disabled (--artifact-viewer)"
-    else (
-      let reference =
-        match t.reading with
-        | Some r -> Some r.artifact
-        | None -> List.nth t.catalog t.selected
-      in
-      match reference with
-      | None -> "x: unavailable (select text)"
-      | Some reference when Or_error.is_error (Artifact_export.eligible reference) ->
-        "x: unavailable (non-text/over 16 MiB)"
-      | Some _ -> "x: export sanitized text")
+    (if not t.viewer_configured
+     then "x: disabled (--artifact-viewer)"
+     else (
+       let reference =
+         match t.reading with
+         | Some r -> Some r.artifact
+         | None -> List.nth t.catalog t.selected
+       in
+       match reference with
+       | None -> "x: unavailable (select text)"
+       | Some reference when Or_error.is_error (Artifact_export.eligible reference) ->
+         "x: unavailable (non-text/over 16 MiB)"
+       | Some _ -> "x: export sanitized text"))
+    ^
+    if t.binary_viewer_configured
+    then " · b: export exact physical binary"
+    else " · b: disabled (--artifact-binary-viewer)"
   in
   let notices = notice_rows t ~width in
   let body =
@@ -460,6 +472,9 @@ let%test_unit "artifact inspector pins run/attempt/hash and pages with exact off
     ; finalizations = []
     ; artifacts = [ artifact ]
     ; artifact_pages = pages
+    ; artifact_byte_pages = []
+    ; inspections = []
+    ; inspection_details = []
     ; cache_error = None
     }
   in
@@ -719,6 +734,9 @@ let%test_unit "wrapped viewport persists its bottom clamp and reclamps on resize
     ; finalizations = []
     ; artifacts = List.init 40 ~f:(fun i -> { artifact with id = Int.to_string i })
     ; artifact_pages = []
+    ; artifact_byte_pages = []
+    ; inspections = []
+    ; inspection_details = []
     ; cache_error = None
     }
   in
