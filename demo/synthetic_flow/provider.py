@@ -63,7 +63,7 @@ def stage_plan(selected, statuses=None):
     statuses = statuses or {}
     end = STAGES.index(selected['endpoint'])
     return envelope('stage-plan', stages=[dict(
-        id=stage, name='Synthetic ' + stage.title(),
+        id=stage, name='CTS' if stage == 'cts' else stage.title(),
         status=statuses.get(stage, 'pending' if i <= end else 'not_requested'),
         requested=i <= end,
         reason=LABEL + '; action starts a NEW run through ' + stage,

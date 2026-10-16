@@ -5,6 +5,11 @@ host, not a separate renderer or synthetic-only application. No final product
 default has been selected. The aesthetics worktree now starts with A/Instrument,
 vivid color, Unicode markers and comfortable density as an experimental review preset.
 
+**Frontend composition follow-on delivered:** bounded fuzzy palette with matched
+character highlighting and Tab/Shift-Tab navigation, quiet default Follow/project
+badges, per-tile presentation controls, typed status colors and centralized OCaml
+workspace definitions. See [source map, controls and acceptance](frontend_composition.md).
+
 ## Try them
 
 Start the client using the normal [README instructions](../README.md). Press
@@ -36,7 +41,8 @@ work or change the daemon registry. Preferences currently reset when the client
 restarts; persistence remains a later small extension.
 
 Frames/padding degrade on small tiles to protect evidence rows. Comfortable density
-adds inner padding when space permits. Appearance does not populate workspaces or
+adds default inner padding when space permits; explicit padding overrides take
+priority. Appearance does not populate workspaces or
 change layout mode: **Layout: Fit tiles to window** fills the available surface,
 while **Layout: Requested tile sizes** uses the saved shelf sizes. Fit is the new
 client default; requested geometry remains intact. Filled title badges indicate focus; they are not fake
@@ -80,6 +86,13 @@ Use **Apply default layout (add missing tiles)** from Overview to add the new
 the top, session/run/checklist sidebar, and larger content panels when space permits.
 Requested sizes remain available through the separate Requested layout mode.
 Narrow surfaces fall back to a grid or focused-tile view.
+
+The subsequent [composition delivery](frontend_composition.md) moves the run selector
+to the wider upper-main region, stacks main panels, and centralizes Overview/Timing/
+Testing in `terminal/workspaces/`. Use **Apply preset: Overview (add missing tiles)**
+for additive membership or explicit **Reset arrangement** for requested geometry;
+both preserve extras, pins and contexts. Navigation is quiet by default; Testing now
+includes the FS2 simulation tile. The earlier geometry description above is historical.
 
 - **Tab / Shift-Tab** focus the next/previous visible tile.
 - In **Workspaces**, **j/k or arrows** browse and **Enter** opens the destination;

@@ -113,7 +113,12 @@ class Terminal(dashboard.Terminal):
             self.key(key)
         self.capture('palette-open-' + str(time.time_ns()), ['COMMAND'])
         self.key(title.encode())
-        self.capture('palette-query-' + str(time.time_ns()), [title])
+        # The bounded overlay shows a cell-clipped command and the tail of a
+        # long query (notably exact 64-hex simulation IDs). Fence both the
+        # result's action prefix and query's identifying suffix. The caller's
+        # subsequent attempt/selection/export assertions verify actual execution.
+        self.capture('palette-query-' + str(time.time_ns()),
+                     ['COMMAND PALETTE', title[:40], title[-60:]])
         self.key(b'\r')
 
 

@@ -7,7 +7,8 @@ acceptance tools. No PDK or retained real-run directories are required.
 
 ## Launch in two terminals
 
-The commands below use `/tmp/opencode/wb-synthetic-demo` as a new demo directory.
+The commands below use `$HOME/.local/state/hardcaml-workbench/synthetic-composition`
+as a new persistent demo directory.
 Choose a different name if it already exists; preparation deliberately refuses to
 overwrite a prepared demo. The existing Workbench opam switch is required. Scripts
 use `scripts/with-switch.sh`, respecting `OPAM_SWITCH` (default `5.2.0+ox`).
@@ -15,14 +16,17 @@ use `scripts/with-switch.sh`, respecting `OPAM_SWITCH` (default `5.2.0+ox`).
 ### Terminal 1 — prepare once and start the daemon
 
 ```sh
-cd /home/wayne/devel/jane/aesthetics
-./scripts/with-switch.sh dune build -j20 daemon/main.exe terminal/main.exe
+cd /home/wayne/devel/jane/hardcaml_workbench
+./scripts/with-switch.sh dune build -j 2 \
+  daemon/main.exe terminal/main.exe terminal/workspaces/export_presets.exe
+
+mkdir -p "$HOME/.local/state/hardcaml-workbench"
 
 python3 -B scripts/synthetic-flow-demo.py prepare \
-  --dir /tmp/opencode/wb-synthetic-demo
+  --dir "$HOME/.local/state/hardcaml-workbench/synthetic-composition"
 
 python3 -B scripts/synthetic-flow-demo.py daemon \
-  --dir /tmp/opencode/wb-synthetic-demo
+  --dir "$HOME/.local/state/hardcaml-workbench/synthetic-composition"
 ```
 
 The daemon stays in the foreground. Its port is selected automatically and recorded
@@ -31,22 +35,30 @@ in the demo's discovery file; it has its own state directory.
 ### Terminal 2 — populate the daemon and connect
 
 ```sh
-cd /home/wayne/devel/jane/aesthetics
+cd /home/wayne/devel/jane/hardcaml_workbench
 
 python3 -B scripts/synthetic-flow-demo.py seed \
-  --dir /tmp/opencode/wb-synthetic-demo
+  --dir "$HOME/.local/state/hardcaml-workbench/synthetic-composition"
 
 python3 -B scripts/synthetic-flow-demo.py client \
-  --dir /tmp/opencode/wb-synthetic-demo
+  --dir "$HOME/.local/state/hardcaml-workbench/synthetic-composition"
 ```
 
 Both commands discover this demo's exact daemon endpoint. Start with a terminal
 at least **120 columns × 40 rows**. Overview and Timing already have useful tile
-arrangements; no Apply default layout action is required.
+arrangements from the same `terminal/workspaces/` definitions used by ordinary
+Workbench; no Apply default layout action is required. The exporter is required at
+seed time. `--preset-export PATH` selects a matching non-default build.
 
 For later sessions, repeat only `daemon` and `client`. `seed` reimports reference
-evidence, selects the reference and reapplies the demo's curated layouts, hiding
-extra tiles; use it deliberately if you have customized that demo.
+evidence, selects the reference and adds missing preset tiles. It preserves extra
+tiles, pins, hidden state and requested geometry; explicit **Reset arrangement**
+restores preset requested sizes. Use seed deliberately because it changes selection.
+
+Prepared demos contain copied provider code and retained evidence. Create a fresh
+directory to see updated production-like stage labels; old evidence is not silently
+rewritten. Synthetic identity remains in runs/reports/provenance. See
+[frontend composition](frontend_composition.md) for palette and presentation controls.
 
 `q` exits the client while the daemon stays alive. Ctrl-C stops the foreground
 daemon. `--url` permits explicitly connecting to another endpoint; `--daemon` and
@@ -142,18 +154,25 @@ acceptance evidence.
 ## Verification
 
 ```sh
-./scripts/with-switch.sh dune build -j20 @fmt
-./scripts/with-switch.sh dune build -j20 @lint
-./scripts/with-switch.sh dune runtest -j20
-./scripts/with-switch.sh dune build -j20
+./scripts/with-switch.sh dune build -j 2 @fmt
+./scripts/with-switch.sh dune build -j 2 @lint
+./scripts/with-switch.sh dune runtest -j 2
+./scripts/with-switch.sh dune build -j 2
 
 python3 -B scripts/test-synthetic-flow.py --smoke
 python3 -B scripts/test-synthetic-flow.py --pty \
   --daemon _build/default/daemon/main.exe \
-  --client _build/default/terminal/main.exe
+  --client _build/default/terminal/main.exe \
+  --preset-export _build/default/terminal/workspaces/export_presets.exe
 ```
 
-Formatting, lint, full tests and build passed; terminal tests were repeated after
+**Current composition integration:** updated same-definition seeding, production-like
+stage labels and bounded palette passed synthetic HTTP/PTY at
+`/tmp/opencode/synthetic-flow-huttcbvv/`; final format/lint/full tests/build passed at
+`-j 2`. Broader frontend and FS2 regression evidence is in
+[frontend composition](frontend_composition.md#verification-and-retained-evidence).
+
+Historical first-slice evidence: formatting, lint, full tests and build passed; terminal tests were repeated after
 checklist viewport/preview refinements. Final provider + real HTTP + PTY acceptance
 passed at **`/tmp/opencode/synthetic-flow-8rmfu7xu/`**. This includes:
 

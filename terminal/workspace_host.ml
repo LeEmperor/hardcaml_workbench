@@ -1,6 +1,8 @@
 open! Core
 open Hardcaml_workbench_protocol
 module W = Workspace
+module P = Hardcaml_workbench_workspaces
+module T = Tile_presentation
 
 (** Only presentation state lives here. Registry writes are effects returned to the
     transport owner; a keypress never optimistically mutates the registry. *)
@@ -10,7 +12,8 @@ type local =
   ; filter : string
   ; scroll : int
   ; follow : bool
-  ; headers : bool
+  ; presentation : T.overrides
+  ; metrics_scope : (Run_ref.t * string) option
   ; utility_detail : bool
   ; synthesis : Synthesis_view.State.t
   ; terminal_result : Terminal_result_view.State.t
@@ -48,6 +51,7 @@ type action =
   | Apply_default_layout
   | Create_testing_workspace
   | Local_headers
+  | Set_presentation of W.Tile_id.t * T.overrides
   | Resume_log
   | Toggle_chrome
   | Set_appearance of Appearance.t
@@ -107,6 +111,8 @@ type t =
   ; workspace_focus : (string * W.Tile_id.t option) list
   ; appearance : Appearance.t
   ; layout_mode : layout_mode
+  ; presentation : T.overrides
+  ; workspace_presentation : (string * T.overrides) list
   }
 
 let empty =
@@ -124,6 +130,8 @@ let empty =
   ; workspace_focus = []
   ; appearance = Appearance.default
   ; layout_mode = Fit
+  ; presentation = T.inherit_
+  ; workspace_presentation = []
   }
 ;;
 
@@ -133,7 +141,8 @@ let default_local =
   ; filter = ""
   ; scroll = 0
   ; follow = true
-  ; headers = true
+  ; presentation = T.inherit_
+  ; metrics_scope = None
   ; utility_detail = false
   ; synthesis = Synthesis_view.State.empty
   ; terminal_result = Terminal_result_view.State.empty
@@ -310,6 +319,7 @@ let receive t (s : W.Snapshot.t) =
         ; focus = None
         ; locals = []
         ; workspace_focus = []
+        ; workspace_presentation = []
         ; palette = None
         ; prefix = 0
         ; editing_filter = false
@@ -530,49 +540,132 @@ let evidence_runs t =
     |> List.dedup_and_sort ~compare:Run_ref.compare
 ;;
 
+let definition = P.Presets.for_arrangement
+
 let default_tile_specs ~workspace_name =
-  if String.equal workspace_name "Testing"
-  then
-    [ "live-status", 28, 6
-    ; "workspace-tabs", 28, 6
-    ; "project-tests", 64, 12
-    ; "execution", 48, 10
-    ; "logs", 64, 10
-    ]
-  else if String.equal workspace_name "Timing"
-  then [ "run-selector", 28, 6; "timing", 64, 12; "logs", 64, 10 ]
-  else
-    [ "live-status", 28, 6
-    ; "workspace-tabs", 28, 6
-    ; "run-selector", 32, 12
-    ; "stage-checklist", 32, 12
-    ; "synthesis", 64, 10
-    ; "placement", 40, 10
-    ; "cts", 40, 10
-    ; "routing", 40, 10
-    ; "timing", 40, 10
-    ; "checks", 40, 10
-    ; "finalization", 40, 10
-    ; "asic", 64, 10
-    ; "execution", 48, 10
-    ; "project-tests", 48, 10
-    ; "logs", 64, 10
-    ; "navigation", 64, 6
-    ]
+  List.find P.Presets.all ~f:(fun d -> String.equal d.P.Definition.name workspace_name)
+  |> Option.value_map ~default:[] ~f:(fun d ->
+    P.Definition.specs d
+    |> List.map ~f:(fun (kind, g) -> kind, g.W.Geometry.width, g.height))
 ;;
 
 (** Additive preset: hidden tiles count as existing. Never rewrite a saved binding,
     selection, requested geometry, ordering, zoom, or context to install a preset. *)
 let missing_default_tiles (snapshot : W.Snapshot.t) (workspace : W.Arrangement.t) =
-  default_tile_specs ~workspace_name:workspace.name
-  |> List.filter_map ~f:(fun (kind, width, height) ->
+  Option.value_map (definition workspace) ~default:[] ~f:P.Definition.specs
+  |> List.filter_map ~f:(fun (kind, geometry) ->
     if List.exists snapshot.tiles ~f:(fun tile ->
          W.Workspace_id.equal tile.workspace workspace.id && String.equal tile.kind kind)
     then None
-    else
-      Some
-        (W.Mutation.Create_tile
-           { workspace = workspace.id; kind; geometry = { x = 0; y = 0; width; height } }))
+    else Some (W.Mutation.Create_tile { workspace = workspace.id; kind; geometry }))
+;;
+
+let preset_presentation (p : P.Common.presentation) : T.overrides =
+  { T.inherit_ with
+    title = p.title
+  ; run_reference = p.run_reference
+  ; freshness = p.freshness
+  ; hints = p.hints
+  ; frame = p.frame
+  ; padding = p.padding
+  ; run_selector_rows = p.visible_rows
+  ; badge =
+      Option.bind p.binding_badge ~f:(function
+        | "hidden" -> Some T.Badge.Hidden
+        | "always" -> Some T.Badge.Always
+        | "exceptions" -> Some T.Badge.Exceptions
+        | _ -> None)
+  }
+;;
+
+(** Presentation preferences are client-local, keyed by stable workspace/tile IDs. They
+    survive polling/workspace switches, not client restart. No daemon writes. *)
+let policy t (tile : W.Tile.t) =
+  let density_defaults : T.t =
+    { T.defaults with
+      padding =
+        (match t.appearance.density with
+         | Compact -> 0
+         | Comfortable -> 1)
+    }
+  in
+  let base =
+    if String.equal tile.kind "workspace-tabs"
+    then
+      T.apply density_defaults { T.navigation with frame = Some false; padding = Some 0 }
+    else density_defaults
+  in
+  let workspace =
+    Option.bind t.registry ~f:(fun registry ->
+      List.find registry.workspaces ~f:(fun w -> W.Workspace_id.equal w.id tile.workspace))
+  in
+  let defaults =
+    Option.bind workspace ~f:definition
+    |> Option.bind ~f:(fun d -> P.Definition.presentation d ~kind:tile.kind)
+    |> Option.value_map ~default:T.inherit_ ~f:preset_presentation
+  in
+  (* Compiled kind/preset settings are defaults. Every explicit client setting wins over
+     them, with workspace and tile overrides becoming more specific. *)
+  let app = T.apply (T.apply base defaults) t.presentation in
+  let workspace =
+    List.Assoc.find
+      t.workspace_presentation
+      (W.Workspace_id.to_string tile.workspace)
+      ~equal:String.equal
+    |> Option.value ~default:T.inherit_
+  in
+  let local = local t tile.id in
+  T.apply (T.apply app workspace) local.presentation
+;;
+
+let binding_kind (tile : W.Tile.t) : T.Binding.t =
+  match tile.binding with
+  | Pin_run _ -> Pinned
+  | Follow -> if project_scoped_kind tile.kind then Project else Follow
+;;
+
+let presentation_commands t (tile : W.Tile.t) =
+  let p = policy t tile
+  and o = (local t tile.id).presentation in
+  let set id title overrides =
+    command
+      (if String.equal id "header" then "tile.headers" else "tile.presentation." ^ id)
+      title
+      "appearance presentation focused tile local inherit"
+      (Set_presentation (tile.id, overrides))
+  in
+  [ set "header" "Toggle focused tile header" { o with header = Some (not p.header) }
+  ; set "title" "Toggle focused tile title" { o with title = Some (not p.title) }
+  ; set
+      "badge.exceptions"
+      "Binding badge: Exceptions (pins only)"
+      { o with badge = Some Exceptions }
+  ; set "badge.always" "Binding badge: Always" { o with badge = Some Always }
+  ; set "badge.hidden" "Binding badge: Hidden" { o with badge = Some Hidden }
+  ; set
+      "run-reference"
+      "Toggle focused tile run reference"
+      { o with run_reference = Some (not p.run_reference) }
+  ; set
+      "freshness"
+      "Toggle focused tile freshness"
+      { o with freshness = Some (not p.freshness) }
+  ; set "hints" "Toggle focused tile hints" { o with hints = Some (not p.hints) }
+  ; set "frame" "Toggle focused tile frame" { o with frame = Some (not p.frame) }
+  ; set
+      "padding"
+      "Toggle focused tile padding"
+      { o with padding = Some (if p.padding = 0 then 1 else 0) }
+  ; set
+      "rows.more"
+      "Run selector: More visible rows (+1)"
+      { o with run_selector_rows = Some (p.run_selector_rows + 1) }
+  ; set
+      "rows.fewer"
+      "Run selector: Fewer visible rows (-1)"
+      { o with run_selector_rows = Some (Int.max 1 (p.run_selector_rows - 1)) }
+  ; set "reset" "Reset presentation overrides (inherit)" T.inherit_
+  ]
 ;;
 
 let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
@@ -660,7 +753,8 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
         ("Switch to " ^ w.name)
         "workspace navigation tabs"
         (Switch w.id))
-    @ (if List.exists s.workspaces ~f:(fun w -> String.equal w.name "Testing")
+    @ (if List.exists s.workspaces ~f:(fun w ->
+            Option.equal String.equal w.preset (Some "testing"))
        then []
        else
          [ command
@@ -682,11 +776,34 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
           "Unzoom workspace"
           (Set_zoom { workspace = w.id; tile = None })
       ; command
+          ?unavailable:
+            (if Option.is_none (definition w)
+             then
+               Some
+                 "Choose Apply preset: Overview, Timing or Testing for this custom \
+                  workspace"
+             else None)
           "workspace.default-layout"
           "Apply default layout (add missing tiles)"
           "preset synthesis"
           Apply_default_layout
       ]
+    @ List.concat_map P.Presets.all ~f:(fun d ->
+      [ mutation
+          ("workspace.apply-preset." ^ d.P.Definition.id)
+          ("Apply preset: " ^ d.name ^ " (add missing tiles)")
+          (P.Definition.apply d ~workspace:w.id)
+      ; mutation
+          ("workspace.reset-arrangement." ^ d.id)
+          ("Reset arrangement: " ^ d.name ^ " (preserve extras and pins)")
+          (P.Definition.reset d ~workspace:w.id)
+      ])
+    @ Option.value_map (definition w) ~default:[] ~f:(fun d ->
+      [ mutation
+          "workspace.reset-arrangement"
+          "Reset arrangement (current preset; preserve extras and pins)"
+          (P.Definition.reset d ~workspace:w.id)
+      ])
     @ List.map
         [ "live-status"
         ; "workspace-tabs"
@@ -775,9 +892,9 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
           "tile.last"
           "Reorder tile to end"
           (Reorder_tile { tile = id; before = None })
-      ; command "tile.headers" "Toggle focused tile header" "appearance" Local_headers
       ; command "logs.follow" "Resume log follow" "tail" Resume_log
       ]
+      @ presentation_commands t tile
       @ (if not (String.equal tile.kind "synthesis")
          then []
          else
@@ -842,16 +959,29 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
   | _ -> base
 ;;
 
-let matches p =
-  let words =
-    String.split (String.lowercase p.query) ~on:' '
-    |> List.filter ~f:(Fn.non String.is_empty)
+let ranked_matches p =
+  Palette_search.rank
+    ~query:p.query
+    (List.map p.commands ~f:(fun c ->
+       ( c
+       , [ { Palette_search.text = c.title; weight = 100 }
+         ; { text = c.aliases; weight = 85 }
+         ; { text = c.id; weight = 75 }
+         ] )))
+;;
+
+let matches p = List.map (ranked_matches p) ~f:(fun result -> result.Palette_search.item)
+
+(* Query edits retain command identity even when its ranked index changes. *)
+let palette_query p query =
+  let selected = List.nth (matches p) p.index in
+  let next = { p with query; index = 0 } in
+  let index =
+    Option.bind selected ~f:(fun selected ->
+      List.findi (matches next) ~f:(fun _ c -> String.equal selected.id c.id))
+    |> Option.value_map ~default:0 ~f:fst
   in
-  List.filter p.commands ~f:(fun c ->
-    List.for_all words ~f:(fun word ->
-      String.is_substring
-        (String.lowercase (c.title ^ " " ^ c.aliases ^ " " ^ c.id))
-        ~substring:word))
+  { next with index }
 ;;
 
 type input =
@@ -1253,8 +1383,7 @@ let input t event ~commands : t * effect =
     (match t.palette with
      | Some p ->
        (match event with
-        | Clear_filter ->
-          { t with palette = Some { p with query = ""; index = 0 } }, No_effect
+        | Clear_filter -> { t with palette = Some (palette_query p "") }, No_effect
         | Escape -> { t with palette = None; prefix = 0 }, No_effect
         | Character _
           when match p.argument with
@@ -1263,16 +1392,16 @@ let input t event ~commands : t * effect =
                | None | Some (Plan_endpoint _) -> false ->
           { t with notice = "Finalization reference is limited to 4096 bytes" }, No_effect
         | Character ch ->
-          ( { t with
-              palette = Some { p with query = p.query ^ String.of_char ch; index = 0 }
-            }
+          ( { t with palette = Some (palette_query p (p.query ^ String.of_char ch)) }
           , No_effect )
+        | Text text ->
+          if printable_utf8 text && String.length p.query + String.length text <= 4096
+          then { t with palette = Some (palette_query p (p.query ^ text)) }, No_effect
+          else t, No_effect
         | Backspace ->
-          ( { t with
-              palette = Some { p with query = String.drop_suffix p.query 1; index = 0 }
-            }
+          ( { t with palette = Some (palette_query p (drop_last_codepoint p.query)) }
           , No_effect )
-        | Next ->
+        | Next | Focus ->
           ( { t with
               palette =
                 Some
@@ -1281,7 +1410,7 @@ let input t event ~commands : t * effect =
                   }
             }
           , No_effect )
-        | Previous ->
+        | Previous | Focus_previous ->
           { t with palette = Some { p with index = Int.max 0 (p.index - 1) } }, No_effect
         | Enter when Option.is_some p.argument ->
           if not (current t p.capture)
@@ -1521,6 +1650,63 @@ let%test_unit "Tab and Shift-Tab wrap only visible tiles and honor zoom and moda
   assert (Option.is_none no_tiles.focus)
 ;;
 
+let%test_unit "palette similar commands capture Tab arrows aliases stable identity and \
+               target"
+  =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "fuzzy-palette") in
+  let host = receive empty registry in
+  let command id title aliases unavailable =
+    { id; title; aliases; action = Toggle_chrome; unavailable }
+  in
+  let commands =
+    [ command "inspect" "Inspect finalization" "reconnect evidence" None
+    ; command "accept" "Finalize and accept" "acceptance" (Some "fixture unavailable")
+    ; command "refresh" "Refresh finalization" "reload" None
+    ]
+  in
+  let step host event = fst (input host event ~commands) in
+  let opened =
+    List.fold [ ' '; 'c'; 'c' ] ~init:host ~f:(fun host c -> step host (Character c))
+  in
+  let query host text =
+    { host with palette = Option.map host.palette ~f:(fun p -> palette_query p text) }
+  in
+  let selected host =
+    let p = Option.value_exn host.palette in
+    (List.nth_exn (matches p) p.index).id
+  in
+  let narrowed = query opened "fn" in
+  assert (List.length (matches (Option.value_exn narrowed.palette)) = 3);
+  let next = step narrowed Focus in
+  assert (not (String.equal (selected next) (selected narrowed)));
+  assert (String.equal (selected (step next Focus_previous)) (selected narrowed));
+  assert (String.equal (selected (step narrowed Next)) (selected next));
+  assert (String.equal (selected (step next Previous)) (selected narrowed));
+  assert (Option.equal W.Tile_id.equal next.focus host.focus);
+  assert (phys_equal next.registry host.registry);
+  let alias = query next "reconnect" in
+  assert (String.equal (selected alias) "inspect");
+  let _, effect = input alias Enter ~commands:[] in
+  (match effect with
+   | Execute (target, Toggle_chrome) ->
+     assert (String.equal (W.Session_id.to_string target.session) "fuzzy-palette")
+   | _ -> assert false);
+  let accept = query next "accept" in
+  let unavailable, effect = input accept Enter ~commands:[] in
+  assert (
+    Option.is_some unavailable.palette
+    && String.equal unavailable.notice "fixture unavailable");
+  (match effect with
+   | No_effect -> ()
+   | _ -> assert false);
+  let selected_id = selected next in
+  let edited = query next "final" in
+  assert (String.equal (selected edited) selected_id);
+  let unicode = step (query opened "界é") Backspace in
+  assert (String.equal (Option.value_exn unicode.palette).query "界");
+  assert (Option.is_none (step opened Escape).palette)
+;;
+
 let%test_unit "workspace tabs browse registry IDs and switch without mutating contexts" =
   let s = W.initial ~session_id:(W.Session_id.of_string "workspace-tabs") in
   let overview = List.hd_exn s.workspaces
@@ -1584,7 +1770,9 @@ let%test_unit "overview utilities and explicit Testing creation are available ad
   assert (project_scoped_kind "live-status" && project_scoped_kind "workspace-tabs");
   assert (not (project_scoped_kind "stage-checklist"));
   assert (List.exists commands ~f:(fun c -> String.equal c.id "workspace.create-testing"));
-  let testing = { (List.last_exn s.workspaces) with name = "Testing" } in
+  let testing =
+    { (List.last_exn s.workspaces) with name = "Renamed tests"; preset = Some "testing" }
+  in
   let s = { s with workspaces = [ List.hd_exn s.workspaces; testing ] } in
   assert (
     not
@@ -2239,7 +2427,13 @@ let%test_unit "additive default preset exposes synthesis and preserves saved con
     List.exists pending ~f:(function
       | Create_tile { kind = "synthesis"; _ } -> true
       | _ -> false));
-  let s = List.fold pending ~init:s ~f:apply in
+  let s =
+    apply
+      s
+      (P.Definition.apply
+         (Option.value_exn (definition workspace))
+         ~workspace:workspace.id)
+  in
   assert (List.equal W.Context.equal original_contexts s.contexts);
   assert (List.equal W.Arrangement.equal original_workspaces s.workspaces);
   assert (W.Tile.equal (W.tile s selector.id) { selector with hidden = true });
@@ -2252,6 +2446,97 @@ let%test_unit "additive default preset exposes synthesis and preserves saved con
       match command.action with
       | Apply_default_layout -> true
       | _ -> false))
+;;
+
+let%test_unit "presentation inherits by stable IDs and palette captures exact tile \
+               overrides"
+  =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "presentation-policy") in
+  let tile = List.hd_exn registry.tiles in
+  let host = receive empty registry in
+  assert (T.Badge.equal (policy host tile).badge Exceptions);
+  assert ((policy host tile).run_selector_rows = 4);
+  let global =
+    { host with
+      presentation = { T.inherit_ with run_selector_rows = Some 7; header = Some false }
+    }
+  in
+  assert ((policy global tile).run_selector_rows = 7);
+  let workspace_override =
+    { global with
+      workspace_presentation =
+        [ ( W.Workspace_id.to_string tile.workspace
+          , { T.inherit_ with run_selector_rows = Some 6 } )
+        ]
+    }
+  in
+  assert ((policy workspace_override tile).run_selector_rows = 6);
+  let tile_override =
+    set_local
+      workspace_override
+      tile.id
+      { default_local with
+        presentation = { T.inherit_ with run_selector_rows = Some 5; header = Some true }
+      }
+  in
+  assert (
+    (policy tile_override tile).run_selector_rows = 5
+    && (policy tile_override tile).header);
+  let reset_tile = set_local tile_override tile.id default_local in
+  assert (
+    (policy reset_tile tile).run_selector_rows = 6 && not (policy reset_tile tile).header);
+  let host =
+    { host with
+      presentation = { T.inherit_ with padding = Some 2; hints = Some false }
+    ; workspace_presentation =
+        [ W.Workspace_id.to_string tile.workspace, { T.inherit_ with padding = Some 1 } ]
+    }
+  in
+  assert ((policy host tile).padding = 1 && not (policy host tile).hints);
+  let host =
+    set_local
+      host
+      tile.id
+      { default_local with
+        presentation = { T.inherit_ with padding = Some 0; hints = Some true }
+      }
+  in
+  assert ((policy host tile).padding = 0 && (policy host tile).hints);
+  let reset =
+    List.find_exn (presentation_commands host tile) ~f:(fun c ->
+      String.equal c.id "tile.presentation.reset")
+  in
+  (match reset.action with
+   | Set_presentation (id, overrides) ->
+     assert (W.Tile_id.equal id tile.id && T.equal_overrides overrides T.inherit_)
+   | _ -> assert false);
+  let renamed =
+    { registry with
+      workspaces =
+        List.map registry.workspaces ~f:(fun w -> { w with name = "User name" })
+    }
+  in
+  let host = receive host renamed in
+  assert ((policy host tile).padding = 0 && (policy host tile).hints);
+  assert (Option.is_some (definition (List.hd_exn renamed.workspaces)));
+  let fresh = receive host { renamed with session_id = W.Session_id.of_string "other" } in
+  assert (List.is_empty fresh.locals && List.is_empty fresh.workspace_presentation);
+  assert ((policy fresh tile).padding = 2 && not (policy fresh tile).hints);
+  let commands = catalog host ~project:None ~jobs:[] in
+  List.iter P.Presets.all ~f:(fun d ->
+    let command =
+      List.find_exn commands ~f:(fun c ->
+        String.equal c.id ("workspace.apply-preset." ^ d.P.Definition.id))
+    in
+    match command.action with
+    | Registry (Apply_preset { workspace; preset; tiles }) ->
+      assert (W.Workspace_id.equal workspace tile.workspace && String.equal preset d.id);
+      assert (
+        List.equal
+          (fun (a, g) (b, h) -> String.equal a b && W.Geometry.equal g h)
+          tiles
+          (P.Definition.specs d))
+    | _ -> assert false)
 ;;
 
 let%test_unit "allocation selects only an unchanged captured context" =

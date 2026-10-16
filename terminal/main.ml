@@ -642,7 +642,15 @@ let change_synthesis session f =
     if String.equal tile.kind "synthesis"
     then (
       let local = Host.local session.host tile.id in
-      session.host <- Host.set_local session.host tile.id (f tile local)))
+      let (next : Host.local) = f tile local in
+      let next =
+        if Synthesis_view.Mode.equal
+             (Synthesis_view.State.mode local.synthesis)
+             (Synthesis_view.State.mode next.synthesis)
+        then next
+        else { next with scroll = 0; metrics_scope = None }
+      in
+      session.host <- Host.set_local session.host tile.id next))
 ;;
 
 let workspace_request session operation =
@@ -1034,38 +1042,39 @@ let export_artifact_binary session tile_id ~viewer (reference : Asic_artifact.Re
 ;;
 
 let add_default_tiles session (registry : Workspace.Snapshot.t) workspace =
-  Deferred.List.iter
-    (Host.missing_default_tiles registry workspace)
-    ~how:`Sequential
-    ~f:(fun mutation ->
-      match mutation, session.host.registry with
-      | Workspace.Mutation.Create_tile { workspace; kind; _ }, Some current ->
-        if List.exists current.tiles ~f:(fun tile ->
-             Workspace.Workspace_id.equal tile.workspace workspace
-             && String.equal tile.kind kind)
-        then return ()
-        else mutate_workspace session mutation
-      | _ -> return ())
+  ignore (registry : Workspace.Snapshot.t);
+  match Host.definition workspace with
+  | None -> return ()
+  | Some definition ->
+    mutate_workspace
+      session
+      (Hardcaml_workbench_workspaces.Definition.apply definition ~workspace:workspace.id)
 ;;
 
 let initialize_host_layout session =
   match session.host.registry with
   | Some registry when registry.revision = 0 ->
     Deferred.List.iter registry.workspaces ~how:`Sequential ~f:(fun workspace ->
+      (* Revision zero contains only protocol bootstrap prototypes, not saved user
+         arrangements. Normalize those from the same definitions as new tiles; subsequent
+         additive Apply never rewrites requested geometry. *)
       let%bind () =
-        match
-          List.find registry.tiles ~f:(fun tile ->
-            Workspace.Workspace_id.equal tile.workspace workspace.id
-            && String.equal tile.kind "run-selector")
-        with
+        match Host.definition workspace with
         | None -> return ()
-        | Some tile ->
-          let width, height =
-            if String.equal workspace.name "Timing" then 28, 6 else 32, 12
-          in
-          mutate_workspace
-            session
-            (Resize_tile { tile = tile.id; geometry = { x = 0; y = 0; width; height } })
+        | Some definition ->
+          Deferred.List.iter registry.tiles ~how:`Sequential ~f:(fun tile ->
+            if not (Workspace.Workspace_id.equal tile.workspace workspace.id)
+            then return ()
+            else (
+              match
+                List.Assoc.find
+                  (Hardcaml_workbench_workspaces.Definition.specs definition)
+                  tile.kind
+                  ~equal:String.equal
+              with
+              | None -> return ()
+              | Some geometry ->
+                mutate_workspace session (Resize_tile { tile = tile.id; geometry })))
       in
       add_default_tiles session registry workspace)
   | _ -> return ()
@@ -2844,7 +2853,7 @@ let execute_host session captured action ~exit =
         | Some registry, Some active
           when not
                  (List.exists registry.workspaces ~f:(fun w ->
-                    String.equal w.name "Testing")) ->
+                    Option.equal String.equal w.preset (Some "testing"))) ->
           let%bind () =
             mutate_workspace
               session
@@ -2866,7 +2875,13 @@ let execute_host session captured action ~exit =
               with
               | None -> return ()
               | Some workspace ->
-                let%map () = add_default_tiles session current workspace in
+                let%map () =
+                  mutate_workspace
+                    session
+                    (Hardcaml_workbench_workspaces.Definition.apply
+                       Hardcaml_workbench_workspaces.Testing.definition
+                       ~workspace:workspace.id)
+                in
                 session.host <- Host.switch session.host workspace.id)
            | _ -> return ())
         | _ -> return ())
@@ -3106,12 +3121,29 @@ let execute_host session captured action ~exit =
               Option.iter (Host.launch_target session.host) ~f:(fun target ->
                 session.view_on_allocation <- Some (key, target));
             asic_request session (Run { key; preview }))))
+    | Set_presentation (id, presentation) ->
+      let local = Host.local session.host id in
+      session.host
+      <- Host.set_local session.host id { local with presentation; scroll = 0 };
+      session.host
+      <- { session.host with
+           notice =
+             "Presentation override: client-local until restart; reset inherits defaults"
+         };
+      Effect.Ignore
     | Local_headers | Resume_log ->
       Option.iter session.host.focus ~f:(fun id ->
         let local = Host.local session.host id in
         let local =
           match action with
-          | Local_headers -> { local with headers = not local.headers }
+          | Local_headers ->
+            let tile = Option.value_exn (Host.focused session.host) in
+            { local with
+              presentation =
+                { local.presentation with
+                  header = Some (not (Host.policy session.host tile).header)
+                }
+            }
           | _ -> { local with follow = true; scroll = 0 }
         in
         session.host <- Host.set_local session.host id local);
@@ -3217,8 +3249,14 @@ let browse_host session delta =
           let _, _, _, _, height =
             Host_view.body_geometry session.host tile ~width:g.width ~height:g.height
           in
-          height - 1))
+          if String.equal tile.kind "run-selector"
+          then Int.min height (Host.policy session.host tile).run_selector_rows
+          else height))
       |> Option.value ~default:(tile.requested_geometry.height - 2)
+      |> (fun height ->
+           if String.equal tile.kind "run-selector"
+           then Int.min height (Host.policy session.host tile).run_selector_rows
+           else height)
       |> Int.max 1
     in
     let scroll =

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -58,7 +59,38 @@ def prepare(directory=None, manual=False, delay=1.5):
     return base
 
 
-def seed(base, url):
+def workspace_presets(executable=None):
+    """Read the OCaml source of truth; never synthesize fallback Python layouts."""
+    executable = Path(executable or os.environ.get('WORKBENCH_PRESET_EXPORT',
+        REPO / '_build/default/terminal/workspaces/export_presets.exe')).expanduser().resolve()
+    if not executable.is_file():
+        raise RuntimeError('Build terminal/workspaces/export_presets.exe and pass --preset-export; missing ' + str(executable))
+    output = subprocess.run(switch_command([executable]), check=True, capture_output=True,
+                            text=True, timeout=15).stdout
+    presets = parse(output)
+    ids = [field(p, 'id') for p in presets]
+    if len(set(ids)) != len(ids):
+        raise ValueError('Duplicate OCaml preset IDs')
+    return {field(p, 'id'): p for p in presets}
+
+
+def apply_workspace_presets(client, snapshot, presets):
+    """Add defaults without resetting pins, custom geometry or user-owned extras."""
+    for arrangement in field(snapshot, 'workspaces'):
+        identity = field(arrangement, 'preset')
+        definition = presets.get(identity[0]) if identity else None
+        if definition is None:
+            continue
+        specs = [[field(tile, 'kind'), field(tile, 'geometry')]
+                 for tile in field(definition, 'tiles')]
+        snapshot = client.mutate(snapshot,
+            '(Apply_preset (workspace %s) (preset %s) (tiles %s))' %
+            (sexp(field(arrangement, 'id')), sexp(field(definition, 'id')), sexp(specs)))
+    return snapshot
+
+
+def seed(base, url, preset_export=None):
+    presets = workspace_presets(preset_export)
     manifest = provider.load(base / 'manifest.json')
     # Explicit selection also works with an externally started daemon whose PATH
     # lacks Dune. The terminal must use the same selection/project-session key.
@@ -83,59 +115,30 @@ def seed(base, url):
         registered.append(run)
     # Stable existing workspace IDs; avoid duplicating tiles on repeated seed.
     ws = client.rpc(domain='workspace')
-    overview = field(ws, 'workspaces')[0]
+    overview = next((w for w in field(ws, 'workspaces') if field(w, 'preset') == ['overview']), None)
+    if overview is None:
+        raise RuntimeError('Synthetic seed requires a workspace with stable preset ID overview')
     workspace = field(overview, 'id')
     context_id = field(overview, 'context')
     context = next(c for c in field(ws, 'contexts') if field(c, 'id') == context_id)
     ws = client.mutate(ws, '(Select_run (workspace %s) (context %s) (expected_selection_revision %s) (run (%s)))' %
         (workspace, context_id, field(context, 'selection_revision'), sexp(registered[0])))
-    # Seed before the first terminal opens: revision > 0 deliberately bypasses
-    # initialize_host_layout's revision-zero additive default preset. Re-seeding
-    # also hides obsolete/extra tiles from earlier demo layouts, without deletion.
-    layouts = {
-        'Overview': [('workspace-tabs', 28, 6), ('live-status', 32, 8), ('run-selector', 32, 10),
-                     ('stage-checklist', 40, 13), ('synthesis', 56, 12), ('timing', 40, 10),
-                     ('placement', 40, 10), ('checks', 40, 10), ('finalization', 40, 10)],
-        'Timing': [('workspace-tabs', 28, 6), ('live-status', 32, 8), ('run-selector', 32, 10),
-                   ('timing', 56, 12), ('placement', 40, 10), ('cts', 40, 10),
-                   ('routing', 40, 10), ('checks', 40, 10), ('finalization', 40, 10)],
-    }
-    for arrangement in field(ws, 'workspaces'):
-        name = field(arrangement, 'name')
-        if name not in layouts:
-            continue
-        wid = field(arrangement, 'id')
-        specs = layouts[name]
-        chosen = []
-        for kind, width, height in specs:
-            tiles = [t for t in field(ws, 'tiles') if field(t, 'workspace') == wid and field(t, 'kind') == kind]
-            geometry = '((x 0) (y 0) (width %d) (height %d))' % (width, height)
-            if not tiles:
-                ws = client.mutate(ws, '(Create_tile (workspace %s) (kind %s) (geometry %s))' % (wid, kind, geometry))
-                tile = field(ws, 'tiles')[-1]
-            else:
-                tile = tiles[0]
-            tid = field(tile, 'id')
-            chosen.append(tid)
-            ws = client.mutate(ws, '(Resize_tile (tile %s) (geometry %s))' % (tid, geometry))
-            ws = client.mutate(ws, '(Set_tile_hidden (tile %s) (hidden false))' % tid)
-            ws = client.mutate(ws, '(Reorder_tile (tile %s) (before ()))' % tid)
-        for tile in field(ws, 'tiles'):
-            if field(tile, 'workspace') == wid and field(tile, 'id') not in chosen and field(tile, 'hidden') != 'true':
-                ws = client.mutate(ws, '(Set_tile_hidden (tile %s) (hidden true))' % field(tile, 'id'))
+    ws = apply_workspace_presets(client, ws, presets)
+    provider.save(base / 'workspace-presets.json', presets)
     provider.save(base / 'seed-http.json', client.history)
     provider.save(base / 'seeded.json', dict(url=url, project=client.project, runs=registered, workspace=ws))
     print('SYNTHETIC reference and failed candidate registered; FS1 evidence imported.')
     return client, registered
 
 
-def commands(base, daemon, client, url=None):
+def commands(base, daemon, client, url=None, preset_export=None):
     q = lambda value: shlex.quote(str(value))
     script = REPO / 'scripts/synthetic-flow-demo.py'
     print('SYNTHETIC demo: ' + str(base))
     print('1. ' + ' '.join(map(q, [sys.executable, script, 'daemon', '--dir', base, '--daemon', daemon])))
     connection = ['--url', url] if url else []
-    print('2. ' + ' '.join(map(q, [sys.executable, script, 'seed', '--dir', base] + connection)))
+    export = ['--preset-export', preset_export] if preset_export else []
+    print('2. ' + ' '.join(map(q, [sys.executable, script, 'seed', '--dir', base] + connection + export)))
     print('3. ' + ' '.join(map(q, [sys.executable, script, 'client', '--dir', base, '--client', client])) +
           (' --url ' + q(url) if url else ''))
     if url:
@@ -153,6 +156,7 @@ def main():
     parser.add_argument('command', choices=['prepare', 'seed', 'daemon', 'client', 'commands'])
     parser.add_argument('--dir', type=Path, help='prepare: NEW directory with existing parent; others: existing demo')
     parser.add_argument('--url')
+    parser.add_argument('--preset-export', type=Path, help='OCaml export_presets.exe (or WORKBENCH_PRESET_EXPORT)')
     parser.add_argument('--manual', action='store_true', help='runs wait for explicit provider advance; 120s bound')
     parser.add_argument('--delay', type=float, default=1.5, help='seconds per stage, .01..2 (default: 1.5)')
     parser.add_argument('--daemon', type=Path, default=REPO / '_build/default/daemon/main.exe')
@@ -162,7 +166,7 @@ def main():
         parser.error('--delay must be .01..2')
     if args.command == 'prepare':
         base = prepare(args.dir, args.manual, args.delay)
-        commands(base, args.daemon, args.client)
+        commands(base, args.daemon, args.client, preset_export=args.preset_export)
         return
     if args.dir is None:
         parser.error('--dir required')
@@ -173,8 +177,8 @@ def main():
             parser.error('--url required unless this demo has discovery/daemon.sexp')
         args.url = field(parse(metadata.read_text()), 'endpoint')
     if args.command == 'seed':
-        seed(base, args.url)
-        commands(base, args.daemon, args.client, args.url)
+        seed(base, args.url, args.preset_export)
+        commands(base, args.daemon, args.client, args.url, args.preset_export)
     elif args.command == 'daemon':
         discovery = base / 'discovery'
         discovery.mkdir(exist_ok=True)
@@ -187,7 +191,7 @@ def main():
                                '--environment', 'opam:' + switch_name()])
         os.execv(argv[0], argv)
     else:
-        commands(base, args.daemon, args.client, args.url)
+        commands(base, args.daemon, args.client, args.url, args.preset_export)
 
 
 if __name__ == '__main__':

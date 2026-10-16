@@ -495,6 +495,40 @@ Synthesis area/check counters are now projected into the current summary.
 
 ## V1 — Independent appearance gallery (FS5)
 
+### Frontend composition follow-on — 2026-10-16
+
+Delivered from the owner's palette/layout/configurability request; this does not
+reopen the accepted FS2 milestone. [Shared plan](frontend_composition_plan.md),
+[source map, controls and acceptance](frontend_composition.md).
+
+- [x] Bounded centered palette over the actual workspace/inspector, ranked fuzzy
+  title/alias/ID matching, exact character emphasis and Tab/Shift-Tab navigation.
+- [x] Quiet normal Follow/project chrome, visible pins by default even without a
+  header, per-tile title/badge/run/freshness/hints/frame/padding/row controls and reset.
+- [x] Typed freshness/outcome/check colors, preserving Validated versus Passed/Failed
+  semantics and unmodified raw report/log evidence.
+- [x] Central composable Overview/Timing/Testing OCaml definitions and stable preset
+  identity; legacy loading, rename stability and explicit additive Apply/Reset.
+- [x] Wide shallow upper-main run selector, stacked main panels, quiet navigation,
+  retained duplicates/extras/pins and narrow/zoom fallbacks. Testing includes FS2.
+- [x] Synthetic seeding consumes exported normal presets; provider stage labels are
+  production-like while synthetic identity/provenance remains explicit.
+- [x] Preserve Compact/Comfortable density as the base padding choice, with explicit
+  presentation overrides taking priority and reset restoring inheritance.
+- [x] Final full format/lint/runtest/build at `-j 2`; actual frontend HTTP/PTY
+  **41 checks**, synthetic flow, FS2 Cyclesim and five-mode interrupt regression.
+- [ ] Owner visual review of this new arrangement. Persisted client presentation,
+  tile-local tab groups, arbitrary floating surfaces and a separately tiled global
+  footer remain later extensions, not claims of this bounded slice.
+
+Final evidence under `/tmp/opencode`: `frontend-composition-359220233ca9`,
+`synthetic-flow-huttcbvv`, `fs2-native-me_1anb2`, and
+`workbench-terminal-interrupt-v31tg44p`. The frontend evidence includes actual
+80×24, 120×40 and 180×55 cell-grid captures. Normal `_build` binaries were rebuilt;
+existing user daemon/demo state was not changed. No physical tools or mutative Git
+operations were needed. Earlier transient compile/format findings and a timed-out
+coordinator harness run are distinguished from final passing evidence in the guide.
+
 **Synthetic flow/demo slice (2026-10-16):** delivered an isolated no-EDA provider
 and setup/seed/client launcher, coherent reference/failed runs, rich FS1 inspection
 datasets, optional typed stage observations and checklist planning through existing

@@ -3,6 +3,9 @@ open Hardcaml_workbench_protocol
 open Bonsai_term
 module H = Workspace_host
 module W = Workspace
+module T = Tile_presentation
+module E = Evidence_style
+module P = Hardcaml_workbench_workspaces
 
 module Role = struct
   type t =
@@ -131,8 +134,8 @@ let focus_marker (appearance : Appearance.t) focused =
   | Unicode -> if focused then "◆ " else "· "
 ;;
 
-let frame_tile appearance ~focused ~width ~height content =
-  if not (framed appearance ~width ~height)
+let frame_tile ?(enabled = true) appearance ~focused ~width ~height content =
+  if not (enabled && framed appearance ~width ~height)
   then box ~width ~height content
   else (
     let tl, tr, bl, br, horizontal, vertical =
@@ -358,6 +361,7 @@ let checklist_preview host data tile =
 ;;
 
 let utility_rows host data tile =
+  let policy = H.policy host tile in
   Option.bind host.H.registry ~f:(fun registry ->
     let selected_run =
       W.resolve_tile registry tile.W.Tile.id
@@ -416,10 +420,27 @@ let utility_rows host data tile =
       in
       let facts =
         Option.bind selected_run ~f:data.summary
-        |> Option.value_map ~default:[] ~f:Overview_tiles.summary_rows
+        |> Option.value_map ~default:[] ~f:(fun summary ->
+          Overview_tiles.summary_rows summary
+          |> List.filter_mapi ~f:(fun i row ->
+            if i = 0 && not policy.freshness
+            then None
+            else if i = 0
+            then
+              Some
+                { row with
+                  role =
+                    (match E.freshness_role summary.freshness with
+                     | Validated | Running -> Running
+                     | Failed -> Failure
+                     | Pending | Stale -> Warning
+                     | Passed -> Success
+                     | Plain | Muted -> Muted)
+                }
+            else Some row))
       in
       let interaction =
-        if not local.utility_detail
+        if (not local.utility_detail) || not policy.hints
         then []
         else
           [ Overview_tiles.row
@@ -436,11 +457,15 @@ let utility_rows host data tile =
                ]))
       in
       Some
-        ((Overview_tiles.row
-            ~role:Muted
-            "Run"
-            (Option.value_map selected_run ~default:"none selected" ~f:run_label)
-          :: stages)
+        ((if policy.run_reference
+          then
+            [ Overview_tiles.row
+                ~role:Muted
+                "Run"
+                (Option.value_map selected_run ~default:"none selected" ~f:run_label)
+            ]
+          else [])
+         @ stages
          @ interaction
          @ facts)
     | _ -> None)
@@ -466,6 +491,192 @@ let inspection_explorer host tile =
         Inspection_view.reconcile_scope view ~scope:reference.run)))
 ;;
 
+let evidence_attrs appearance : E.Role.t -> Attr.t list = function
+  | Plain -> Role.attrs appearance Foreground
+  | Muted -> Role.attrs appearance Muted
+  | Validated -> Role.attrs appearance Running
+  | Passed -> Role.attrs appearance Success
+  | Failed -> Role.attrs appearance Failure
+  | Pending | Stale -> Role.attrs appearance Warning
+  | Running -> Role.attrs appearance Running
+;;
+
+let tile_run host tile =
+  Option.bind host.H.registry ~f:(fun registry ->
+    W.resolve_tile registry tile.W.Tile.id
+    |> Result.ok
+    |> Option.bind ~f:(fun reference -> reference.run))
+;;
+
+(* Chrome is removed at typed construction locations, before wrapping/paging. Never search
+   provider text: full evidence, raw reports and fallback payloads retain every source row
+   even when their text resembles chrome. *)
+let terminal_content host data tile ~run =
+  let local = H.local host tile.W.Tile.id
+  and policy = H.policy host tile in
+  let summary = data.summary run in
+  let exact_terminal =
+    Option.exists summary ~f:(fun s ->
+      Run_ref.equal s.Asic.Summary.run run && Option.is_some s.terminal)
+  in
+  let content =
+    Terminal_result_view.semantic_rows
+      ~fallback:(data.run_lines run tile.kind)
+      ~request_context:(data.run_context run)
+      { local.terminal_result with offset = 0 }
+      ~run
+      ~summary
+      ~kind:tile.kind
+      ~width:Int.max_value
+      ~height:Int.max_value
+  in
+  let hint_index =
+    Option.bind summary ~f:(fun s ->
+      Option.map s.Asic.Summary.terminal ~f:(fun terminal ->
+        2
+        + List.length (data.run_context run)
+        + List.length
+            (Terminal_result_view.semantic_lines terminal ~kind:tile.kind ~detail:false)
+        - 1))
+  in
+  let content =
+    if not exact_terminal
+    then content
+    else
+      List.filteri content ~f:(fun i _ ->
+        i <> 0 (* run reference belongs to host chrome *)
+        && (policy.freshness || i <> 1)
+        && (policy.hints || not (Option.equal Int.equal (Some i) hint_index)))
+  in
+  (if String.equal tile.kind "finalization"
+   then List.map (data.run_lines run "finalization-status") ~f:E.plain
+   else [])
+  @ content
+;;
+
+let synthesis_metrics_content host data tile ~run =
+  let local = H.local host tile.W.Tile.id
+  and policy = H.policy host tile in
+  let summary = data.summary run in
+  let state =
+    Synthesis_view.State.scroll local.synthesis ~delta:Int.min_value ~max_offset:0
+  in
+  let rows =
+    Synthesis_view.semantic_rows
+      state
+      ~summary
+      ~filter:local.filter
+      ~width:Int.max_value
+      ~height:Int.max_value
+  in
+  let freshness_index =
+    Option.map summary ~f:(fun s -> 2 + Int.max 1 (List.length s.Asic.Summary.metrics))
+  in
+  List.filter_mapi rows ~f:(fun i row ->
+    if (not policy.freshness) && Option.equal Int.equal (Some i) freshness_index
+    then None
+    else if i = 0 && not policy.hints
+    then Some (E.plain "Synthesis metrics")
+    else Some row)
+;;
+
+let metrics_scope data run =
+  Option.map (data.summary run) ~f:(fun s -> run, s.Asic.Summary.source_digest)
+;;
+
+let metrics_offset local data run =
+  if Option.equal
+       (fun (r, d) (s, e) -> Run_ref.equal r s && String.equal d e)
+       local.H.metrics_scope
+       (metrics_scope data run)
+  then local.scroll
+  else 0
+;;
+
+let semantic_rows host data tile ~width ~height =
+  let local = H.local host tile.W.Tile.id
+  and policy = H.policy host tile in
+  if Option.is_some local.inspection || Option.is_some local.artifacts
+  then None
+  else
+    Option.bind (tile_run host tile) ~f:(fun run ->
+      if String.equal tile.kind "synthesis"
+      then (
+        let mode = Synthesis_view.State.mode local.synthesis in
+        let rows =
+          match mode with
+          | Metrics ->
+            E.page
+              ~width
+              ~height
+              ~offset:(metrics_offset local data run)
+              (synthesis_metrics_content host data tile ~run)
+          | Summary | Cells ->
+            let base_height =
+              height
+              +
+              if (not policy.freshness) && Synthesis_view.Mode.equal mode Summary
+              then 1
+              else 0
+            in
+            let source_height =
+              base_height
+              +
+              if (not policy.hints)
+                 && ((Synthesis_view.Mode.equal mode Summary && base_height >= 8)
+                     || (Synthesis_view.Mode.equal mode Cells && base_height >= 5))
+              then 1
+              else 0
+            in
+            let rows =
+              Synthesis_view.semantic_rows
+                local.synthesis
+                ~summary:(data.summary run)
+                ~filter:local.filter
+                ~width
+                ~height:source_height
+            in
+            let count = List.length rows in
+            List.filteri rows ~f:(fun i _ ->
+              (policy.freshness
+               || not
+                    (Synthesis_view.Mode.equal mode Summary
+                     && i = 1
+                     && Option.is_some (data.summary run)))
+              && (policy.hints
+                  || not
+                       (Option.is_some (data.summary run)
+                        && i = count - 1
+                        && ((Synthesis_view.Mode.equal mode Summary && source_height >= 8)
+                            || (Synthesis_view.Mode.equal mode Cells && source_height >= 5)
+                           ))))
+            |> Fn.flip List.take height
+          | Details | Evidence ->
+            Synthesis_view.semantic_rows
+              local.synthesis
+              ~summary:(data.summary run)
+              ~filter:local.filter
+              ~width
+              ~height
+        in
+        Some rows)
+      else if Terminal_result_view.supports tile.kind
+      then (
+        let state =
+          Terminal_result_view.State.reconcile
+            local.terminal_result
+            ~run
+            ~summary:(data.summary run)
+        in
+        Some
+          (E.page
+             ~width
+             ~height
+             ~offset:state.offset
+             (terminal_content host data tile ~run)))
+      else None)
+;;
+
 let rows host data tile ~width ~height =
   let local = H.local host tile.W.Tile.id in
   let scope =
@@ -474,20 +685,36 @@ let rows host data tile ~width ~height =
     | Some s -> W.resolve_tile s tile.id |> Result.ok |> Option.bind ~f:(fun r -> r.run)
   in
   let run_rows () =
-    ("Selected: " ^ Option.value_map scope ~default:"none" ~f:display_run)
-    :: (List.filter data.runs ~f:(fun (r, label) ->
-          String.is_substring
-            (String.lowercase (run_label r ^ " " ^ label))
-            ~substring:(String.lowercase local.filter))
-        |> List.map ~f:(fun (run, label) ->
-          sprintf
-            "%s%s %s  %s"
-            (if Option.equal String.equal local.cursor (Some (run_label run))
-             then ">"
-             else " ")
-            (if Option.equal Run_ref.equal scope (Some run) then "*" else " ")
-            (display_run run)
-            label))
+    let candidates =
+      List.filter data.runs ~f:(fun (r, label) ->
+        String.is_substring
+          (String.lowercase (run_label r ^ " " ^ label))
+          ~substring:(String.lowercase local.filter))
+    in
+    let available = Int.min height (H.policy host tile).run_selector_rows in
+    let selected = Option.first_some local.cursor (Option.map scope ~f:run_label) in
+    let selected_index =
+      List.findi candidates ~f:(fun _ (run, _) ->
+        Option.equal String.equal selected (Some (run_label run)))
+      |> Option.value_map ~default:0 ~f:fst
+    in
+    let start =
+      Int.clamp_exn
+        local.scroll
+        ~min:(Int.max 0 (selected_index - Int.max 1 available + 1))
+        ~max:selected_index
+    in
+    List.drop candidates start
+    |> Fn.flip List.take (Int.max 0 available)
+    |> List.map ~f:(fun (run, label) ->
+      sprintf
+        "%s%s %s  %s"
+        (if Option.equal String.equal local.cursor (Some (run_label run))
+         then ">"
+         else " ")
+        (if Option.equal Run_ref.equal scope (Some run) then "*" else " ")
+        (display_run run)
+        label)
   in
   let jobs =
     if String.equal tile.kind "project-tests"
@@ -521,6 +748,7 @@ let rows host data tile ~width ~height =
        | "run-selector" -> run_rows ()
        | "simulation" ->
          Simulation_view.rows local.simulation ~log_lines:data.log_lines
+         |> List.filteri ~f:(fun i _ -> i <> 1 || (H.policy host tile).hints)
          |> List.concat_map ~f:(wrap_cells ~width)
        | "execution" | "project-tests" ->
          [ (if String.equal tile.kind "project-tests"
@@ -563,29 +791,18 @@ let rows host data tile ~width ~height =
          (match scope with
           | None -> [ "No run selected — use a run selector" ]
           | Some run ->
-            ("Run: " ^ run_label run)
-            :: Synthesis_view.rows
-                 local.synthesis
-                 ~summary:(data.summary run)
-                 ~filter:local.filter
-                 ~width
-                 ~height:(Int.max 0 (height - 1)))
+            ignore (run : Run_ref.t);
+            semantic_rows host data tile ~width ~height
+            |> Option.value ~default:[]
+            |> List.map ~f:E.text)
        | kind when Terminal_result_view.supports kind ->
          (match scope with
           | None -> [ "No run selected — use a run selector" ]
           | Some run ->
-            (if String.equal tile.kind "finalization"
-             then data.run_lines run "finalization-status"
-             else [])
-            @ Terminal_result_view.rows
-                ~fallback:(("Run: " ^ run_label run) :: data.run_lines run kind)
-                ~request_context:(data.run_context run)
-                local.terminal_result
-                ~run
-                ~summary:(data.summary run)
-                ~kind
-                ~width
-                ~height)
+            ignore (run : Run_ref.t);
+            semantic_rows host data tile ~width ~height
+            |> Option.value ~default:[]
+            |> List.map ~f:E.text)
        | kind ->
          (match scope with
           | None -> [ "No run selected — use a run selector" ]
@@ -598,31 +815,33 @@ let rows host data tile ~width ~height =
      || (String.equal tile.kind "logs" && local.follow)
   then rows
   else if String.equal tile.kind "run-selector"
-  then (
-    match rows with
-    | [] -> []
-    | scope :: rest -> scope :: List.drop rest local.scroll)
+  then rows
   else if String.equal tile.kind "simulation"
   then List.drop rows (Int.min local.scroll (Int.max 0 (List.length rows - height)))
   else List.drop rows local.scroll
 ;;
 
 let body_geometry host tile ~width ~height =
-  let local = H.local host tile.W.Tile.id in
+  let policy = H.policy host tile in
   let appearance = host.H.appearance in
-  let border = if framed appearance ~width ~height then 1 else 0 in
+  let border = if policy.frame && framed appearance ~width ~height then 1 else 0 in
   let inner_width = Int.max 0 (width - (2 * border)) in
   let inner_height = Int.max 0 (height - (2 * border)) in
   let padding =
-    if width >= 24
-       && height > 8
-       && Appearance.Density.equal appearance.density Comfortable
-    then 1
-    else 0
+    Int.min
+      policy.padding
+      (Int.max 0 (Int.min ((inner_width - 4) / 2) ((inner_height - 3) / 2)))
   in
   let body_width = Int.max 0 (inner_width - (2 * padding)) in
   let body_height =
-    Int.max 0 (inner_height - (2 * padding) - if local.headers then 1 else 0)
+    Int.max
+      0
+      (inner_height
+       - (2 * padding)
+       - (if T.show_title policy || T.show_badge policy (H.binding_kind tile)
+          then 1
+          else 0)
+       - if policy.run_reference then 1 else 0)
   in
   inner_width, inner_height, padding, body_width, body_height
 ;;
@@ -630,21 +849,26 @@ let body_geometry host tile ~width ~height =
 let tile_view host data tile ~width ~height =
   let appearance = host.H.appearance in
   let local = H.local host tile.W.Tile.id in
+  let policy = H.policy host tile in
+  let show_title = T.show_title policy in
+  let show_badge = T.show_badge policy (H.binding_kind tile) in
   let focused =
     Option.value_map host.H.focus ~default:false ~f:(W.Tile_id.equal tile.id)
   in
   let binding =
-    if H.project_scoped_kind tile.kind
-    then "PROJECT"
-    else (
-      match tile.binding with
-      | Follow -> "FOLLOW"
-      | Pin_run run -> "PIN " ^ display_run run)
+    match tile.binding with
+    | Pin_run run -> "PIN " ^ run_label run
+    | Follow -> if H.project_scoped_kind tile.kind then "PROJECT" else "FOLLOW"
   in
   let inner_width, inner_height, padding, body_width, body_height =
     body_geometry host tile ~width ~height
   in
-  let rows = rows host data tile ~width:body_width ~height:body_height in
+  let semantic = semantic_rows host data tile ~width:body_width ~height:body_height in
+  let rows =
+    match semantic with
+    | Some rows -> List.map rows ~f:E.text
+    | None -> rows host data tile ~width:body_width ~height:body_height
+  in
   let rows =
     if String.equal tile.kind "logs" && local.follow
     then
@@ -656,7 +880,7 @@ let tile_view host data tile ~width ~height =
     else rows
   in
   let rows =
-    if focused && not local.headers
+    if focused && (not show_title) && not (String.equal tile.kind "workspace-tabs")
     then (
       match rows with
       | [] -> [ "> focused tile" ]
@@ -664,7 +888,7 @@ let tile_view host data tile ~width ~height =
     else rows
   in
   let header =
-    if local.headers
+    if show_title || show_badge
     then (
       let title =
         if Terminal_result_view.supports tile.kind && local.terminal_result.detail
@@ -696,53 +920,67 @@ let tile_view host data tile ~width ~height =
           ~width:body_width
           ~height:1
           [ sprintf
-              "%s%s [%s] %s%s"
-              (focus_marker appearance focused)
-              (if studio appearance
+              "%s%s%s%s%s"
+              (if show_title then focus_marker appearance focused else "")
+              (if not show_title
+               then ""
+               else if studio appearance
                then "[ " ^ title ^ " ]"
                else if Appearance.Preset.equal appearance.preset Instrument
                then String.uppercase title
                else title)
-              binding
+              (if show_badge
+               then if show_title then " [" ^ binding ^ "]" else binding
+               else "")
               ""
               (if String.is_empty local.filter then "" else " filter=" ^ local.filter)
           ]
       ])
     else []
   in
+  let header =
+    header
+    @
+    if policy.run_reference
+    then
+      [ lines
+          ~appearance
+          ~role:Muted
+          ~width:body_width
+          ~height:1
+          [ "Run: "
+            ^ Option.value_map (tile_run host tile) ~default:"none selected" ~f:run_label
+          ]
+      ]
+    else []
+  in
   let body =
     List.take rows body_height
     |> List.map ~f:(fun row ->
-      (* This is a known metric emitted by the synthesis summary above, never a
-         severity/acceptance classification inferred from arbitrary provider text. *)
-      let role =
-        if Appearance.Preset.equal appearance.preset Instrument
-           && String.equal tile.kind "synthesis"
-           && String.is_prefix row ~prefix:"Cell count: "
-        then Role.Metric
-        else if H.job_attempt_kind tile.kind
-                && (not (String.equal tile.kind "logs"))
-                && String.is_prefix row ~prefix:"STATUS: Failed"
-        then Failure
-        else if H.job_attempt_kind tile.kind
-                && (not (String.equal tile.kind "logs"))
-                && String.is_prefix row ~prefix:"STATUS: Complete"
-        then Success
-        else if H.job_attempt_kind tile.kind
-                && (not (String.equal tile.kind "logs"))
-                && String.is_prefix row ~prefix:"STATUS: Running"
-        then Running
-        else if focused && not local.headers
-        then Focus
-        else Foreground
-      in
+      let role = if focused && not show_title then Role.Focus else Role.Foreground in
       lines ~appearance ~role ~width:body_width ~height:1 [ row ])
     |> View.vcat
     |> box ~width:body_width ~height:body_height
   in
   let body =
     match utility_rows host data tile with
-    | None -> body
+    | None ->
+      (match semantic with
+       | None -> body
+       | Some rows ->
+         let rows =
+           if focused && not show_title
+           then (
+             match rows with
+             | first :: rest ->
+               E.clip ~width:body_width (E.plain (focus_marker appearance true) @ first)
+               :: rest
+             | [] -> [])
+           else rows
+         in
+         E.render ~attrs:(evidence_attrs appearance) rows
+         |> box ~width:body_width ~height:body_height
+         |> colored appearance Foreground)
     | Some rows when local.utility_detail ->
       Overview_tiles.inspection_lines rows
       |> List.concat_map ~f:(wrap_cells ~width:body_width)
@@ -750,15 +988,18 @@ let tile_view host data tile ~width ~height =
       |> lines ~appearance ~width:body_width ~height:body_height
     | Some rows when String.equal tile.kind "stage-checklist" ->
       let hints =
-        match checklist_preview host data tile with
-        | None -> [ "r prepare NEW run"; "j/k browse | Enter inspect" ]
-        | Some preview ->
-          [ "Space c c: Launch"
-          ; "or Launch and view"
-          ; "r prepare NEW run"
-          ; "j/k browse | Enter inspect"
-          ; "Matching plan: " ^ preview.selection.endpoint
-          ]
+        if not policy.hints
+        then []
+        else (
+          match checklist_preview host data tile with
+          | None -> [ "r prepare NEW run"; "j/k browse | Enter inspect" ]
+          | Some preview ->
+            [ "Space c c: Launch"
+            ; "or Launch and view"
+            ; "r prepare NEW run"
+            ; "j/k browse | Enter inspect"
+            ; "Matching plan: " ^ preview.selection.endpoint
+            ])
       in
       (* Short Overview tiles must spend their scarce rows on stage evidence. At least one
          row remains even at the smallest viewport; roomier tiles retain three evidence
@@ -835,12 +1076,15 @@ let tile_view host data tile ~width ~height =
       in
       View.vcat
         [ navigation
-        ; lines
-            ~appearance
-            ~role:Muted
-            ~width:body_width
-            ~height:1
-            [ "j/k browse | Enter open | 1-9 jump" ]
+        ; (if not policy.hints
+           then View.none
+           else
+             lines
+               ~appearance
+               ~role:Muted
+               ~width:body_width
+               ~height:1
+               [ "j/k browse | Enter open | 1-9 jump" ])
         ]
       |> box ~width:body_width ~height:body_height
     | Some rows ->
@@ -856,7 +1100,7 @@ let tile_view host data tile ~width ~height =
     |> View.pad ~l:padding ~r:padding ~t:padding ~b:padding
     |> box ~width:inner_width ~height:inner_height
   in
-  frame_tile appearance ~focused ~width ~height content
+  frame_tile ~enabled:policy.frame appearance ~focused ~width ~height content
   |> colored appearance Foreground
   |> box ~width ~height
 ;;
@@ -918,24 +1162,26 @@ let tile_layout host ({ Dimensions.width; height } : Dimensions.t) =
     Option.value_map (H.active host) ~default:false ~f:(fun w ->
       Option.is_some w.zoomed_tile)
   in
+  let definition = Option.bind (H.active host) ~f:H.definition in
+  let layout_mode = if Option.is_none definition then H.Preferred else host.layout_mode in
   let fit =
-    if Option.value_map (H.active host) ~default:false ~f:(fun w ->
-         String.equal w.name "Overview")
-    then (
-      match
-        Overview_layout.compute
-          ~width
-          ~height:available
-          ~kinds:(List.map tiles ~f:(fun tile -> tile.W.Tile.kind))
-      with
-      | Grid cells -> Fit_layout.Grid cells
-      | Compact -> Fit_layout.Compact)
-    else Fit_layout.compute ~width ~height:available ~count:(List.length tiles)
+    match definition with
+    | Some definition ->
+      (match
+         P.Layout.compute
+           definition
+           ~width
+           ~height:available
+           ~kinds:(List.map tiles ~f:(fun tile -> tile.W.Tile.kind))
+       with
+       | Grid cells -> Fit_layout.Grid cells
+       | Compact -> Fit_layout.Compact)
+    | None -> Fit_layout.compute ~width ~height:available ~count:(List.length tiles)
   in
   let compact =
     (not zoomed)
     &&
-    match host.layout_mode, fit with
+    match layout_mode, fit with
     | H.Fit, Fit_layout.Compact -> true
     | _ -> false
   in
@@ -953,7 +1199,7 @@ let tile_layout host ({ Dimensions.width; height } : Dimensions.t) =
     if zoomed || compact
     then focused ()
     else (
-      match host.layout_mode, fit with
+      match layout_mode, fit with
       | H.Fit, Fit_layout.Grid cells -> List.zip_exn tiles cells
       | H.Fit, Fit_layout.Compact -> focused ()
       | H.Preferred, _ ->
@@ -1023,6 +1269,26 @@ let scroll_run_focused host data dimensions ~delta =
        let local = H.local host tile.id in
        let local =
          if String.equal tile.kind "synthesis"
+            && Synthesis_view.Mode.equal
+                 (Synthesis_view.State.mode local.synthesis)
+                 Metrics
+         then (
+           let count =
+             synthesis_metrics_content host data tile ~run
+             |> List.concat_map ~f:(E.wrap ~width)
+             |> List.length
+           in
+           let maximum = Int.max 0 (count - height) in
+           let current = metrics_offset local data run in
+           let scroll =
+             Int64.(
+               max
+                 zero
+                 (min (of_int maximum) (of_int (Int.min current maximum) + of_int delta)))
+             |> Int64.to_int_exn
+           in
+           { local with scroll; metrics_scope = metrics_scope data run })
+         else if String.equal tile.kind "synthesis"
          then
            { local with
              synthesis =
@@ -1031,24 +1297,26 @@ let scroll_run_focused host data dimensions ~delta =
                  ~summary:(data.summary run)
                  ~filter:local.filter
                  ~width
-                 ~height:(Int.max 0 (height - 1))
-                 ~delta
-           }
-         else if Terminal_result_view.supports tile.kind
-         then
-           { local with
-             terminal_result =
-               Terminal_result_view.scroll
-                 ~fallback:(("Run: " ^ run_label run) :: data.run_lines run tile.kind)
-                 ~request_context:(data.run_context run)
-                 local.terminal_result
-                 ~run
-                 ~summary:(data.summary run)
-                 ~kind:tile.kind
-                 ~width
                  ~height
                  ~delta
            }
+         else if Terminal_result_view.supports tile.kind
+         then (
+           let count =
+             terminal_content host data tile ~run
+             |> List.concat_map ~f:(E.wrap ~width)
+             |> List.length
+           in
+           { local with
+             terminal_result =
+               Terminal_result_view.State.scroll
+                 (Terminal_result_view.State.reconcile
+                    local.terminal_result
+                    ~run
+                    ~summary:(data.summary run))
+                 ~delta
+                 ~max_offset:(Int.max 0 (count - height))
+           })
          else local
        in
        H.set_local host tile.id local
@@ -1193,76 +1461,127 @@ let render_workspace host data ({ Dimensions.width; height } as dimensions) =
     |> box ~width ~height
     |> colored appearance Background
   in
-  match host.palette with
-  | None ->
-    (match Option.bind (H.focused host) ~f:(artifact_inspector host) with
-     | None -> frame
-     | Some view ->
-       lines
-         ~appearance
-         ~role:Surface
-         ~width
-         ~height
-         (Artifact_view.rows view ~width ~height)
-       |> colored appearance Surface
-       |> box ~width:dimensions.width ~height:dimensions.height)
+  match Option.bind (H.focused host) ~f:(artifact_inspector host) with
+  | None -> frame
+  | Some view ->
+    lines
+      ~appearance
+      ~role:Surface
+      ~width
+      ~height
+      (Artifact_view.rows view ~width ~height)
+    |> colored appearance Surface
+    |> box ~width:dimensions.width ~height:dimensions.height
+;;
+
+let render_palette host dimensions background =
+  match host.H.palette with
+  | None -> background
   | Some p ->
-    let matches = H.matches p in
-    let shown = Int.max 1 (height - 4) in
+    let appearance = host.appearance in
+    let bounds =
+      Palette_view.bounds ~width:dimensions.Dimensions.width ~height:dimensions.height
+    in
+    let px = if bounds.width >= 6 then 1 else 0 in
+    let py = if bounds.height >= 6 then 1 else 0 in
+    let width = Int.max 0 (bounds.width - (2 * px)) in
+    let height = Int.max 0 (bounds.height - (2 * py)) in
+    let footer_height = if height >= 3 then 1 else 0 in
+    let heading_height = if height >= 4 then 1 else 0 in
+    let prompt_rows = Int.max 1 (Int.min 3 (height - footer_height - heading_height)) in
+    let text ?(role = Role.Surface) text =
+      lines ~appearance ~role ~width ~height:1 [ text ]
+    in
+    let heading =
+      match p.argument with
+      | Some (H.Plan_endpoint _) ->
+        "PLAN ENDPOINT - exact provider endpoint; Enter previews; Esc closes"
+      | Some (H.Finalization_attempt run) ->
+        "INSPECT FINALIZATION for "
+        ^ run_label run
+        ^ " - exact returned attempt; Enter imports; Esc closes"
+      | Some (H.Acceptance (run, _, _)) ->
+        "FINALIZE AND ACCEPT " ^ run_label run ^ " — Enter submits; Esc closes"
+      | Some (H.Simulation_selection _) ->
+        "SIMULATION LAUNCH FORM — explicit inputs; Enter accepts each field"
+      | None -> "COMMAND PALETTE · captured target"
+    in
+    let query =
+      match p.argument with
+      | Some (H.Simulation_selection _ | H.Acceptance _) ->
+        wrap_cells ~width ("> " ^ p.query)
+        |> List.rev
+        |> Fn.flip List.take prompt_rows
+        |> List.rev
+      | _ -> []
+    in
+    let help =
+      match p.argument with
+      | Some (H.Simulation_selection (_, _, _, form)) ->
+        Simulation_view.Form.help form |> List.concat_map ~f:(wrap_cells ~width)
+      | Some (H.Acceptance _) ->
+        [ "Acceptance S-expression (≤4096 UTF-8 bytes; quote paths with spaces):"
+        ; "((support_tools /tools) (precheck_python /python)"
+        ; " (testbench /tb.sv) (testbench_top tb) (replay_trace /trace))"
+        ; "All five values are explicit strings; no shell expansion."
+        ]
+      | _ -> []
+    in
+    let prompt =
+      if List.is_empty query
+      then [ Palette_view.query ~attrs:(Role.attrs appearance Surface) ~width p.query ]
+      else List.map query ~f:text
+    in
+    let header =
+      (if heading_height > 0 then [ text heading ] else [])
+      @ prompt
+      @ List.map help ~f:text
+    in
+    let shown = Int.max 0 (height - List.length header - footer_height) in
+    let ranked = if Option.is_some p.argument then [] else H.ranked_matches p in
     let start = Int.max 0 (p.index - shown + 1) in
     let commands =
-      List.drop matches start
+      List.drop ranked start
       |> Fn.flip List.take shown
-      |> List.mapi ~f:(fun i c ->
-        sprintf
-          "%s %s%s"
-          (if i + start = p.index then ">" else " ")
-          c.H.title
-          (Option.value_map c.unavailable ~default:"" ~f:(fun reason ->
-             " [" ^ reason ^ "]")))
+      |> List.mapi ~f:(fun i result ->
+        let selected = start + i = p.index in
+        let role = if selected then Role.Selection else Surface in
+        let attrs = Role.attrs appearance role in
+        (* Selection owns the row backdrop; matching owns underline and a warm foreground.
+           The two remain distinct even on the selected command. *)
+        let match_attrs = attrs @ [ Attr.fg (Role.rgb 255 207 102); Attr.underline ] in
+        Palette_view.result_row ~attrs ~match_attrs ~width ~selected result
+        |> colored appearance role)
     in
-    let overlay =
-      lines
-        ~appearance
-        ~role:Surface
-        ~width
-        ~height
-        ([ (match p.argument with
-            | Some (H.Plan_endpoint _) ->
-              "PLAN ENDPOINT - exact provider endpoint; Enter previews; Esc closes"
-            | Some (H.Finalization_attempt run) ->
-              "INSPECT FINALIZATION for "
-              ^ run_label run
-              ^ " - exact returned attempt; Enter imports; Esc closes"
-            | Some (H.Acceptance (run, _, _)) ->
-              "FINALIZE AND ACCEPT " ^ run_label run ^ " — Enter submits; Esc closes"
-            | Some (H.Simulation_selection _) ->
-              "SIMULATION LAUNCH FORM — explicit inputs; Enter accepts each field"
-            | None -> "COMMAND PALETTE - Esc closes; Enter executes captured target")
-         ]
-         @ (match p.argument with
-            | Some (H.Simulation_selection _) -> wrap_cells ~width ("> " ^ p.query)
-            | Some (H.Acceptance _) ->
-              wrap_cells ~width ("> " ^ p.query)
-              |> List.rev
-              |> Fn.flip List.take 3
-              |> List.rev
-            | _ -> [ "> " ^ p.query ])
-         @ (match p.argument with
-            | Some (H.Simulation_selection (_, _, _, form)) ->
-              Simulation_view.Form.help form |> List.concat_map ~f:(wrap_cells ~width)
-            | Some (H.Acceptance _) ->
-              [ "Acceptance S-expression (≤4096 UTF-8 bytes; quote paths with spaces):"
-              ; "((support_tools /tools) (precheck_python /python)"
-              ; " (testbench /tb.sv) (testbench_top tb) (replay_trace /trace))"
-              ; "All five values are explicit strings; no shell expansion."
-              ]
-            | _ -> [])
-         @ commands
-         @ [ host.notice ])
+    let commands =
+      if Option.is_none p.argument && List.is_empty ranked && shown > 0
+      then [ text ~role:Muted "No matching commands" ]
+      else commands
+    in
+    let footer =
+      if not (String.is_empty host.notice)
+      then host.notice
+      else if Option.is_some p.argument
+      then "Enter accepts input · Esc return · Ctrl-C exits"
+      else
+        sprintf
+          "%d/%d · Tab/Shift-Tab ↑/↓ · Enter run · Esc return"
+          (if List.is_empty ranked then 0 else p.index + 1)
+          (List.length ranked)
+    in
+    let body =
+      View.vcat (header @ commands)
+      |> box ~width ~height:(Int.max 0 (height - footer_height))
+    in
+    let panel =
+      View.vcat ([ body ] @ if footer_height > 0 then [ text ~role:Muted footer ] else [])
+      |> box ~width ~height
+      |> View.pad ~l:px ~r:px ~t:py ~b:py
+      |> box ~width:bounds.width ~height:bounds.height
       |> colored appearance Surface
     in
-    View.zcat [ overlay; frame ] |> box ~width:dimensions.width ~height:dimensions.height
+    Palette_view.overlay ~background ~panel bounds
+    |> box ~width:dimensions.width ~height:dimensions.height
 ;;
 
 (* A focused explorer covers the workspace. Do not construct the obscured tile images:
@@ -1275,18 +1594,21 @@ let render host data dimensions =
       Option.bind host.registry ~f:(fun registry ->
         List.find registry.tiles ~f:(fun tile -> W.Tile_id.equal tile.id id))
   in
-  match host.H.palette, Option.bind inspection_tile ~f:(inspection_explorer host) with
-  | None, Some view ->
-    let width, height = inspection_viewport dimensions in
-    lines
-      ~appearance:host.appearance
-      ~role:Surface
-      ~width
-      ~height
-      (Inspection_view.rows view ~width ~height)
-    |> colored host.appearance Surface
-    |> box ~width ~height
-  | _ -> render_workspace host data dimensions
+  let background =
+    match Option.bind inspection_tile ~f:(inspection_explorer host) with
+    | Some view ->
+      let width, height = inspection_viewport dimensions in
+      lines
+        ~appearance:host.appearance
+        ~role:Surface
+        ~width
+        ~height
+        (Inspection_view.rows view ~width ~height)
+      |> colored host.appearance Surface
+      |> box ~width ~height
+    | None -> render_workspace host data dimensions
+  in
+  render_palette host dimensions background
 ;;
 
 let appearance_cases =
@@ -1306,6 +1628,436 @@ let plain_text view =
     (View.width view, View.height view)
     (View.Private.notty_image view);
   Buffer.contents buffer
+;;
+
+let%test_unit "palette scroll keeps selected result visible at normal and tiny sizes" =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "palette-scrolling") in
+  let host = H.receive H.empty registry in
+  let commands =
+    List.init 40 ~f:(fun i ->
+      { H.id = Int.to_string i
+      ; title = sprintf "Similar command %02d" i
+      ; aliases = ""
+      ; action = Toggle_chrome
+      ; unavailable = None
+      })
+  in
+  let host =
+    List.fold [ ' '; 'c'; 'c' ] ~init:host ~f:(fun host c ->
+      fst (H.input host (Character c) ~commands))
+  in
+  let host =
+    List.fold (List.init 39 ~f:Fn.id) ~init:host ~f:(fun host _ ->
+      fst (H.input host Focus ~commands))
+  in
+  List.iter
+    [ 80, 24; 120, 40; 40, 4 ]
+    ~f:(fun (width, height) ->
+      let dimensions = { Dimensions.width; height } in
+      let background = lines ~width ~height [ "WORKSPACE BACKGROUND" ] in
+      let frame = render_palette host dimensions background in
+      let text = plain_text frame in
+      assert (View.width frame = width && View.height frame = height);
+      assert (String.is_substring text ~substring:"Similar command 39");
+      assert (not (String.is_substring text ~substring:"Similar command 00")));
+  List.iter
+    [ 1, 1; 3, 2; 12, 3 ]
+    ~f:(fun (width, height) ->
+      let frame =
+        render_palette
+          host
+          { Dimensions.width; height }
+          (View.rectangle ~width ~height ())
+      in
+      assert (View.width frame = width && View.height frame = height))
+;;
+
+let%test_unit "form overlay keeps query tail visible without changing captured form state"
+  =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "form-overlay-tail") in
+  let host = H.receive H.empty registry in
+  let query = String.make 290 'x' ^ "QUERY-TAIL" in
+  let palette : H.palette =
+    { capture = Option.value_exn (H.capture host)
+    ; commands = []
+    ; query
+    ; index = 0
+    ; argument = Some (Acceptance (Fs0_fixture.run_a, "/exact/execution", "captured-key"))
+    }
+  in
+  let host = { host with palette = Some palette } in
+  List.iter
+    [ 40, 4; 80, 24 ]
+    ~f:(fun (width, height) ->
+      let frame =
+        render_palette
+          host
+          { Dimensions.width; height }
+          (View.rectangle ~width ~height ())
+      in
+      assert (String.is_substring (plain_text frame) ~substring:"QUERY-TAIL");
+      assert (phys_equal (Option.value_exn host.palette) palette));
+  let returned, effect = H.input host Escape ~commands:[] in
+  assert (Option.is_none returned.palette);
+  match effect with
+  | No_effect -> ()
+  | _ -> assert false
+;;
+
+let%test_unit "density changes rendered padding while explicit overrides retain geometry" =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "density-rendering") in
+  let original = List.hd_exn registry.tiles in
+  let tile = { original with kind = "project" } in
+  let registry = { registry with tiles = tile :: List.tl_exn registry.tiles } in
+  let data =
+    { project = None
+    ; jobs = []
+    ; runs = []
+    ; log_lines = (fun _ -> assert false)
+    ; run_lines = (fun _ _ -> assert false)
+    ; run_context = (fun _ -> assert false)
+    ; summary = (fun _ -> assert false)
+    ; status = "fixture"
+    ; environment = "fixture"
+    ; asic_lines = []
+    ; asic = None
+    }
+  in
+  let host = H.receive H.empty registry in
+  let host =
+    H.set_local
+      { host with focus = None }
+      tile.id
+      { H.default_local with presentation = { T.inherit_ with header = Some false } }
+  in
+  let host = { host with appearance = { host.appearance with preset = Minimal } } in
+  let density host density = H.set_appearance host { host.H.appearance with density } in
+  let geometry host = body_geometry host tile ~width:40 ~height:12 in
+  let image host = tile_view host data tile ~width:40 ~height:12 in
+  let compact = density host Compact
+  and comfortable = density host Comfortable in
+  let equal_geometry = [%equal: int * int * int * int * int] in
+  assert (equal_geometry (geometry compact) (40, 12, 0, 40, 12));
+  assert (equal_geometry (geometry comfortable) (40, 12, 1, 38, 10));
+  assert (String.is_prefix (plain_text (image compact)) ~prefix:"No project open");
+  let comfortable_body = image comfortable |> View.crop ~l:1 ~t:1 in
+  assert (String.is_prefix (plain_text comfortable_body) ~prefix:"No project open");
+  assert (not (String.equal (plain_text (image compact)) (plain_text (image comfortable))));
+  List.iter [ 0; 2 ] ~f:(fun padding ->
+    let explicit =
+      H.set_local
+        host
+        tile.id
+        { (H.local host tile.id) with
+          presentation = { T.inherit_ with header = Some false; padding = Some padding }
+        }
+    in
+    let a = density explicit Compact
+    and b = density explicit Comfortable in
+    assert ((H.policy a tile).padding = padding && (H.policy b tile).padding = padding);
+    assert (equal_geometry (geometry a) (geometry b));
+    assert (String.equal (plain_text (image a)) (plain_text (image b))));
+  let app = { host with presentation = { T.inherit_ with padding = Some 0 } } in
+  assert ((H.policy (density app Comfortable) tile).padding = 0);
+  let workspace =
+    { app with
+      workspace_presentation =
+        [ W.Workspace_id.to_string tile.workspace, { T.inherit_ with padding = Some 2 } ]
+    }
+  in
+  assert ((H.policy (density workspace Compact) tile).padding = 2);
+  let navigation = { tile with kind = "workspace-tabs" } in
+  assert (
+    (H.policy compact navigation).padding = 0
+    && (H.policy comfortable navigation).padding = 0);
+  assert (
+    let _, _, padding, _, _ = body_geometry comfortable tile ~width:3 ~height:2 in
+    padding = 0);
+  List.iter [ compact; comfortable; app; workspace ] ~f:(fun host ->
+    assert (phys_equal (Option.value_exn host.H.registry) registry);
+    assert (W.Tile.equal (W.tile (Option.value_exn host.registry) tile.id) tile))
+;;
+
+let%test_unit "actual preset host resolves quiet chrome, headerless pins and selector cap"
+  =
+  let initial = W.initial ~session_id:(W.Session_id.of_string "composed-host") in
+  let workspace = List.hd_exn initial.workspaces in
+  let apply s mutation =
+    W.apply s (Mutate { expected_revision = s.W.Snapshot.revision; mutation })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let registry =
+    apply initial (P.Definition.apply P.Overview.definition ~workspace:workspace.id)
+  in
+  let context = W.context registry workspace.context in
+  let registry =
+    apply
+      registry
+      (Select_run
+         { workspace = workspace.id
+         ; context = context.id
+         ; expected_selection_revision = context.selection_revision
+         ; run = Some Fs0_fixture.run_a
+         })
+  in
+  let find kind =
+    List.find_exn registry.tiles ~f:(fun t ->
+      W.Workspace_id.equal t.W.Tile.workspace workspace.id && String.equal t.kind kind)
+  in
+  let synthesis = find "synthesis"
+  and selector = find "run-selector"
+  and navigation = find "workspace-tabs" in
+  let data =
+    { project = None
+    ; jobs = []
+    ; runs =
+        List.init 12 ~f:(fun i ->
+          { Fs0_fixture.run_a with id = sprintf "run-%02d" i }, sprintf "candidate-%02d" i)
+    ; log_lines = (fun _ -> [])
+    ; run_lines = (fun _ _ -> [])
+    ; run_context = (fun _ -> [])
+    ; summary =
+        (fun run ->
+          List.find Fs0_fixture.snapshot.summaries ~f:(fun s -> Run_ref.equal s.run run))
+    ; status = "fixture"
+    ; environment = "fixture"
+    ; asic_lines = []
+    ; asic = Some Fs0_fixture.snapshot
+    }
+  in
+  let host = H.receive H.empty registry in
+  let image host tile = tile_view host data tile ~width:100 ~height:16 |> plain_text in
+  let normal = image host synthesis in
+  assert (not (String.is_substring normal ~substring:"FOLLOW"));
+  assert (
+    not (String.is_substring normal ~substring:("Run: " ^ run_label Fs0_fixture.run_a)));
+  assert (String.is_substring normal ~substring:"Freshness:");
+  let pin_registry =
+    apply
+      registry
+      (Set_tile_binding { tile = synthesis.id; binding = Pin_run Fs0_fixture.run_a })
+  in
+  let pinned = W.tile pin_registry synthesis.id in
+  let pin_host = H.receive host pin_registry in
+  let pin_host =
+    H.set_local
+      pin_host
+      pinned.id
+      { H.default_local with
+        presentation = { T.inherit_ with header = Some false; freshness = Some false }
+      }
+  in
+  let pinned_text = image pin_host pinned in
+  assert (String.is_substring pinned_text ~substring:("PIN " ^ run_label Fs0_fixture.run_a));
+  assert (not (String.is_substring pinned_text ~substring:"Freshness:"));
+  assert (String.is_substring pinned_text ~substring:"Cell count: 50");
+  let hidden =
+    H.set_local
+      pin_host
+      pinned.id
+      { (H.local pin_host pinned.id) with
+        presentation = { T.inherit_ with header = Some false; badge = Some Hidden }
+      }
+  in
+  assert (not (String.is_substring (image hidden pinned) ~substring:"PIN "));
+  assert (W.Snapshot.equal (Option.value_exn hidden.registry) pin_registry);
+  let nav_policy = H.policy host navigation in
+  assert (
+    (not (T.show_title nav_policy))
+    && (not nav_policy.hints)
+    && (not nav_policy.frame)
+    && nav_policy.padding = 0);
+  let nav = image host navigation in
+  assert (
+    (not (String.is_substring nav ~substring:"PROJECT"))
+    && not (String.is_substring nav ~substring:"j/k browse"));
+  let selector_host =
+    H.set_local host selector.id { H.default_local with cursor = Some "asic/run-11" }
+  in
+  let candidates = rows selector_host data selector ~width:100 ~height:12 in
+  assert (List.length candidates = 4);
+  assert (
+    List.exists candidates ~f:(fun row ->
+      String.is_substring row ~substring:"candidate-11"));
+  let global_rows =
+    { selector_host with presentation = { T.inherit_ with run_selector_rows = Some 7 } }
+  in
+  assert (List.length (rows global_rows data selector ~width:100 ~height:12) = 7);
+  let more =
+    H.set_local
+      selector_host
+      selector.id
+      { (H.local selector_host selector.id) with
+        presentation = { T.inherit_ with run_selector_rows = Some 6 }
+      }
+  in
+  assert (List.length (rows more data selector ~width:100 ~height:12) = 6);
+  let dimensions = { Dimensions.width = 120; height = 40 } in
+  let _, compact, layout = tile_layout host dimensions in
+  assert (not compact);
+  let cell tile =
+    List.find_exn layout ~f:(fun (t, _) -> W.Tile_id.equal t.id tile.W.Tile.id) |> snd
+  in
+  let select_cell = cell selector
+  and synthesis_cell = cell synthesis in
+  assert (
+    select_cell.width > (cell (find "live-status")).width
+    && select_cell.y < synthesis_cell.y);
+  let renamed =
+    { registry with
+      workspaces =
+        List.map registry.workspaces ~f:(fun w ->
+          if W.Workspace_id.equal w.id workspace.id
+          then { w with name = "Custom title" }
+          else w)
+    }
+  in
+  let _, _, renamed_layout = tile_layout (H.receive host renamed) dimensions in
+  assert (
+    List.equal
+      (fun (a, g) (b, h) ->
+        W.Tile_id.equal a.W.Tile.id b.W.Tile.id && W.Geometry.equal g h)
+      layout
+      renamed_layout)
+;;
+
+let%test_unit "host semantic terminal rows preserve failure and raw evidence when chrome \
+               hidden"
+  =
+  let initial = W.initial ~session_id:(W.Session_id.of_string "semantic-host") in
+  let workspace = List.hd_exn initial.workspaces in
+  let registry =
+    W.apply
+      initial
+      (Mutate
+         { expected_revision = initial.revision
+         ; mutation = P.Definition.apply P.Overview.definition ~workspace:workspace.id
+         })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let timing =
+    List.find_exn registry.tiles ~f:(fun t -> String.equal t.W.Tile.kind "timing")
+  in
+  let timing = { timing with binding = Pin_run Fs0_fixture.run_a } in
+  let registry =
+    { registry with
+      tiles =
+        List.map registry.tiles ~f:(fun t ->
+          if W.Tile_id.equal t.id timing.id then timing else t)
+    }
+  in
+  let terminal : Asic.Terminal_result.t =
+    { attempt = "exact"
+    ; results_file = "/results"
+    ; results_digest = "digest"
+    ; operation_status = "completed"
+    ; physical_completion = "partial"
+    ; acceptance = "fail"
+    ; timing_goal = "unknown"
+    ; metrics = []
+    ; checks =
+        [ { name = "drc"
+          ; status = "fail"
+          ; reason = Some "validated passed is provider prose"
+          ; source = None
+          }
+        ]
+    ; evidence =
+        "Freshness: provider source\nRun: original raw identity\nfailed pending validated"
+    }
+  in
+  let summary =
+    { (List.hd_exn Fs0_fixture.snapshot.summaries) with
+      run = Fs0_fixture.run_a
+    ; freshness = Validated
+    ; terminal = Some terminal
+    }
+  in
+  let data =
+    { project = None
+    ; jobs = []
+    ; runs = []
+    ; log_lines = (fun _ -> [])
+    ; run_lines = (fun _ _ -> [])
+    ; run_context = (fun _ -> [])
+    ; summary = (fun _ -> Some summary)
+    ; status = "fixture"
+    ; environment = "fixture"
+    ; asic_lines = []
+    ; asic = None
+    }
+  in
+  let host = H.receive H.empty registry in
+  let local =
+    { H.default_local with
+      terminal_result =
+        Terminal_result_view.State.inspect
+          (Terminal_result_view.State.reconcile
+             Terminal_result_view.State.empty
+             ~run:Fs0_fixture.run_a
+             ~summary:(Some summary))
+    }
+  in
+  let host = H.set_local host timing.id local in
+  let typed = semantic_rows host data timing ~width:120 ~height:200 |> Option.value_exn in
+  assert (
+    List.exists typed ~f:(List.exists ~f:(fun span -> E.Role.equal span.E.role Validated)));
+  assert (
+    List.exists typed ~f:(List.exists ~f:(fun span -> E.Role.equal span.E.role Failed)));
+  let hidden =
+    H.set_local
+      host
+      timing.id
+      { local with
+        presentation =
+          { T.inherit_ with
+            freshness = Some false
+          ; run_reference = Some false
+          ; hints = Some false
+          }
+      }
+  in
+  let hidden_rows =
+    semantic_rows hidden data timing ~width:120 ~height:200 |> Option.value_exn
+  in
+  let text = String.concat ~sep:"\n" (List.map hidden_rows ~f:E.text) in
+  assert (String.is_substring text ~substring:"Freshness: provider source");
+  assert (String.is_substring text ~substring:"Run: original raw identity");
+  assert (
+    not
+      (List.exists
+         hidden_rows
+         ~f:(List.exists ~f:(fun span -> E.Role.equal span.E.role Validated))));
+  assert (
+    List.exists
+      hidden_rows
+      ~f:
+        (List.exists ~f:(fun span ->
+           E.Role.equal span.E.role Plain
+           && String.is_substring
+                span.text
+                ~substring:"validated passed is provider prose")));
+  assert (W.Snapshot.equal registry (Option.value_exn hidden.registry));
+  let hidden = { hidden with focus = Some timing.id } in
+  List.iter
+    [ 32, 8; 80, 24 ]
+    ~f:(fun (width, height) ->
+      let dimensions = { Dimensions.width; height } in
+      let bottom = scroll_focused hidden data dimensions ~delta:Int.max_value in
+      let stopped = scroll_focused bottom data dimensions ~delta:1 in
+      assert (
+        (H.local stopped timing.id).terminal_result.offset
+        = (H.local bottom timing.id).terminal_result.offset);
+      let reverse = scroll_focused stopped data dimensions ~delta:(-1) in
+      if (H.local bottom timing.id).terminal_result.offset > 0
+      then
+        assert (
+          not
+            (String.equal
+               (render bottom data dimensions |> plain_text)
+               (render reverse data dimensions |> plain_text))))
 ;;
 
 let%test_unit "utility navigation filters match input and inspection scroll is bounded" =
@@ -1517,7 +2269,10 @@ let%test_unit "checklist follows exact run and pin with selected-stage detail an
   assert (List.equal String.equal (projected following) [ "running" ]);
   assert (List.equal String.equal (projected pinned) [ "completed"; "failed" ]);
   let compact_host =
-    H.set_local host following.id { H.default_local with headers = false }
+    H.set_local
+      host
+      following.id
+      { H.default_local with presentation = { T.inherit_ with header = Some false } }
   in
   let compact =
     tile_view compact_host data following ~width:40 ~height:10 |> plain_text
@@ -1557,7 +2312,7 @@ let%test_unit "checklist follows exact run and pin with selected-stage detail an
         H.set_local
           host
           following.id
-          { (H.local host following.id) with headers = true; scroll }
+          { (H.local host following.id) with presentation = T.inherit_; scroll }
       in
       let text = tile_view host data following ~width:40 ~height |> plain_text in
       assert (String.is_substring text ~substring:"stage-5: pending")));
@@ -1651,7 +2406,19 @@ let%test_unit "simulation tile renders project scope and independent selection a
       assert (View.width view = width && View.height view = height));
   let text = tile_view host data tile ~width:120 ~height:24 |> plain_text in
   assert (String.is_substring text ~substring:"Structured simulation");
-  assert (String.is_substring text ~substring:"[PROJECT]");
+  assert (not (String.is_substring text ~substring:"[PROJECT]"));
+  let explicit =
+    H.set_local
+      host
+      tile.id
+      { (H.local host tile.id) with
+        presentation = { T.inherit_ with badge = Some Always }
+      }
+  in
+  assert (
+    String.is_substring
+      (tile_view explicit data tile ~width:120 ~height:24 |> plain_text)
+      ~substring:"[PROJECT]");
   assert (String.is_substring text ~substring:"/host/trace.vcd");
   assert (not (String.is_substring text ~substring:"No run selected"));
   let local = H.local host tile.id in
@@ -1985,7 +2752,12 @@ let%test_unit "actual renderer clips cell geometry and distinguishes run and pro
      | None_ | Ascii -> assert (String.for_all text ~f:(fun ch -> Char.to_int ch < 128))
      | Unicode -> ());
     let local = H.local host test_tile.id in
-    let without_headers = H.set_local host test_tile.id { local with headers = false } in
+    let without_headers =
+      H.set_local
+        host
+        test_tile.id
+        { local with presentation = { local.presentation with header = Some false } }
+    in
     let text =
       tile_view without_headers data test_tile ~width:64 ~height:12 |> plain_text
     in
@@ -2192,6 +2964,23 @@ let%test_unit "inspection overlay and input share full viewport and visibly reve
       let frame state = render (host_for state) data dimensions in
       assert (View.width (frame bottom) = width && View.height (frame bottom) = height);
       assert (not (String.equal (plain_text (frame bottom)) (plain_text (frame up))));
+      (* Opening the palette must preserve this actual inspector, not rebuild a different
+         workspace underneath. Data callbacks above deliberately fail if the workspace
+         renderer is accidentally entered. *)
+      let source = host_for bottom in
+      let opened =
+        List.fold [ ' '; 'c'; 'c' ] ~init:source ~f:(fun host ch ->
+          fst (H.input host (Character ch) ~commands:[]))
+      in
+      let overlay = render opened data dimensions in
+      let b = Palette_view.bounds ~width ~height in
+      let top image = View.crop ~b:(height - b.y) image |> plain_text in
+      assert (b.y > 0 && String.equal (top overlay) (top (frame bottom)));
+      let returned = fst (H.input opened Escape ~commands:[]) in
+      assert (
+        String.equal
+          (plain_text (render returned data dimensions))
+          (plain_text (frame bottom)));
       let stale =
         { (host_for bottom) with registry = Some (bind snapshot Fs0_fixture.run_b) }
       in
@@ -2337,7 +3126,9 @@ let%test_unit "warm synthesis run switch renders 73 while pinned reference retai
   let has frame text = String.is_substring frame ~substring:text in
   let host = select (H.receive H.empty s) Fs0_fixture.run_a in
   let host = { host with focus = Some following } in
-  let before = frame host 32 8 in
+  (* Comfortable density uses two padding rows. Keep room for an actual cell row as well
+     as count/freshness/table headings in this narrow fallback. *)
+  let before = frame host 32 10 in
   assert (has before "Cell count: 50");
   assert (has before "Freshness: Cached_unverified");
   assert (has before "Count  Cell type");
@@ -2350,7 +3141,7 @@ let%test_unit "warm synthesis run switch renders 73 while pinned reference retai
     let both = frame host 128 24 in
     assert (has both "Cell count: 73" && has both "Cell count: 50");
     assert (has both "run asic/fixture-B" && has both "PIN asic/fixture-A");
-    let small = frame host 32 8 in
+    let small = frame host 32 10 in
     assert (has small "Cell count: 73");
     assert (has small "Freshness: Cached_unverified");
     assert (has small "Count  Cell type");

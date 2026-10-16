@@ -4,6 +4,8 @@
   baseline_fixture
   fs0_fixture
   appearance
+  tile_presentation
+  evidence_style
   overview_tiles
   overview_layout
   synthesis_view
@@ -15,6 +17,8 @@
   presentation
   state
   workspace_host
+  palette_search
+  palette_view
   host_view
   plain_rpc
   launch_preferences
@@ -27,6 +31,7 @@
   core_unix
   core_unix.filename_unix
   hardcaml_workbench_protocol
+  hardcaml_workbench_workspaces
   bonsai_term
   notty-community
   cryptokit)

@@ -20,6 +20,7 @@ Project/provider commands remain useful without the application.
 | [Rendering](rendering.md) | Presentation, input, layout and headless interaction requirements |
 | [Appearance handoffs](design/README.md) | Imported older design doc, newer gallery and implementation qualifications |
 | [Appearance presets](appearance_presets.md) | Try the implemented A–E skins and independent presentation controls |
+| [Frontend composition](frontend_composition.md) | Where workspace layouts live; bounded fuzzy palette, per-tile chrome, status colors, preset migration and actual PTY evidence |
 | [Synthetic flow demo](synthetic_flow.md) | Launch populated Overview/Timing workspaces and operate a simulated flow through the real daemon, without EDA |
 | [Synthesis inspection](synthesis_inspection.md) | FS1/F06 cell table, filter/sort, row detail and evidence controls |
 | [FS1 acceptance](fs1_acceptance.md) | Aggregate timing/resources/checks, declared-clock context, finalization import, real physical/acceptance/cancellation evidence and remaining scope |

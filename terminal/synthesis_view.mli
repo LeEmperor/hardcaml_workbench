@@ -56,6 +56,16 @@ val rows
   -> height:int
   -> string list
 
+(** Same viewport and plain text as [rows]. Summary freshness and Metrics acceptance carry
+    typed roles; arbitrary cell labels, producer text and evidence remain plain. *)
+val semantic_rows
+  :  State.t
+  -> summary:Asic.Summary.t option
+  -> filter:string
+  -> width:int
+  -> height:int
+  -> Evidence_style.row list
+
 (** Navigate a wrapped page using its actual viewport, including after resize. *)
 val scroll
   :  State.t

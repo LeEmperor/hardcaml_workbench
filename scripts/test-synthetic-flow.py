@@ -64,6 +64,11 @@ def smoke(base):
     selected = provider.selection(endpoint='placement')
     preview = call('flow', 'plan', '--flow', 'synthetic', '--profile', 'success', '--endpoint', 'placement', '--json')
     require(preview['stage_plan']['stages'][2]['action'] == selected, 'Exact advertised action selection')
+    require([s['name'] for s in preview['stage_plan']['stages']] ==
+            ['Synthesis', 'Floorplan', 'Placement', 'CTS', 'Routing', 'Signoff'],
+            'Production-like producer checklist labels')
+    require(all('SYNTHETIC' in s['reason'] for s in preview['stage_plan']['stages']),
+            'Synthetic provenance retained separately from labels')
     for reference in provider.load(base / 'manifest.json')['runs']:
         attempt = Path(reference['attempt'])
         before = {str(p): p.read_bytes() for p in attempt.rglob('*') if p.is_file()}
@@ -192,8 +197,11 @@ def pty_check(base, client_path, http):
         return [a for a in calls() if a[:2] == ['flow', 'run']]
     def producers():
         return [a for a in calls() if a[:2] == ['flow', 'run'] or a[:1] == ['finalize']]
+    def planners():
+        return [a for a in calls() if a[:2] == ['flow', 'plan']]
     launches_before = launches()
     producers_before = producers()
+    planners_before = planners()
     result_dirs_before = set((base / 'results').iterdir())
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 120, 0, 0))
@@ -237,8 +245,10 @@ def pty_check(base, client_path, http):
         keys(label.encode())
         drain(.3)
         keys(b'\r')
-    def no_launch(label):
+    def no_launch(label, allow_planning=False):
         require(producers() == producers_before, label + ' dispatched a producer command')
+        if not allow_planning:
+            require(planners() == planners_before, label + ' dispatched an unsolicited planning command')
         require(set((base / 'results').iterdir()) == result_dirs_before, label + ' allocated an attempt')
         require({field(field(r, 'run'), 'id') for r in field(http.rpc(wait=False), 'runs')} == before_ids,
                 label + ' registered a new run')
@@ -246,12 +256,12 @@ def pty_check(base, client_path, http):
     try:
         drain(2)
         overview_screen = screen('full-overview', ['Overview', 'Timing', 'Session', 'run-selector',
-            'Stage checklist', 'Synthetic Synthesis', 'synthesis', 'Cell count: 128',
-            'timing', 'Setup slack: 0.42 ns', 'placement', 'Final standard-cell area: 940 um^2', 'checks', 'drc: pass'])
+            'Stage checklist', 'Synthesis', 'synthesis', 'Cell count: 128',
+             'timing', 'Setup slack: 0.42 ns', 'checks', 'drc: pass'])
         require('[1 Overview]'.casefold() in overview_screen.casefold(), 'Overview workspace tab is not active')
         palette('Switch to Timing')
         timing_screen = screen('full-timing', ['Overview', 'Timing', 'Session', 'run-selector',
-            'Setup slack: 0.42 ns', 'placement', 'checks', 'drc: pass',
+             'Setup slack: 0.42 ns', 'cts', 'routing',
             'Declared clock clk period: 10 ns'])
         require('[2 Timing]'.casefold() in timing_screen.casefold(), 'Timing workspace switch did not apply')
         palette('Inspect timing paths asic/synthetic-reference')
@@ -291,12 +301,12 @@ def pty_check(base, client_path, http):
         # Only after the physical demo proof, zoom the actual checklist for the
         # existing deterministic interaction/launch scenario.
         ws = http.mutate(ws, '(Set_zoom (workspace %s) (tile (%s)))' % (workspace, field(checklist, 'id')))
-        screen('initial', ['Stage checklist', 'j/k browse', 'Synthetic Synthesis'],
+        screen('initial', ['Stage checklist', 'j/k browse', 'Synthesis'],
                ['Session [PROJECT]', 'run-selector [FOLLOW]', 'Cell count: 128'])
         keys(b'\r')
         screen('synthesis-detail', ['Stage ID: synthesis', 'Esc overview'])
         keys(b'\x1b')
-        screen('synthesis-overview', ['j/k browse', 'Synthetic Placement'], ['Stage ID: synthesis'])
+        screen('synthesis-overview', ['j/k browse', 'Placement'], ['Stage ID: synthesis'])
         keys(b'j')
         keys(b'\r')
         screen('j-floorplan', ['Stage ID: floorplan'], ['Stage ID: synthesis'])
@@ -329,7 +339,8 @@ def pty_check(base, client_path, http):
         require(dict(selected) == dict(flow='synthetic', profile='success', endpoint='placement', assignments=[]),
                 'Checklist r did not plan the selected exact stage action')
         screen('placement-preview', ['Matching plan: placement', 'Space c c: Launch'])
-        no_launch('Checklist planning')
+        require(len(planners()) == len(planners_before) + 1, 'Explicit checklist r must plan exactly once')
+        no_launch('Checklist planning', allow_planning=True)
         # Take identities and launch records immediately before the launch keys,
         # including every earlier HTTP/seeded/cancelled run, not an allowlist.
         require({field(field(r, 'run'), 'id') for r in field(http.rpc(), 'runs')} == before_ids,
@@ -373,14 +384,14 @@ def pty_check(base, client_path, http):
                     [field(s, 'status') for s in field(current, 'stages')] == expected) else None
             return wait_for(matches, 'PTY run observed stages: ' + repr(expected))
         transitions = [observe(['Running', 'Pending', 'Pending'] + ['Not_requested'] * 3, 0)]
-        screen('new-run-synthesis-running', ['Stage checklist', 'Synthetic Synthesis', 'running'])
+        screen('new-run-synthesis-running', ['Stage checklist', 'Synthesis', 'running'])
         expected_steps = [['Completed', 'Running', 'Pending'], ['Completed', 'Completed', 'Running'], ['Completed'] * 3]
         for cursor, expected in enumerate(expected_steps, 1):
             subprocess.run([str(base / 'project/synthetic-flow'), 'advance', str(attempt)],
                            cwd=base / 'project', check=True, stdout=subprocess.PIPE, timeout=5)
             transitions.append(observe(expected + ['Not_requested'] * 3, cursor))
             if cursor < 3:
-                screen('new-run-stage-' + str(cursor), ['Synthetic ' + ('Floorplan' if cursor == 1 else 'Placement'), 'running'])
+                screen('new-run-stage-' + str(cursor), [('Floorplan' if cursor == 1 else 'Placement'), 'running'])
         require(field(transitions[-1], 'status') == 'completed', 'PTY placement prefix did not complete')
         http.rpc()
         require(len(launches()) == len(launches_before) + 1, 'Extra provider launches during observation')
@@ -421,18 +432,18 @@ def integration(base, args):
         wait_for(lambda: metadata.exists() or daemon.poll() is not None, 'daemon discovery')
         require(daemon.poll() is None, 'Daemon exited; see daemon.log')
         url = field(parse(metadata.read_text()), 'endpoint')
-        http, runs = demo.seed(base, url)
+        http, runs = demo.seed(base, url, args.preset_export)
+        presets = demo.workspace_presets(args.preset_export)
         layout = http.rpc(domain='workspace')
         for arrangement in field(layout, 'workspaces'):
-            if field(arrangement, 'name') not in ('Overview', 'Timing'):
+            identity = field(arrangement, 'preset')
+            if not identity or identity[0] not in presets:
                 continue
+            expected = [field(t, 'kind') for t in field(presets[identity[0]], 'tiles')]
             visible = [t for t in field(layout, 'tiles') if field(t, 'workspace') == field(arrangement, 'id')
                        and field(t, 'hidden') == 'false']
-            require(len(visible) == 9, 'Curated demo must have exactly nine visible tiles per workspace')
-            kinds = {field(t, 'kind') for t in visible}
-            require({'workspace-tabs', 'live-status', 'run-selector', 'timing', 'placement', 'checks'} <= kinds,
-                    'Missing useful supported demo tiles')
-            require(not ({'physical', 'logs'} & kinds), 'Unsupported/empty tiles in curated demo')
+            require(sorted(field(t, 'kind') for t in visible) == sorted(expected),
+                    'Fresh synthetic workspace must match the shared OCaml preset: ' + identity[0])
         snapshot = http.rpc()
         require({field(r, 'status') for r in field(snapshot, 'runs')} == {'completed', 'failed'}, 'Reference and failed outcomes')
         for run in field(snapshot, 'runs'):
@@ -548,10 +559,39 @@ def main():
     parser.add_argument('--evidence', type=Path, help='NEW directory, default /tmp/opencode/synthetic-flow-*')
     parser.add_argument('--daemon', type=Path, default=REPO / '_build/default/daemon/main.exe')
     parser.add_argument('--client', type=Path, default=REPO / '_build/default/terminal/main.exe')
+    parser.add_argument('--preset-export', type=Path, help='built OCaml preset exporter; also verify export with --smoke')
     args = parser.parse_args()
     base = demo.prepare(args.evidence, manual=True, delay=.05)
     print('SYNTHETIC test evidence: ' + str(base), flush=True)
     smoke(base)
+    if args.preset_export:
+        presets = demo.workspace_presets(args.preset_export)
+        require(set(presets) == {'overview', 'timing', 'testing'}, 'Shared stable preset identities')
+        for definition in presets.values():
+            tiles = field(definition, 'tiles')
+            require(len({field(t, 'kind') for t in tiles}) == len(tiles), 'Unique default tile kinds')
+            navigation = next(t for t in tiles if field(t, 'kind') == 'workspace-tabs')
+            require(field(field(navigation, 'presentation'), 'title') == ['false'], 'Quiet navigation default')
+        # Exercise the real consumer independently of daemon availability. Names
+        # deliberately disagree with preset IDs; custom workspaces stay custom.
+        class Recorder:
+            def __init__(self):
+                self.mutations = []
+            def mutate(self, snapshot, mutation):
+                self.mutations.append(parse(mutation))
+                return snapshot
+        recorder = Recorder()
+        snapshot = [['workspaces', [
+            [['id', 'renamed'], ['name', 'Timing'], ['preset', ['overview']]],
+            [['id', 'custom'], ['name', 'Overview'], ['preset', []]]]]]
+        demo.apply_workspace_presets(recorder, snapshot, presets)
+        require(len(recorder.mutations) == 1, 'Explicit custom workspace must not infer by name')
+        mutation = recorder.mutations[0]
+        require(mutation[0] == 'Apply_preset' and field(mutation[1:], 'preset') == 'overview',
+                'Renamed workspace must apply stable preset identity')
+        require(field(mutation[1:], 'tiles') == [[field(t, 'kind'), field(t, 'geometry')]
+                for t in field(presets['overview'], 'tiles')], 'Seed specs must be exact OCaml export')
+        provider.save(base / 'preset-export-verified.json', dict(status='passed', ids=sorted(presets)))
     if not args.smoke:
         integration(base, args)
     print('SYNTHETIC ' + ('provider smoke' if args.smoke else 'HTTP' + (' + PTY' if args.pty else '')) + ': passed')

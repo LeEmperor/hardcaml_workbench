@@ -264,17 +264,24 @@ let metric_line (metric : Asic.Metric.t) =
   sprintf "%s: %s [%s]" label (metric_value metric) availability
 ;;
 
-let metrics_lines (summary : Asic.Summary.t) =
-  [ "Synthesis metrics | j/k scroll | e Evidence | Esc Summary" ]
-  @ (if List.is_empty summary.metrics
-     then [ "Metrics unavailable in cached summary; explicit Refresh needed" ]
-     else List.map summary.metrics ~f:metric_line)
-  @ [ "Scope: synthesis resources/diagnostics, not physical area or DRC/LVS"
-    ; "Freshness: " ^ freshness summary.freshness
-    ; "Provenance: accumulated checkpoint-boundary reports; see Evidence"
-    ; "Acceptance (reported): " ^ summary.acceptance
-    ; "Zero diagnostic counts do not imply signoff"
+let semantic_metrics_lines (summary : Asic.Summary.t) =
+  List.map
+    ([ "Synthesis metrics | j/k scroll | e Evidence | Esc Summary" ]
+     @ (if List.is_empty summary.metrics
+        then [ "Metrics unavailable in cached summary; explicit Refresh needed" ]
+        else List.map summary.metrics ~f:metric_line)
+     @ [ "Scope: synthesis resources/diagnostics, not physical area or DRC/LVS" ])
+    ~f:Evidence_style.plain
+  @ [ Evidence_style.freshness summary.freshness
+    ; Evidence_style.plain
+        "Provenance: accumulated checkpoint-boundary reports; see Evidence"
+    ; Evidence_style.fact ~label:"Acceptance (reported): " Verdict summary.acceptance
+    ; Evidence_style.plain "Zero diagnostic counts do not imply signoff"
     ]
+;;
+
+let metrics_lines summary =
+  List.map (semantic_metrics_lines summary) ~f:Evidence_style.text
 ;;
 
 let checks_lines (summary : Asic.Summary.t) =
@@ -492,6 +499,27 @@ let rows state ~summary ~filter ~width ~height =
             @ [ "Producer (raw):"; summary.producer ])))
 ;;
 
+(** The Summary layout fixes freshness immediately after cell count; construct this row
+    from the typed source rather than classifying rendered/provider text. Cells, metrics
+    and raw evidence are never keyword-colored. *)
+let semantic_rows state ~summary ~filter ~width ~height =
+  let state = State.reconcile state ~summary ~filter in
+  match summary, State.mode state with
+  | Some summary, Metrics ->
+    Evidence_style.page
+      ~width
+      ~height
+      ~offset:state.offset
+      (semantic_metrics_lines summary)
+  | Some summary, Summary ->
+    rows state ~summary:(Some summary) ~filter ~width ~height
+    |> List.mapi ~f:(fun index line ->
+      if index = 1
+      then Evidence_style.clip ~width (Evidence_style.freshness summary.freshness)
+      else Evidence_style.plain line)
+  | _ -> rows state ~summary ~filter ~width ~height |> List.map ~f:Evidence_style.plain
+;;
+
 let scroll state ~summary ~filter ~width ~height ~delta =
   let state = State.reconcile state ~summary ~filter in
   match State.mode state with
@@ -586,6 +614,34 @@ module%test Tests = struct
       ~filter:""
       ~width:200
       ~height:200
+  ;;
+
+  let%test_unit "semantic synthesis preserves text and separates validation from \
+                 acceptance"
+    =
+    let s = { (summary ()) with freshness = Validated; acceptance = "fail" } in
+    List.iter [ Mode.Summary; Metrics; Cells; Details; Evidence ] ~f:(fun mode ->
+      List.iter [ 1; 17; 80 ] ~f:(fun width ->
+        let state = State.set_mode (ready s) mode in
+        let plain = rows state ~summary:(Some s) ~filter:"" ~width ~height:100 in
+        let styled =
+          semantic_rows state ~summary:(Some s) ~filter:"" ~width ~height:100
+        in
+        [%test_result: string list] (List.map styled ~f:Evidence_style.text) ~expect:plain));
+    let styled =
+      semantic_rows
+        (State.set_mode (ready s) Metrics)
+        ~summary:(Some s)
+        ~filter:""
+        ~width:200
+        ~height:100
+      |> List.concat
+    in
+    assert (
+      List.exists styled ~f:(fun span -> Evidence_style.Role.equal span.role Validated));
+    assert (List.exists styled ~f:(fun span -> Evidence_style.Role.equal span.role Failed));
+    assert (
+      not (List.exists styled ~f:(fun span -> Evidence_style.Role.equal span.role Passed)))
   ;;
 
   let%test_unit "metrics missing in old caches require explicit Refresh; invalid values \

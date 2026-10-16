@@ -31,6 +31,10 @@ python3 scripts/synthetic-flow-demo.py client --dir /tmp/opencode/my-synthetic-d
 ```
 
 `--daemon PATH` and `--client PATH` override the built binary locations.
+Seeding also requires the built `terminal/workspaces/export_presets.exe` helper;
+use `--preset-export PATH` or `WORKBENCH_PRESET_EXPORT` for a separate build dir.
+It exports the actual OCaml Overview/Timing/Testing definitions, not a second
+Python layout table. Build it alongside the daemon/client before this walkthrough.
 Use `--url http://127.0.0.1:PORT` to connect to an externally started daemon.
 Daemon/client convenience launches go through the repository's existing
 `scripts/with-switch.sh`; the shell need not already have Dune on PATH. The
@@ -49,18 +53,19 @@ discovery; no project build or test target is requested by this demo.
 
 The selected reference has all six explicit completed stages. The failed candidate
 has completed synthesis/floorplan/placement/CTS, failed routing and skipped
-signoff. Select either in the normal run selector. Overview has nine supported
-tiles: workspace tabs, live status, run selector, stage checklist, synthesis,
-timing, placement, checks and finalization. Timing has workspace tabs, live
-status, run selector, timing, placement, CTS, routing, checks and finalization.
-Both follow the selected Main run. Timing/placement/checks show imported live
+signoff. Checklist labels are Synthesis, Floorplan, Placement, CTS, Routing and
+Signoff; session/run/evidence and stage reasons retain synthetic provenance.
+Select either in the normal run selector. Overview and Timing use the shared
+OCaml presets under `terminal/workspaces/`; the exported definitions are retained
+as `workspace-presets.json` with the demo evidence. Both follow the selected Main
+run. Timing/checks show imported live
 aggregate evidence; FS1 timing/clocks/physical/routing inspection is available
 through the normal Space-c-c inspection commands. Their default stage indexes
 are preloaded (timing/clocks signoff, physical placement, routing routing).
-Generic job logs are omitted because this no-EDA project produces no generic
-Workbench jobs. Seeding applies this curated layout before the first terminal
-opens (nonzero workspace revision prevents the host's larger additive initial
-preset); re-seeding resizes/reorders the preset and hides extra/obsolete tiles.
+Seeding applies defaults additively before the first terminal opens; reseeding
+preserves existing geometry, pins, hidden tiles, custom/duplicate tiles, context
+and arrangement names. Stable preset metadata selects definitions after rename.
+Use the terminal's explicit Reset arrangement action to restore preset geometry.
 The terminal's checklist `j/k` selects stages; `r` prepares the exact advertised
 action. **Launch / Launch and view** in the Space-c-c palette starts a **new run
 through that endpoint**, never a restart of a stage in the observed run.

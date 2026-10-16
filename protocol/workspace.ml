@@ -75,8 +75,34 @@ module Arrangement = struct
     ; context : Context_id.t
     ; binding_revision : int
     ; zoomed_tile : Tile_id.t option
+    ; preset : string option [@sexp.default None]
     }
   [@@deriving bin_io, compare, equal, sexp]
+
+  (** Infer only when the field is absent on disk. Explicit [None] denotes a custom
+      arrangement; renaming a migrated arrangement never re-runs name inference. *)
+  let t_of_sexp sexp =
+    let value = t_of_sexp sexp in
+    let present =
+      match sexp with
+      | Sexp.List fields ->
+        List.exists fields ~f:(function
+          | Sexp.List (Sexp.Atom "preset" :: _) -> true
+          | _ -> false)
+      | _ -> false
+    in
+    if present
+    then value
+    else
+      { value with
+        preset =
+          (match value.name with
+           | "Overview" -> Some "overview"
+           | "Timing" -> Some "timing"
+           | "Testing" -> Some "testing"
+           | _ -> None)
+      }
+  ;;
 end
 
 module Tile = struct
@@ -167,6 +193,16 @@ module Mutation = struct
     | Set_zoom of
         { workspace : Workspace_id.t
         ; tile : Tile_id.t option
+        }
+    | Apply_preset of
+        { workspace : Workspace_id.t
+        ; preset : string
+        ; tiles : (string * Geometry.t) list
+        }
+    | Reset_arrangement of
+        { workspace : Workspace_id.t
+        ; preset : string
+        ; tiles : (string * Geometry.t) list
         }
   [@@deriving bin_io, compare, equal, sexp]
 end
@@ -268,6 +304,7 @@ let validate (s : Snapshot.t) =
     List.iter s.windows ~f:(fun w -> valid_name w.name);
     List.iter s.workspaces ~f:(fun w ->
       valid_name w.name;
+      Option.iter w.preset ~f:valid_name;
       ignore (window s w.window : Window.t);
       ignore (context s w.context : Context.t);
       require
@@ -295,7 +332,14 @@ let initial ~session_id : Snapshot.t =
   let overview = Workspace_id.of_string "workspace-3" in
   let timing = Workspace_id.of_string "workspace-4" in
   let arrangement id name : Arrangement.t =
-    { id; window; name; context = main_context; binding_revision = 0; zoomed_tile = None }
+    { id
+    ; window
+    ; name
+    ; context = main_context
+    ; binding_revision = 0
+    ; zoomed_tile = None
+    ; preset = Some (String.lowercase name)
+    }
   in
   let selector id workspace width height : Tile.t =
     { id = Tile_id.of_string id
@@ -428,6 +472,7 @@ let apply_mutation (s : Snapshot.t) (mutation : Mutation.t) =
             ; context = context_id
             ; binding_revision = s.revision
             ; zoomed_tile = None
+            ; preset = None
             }
           ]
     }
@@ -489,6 +534,53 @@ let apply_mutation (s : Snapshot.t) (mutation : Mutation.t) =
         (Workspace_id.equal t.workspace id && not t.hidden)
         "Zoom requires a visible tile in this workspace");
     update_workspace s id ~f:(fun w -> { w with zoomed_tile })
+  | Apply_preset { workspace = id; preset; tiles }
+  | Reset_arrangement { workspace = id; preset; tiles } ->
+    valid_name preset;
+    ignore (workspace s id : Arrangement.t);
+    let reset =
+      match mutation with
+      | Reset_arrangement _ -> true
+      | _ -> false
+    in
+    let _, s =
+      List.fold tiles ~init:([], s) ~f:(fun (claimed, s) (kind, geometry) ->
+        valid_name kind;
+        valid_geometry geometry;
+        match
+          List.find s.tiles ~f:(fun t ->
+            Workspace_id.equal t.workspace id
+            && String.equal t.kind kind
+            && not (List.mem claimed t.id ~equal:Tile_id.equal))
+        with
+        | Some t ->
+          let s =
+            if reset
+            then update_tile s t.id ~f:(fun t -> { t with requested_geometry = geometry })
+            else s
+          in
+          t.id :: claimed, s
+        | None ->
+          let fresh, s = allocate s "tile" in
+          let tile_id = Tile_id.of_string fresh in
+          ( tile_id :: claimed
+          , { s with
+              tiles =
+                s.tiles
+                @ [ { Tile.id = tile_id
+                    ; workspace = id
+                    ; kind
+                    ; binding = Follow
+                    ; hidden = false
+                    ; requested_geometry = geometry
+                    }
+                  ]
+            } ))
+    in
+    (* Neither operation deletes/rebinds/unhides existing tiles, changes context, reorders
+       user extras, nor clears zoom. Apply is strictly additive; reset additionally
+       restores the first matching tile's requested geometry. *)
+    update_workspace s id ~f:(fun w -> { w with preset = Some preset })
 ;;
 
 (** Pure CAS reducer. Invalid snapshots/references and stale writes are explicit errors;
