@@ -447,6 +447,16 @@ Synthesis area/check counters are now projected into the current summary.
 
 ## V1 — Independent appearance gallery (FS5)
 
+**Synthetic flow/demo slice (2026-10-16):** delivered an isolated no-EDA provider
+and setup/seed/client launcher, coherent reference/failed runs, rich FS1 inspection
+datasets, optional typed stage observations and checklist planning through existing
+Plan/Run operations. Three agents implemented backend, provider and terminal slices;
+parent checks stayed serialized at `-j20`. Real HTTP and terminal/PTY acceptance
+passed at `/tmp/opencode/synthetic-flow-8rmfu7xu/`. See the
+[user guide and evidence](synthetic_flow.md) and [bounded implementation plan](synthetic_flow_plan.md).
+This supports the appearance track and future FS2 fixture integration; it does not
+implement another structured-suite contract or imply real-provider stage support.
+
 **Aesthetics worktree slice (2026-10-16):** added pure utility-tile presentation
 and nonuniform Overview geometry, a three-row workspace navigation tile, session
 status and stage checklist, explicit Testing workspace creation, Shift-Tab reverse

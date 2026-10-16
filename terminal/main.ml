@@ -591,6 +591,20 @@ let reconcile_synthesis session =
             ~filter:local.filter
         in
         session.host <- Host.set_local session.host tile.id { local with synthesis })
+      else if String.equal tile.kind "stage-checklist"
+      then (
+        let local = Host.local session.host tile.id in
+        let run =
+          Workspace.resolve_tile registry tile.id
+          |> Result.ok
+          |> Option.bind ~f:(fun reference -> reference.run)
+        in
+        let stages =
+          Option.value_map run ~default:[] ~f:(fun run ->
+            Terminal_presentation.Overview_tiles.observed_stages ~asic:session.asic ~run)
+        in
+        session.host
+        <- Host.set_local session.host tile.id (Host.reconcile_stages local ~run ~stages))
       else if Terminal_result_view.supports tile.kind
       then (
         let local = Host.local session.host tile.id in
@@ -1077,8 +1091,13 @@ let refresh_host session =
        | Awaiting -> return ())
     | _ -> return ()
   in
-  (* One bounded read intent per distinct visible run, shared by all its tiles. *)
-  let runs = Host.evidence_runs session.host in
+  (* Visible evidence and active runs share the same bounded read-intent scheduler. *)
+  let runs =
+    Host.evidence_runs session.host
+    @ Option.value_map session.asic ~default:[] ~f:(fun snapshot ->
+      List.filter_map snapshot.runs ~f:(fun run ->
+        if Asic_intents.live_status run.status then Some run.run else None))
+  in
   match session.asic with
   | None -> return ()
   | Some snapshot ->
@@ -2210,6 +2229,7 @@ let host_data session : Host_view.data =
   ; status = session.status
   ; environment = session.environment_label
   ; asic_lines
+  ; asic = session.asic
   }
 ;;
 
@@ -2812,7 +2832,22 @@ let scroll_host session delta =
 ;;
 
 let browse_host session delta =
-  scroll_host session delta;
+  let checklist =
+    Option.filter (Host.focused session.host) ~f:(fun tile ->
+      String.equal tile.kind "stage-checklist")
+  in
+  (match checklist with
+   | Some tile when not (Host.local session.host tile.id).utility_detail ->
+     Option.iter session.host.registry ~f:(fun registry ->
+       Workspace.resolve_tile registry tile.id
+       |> Result.ok
+       |> Option.bind ~f:(fun reference -> reference.run)
+       |> Option.iter ~f:(fun run ->
+         let stages =
+           Terminal_presentation.Overview_tiles.observed_stages ~asic:session.asic ~run
+         in
+         session.host <- Host.browse_stages session.host tile.id ~run ~stages ~delta))
+   | _ -> scroll_host session delta);
   change_synthesis session (fun tile local ->
     let synthesis =
       match Synthesis_view.State.mode local.synthesis with
@@ -2967,6 +3002,41 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
           Some Effect.Ignore
         | _ -> dispatch "synthesis.evidence")
      | Some (Character 'm') -> dispatch "synthesis.metrics"
+     | Some (Character 'r')
+       when Option.exists (Host.focused session.host) ~f:(fun tile ->
+              String.equal tile.kind "stage-checklist") ->
+       let selected =
+         Option.bind (Host.focused session.host) ~f:(fun tile ->
+           Option.bind session.host.registry ~f:(fun registry ->
+             Workspace.resolve_tile registry tile.id
+             |> Result.ok
+             |> Option.bind ~f:(fun reference -> reference.run)
+             |> Option.bind ~f:(fun run ->
+               let stages =
+                 Terminal_presentation.Overview_tiles.observed_stages
+                   ~asic:session.asic
+                   ~run
+               in
+               Host.stage_cursor (Host.local session.host tile.id) ~run ~stages)))
+       in
+       (match Host.stage_plan selected, captured with
+        | Ok operation, Some capture ->
+          session.host
+          <- { session.host with
+               notice =
+                 "Preparing NEW run; when preview ready: Space c c → Launch / Launch and \
+                  view"
+             };
+          Some (execute_host session capture (Asic operation) ~exit)
+        | Error reason, _ ->
+          session.host <- { session.host with notice = reason };
+          Some Effect.Ignore
+        | Ok _, None ->
+          session.host
+          <- { session.host with
+               notice = "Stage action unavailable: workspace not loaded"
+             };
+          Some Effect.Ignore)
      | Some Escape ->
        Option.iter (Host.focused session.host) ~f:(fun tile ->
          let local = Host.local session.host tile.id in

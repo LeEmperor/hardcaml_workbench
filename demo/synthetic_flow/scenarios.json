@@ -1,0 +1,22 @@
+{
+  "label": "SYNTHETIC — illustrative data, no EDA execution",
+  "stages": ["synthesis", "floorplan", "placement", "cts", "routing", "signoff"],
+  "profiles": {
+    "success": {"cells": 128, "area": 940.0, "utilization": 0.55, "setup_slack": 0.42, "hold_slack": 0.08, "fail_stage": null},
+    "failure": {"cells": 144, "area": 1080.0, "utilization": 0.62, "setup_slack": -0.31, "hold_slack": -0.02, "fail_stage": "routing"}
+  },
+  "timing_paths": [
+    {"key": "", "name": "setup path clk:reg0 -> reg7", "check": "setup", "corner": "synthetic_typical", "group": "clk", "offset": 0.0},
+    {"key": "setup-02", "name": "setup path clk:reg1 -> reg8", "check": "setup", "corner": "synthetic_slow", "group": "clk", "offset": 0.05},
+    {"key": "setup-03", "name": "setup path io:input2 -> reg9", "check": "setup", "corner": "synthetic_typical", "group": "io", "offset": 0.09},
+    {"key": "setup-04", "name": "setup path io:reg3 -> output10", "check": "setup", "corner": "synthetic_slow", "group": "io", "offset": 0.16},
+    {"key": "setup-05", "name": "setup path io:reg4 -> output11", "check": "setup", "corner": "synthetic_typical", "group": "io", "offset": 0.48},
+    {"key": "setup-06", "name": "setup path clk:reg5 -> reg12", "check": "setup", "corner": "synthetic_slow", "group": "clk", "offset": 0.72},
+    {"key": "hold-01", "name": "hold path clk:reg16 -> reg23", "check": "hold", "corner": "synthetic_typical", "group": "clk", "offset": 0.0},
+    {"key": "hold-02", "name": "hold path io:input17 -> reg24", "check": "hold", "corner": "synthetic_slow", "group": "io", "offset": 0.015},
+    {"key": "hold-03", "name": "hold path clk:reg18 -> reg25", "check": "hold", "corner": "synthetic_slow", "group": "clk", "offset": 0.035},
+    {"key": "hold-04", "name": "hold path io:reg19 -> output26", "check": "hold", "corner": "synthetic_typical", "group": "io", "offset": 0.06},
+    {"key": "hold-05", "name": "hold path clk:reg20 -> reg27", "check": "hold", "corner": "synthetic_typical", "group": "clk", "offset": 0.12},
+    {"key": "hold-06", "name": "hold path io:reg21 -> output28", "check": "hold", "corner": "synthetic_slow", "group": "io", "offset": 0.19}
+  ]
+}

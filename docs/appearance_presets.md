@@ -90,10 +90,12 @@ Narrow surfaces fall back to a grid or focused-tile view.
   **[ / ]** scroll, and **Esc** returns. Long opaque run IDs use six leading and
   six trailing characters; identities used for actions remain exact.
 - **Stage checklist** uses explicit stage statuses, symbols and semantic colors.
-  The current ASIC snapshot does not expose per-stage observations, so its stage
-  entries say **not reported**. Imported aggregate outcomes/check verdicts and
-  evidence freshness appear separately below them; scroll or use **Enter** for
-  details. Aggregate completion does not manufacture completed stages.
+  Providers supplying the optional stage-plan extension populate live rows; others
+  still say **not reported**. **j/k** selects a stage, **Enter** inspects it and
+  **r** prepares its advertised new-run action. Use the existing palette launch
+  command after planning. Imported aggregate outcomes/check verdicts and freshness
+  remain separate from stage completion. The [synthetic flow demo](synthetic_flow.md)
+  exercises this end to end without EDA tools.
 - Rounded Instrument frames, brighter semantic colors and comfortable padding
   are the provisional startup combination. Palette appearance controls still work;
   ASCII/off modes provide font-independent alternatives. Decoration degrades at

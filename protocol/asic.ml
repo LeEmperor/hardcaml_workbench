@@ -10,6 +10,34 @@ module Selection = struct
   [@@deriving bin_io, compare, equal, sexp]
 end
 
+module Stage = struct
+  module Status = struct
+    type t =
+      | Pending
+      | Running
+      | Completed
+      | Failed
+      | Skipped
+      | Cancelled
+      | Not_requested
+      | Unsupported
+      | Unknown of string
+    [@@deriving bin_io, compare, equal, sexp]
+  end
+
+  (** Explicit provider observations only. An action prepares a new named-flow run through
+      its endpoint using ordinary [Plan]/[Run], never a restart in this run. *)
+  type t =
+    { id : string
+    ; name : string
+    ; status : Status.t
+    ; requested : bool
+    ; reason : string option
+    ; action : Selection.t option
+    }
+  [@@deriving bin_io, compare, equal, sexp]
+end
+
 module Flow = struct
   type t =
     { id : string
@@ -118,6 +146,7 @@ module Run = struct
     ; status : string
     ; execution_file : string option
     ; error : string option
+    ; stages : Stage.t list [@sexp.default []]
     }
   [@@deriving bin_io, compare, equal, sexp]
 end

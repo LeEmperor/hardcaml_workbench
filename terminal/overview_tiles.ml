@@ -2,9 +2,8 @@ open! Core
 open Hardcaml_workbench_protocol
 open Bonsai_term
 
-(** Pure utility tiles. The host owns frames, focus, input and fetching. In particular,
-    [Asic.Snapshot] does not contain per-stage observations: neither its run status,
-    requested endpoint, metrics nor terminal completion can fill in a checklist. *)
+(** Pure utility tiles. Only explicit per-stage observations fill in a checklist;
+    aggregate completion and metrics never stand in for stage evidence. *)
 module Status = struct
   type t =
     | Unknown
@@ -14,16 +13,22 @@ module Status = struct
     | Completed
     | Failed
     | Skipped
+    | Cancelled
+    | Unsupported
+    | Unrecognized of string
   [@@deriving compare, equal, sexp]
 
   let label = function
     | Unknown -> "not reported"
     | Not_requested -> "not requested"
-    | Pending -> "not run"
+    | Pending -> "pending"
     | Running -> "running"
     | Completed -> "completed"
     | Failed -> "failed"
     | Skipped -> "skipped"
+    | Cancelled -> "cancelled"
+    | Unsupported -> "unsupported"
+    | Unrecognized value -> "unknown: " ^ value
   ;;
 end
 
@@ -63,8 +68,8 @@ let row
 ;;
 
 let status_role : Status.t -> Role.t = function
-  | Unknown | Not_requested -> Muted
-  | Pending | Skipped -> Warning
+  | Unknown | Not_requested | Unsupported | Unrecognized _ -> Muted
+  | Pending | Skipped | Cancelled -> Warning
   | Running -> Running
   | Completed -> Success
   | Failed -> Failure
@@ -98,6 +103,52 @@ let stage_row (stage : Stage.t) =
 
 let default_stages = [ "Synthesis"; "Placement"; "CTS"; "Routing"; "Checks" ]
 let run_identity (run : Run_ref.t) = Backend_id.to_string run.backend ^ "/" ^ run.id
+
+let asic_stage_status : Asic.Stage.Status.t -> Status.t = function
+  | Pending -> Pending
+  | Running -> Running
+  | Completed -> Completed
+  | Failed -> Failed
+  | Skipped -> Skipped
+  | Cancelled -> Cancelled
+  | Not_requested -> Not_requested
+  | Unsupported -> Unsupported
+  | Unknown value -> Unrecognized value
+;;
+
+let asic_stage_row ~run ~selected (stage : Asic.Stage.t) =
+  let status = asic_stage_status stage.status in
+  row
+    ~role:(status_role status)
+    ~status
+    ~active:selected
+    ~details:
+      ([ "Run: " ^ run_identity run
+       ; "Stage ID: " ^ stage.id
+       ; sprintf "Requested: %b" stage.requested
+       ; "Reason: " ^ Option.value stage.reason ~default:"not reported"
+       ]
+       @ (match stage.status, stage.action with
+          | Unsupported, _ -> [ "Action: unavailable (unsupported stage)" ]
+          | _, None -> [ "Action: unavailable (no advertised stage selection)" ]
+          | _, Some _ ->
+            [ "Action: r prepares NEW run through endpoint (never resume this run)" ])
+       @ Option.to_list
+           (Option.map stage.action ~f:(fun selection ->
+              "Advertised selection: "
+              ^ Sexp.to_string_hum (Asic.Selection.sexp_of_t selection))))
+    stage.name
+    (Status.label status)
+;;
+
+let execution ~asic ~run =
+  Option.bind asic ~f:(fun (snapshot : Asic.Snapshot.t) ->
+    List.find snapshot.runs ~f:(fun execution -> Run_ref.equal execution.run run))
+;;
+
+let observed_stages ~asic ~run =
+  execution ~asic ~run |> Option.value_map ~default:[] ~f:(fun run -> run.stages)
+;;
 
 (** Only shorten ASCII opaque identifiers. Human/provider labels remain intact and are
     clipped by display cells during rendering, never by UTF-8 byte offsets. *)
@@ -364,8 +415,10 @@ let marker (appearance : Appearance.t) (row : row) =
      | Some Running -> "[>] "
      | Some Pending -> "[ ] "
      | Some Skipped -> "[-] "
+     | Some Cancelled -> "[!] "
+     | Some Unsupported -> "[~] "
      | Some Not_requested -> "[.] "
-     | Some Unknown -> "[?] "
+     | Some (Unknown | Unrecognized _) -> "[?] "
      | None -> if row.active then "> " else "")
   | Unicode ->
     (match row.status with
@@ -374,8 +427,10 @@ let marker (appearance : Appearance.t) (row : row) =
      | Some Running -> "▶ "
      | Some Pending -> "○ "
      | Some Skipped -> "− "
+     | Some Cancelled -> "! "
+     | Some Unsupported -> "~ "
      | Some Not_requested -> "· "
-     | Some Unknown -> "? "
+     | Some (Unknown | Unrecognized _) -> "? "
      | None -> if row.active then "◆ " else "")
 ;;
 
@@ -405,7 +460,11 @@ let render ?title ~(appearance : Appearance.t) ~attrs ~width ~height rows =
       let value = if String.is_empty row.value then "" else ": " ^ row.value in
       View.text
         ~attrs:(attrs row.role)
-        (indent ^ marker appearance row ^ row.label ^ value))
+        (indent
+         ^ (if row.active && Option.is_some row.status then "> " else "")
+         ^ marker appearance row
+         ^ row.label
+         ^ value))
   in
   let view = View.vcat (List.take (heading @ content) height) in
   let view =
@@ -433,6 +492,56 @@ let%test_unit "stage outcomes preserve request and observation distinctions" =
   check true Running Running;
   check true (Failed { reason = "tool error" }) Failed;
   check false (Skipped { reason = "unsupported" }) Skipped
+;;
+
+let%test_unit "ASIC stage projection preserves every explicit status and full action" =
+  let run = Fs0_fixture.run_a in
+  let action : Asic.Selection.t =
+    { flow = "ordinary"
+    ; profile = "default"
+    ; endpoint = "route"
+    ; assignments = [ "X=1" ]
+    }
+  in
+  let cases : (Asic.Stage.Status.t * string * Role.t) list =
+    [ Pending, "pending", Warning
+    ; Running, "running", Running
+    ; Completed, "completed", Success
+    ; Failed, "failed", Failure
+    ; Cancelled, "cancelled", Warning
+    ; Skipped, "skipped", Warning
+    ; Not_requested, "not requested", Muted
+    ; Unsupported, "unsupported", Muted
+    ; Unknown "provider-future", "unknown: provider-future", Muted
+    ]
+  in
+  List.iter cases ~f:(fun (status, value, role) ->
+    let stage : Asic.Stage.t =
+      { id = "route-id"
+      ; name = "Routing"
+      ; status
+      ; requested = false
+      ; reason = Some "exact provider reason"
+      ; action = Some action
+      }
+    in
+    let row = asic_stage_row ~run ~selected:true stage in
+    [%test_result: string] row.value ~expect:value;
+    [%test_result: Role.t] row.role ~expect:role;
+    assert row.active;
+    let detail = inspection_lines [ row ] |> String.concat ~sep:"\n" in
+    List.iter
+      [ "Stage ID: route-id"
+      ; "Requested: false"
+      ; "exact provider reason"
+      ; "asic/fixture-A"
+      ]
+      ~f:(fun text -> assert (String.is_substring detail ~substring:text));
+    match status with
+    | Unsupported -> assert (String.is_substring detail ~substring:"unavailable")
+    | _ ->
+      assert (String.is_substring detail ~substring:"NEW run");
+      assert (String.is_substring detail ~substring:"X=1"))
 ;;
 
 let%test_unit "aggregate colors require field-specific explicit facts" =
@@ -534,6 +643,7 @@ let%test_unit "process completion is not stage evidence; mismatched and duplicat
         [ { run = selected
           ; reference = { attempt = "attempt"; stream_id = "stream" }
           ; selection = None
+          ; stages = []
           ; cursor = 0
           ; status = "completed"
           ; execution_file = None

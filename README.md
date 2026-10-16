@@ -45,6 +45,7 @@ polish and broader race/scaling coverage remain followups, not FS1 feature block
 - [Rendering](docs/rendering.md) — styles, layout, interaction and headless UI testing.
 - [Appearance handoffs](docs/design/README.md) — imported aesthetic sources and F12/FS5 interpretation.
 - [Try the appearance presets](docs/appearance_presets.md) — A–E skins and independent color/icon/density controls.
+- [Interactive synthetic flow](docs/synthetic_flow.md) — populated Overview/Timing, live checklist, simulated launches and FS1 inspection without EDA tools.
 - [Formatting guide](docs/formatting_guide.md) — retained source conventions.
 - [Backlog](docs/backlog/README.md) — explicitly deferred ideas and reactivation triggers.
 - [Archive](docs/archive/README.md) — earlier designs, plans and completion evidence.

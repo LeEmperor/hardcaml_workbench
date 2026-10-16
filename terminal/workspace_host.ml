@@ -6,6 +6,7 @@ module W = Workspace
     transport owner; a keypress never optimistically mutates the registry. *)
 type local =
   { cursor : string option
+  ; stage_run : Run_ref.t option
   ; filter : string
   ; scroll : int
   ; follow : bool
@@ -120,6 +121,7 @@ let empty =
 
 let default_local =
   { cursor = None
+  ; stage_run = None
   ; filter = ""
   ; scroll = 0
   ; follow = true
@@ -143,6 +145,125 @@ let set_local t id value =
   { t with
     locals = List.Assoc.add t.locals ~equal:String.equal (W.Tile_id.to_string id) value
   }
+;;
+
+(** A stage ID is meaningful only within its exact run. Reordering observations keeps
+    selection; changing runs or removing the selected ID falls back to the first row. *)
+let stage_cursor local ~run ~(stages : Asic.Stage.t list) =
+  let selected =
+    if Option.equal Run_ref.equal local.stage_run (Some run)
+    then
+      Option.bind local.cursor ~f:(fun id ->
+        List.find stages ~f:(fun stage -> String.equal stage.id id))
+    else None
+  in
+  Option.first_some selected (List.hd stages)
+;;
+
+let reconcile_stages local ~run ~stages =
+  let cursor =
+    Option.bind run ~f:(fun run ->
+      stage_cursor local ~run ~stages |> Option.map ~f:(fun stage -> stage.id))
+  in
+  if Option.equal Run_ref.equal local.stage_run run
+     && Option.equal String.equal local.cursor cursor
+  then local
+  else { local with cursor; stage_run = run; scroll = 0; utility_detail = false }
+;;
+
+let browse_stages t id ~run ~stages ~delta =
+  let l = local t id in
+  let index =
+    Option.bind (stage_cursor l ~run ~stages) ~f:(fun selected ->
+      List.findi stages ~f:(fun _ stage -> String.equal stage.Asic.Stage.id selected.id)
+      |> Option.map ~f:fst)
+    |> Option.value ~default:0
+  in
+  let index = Int.max 0 (Int.min (List.length stages - 1) (index + delta)) in
+  let cursor = Option.map (List.nth stages index) ~f:(fun stage -> stage.Asic.Stage.id) in
+  set_local t id { l with cursor; stage_run = Some run; scroll = 0 }
+;;
+
+let stage_plan = function
+  | None -> Error "Stage action unavailable: no explicit stage observation"
+  | Some (stage : Asic.Stage.t) ->
+    (match stage.status, stage.action with
+     | Unsupported, _ ->
+       Error
+         ("Stage action unavailable: unsupported — "
+          ^ Option.value stage.reason ~default:stage.name)
+     | _, None ->
+       Error
+         ("Stage action unavailable: "
+          ^ Option.value stage.reason ~default:"no advertised stage selection")
+     | _, Some selection -> Ok (Asic.Operation.Plan selection))
+;;
+
+let%test_unit "stage cursor uses stable IDs within exact runs and resets stale inspection"
+  =
+  let stage id : Asic.Stage.t =
+    { id
+    ; name = "Same label"
+    ; status = Pending
+    ; requested = true
+    ; reason = None
+    ; action = None
+    }
+  in
+  let a = stage "a"
+  and b = stage "b" in
+  let registry = W.initial ~session_id:(W.Session_id.of_string "stage-cursor") in
+  let tile = List.hd_exn registry.tiles in
+  let host = { empty with registry = Some registry } in
+  let host =
+    browse_stages host tile.id ~run:Fs0_fixture.run_a ~stages:[ a; b ] ~delta:1
+  in
+  let local = local host tile.id in
+  assert (Option.equal String.equal local.cursor (Some "b"));
+  let selected stages run = Option.value_exn (stage_cursor local ~run ~stages) in
+  assert (String.equal (selected [ b; a ] Fs0_fixture.run_a).id "b");
+  assert (String.equal (selected [ a; b ] Fs0_fixture.run_b).id "a");
+  assert (String.equal (selected [ a ] Fs0_fixture.run_a).id "a");
+  let detailed = { local with utility_detail = true; scroll = 99 } in
+  let refreshed =
+    reconcile_stages detailed ~run:(Some Fs0_fixture.run_a) ~stages:[ b; a ]
+  in
+  assert (refreshed.utility_detail && refreshed.scroll = 99);
+  let changed =
+    reconcile_stages detailed ~run:(Some Fs0_fixture.run_b) ~stages:[ a; b ]
+  in
+  assert ((not changed.utility_detail) && changed.scroll = 0);
+  assert (Option.equal String.equal changed.cursor (Some "a"));
+  let removed = reconcile_stages detailed ~run:(Some Fs0_fixture.run_a) ~stages:[] in
+  assert (Option.is_none removed.cursor && not removed.utility_detail)
+;;
+
+let%test_unit "stage planning uses only advertised selection and never resumes a run" =
+  let selection : Asic.Selection.t =
+    { flow = "ordinary-flow"
+    ; profile = "profile"
+    ; endpoint = "through-placement"
+    ; assignments = [ "parameter=value with spaces" ]
+    }
+  in
+  let stage : Asic.Stage.t =
+    { id = "placement"
+    ; name = "Placement"
+    ; status = Failed
+    ; requested = true
+    ; reason = Some "provider reason"
+    ; action = Some selection
+    }
+  in
+  (match stage_plan (Some stage) with
+   | Ok (Plan actual) -> assert (Asic.Selection.equal actual selection)
+   | _ -> assert false);
+  List.iter
+    [ None; Some { stage with action = None }; Some { stage with status = Unsupported } ]
+    ~f:(fun stage ->
+      match stage_plan stage with
+      | Error reason -> assert (String.is_substring reason ~substring:"unavailable")
+      | Ok _ -> assert false)
 ;;
 
 let active t =

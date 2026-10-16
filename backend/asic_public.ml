@@ -158,10 +158,110 @@ let updates (r : Asic.Run.t) j =
   cursor
 ;;
 
+let stage_text ~limit s =
+  require
+    (String.length s <= limit
+     && String.for_all s ~f:(fun c -> Char.to_int c >= 32 && not (Char.equal c '\127')))
+    "Invalid stage-plan text/budget"
+;;
+
+let stage_identity s =
+  stage_text ~limit:256 s;
+  require
+    ((not (String.is_empty s))
+     && String.for_all s ~f:(function
+       | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' | '.' -> true
+       | _ -> false))
+    "Invalid stage-plan identity"
+;;
+
+let validate_stages (stages : Asic.Stage.t list) =
+  require (List.length stages <= 128) "Stage-plan entry budget exceeded";
+  let identities = String.Hash_set.create () in
+  List.iter stages ~f:(fun stage ->
+    stage_identity stage.id;
+    require (not (Hash_set.mem identities stage.id)) "Duplicate stage-plan identity";
+    Hash_set.add identities stage.id;
+    stage_text ~limit:1024 stage.name;
+    require (not (String.is_empty (String.strip stage.name))) "Empty stage name";
+    (match stage.status with
+     | Unknown s ->
+       stage_text ~limit:256 s;
+       require (not (String.is_empty s)) "Empty stage status"
+     | _ -> ());
+    Option.iter stage.reason ~f:(stage_text ~limit:4096);
+    Option.iter stage.action ~f:(fun action ->
+      List.iter [ action.flow; action.profile; action.endpoint ] ~f:stage_identity;
+      require (List.length action.assignments <= 64) "Stage action assignment budget";
+      List.iter action.assignments ~f:(fun s ->
+        stage_text ~limit:4096 s;
+        require (not (String.is_empty s)) "Empty stage action assignment")));
+  require
+    (String.length (Sexp.to_string_mach ([%sexp_of: Asic.Stage.t list] stages))
+     <= 256 * 1024)
+    "Normalized stage-plan exceeds byte budget"
+;;
+
+let stage_plan j =
+  match field "stage_plan" j with
+  | `Null -> []
+  | `Assoc _ as plan ->
+    (* Optional extensions of another contract/version are deliberately opaque. *)
+    let contract = text (field "contract" plan) in
+    let version = integer (field "schema_version" plan) in
+    if not (String.equal contract "hardcaml-asic.stage-plan" && version = 1)
+    then []
+    else (
+      let entries = list (field "stages" plan) in
+      require (List.length entries <= 128) "Stage-plan entry budget exceeded";
+      let stages =
+        List.map entries ~f:(fun entry ->
+          let status : Asic.Stage.Status.t =
+            match text (field "status" entry) with
+            | "pending" -> Pending
+            | "running" -> Running
+            | "completed" -> Completed
+            | "failed" -> Failed
+            | "skipped" -> Skipped
+            | "cancelled" -> Cancelled
+            | "not_requested" -> Not_requested
+            | "unsupported" -> Unsupported
+            | s -> Unknown s
+          in
+          let requested =
+            match field "requested" entry with
+            | `Bool b -> b
+            | _ -> failwith "Expected stage requested boolean"
+          in
+          let action =
+            match field "action" entry with
+            | `Null -> None
+            | action ->
+              Some
+                { Asic.Selection.flow = text (field "flow" action)
+                ; profile = text (field "profile" action)
+                ; endpoint = text (field "endpoint" action)
+                ; assignments = List.map (list (field "assignments" action)) ~f:text
+                }
+          in
+          { Asic.Stage.id = text (field "id" entry)
+          ; name = text (field "name" entry)
+          ; status
+          ; requested
+          ; reason = optional_text (field "reason" entry)
+          ; action
+          })
+      in
+      validate_stages stages;
+      stages)
+  | _ -> failwith "Expected stage-plan object"
+;;
+
 let inspection (r : Asic.Run.t) ~cursor j =
   let j = envelope j "hardcaml-asic.stage-observation" 2 in
   require
-    (String.equal (text (field "stream_id" j)) r.reference.stream_id
+    (cursor >= r.cursor
+     && String.equal (text (field "stream_id" j)) r.reference.stream_id
      && integer (field "cursor" j) >= cursor)
     "Inspection identity/cursor mismatch";
   let writer_active =
@@ -180,7 +280,11 @@ let inspection (r : Asic.Run.t) ~cursor j =
   let execution_file =
     Option.map (optional_text (field "execution_file" j)) ~f:absolute
   in
-  { r with cursor; status; execution_file; error = None }, final
+  let stages = stage_plan j in
+  (* Inspect can race ahead of read-updates. Never attach its stage state to an older
+     cursor, or retain the previous cursor's checklist. The next poll catches up. *)
+  let stages = if integer (field "cursor" j) = cursor then stages else [] in
+  { r with cursor; status; execution_file; stages; error = None }, final
 ;;
 
 let digest text =
