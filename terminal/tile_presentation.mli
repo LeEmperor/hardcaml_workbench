@@ -17,6 +17,7 @@ type t =
   ; hints : bool
   ; frame : bool
   ; padding : int
+  (** Horizontal inset. Vertical spacing is independently budgeted by Panel. *)
   ; run_selector_rows : int
   }
 [@@deriving equal, sexp]

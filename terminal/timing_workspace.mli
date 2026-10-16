@@ -1,0 +1,52 @@
+open! Core
+open Hardcaml_workbench_protocol
+
+type pane =
+  | Paths
+  | Detail
+  | Context
+[@@deriving equal]
+
+type t = Inspection_view.t
+
+type path_item =
+  { row : Asic_inspection.Row.t
+  ; selected : bool
+  ; label : string
+  }
+
+val path_items : t -> path_item list
+
+type selection =
+  { run : Run_ref.t
+  ; domain : string
+  ; stage : string
+  ; source_digest : string
+  ; row_id : string
+  }
+
+val pane : string -> pane option
+val create : generation:int -> run:Run_ref.t -> stage:string -> t
+val selection : t -> selection option
+
+type line_role =
+  | Selected
+  | Metric
+  | Metadata
+  | Pending
+  | Failure
+
+(** Width-bounded four-line Detail summary, or complete Context provenance. Provider text
+    follows the Detail prefix in [rows] and must remain neutrally styled. *)
+val semantic_prefix : pane:pane -> width:int -> t -> (line_role * string) list
+
+val input
+  :  pane:pane
+  -> scroll:int
+  -> width:int
+  -> height:int
+  -> t
+  -> Inspection_view.input
+  -> t * int * Asic.Operation.t option
+
+val rows : pane:pane -> scroll:int -> width:int -> height:int -> t -> string list

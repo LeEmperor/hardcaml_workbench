@@ -39,6 +39,7 @@ type detail_cache =
 type t =
   { run : Run_ref.t
   ; scope : Run_ref.t option
+  ; workspace_epoch : string option
   ; domain : string
   ; stage : string
   ; index : Asic_inspection.Index.t option
@@ -77,6 +78,7 @@ let stages = [ "synthesis"; "floorplan"; "placement"; "cts"; "routing"; "signoff
 let create ?scope ?(generation = 0) ~run ~domain ~stage () =
   { run
   ; scope
+  ; workspace_epoch = None
   ; domain
   ; stage
   ; index = None
@@ -113,13 +115,17 @@ let operation ?(refresh = false) t =
 
 type ticket =
   { generation : int
+  ; workspace_epoch : string option
   ; operation : Asic.Operation.t
   }
 
-let capture (t : t) operation = { generation = t.generation; operation }
+let capture (t : t) operation =
+  { generation = t.generation; workspace_epoch = t.workspace_epoch; operation }
+;;
 
 let apply_response (t : t) (ticket : ticket) response =
   if t.generation <> ticket.generation
+     || not (Option.equal String.equal t.workspace_epoch ticket.workspace_epoch)
   then t
   else (
     let matches =
@@ -283,12 +289,26 @@ let reconcile t (snapshot : Asic.Snapshot.t) =
   let digest index =
     Option.map index ~f:(fun i -> i.Asic_inspection.Index.source_digest)
   in
-  let changed = not (Option.equal String.equal (digest t.index) (digest index)) in
+  let selected_row index =
+    Option.bind index ~f:(fun i ->
+      List.find i.Asic_inspection.Index.rows ~f:(fun row ->
+        Option.equal String.equal t.selected (Some row.id)))
+  in
+  let changed =
+    (not (Option.equal String.equal (digest t.index) (digest index)))
+    || not
+         (Option.equal
+            Asic_inspection.Row.equal
+            (selected_row t.index)
+            (selected_row index))
+  in
   let t =
     if changed
     then
       { t with
         index
+      ; generation = t.generation + 1
+      ; error = None
       ; requested = None
       ; detail = None
       ; info = false

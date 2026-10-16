@@ -56,6 +56,7 @@ embedded waveforms and real gate-level adapters remain later integrations.
 - [Appearance handoffs](docs/design/README.md) — imported aesthetic sources and F12/FS5 interpretation.
 - [Try the appearance presets](docs/appearance_presets.md) — A–E skins and independent color/icon/density controls.
 - [Workspace composition and palette](docs/frontend_composition.md) — per-workspace OCaml definitions, floating fuzzy palette, configurable badges/chrome and typed status emphasis.
+- [Refined Overview and Timing](docs/frontend_refinement.md) — border titles, compact summaries, horizontal stages, wide run labels and cooperative Timing investigation panes.
 - [Interactive synthetic flow](docs/synthetic_flow.md) — populated Overview/Timing, live checklist, simulated launches and FS1 inspection without EDA tools.
 - [Formatting guide](docs/formatting_guide.md) — retained source conventions.
 - [Backlog](docs/backlog/README.md) — explicitly deferred ideas and reactivation triggers.
@@ -173,11 +174,14 @@ In the client:
 3. Use the palette's **Inspect timing paths**, **Inspect clocks**, **Inspect physical**,
    **Inspect routing**, or **Browse reports/artifacts** commands.
 
-Rich inspectors are full-window, client-local views attached to the initiating
-tile, **not additional workspaces**. Enter opens a row detail. **Esc returns to
-the table; Esc again closes the inspector and reveals the workspace.** Switching
-to the already-active Overview does not dismiss its retained inspector. `/`
-filters, `s` sorts, `c/g/p` cycle corner/group/producer, and `d` shows provenance.
+Timing inspection now opens a composed **Timing investigation workspace** with
+Paths, Selected path and Provenance panes; Tab changes panes and Enter requests
+selected detail. Esc closes its detail reader; workspace navigation returns to
+Overview. See [current Timing controls](docs/frontend_refinement.md).
+Other rich inspectors remain full-window, client-local views attached to the
+initiating tile. Enter opens a row detail; Esc returns to the table, then closes
+the inspector. Switching to the already-active Overview does not dismiss a retained
+non-timing inspector. `/` filters, `s` sorts and `c/g/p` cycle corner/group/producer.
 See [all controls and evidence](docs/fs1_investigation.md#timing-paths-and-navigation).
 
 **Finalize**, **Finalize and accept**, and flow-launch commands start work;

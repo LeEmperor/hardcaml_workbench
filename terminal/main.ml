@@ -17,6 +17,7 @@ module Artifact_view = Terminal_presentation.Artifact_view
 module Artifact_export = Terminal_presentation.Artifact_export
 module Artifact_binary_export = Terminal_presentation.Artifact_binary_export
 module Inspection_view = Terminal_presentation.Inspection_view
+module Timing_workspace = Terminal_presentation.Timing_workspace
 module Fs0_fixture = Terminal_presentation.Fs0_fixture
 module Simulation_view = Terminal_presentation.Simulation_view
 module Simulation_export = Terminal_presentation.Simulation_export
@@ -550,6 +551,41 @@ let terminal_result_context session tile =
 
 let reconcile_synthesis session =
   Option.iter session.host.registry ~f:(fun registry ->
+    let timing =
+      List.filter_map session.host.timing ~f:(fun (id, view) ->
+        let workspace =
+          List.find registry.workspaces ~f:(fun w ->
+            String.equal id (Workspace.Workspace_id.to_string w.id))
+        in
+        Option.bind workspace ~f:(fun workspace ->
+          let context = Workspace.context registry workspace.context in
+          Option.map context.selected_run ~f:(fun run ->
+            let view =
+              if Run_ref.equal run view.Inspection_view.run
+                 && Option.equal
+                      String.equal
+                      view.workspace_epoch
+                      (Some (Host.timing_epoch registry workspace.id))
+              then view
+              else
+                Timing_workspace.create
+                  ~generation:(view.generation + 1)
+                  ~run
+                  ~stage:view.stage
+            in
+            let view =
+              { view with
+                Inspection_view.workspace_epoch =
+                  Some (Host.timing_epoch registry workspace.id)
+              }
+            in
+            ( id
+            , Option.value_map
+                session.asic
+                ~default:view
+                ~f:(Inspection_view.reconcile view) ))))
+    in
+    session.host <- { session.host with timing };
     List.iter registry.tiles ~f:(fun tile ->
       let local = Host.local session.host tile.id in
       let artifacts =
@@ -764,19 +800,14 @@ let asic_request ?artifact_request ?inspection_request session operation =
     then
       Option.iter inspection_request ~f:(fun (tile_id, ticket) ->
         reconcile_synthesis session;
-        let local = Host.local session.host tile_id in
-        Option.iter local.inspection ~f:(fun view ->
+        Option.iter (Host.inspection session.host tile_id) ~f:(fun view ->
           let inspection =
             Inspection_view.apply_response
               view
               ticket
               (Result.map response ~f:(fun _ -> ()))
           in
-          session.host
-          <- Host.set_local
-               session.host
-               tile_id
-               { local with inspection = Some inspection }));
+          session.host <- Host.set_inspection session.host tile_id (Some inspection)));
     if request_id >= session.asic_applied_id && current
     then (
       match response with
@@ -1300,6 +1331,7 @@ and reconnect session =
     session.host
     <- { session.host with
          registry = None
+       ; timing = []
        ; palette = None
        ; prefix = 0
        ; editing_filter = false
@@ -2666,6 +2698,168 @@ let host_catalog session =
         ])))
 ;;
 
+let open_timing_workspace session ~(run : Run_ref.t) ~stage =
+  let instance = session.hello.instance_id in
+  let project = Option.map (current_project session) ~f:(fun p -> p.Project.id) in
+  match session.host.registry, Host.active session.host with
+  | Some initial, Some active ->
+    let name = "Timing · captured " ^ run.id ^ " · " ^ submission_key "inspect" in
+    let valid () =
+      V1.Daemon_instance_id.equal instance session.hello.instance_id
+      && Option.equal
+           Project_id.equal
+           project
+           (Option.map (current_project session) ~f:(fun p -> p.Project.id))
+      && Option.exists session.host.registry ~f:(fun s ->
+        Workspace.Session_id.equal initial.session_id s.session_id)
+    in
+    let%bind workspace =
+      match Host.matching_timing initial ~run with
+      | Some workspace -> return (Some workspace.id)
+      | None ->
+        let%bind () =
+          mutate_workspace
+            session
+            (Create_workspace { window = active.window; name; context = active.context })
+        in
+        if not (valid ())
+        then return None
+        else (
+          match session.host.registry with
+          | None -> return None
+          | Some current ->
+            (match
+               List.find current.workspaces ~f:(fun w ->
+                 String.equal w.name name
+                 && not
+                      (List.exists initial.workspaces ~f:(fun old ->
+                         Workspace.Workspace_id.equal old.id w.id)))
+             with
+             | None -> return None
+             | Some workspace ->
+               let%bind () = mutate_workspace session (Make_independent workspace.id) in
+               if not (valid ())
+               then return None
+               else (
+                 match session.host.registry with
+                 | None -> return None
+                 | Some registry ->
+                   if not
+                        (List.exists registry.workspaces ~f:(fun current ->
+                           Workspace.Workspace_id.equal current.id workspace.id))
+                   then return None
+                   else (
+                     let workspace = Workspace.workspace registry workspace.id in
+                     let context = Workspace.context registry workspace.context in
+                     (* Never select through a shared context if independence was
+                        rejected. *)
+                     if Workspace.Context_id.equal context.id registry.main_context
+                        || List.exists initial.contexts ~f:(fun old ->
+                          Workspace.Context_id.equal old.id context.id)
+                        || List.count registry.workspaces ~f:(fun w ->
+                             Workspace.Context_id.equal w.context context.id)
+                           <> 1
+                     then return None
+                     else (
+                       let%map () =
+                         mutate_workspace
+                           session
+                           (Select_run
+                              { workspace = workspace.id
+                              ; context = context.id
+                              ; expected_selection_revision = context.selection_revision
+                              ; run = Some run
+                              })
+                       in
+                       Some workspace.id)))))
+    in
+    (match workspace with
+     | None -> return ()
+     | Some workspace when valid () ->
+       let%bind () =
+         mutate_workspace
+           session
+           (Hardcaml_workbench_workspaces.Definition.apply
+              Hardcaml_workbench_workspaces.Timing.definition
+              ~workspace)
+       in
+       if not (valid ())
+       then return ()
+       else (
+         match session.host.registry with
+         | None -> return ()
+         | Some registry ->
+           (match Host.matching_timing ~workspace registry ~run with
+            | Some matching when Workspace.Workspace_id.equal matching.id workspace ->
+              (match
+                 List.find registry.tiles ~f:(fun tile ->
+                   Workspace.Workspace_id.equal tile.workspace workspace
+                   && String.equal tile.kind "timing-paths"
+                   && Option.value_map
+                        matching.zoomed_tile
+                        ~default:true
+                        ~f:(Workspace.Tile_id.equal tile.id)
+                   && not tile.hidden)
+               with
+               | None -> return ()
+               | Some tile ->
+                 let generation =
+                   List.Assoc.find
+                     session.host.timing
+                     (Workspace.Workspace_id.to_string workspace)
+                     ~equal:String.equal
+                   |> Option.value_map ~default:1 ~f:(fun view ->
+                     view.Inspection_view.generation + 1)
+                 in
+                 let view =
+                   Host.timing session.host tile
+                   |> Option.filter ~f:(fun view ->
+                     String.equal view.stage stage && Run_ref.equal view.run run)
+                   |> Option.value
+                        ~default:(Timing_workspace.create ~generation ~run ~stage)
+                 in
+                 let view =
+                   { view with
+                     Inspection_view.workspace_epoch =
+                       Some (Host.timing_epoch registry workspace)
+                   }
+                 in
+                 let view =
+                   Option.value_map
+                     session.asic
+                     ~default:view
+                     ~f:(Inspection_view.reconcile view)
+                 in
+                 session.host
+                 <- Host.set_timing (Host.switch session.host workspace) tile view;
+                 session.host
+                 <- Host.set_local
+                      session.host
+                      tile.id
+                      { (Host.local session.host tile.id) with
+                        artifacts = None
+                      ; inspection = None
+                      };
+                 session.host
+                 <- { session.host with
+                      focus = Some tile.id
+                    ; notice = "Timing investigation · captured run " ^ run.id
+                    };
+                 (* Already-loaded observations are sufficient; opening does not
+                    re-extract. *)
+                 if Option.is_some view.index
+                 then return ()
+                 else (
+                   let operation = Inspection_view.operation view in
+                   asic_request
+                     ~inspection_request:(tile.id, Inspection_view.capture view operation)
+                     session
+                     operation))
+            | _ -> return ()))
+     | Some _ -> return ())
+  | _ -> return ()
+;;
+
 let execute_host session captured action ~exit =
   let open Bonsai_term in
   let captured_client = session.client in
@@ -3016,6 +3210,8 @@ let execute_host session captured action ~exit =
               };
          async (fun () -> asic_request ?artifact_request session operation)
        | _ -> Effect.Ignore)
+    | Browse_inspection (run, "timing", stage) ->
+      async (fun () -> open_timing_workspace session ~run ~stage)
     | Browse_inspection (run, domain, stage) ->
       (match Host.focused session.host, session.host.registry with
        | Some tile, Some registry ->
@@ -3517,7 +3713,7 @@ let host_handler_overlays session event ~exit =
   let input = Host.decode_event event in
   let inspection =
     Option.bind (Host.focused session.host) ~f:(fun tile ->
-      Option.map (Host.local session.host tile.id).inspection ~f:(fun view -> tile, view))
+      Option.map (Host.inspection session.host tile.id) ~f:(fun view -> tile, view))
   in
   let bypass =
     Option.is_some session.host.palette
@@ -3567,22 +3763,59 @@ let host_handler_overlays session event ~exit =
     let operation =
       Option.bind action ~f:(fun action ->
         let width, height =
-          Option.value_map
-            session.last_dimensions
-            ~default:(80, 24)
-            ~f:Host_view.inspection_viewport
+          Option.value_map session.last_dimensions ~default:(80, 24) ~f:(fun dimensions ->
+            if Option.is_none (Host.timing_pane session.host tile)
+            then Host_view.inspection_viewport dimensions
+            else (
+              let _, _, layout = Host_view.tile_layout session.host dimensions in
+              List.find layout ~f:(fun (candidate, _) ->
+                Workspace.Tile_id.equal candidate.id tile.id)
+              |> Option.value_map ~default:(80, 24) ~f:(fun (_, geometry) ->
+                let _, _, _, width, height =
+                  Host_view.body_geometry
+                    session.host
+                    tile
+                    ~width:geometry.width
+                    ~height:geometry.height
+                in
+                width, height)))
         in
-        let inspection, operation = Inspection_view.input ~width ~height view action in
+        let inspection, operation =
+          match Host.timing_pane session.host tile with
+          | None -> Inspection_view.input ~width ~height view action
+          | Some pane ->
+            let local = Host.local session.host tile.id in
+            let view, scroll, operation =
+              Timing_workspace.input ~pane ~scroll:local.scroll ~width ~height view action
+            in
+            let view =
+              Option.value_map
+                session.asic
+                ~default:view
+                ~f:(Inspection_view.reconcile view)
+            in
+            let operation =
+              match operation with
+              | Some (Asic.Operation.Inspect_detail _) when Option.is_some view.detail ->
+                None
+              | other -> other
+            in
+            session.host <- Host.set_local session.host tile.id { local with scroll };
+            Some view, operation
+        in
         let local = Host.local session.host tile.id in
         let inspection_generation =
           Option.value_map inspection ~default:local.inspection_generation ~f:(fun v ->
             v.generation)
         in
-        session.host
-        <- Host.set_local
-             session.host
-             tile.id
-             { local with inspection; inspection_generation };
+        session.host <- Host.set_inspection session.host tile.id inspection;
+        if Option.is_none (Host.timing_pane session.host tile)
+        then
+          session.host
+          <- Host.set_local
+               session.host
+               tile.id
+               { (Host.local session.host tile.id) with inspection_generation };
         Option.bind operation ~f:(fun operation ->
           Option.map inspection ~f:(fun view ->
             operation, (tile.id, Inspection_view.capture view operation))))

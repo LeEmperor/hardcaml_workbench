@@ -113,6 +113,7 @@ type t =
   ; layout_mode : layout_mode
   ; presentation : T.overrides
   ; workspace_presentation : (string * T.overrides) list
+  ; timing : (string * Timing_workspace.t) list
   }
 
 let empty =
@@ -132,6 +133,7 @@ let empty =
   ; layout_mode = Fit
   ; presentation = T.inherit_
   ; workspace_presentation = []
+  ; timing = []
   }
 ;;
 
@@ -163,6 +165,89 @@ let set_local t id value =
   { t with
     locals = List.Assoc.add t.locals ~equal:String.equal (W.Tile_id.to_string id) value
   }
+;;
+
+let timing_epoch registry workspace =
+  let arrangement = W.workspace registry workspace in
+  let context = W.context registry arrangement.context in
+  let bindings =
+    List.filter registry.W.Snapshot.tiles ~f:(fun tile ->
+      W.Workspace_id.equal tile.workspace workspace
+      && Option.is_some (Timing_workspace.pane tile.kind))
+    |> List.map ~f:(fun tile ->
+      W.Tile_id.to_string tile.id
+      ^ ":"
+      ^ Sexp.to_string_mach (W.Binding.sexp_of_t tile.binding))
+    |> List.sort ~compare:String.compare
+  in
+  String.concat
+    ~sep:"|"
+    (W.Workspace_id.to_string workspace
+     :: W.Context_id.to_string context.id
+     :: Int.to_string arrangement.binding_revision
+     :: Int.to_string context.selection_revision
+     :: bindings)
+;;
+
+let timing t (tile : W.Tile.t) =
+  Option.bind (Timing_workspace.pane tile.kind) ~f:(fun _ ->
+    List.Assoc.find t.timing (W.Workspace_id.to_string tile.workspace) ~equal:String.equal
+    |> Option.filter ~f:(fun view ->
+      Option.exists t.registry ~f:(fun registry ->
+        match W.resolve_tile registry tile.id with
+        | Ok reference ->
+          Option.equal Run_ref.equal reference.run (Some view.run)
+          && Option.equal
+               String.equal
+               view.workspace_epoch
+               (Some (timing_epoch registry tile.workspace))
+        | Error _ -> false)))
+;;
+
+let set_timing t (tile : W.Tile.t) (view : Timing_workspace.t) =
+  let view =
+    { view with
+      Inspection_view.workspace_epoch =
+        Option.map t.registry ~f:(fun registry -> timing_epoch registry tile.workspace)
+    }
+  in
+  { t with
+    timing =
+      List.Assoc.add
+        t.timing
+        ~equal:String.equal
+        (W.Workspace_id.to_string tile.workspace)
+        view
+  }
+;;
+
+let timing_pane t (tile : W.Tile.t) =
+  let local = local t tile.id in
+  if Option.is_some local.inspection || Option.is_some local.artifacts
+  then None
+  else Timing_workspace.pane tile.kind
+;;
+
+let inspection t id =
+  let tile =
+    Option.bind t.registry ~f:(fun s ->
+      List.find s.tiles ~f:(fun tile -> W.Tile_id.equal tile.id id))
+  in
+  match tile with
+  | Some tile when Option.is_some (timing_pane t tile) ->
+    if Option.is_some (local t id).artifacts then None else timing t tile
+  | _ -> (local t id).inspection
+;;
+
+let set_inspection t id view =
+  let tile =
+    Option.bind t.registry ~f:(fun s ->
+      List.find s.tiles ~f:(fun tile -> W.Tile_id.equal tile.id id))
+  in
+  match tile, view with
+  | Some tile, Some view when Option.is_some (timing_pane t tile) ->
+    set_timing t tile view
+  | _ -> set_local t id { (local t id) with inspection = view }
 ;;
 
 (** A stage ID is meaningful only within its exact run. Reordering observations keeps
@@ -320,6 +405,7 @@ let receive t (s : W.Snapshot.t) =
         ; locals = []
         ; workspace_focus = []
         ; workspace_presentation = []
+        ; timing = []
         ; palette = None
         ; prefix = 0
         ; editing_filter = false
@@ -337,7 +423,37 @@ let receive t (s : W.Snapshot.t) =
       | Some { argument = Some (Simulation_selection _); _ } -> t.notice
       | _ -> ""
     in
-    let t = { t with registry = Some s; active; notice } in
+    (* Invalidate at every received transition, not only when a reader happens to
+       reconcile. A pin A→B→A must never resurrect the first A's pending ticket. *)
+    let timing =
+      List.filter_map t.timing ~f:(fun (id, view) ->
+        List.find s.workspaces ~f:(fun w ->
+          String.equal id (W.Workspace_id.to_string w.id))
+        |> Option.map ~f:(fun workspace ->
+          let view =
+            if Option.equal
+                 String.equal
+                 view.Inspection_view.workspace_epoch
+                 (Some (timing_epoch s workspace.id))
+            then view
+            else
+              { view with
+                workspace_epoch = None
+              ; generation = view.generation + 1
+              ; requested = None
+              ; detail = None
+              ; index = None
+              ; selected = None
+              ; cache = None
+              ; detail_cache = None
+              ; error = None
+              ; pending_error = None
+              ; operation_key = None
+              }
+          in
+          id, view))
+    in
+    let t = { t with registry = Some s; active; notice; timing } in
     let focus =
       Option.filter t.focus ~f:(fun id ->
         List.exists (tiles t) ~f:(fun tile -> W.Tile_id.equal tile.id id))
@@ -542,6 +658,164 @@ let evidence_runs t =
 
 let definition = P.Presets.for_arrangement
 
+let matching_timing ?workspace:expected_workspace (registry : W.Snapshot.t) ~run =
+  List.find registry.workspaces ~f:(fun workspace ->
+    Option.value_map
+      expected_workspace
+      ~default:true
+      ~f:(W.Workspace_id.equal workspace.id)
+    && Option.equal String.equal workspace.preset (Some "timing")
+    && Option.value_map workspace.zoomed_tile ~default:true ~f:(fun id ->
+      List.exists registry.tiles ~f:(fun tile ->
+        W.Tile_id.equal tile.id id
+        && String.equal tile.kind "timing-paths"
+        && not tile.hidden))
+    && (let paths =
+          List.filter registry.tiles ~f:(fun tile ->
+            W.Workspace_id.equal tile.workspace workspace.id
+            && String.equal tile.kind "timing-paths")
+        in
+        List.is_empty paths || List.exists paths ~f:(fun tile -> not tile.hidden))
+    && Option.equal
+         Run_ref.equal
+         (W.context registry workspace.context).selected_run
+         (Some run)
+    && List.for_all registry.tiles ~f:(fun tile ->
+      (not (W.Workspace_id.equal tile.workspace workspace.id))
+      ||
+      match tile.binding with
+      | Follow -> true
+      | Pin_run pinned -> Run_ref.equal pinned run))
+;;
+
+let%test_unit "Timing exact-run reuse preserves pins and independent investigations" =
+  let apply s mutation =
+    W.apply s (Mutate { expected_revision = s.W.Snapshot.revision; mutation })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let choose s workspace run =
+    let w = W.workspace s workspace in
+    let c = W.context s w.context in
+    apply
+      s
+      (Select_run
+         { workspace
+         ; context = c.id
+         ; expected_selection_revision = c.selection_revision
+         ; run = Some run
+         })
+  in
+  let s = W.initial ~session_id:(W.Session_id.of_string "timing-investigations") in
+  let main = List.hd_exn s.workspaces in
+  let timing_workspace = List.last_exn s.workspaces in
+  let s =
+    apply s (P.Definition.apply P.Timing.definition ~workspace:timing_workspace.id)
+  in
+  let s = choose s main.id Fs0_fixture.run_a in
+  assert (Option.is_some (matching_timing s ~run:Fs0_fixture.run_a));
+  assert (Option.is_none (matching_timing s ~run:Fs0_fixture.run_b));
+  let path =
+    List.find_exn s.tiles ~f:(fun tile ->
+      W.Workspace_id.equal tile.workspace timing_workspace.id
+      && String.equal tile.kind "timing-paths")
+  in
+  let s =
+    apply s (Set_tile_binding { tile = path.id; binding = Pin_run Fs0_fixture.run_b })
+  in
+  assert (Option.is_none (matching_timing s ~run:Fs0_fixture.run_a));
+  let s =
+    apply
+      s
+      (Create_workspace
+         { window = main.window; name = "Captured B"; context = main.context })
+  in
+  let independent = List.last_exn s.workspaces in
+  let s = apply s (Make_independent independent.id) in
+  let s = choose s independent.id Fs0_fixture.run_b in
+  let s = apply s (P.Definition.apply P.Timing.definition ~workspace:independent.id) in
+  assert (
+    Option.equal
+      Run_ref.equal
+      (W.context s main.context).selected_run
+      (Some Fs0_fixture.run_a));
+  assert (
+    W.Binding.equal
+      (List.find_exn s.tiles ~f:(fun tile -> W.Tile_id.equal path.id tile.id)).binding
+      (Pin_run Fs0_fixture.run_b));
+  let second =
+    List.find_exn s.tiles ~f:(fun tile ->
+      W.Workspace_id.equal tile.workspace independent.id
+      && String.equal tile.kind "timing-paths")
+  in
+  let host = receive empty s in
+  let host =
+    set_timing
+      host
+      path
+      (Timing_workspace.create ~generation:1 ~run:Fs0_fixture.run_a ~stage:"signoff")
+  in
+  let host =
+    set_timing
+      host
+      second
+      (Timing_workspace.create ~generation:1 ~run:Fs0_fixture.run_b ~stage:"routing")
+  in
+  assert (Option.is_none (timing host path));
+  assert (String.equal (Option.value_exn (timing host second)).stage "routing");
+  let view = Option.value_exn (timing host second) in
+  let view = { view with requested = Some ("digest", "row") } in
+  let host = set_timing host second view in
+  let ticket =
+    Inspection_view.capture
+      view
+      (Inspect_detail
+         { run = Fs0_fixture.run_b
+         ; domain = "timing"
+         ; stage = "routing"
+         ; source_digest = "digest"
+         ; row_id = "row"
+         })
+  in
+  let pinned =
+    apply s (Set_tile_binding { tile = second.id; binding = Pin_run Fs0_fixture.run_b })
+  in
+  let invalid = receive host pinned in
+  assert (Option.is_none (timing invalid second));
+  let unpinned = apply pinned (Set_tile_binding { tile = second.id; binding = Follow }) in
+  let invalid = receive invalid unpinned in
+  assert (Option.is_none (timing invalid second));
+  let old_view =
+    List.Assoc.find_exn
+      invalid.timing
+      (W.Workspace_id.to_string independent.id)
+      ~equal:String.equal
+  in
+  assert (Option.is_none old_view.requested);
+  assert (
+    Option.is_none
+      (Inspection_view.apply_response old_view ticket (Error "late before pin roundtrip"))
+        .error);
+  assert (Option.is_some (timing (receive host s) second));
+  let hidden = apply s (Set_tile_hidden { tile = second.id; hidden = true }) in
+  assert (Option.is_none (matching_timing hidden ~run:Fs0_fixture.run_b));
+  let detail =
+    List.find_exn s.tiles ~f:(fun tile ->
+      W.Workspace_id.equal tile.workspace independent.id
+      && String.equal tile.kind "timing-detail")
+  in
+  let zoomed = apply s (Set_zoom { workspace = independent.id; tile = Some detail.id }) in
+  assert (Option.is_none (matching_timing zoomed ~run:Fs0_fixture.run_b));
+  let host = set_local host second.id { default_local with scroll = 9 } in
+  assert ((local host path.id).scroll = 0);
+  assert ((local host second.id).scroll = 9);
+  let switched = choose s independent.id Fs0_fixture.run_a in
+  let changed = receive host switched in
+  assert (Option.is_none (timing changed second));
+  let switched_back = choose switched independent.id Fs0_fixture.run_b in
+  assert (Option.is_none (timing (receive changed switched_back) second))
+;;
+
 let default_tile_specs ~workspace_name =
   List.find P.Presets.all ~f:(fun d -> String.equal d.P.Definition.name workspace_name)
   |> Option.value_map ~default:[] ~f:(fun d ->
@@ -576,6 +850,23 @@ let preset_presentation (p : P.Common.presentation) : T.overrides =
         | "exceptions" -> Some T.Badge.Exceptions
         | _ -> None)
   }
+;;
+
+(** Neutral composition modes are sparse preset policy, independent of chrome. *)
+let composition_policy t (tile : W.Tile.t) =
+  Option.bind t.registry ~f:(fun registry ->
+    List.find registry.workspaces ~f:(fun w -> W.Workspace_id.equal w.id tile.workspace))
+  |> Option.bind ~f:definition
+  |> Option.bind ~f:(fun d -> P.Definition.presentation d ~kind:tile.kind)
+  |> Option.value ~default:P.Common.inherit_presentation
+;;
+
+let compact_summary t tile =
+  Option.value (composition_policy t tile).compact_summary ~default:false
+;;
+
+let horizontal_stages t tile =
+  Option.value (composition_policy t tile).horizontal_stages ~default:false
 ;;
 
 (** Presentation preferences are client-local, keyed by stable workspace/tile IDs. They
@@ -1149,14 +1440,14 @@ let route_inspection_filter_event t (event : Bonsai_term.Event.t) =
   else (
     let target =
       match t.inspection_paste with
-      | Some id -> Some (id, (local t id).inspection)
+      | Some id -> Some (id, inspection t id)
       | None
         when (not t.paste)
              && Option.is_none t.palette
              && (not t.editing_filter)
              && t.prefix = 0 ->
         Option.bind (focused t) ~f:(fun tile ->
-          Option.bind (local t tile.id).inspection ~f:(fun view ->
+          Option.bind (inspection t tile.id) ~f:(fun view ->
             if view.editing then Some (tile.id, Some view) else None))
       | None -> None
     in
@@ -1198,12 +1489,7 @@ let route_inspection_filter_event t (event : Bonsai_term.Event.t) =
       let t =
         match view with
         | None -> t
-        | Some view ->
-          let local_state = local t id in
-          set_local
-            t
-            id
-            { local_state with inspection = Some (Inspection_view.normalize view) }
+        | Some view -> set_inspection t id (Some (Inspection_view.normalize view))
       in
       Filter_handled t)
 ;;
@@ -1341,6 +1627,66 @@ let%test_unit "inspection filter paste enforces 4096 UTF-8 bytes and consumes or
     && Option.is_none host.palette);
   let host = send host (Paste `End) in
   assert ((not host.paste) && Option.is_none host.inspection_paste)
+;;
+
+let%test_unit "Timing workspace filter paste is literal and shared only within its \
+               workspace"
+  =
+  let apply s mutation =
+    W.apply s (Mutate { expected_revision = s.W.Snapshot.revision; mutation })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let s = W.initial ~session_id:(W.Session_id.of_string "timing-paste") in
+  let workspace = List.last_exn s.workspaces in
+  let context = W.context s workspace.context in
+  let s =
+    apply
+      s
+      (Select_run
+         { workspace = workspace.id
+         ; context = context.id
+         ; expected_selection_revision = context.selection_revision
+         ; run = Some Fs0_fixture.run_a
+         })
+  in
+  let s = apply s (P.Definition.apply P.Timing.definition ~workspace:workspace.id) in
+  let tile =
+    List.find_exn s.tiles ~f:(fun tile ->
+      W.Workspace_id.equal tile.workspace workspace.id
+      && String.equal tile.kind "timing-paths")
+  in
+  let host = switch (receive empty s) workspace.id in
+  let host =
+    set_timing
+      { host with focus = Some tile.id }
+      tile
+      { (Timing_workspace.create ~generation:7 ~run:Fs0_fixture.run_a ~stage:"signoff") with
+        editing = true
+      }
+  in
+  let send host event =
+    match route_inspection_filter_event host event with
+    | Filter_handled host -> host
+    | _ -> assert false
+  in
+  let host = send host (Paste `Start) in
+  let host =
+    String.fold "endpoint/Q ; r t j q" ~init:host ~f:(fun host ch ->
+      send host (Key_press { key = ASCII ch; mods = [] }))
+  in
+  assert ((Option.value_exn (timing host tile)).generation = 7);
+  assert (String.equal (Option.value_exn (timing host tile)).filter "endpoint/Q ; r t j q");
+  assert (Option.is_none host.palette);
+  let host = send host (Paste `End) in
+  let host = send host (Key_press { key = Escape; mods = [] }) in
+  assert (not (Option.value_exn (timing host tile)).editing);
+  assert (not host.paste);
+  match
+    route_inspection_filter_event host (Key_press { key = ASCII 'c'; mods = [ Ctrl ] })
+  with
+  | Filter_interrupt -> ()
+  | _ -> assert false
 ;;
 
 let input t event ~commands : t * effect =

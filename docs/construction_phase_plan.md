@@ -495,6 +495,32 @@ Synthesis area/check counters are now projected into the current summary.
 
 ## V1 — Independent appearance gallery (FS5)
 
+### Owner-review panel and investigation refinement — 2026-10-16
+
+Delivered after manual feedback on the composition slice. [Shared implementation
+plan](frontend_refinement_plan.md), [controls and evidence](frontend_refinement.md).
+
+- [x] Shared styled panel/palette borders, title-in-border, colored query caret,
+  distinct match/selection emphasis and footer separator; short panels retain frames.
+- [x] One-row navigation, reduced vertical padding, width-aware long run identifiers,
+  actual visible/total capacity and bounded responsive selector-height growth.
+- [x] Horizontal Overview stages and compact synthesis/timing/placement/routing/
+  checks/finalization panels over existing typed evidence, with detailed modes retained.
+- [x] Timing Paths/Selected path/Provenance workspace; actual provider detail starts
+  after four compact summary lines, full raw metadata remains separately inspectable.
+- [x] Exact captured-run opening, safe existing-workspace reuse or independent
+  arrangement, protected Main/pins, pane-local scrolling and stale epoch/digest fences.
+- [x] Actual HTTP/PTY refinement57 + two-run12 + composition44 + FS2 45 checks,
+  synthetic launch/cancel and five interrupt cases; full format/lint/tests/build at2.
+- [ ] Owner visual review of the refined panel composition. Existing custom extras
+  remain preserved; no automatic layout deletion or persisted presentation is claimed.
+
+Final evidence under `/tmp/opencode`: `frontend-refinement-e41e2e8d24b9`, its
+`-two-runs` companion, `frontend-composition-25481b162854`,
+`synthetic-flow-y0hx51su`, `fs2-native-n3pc_ana`, and
+`workbench-terminal-interrupt-49omjzgu`. Normal `_build` binaries were rebuilt.
+No live demo-state changes, real EDA, Git staging or commits were performed.
+
 ### Frontend composition follow-on — 2026-10-16
 
 Delivered from the owner's palette/layout/configurability request; this does not

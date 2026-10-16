@@ -5,8 +5,10 @@
   fs0_fixture
   appearance
   tile_presentation
+  panel
   evidence_style
   overview_tiles
+  overview_summary
   overview_layout
   synthesis_view
   terminal_result_view
@@ -14,6 +16,7 @@
   artifact_export
   artifact_binary_export
   inspection_view
+  timing_workspace
   presentation
   state
   workspace_host

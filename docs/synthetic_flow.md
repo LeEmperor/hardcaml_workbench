@@ -60,6 +60,10 @@ directory to see updated production-like stage labels; old evidence is not silen
 rewritten. Synthetic identity remains in runs/reports/provenance. See
 [frontend composition](frontend_composition.md) for palette and presentation controls.
 
+The latest [frontend refinement](frontend_refinement.md) adds border titles,
+horizontal stages and compact Overview panels. Timing now uses a composed
+investigation workspace rather than a full-window timing overlay.
+
 `q` exits the client while the daemon stays alive. Ctrl-C stops the foreground
 daemon. `--url` permits explicitly connecting to another endpoint; `--daemon` and
 `--client` override binary paths. No setup command builds binaries automatically.
@@ -93,9 +97,14 @@ work. Producer calls are recorded in `project/provider-calls.jsonl`.
   **synthetic-failed** (routing failed, signoff skipped). Select a row with j/k
   and Enter. The failure profile can also be launched through its advertised actions.
 - **1 / 2** switch Overview and Timing; their run context remains linked.
-- Use **Space c c → Inspect timing paths**, then **j/k**, **Enter**, **s** to sort,
-  and **/** to filter. Other palette inspection commands open clocks, physical
-  resources and routing data through the same FS1 interfaces as a real provider.
+- Use **Space c c → Inspect timing paths** to focus the Timing investigation
+  workspace, then **j/k**, **Enter** for selected detail, **s** to sort, and **/**
+  to filter. Tab changes between Paths, Selected path and Provenance; each detail
+  pane scrolls independently. Esc closes the selected detail reader, not the
+  workspace; use workspace navigation to return. An incompatible existing context
+  or pin opens an independent captured-run arrangement rather than changing Main.
+  Other palette inspection commands retain full-window clocks/physical/routing
+  explorers through the same FS1 interfaces as a real provider.
 - Synthesis contains 128 cells for the reference and 144 for the failed candidate.
   Reference setup/hold slack is 0.42/0.08 ns. The timing dataset has 12 paths across
   two corners and two groups, with setup/hold entries and varied values.
@@ -171,6 +180,11 @@ stage labels and bounded palette passed synthetic HTTP/PTY at
 `/tmp/opencode/synthetic-flow-huttcbvv/`; final format/lint/full tests/build passed at
 `-j 2`. Broader frontend and FS2 regression evidence is in
 [frontend composition](frontend_composition.md#verification-and-retained-evidence).
+
+**Latest refinement:** styled panels, compact Overview and composed Timing passed
+synthetic HTTP/PTY at `/tmp/opencode/synthetic-flow-y0hx51su/`. Refinement57,
+two-run12, composition44, FS2 45 and five interrupt cases passed with final normal
+format/lint/full tests/build at `-j 2`; see [current evidence](frontend_refinement.md#verification).
 
 Historical first-slice evidence: formatting, lint, full tests and build passed; terminal tests were repeated after
 checklist viewport/preview refinements. Final provider + real HTTP + PTY acceptance

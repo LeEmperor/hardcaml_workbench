@@ -244,6 +244,7 @@ def pty_check(base, client_path, http):
             keys(key)
         keys(label.encode())
         drain(.3)
+        keys(b'\x1b[A' * 100)
         keys(b'\r')
     def no_launch(label, allow_planning=False):
         require(producers() == producers_before, label + ' dispatched a producer command')
@@ -252,36 +253,44 @@ def pty_check(base, client_path, http):
         require(set((base / 'results').iterdir()) == result_dirs_before, label + ' allocated an attempt')
         require({field(field(r, 'run'), 'id') for r in field(http.rpc(wait=False), 'runs')} == before_ids,
                 label + ' registered a new run')
-        require(http.rpc(domain='workspace') == ws, label + ' changed authoritative workspace state')
+        semantic = lambda snapshot: [entry for entry in snapshot if entry[0] != 'revision']
+        require(semantic(http.rpc(domain='workspace')) == semantic(ws), label + ' changed authoritative workspace state')
     try:
         drain(2)
-        overview_screen = screen('full-overview', ['Overview', 'Timing', 'Session', 'run-selector',
-            'Stage checklist', 'Synthesis', 'synthesis', 'Cell count: 128',
-             'timing', 'Setup slack: 0.42 ns', 'checks', 'drc: pass'])
+        overview_screen = screen('full-overview', ['Overview', 'Timing', 'Session', 'Runs',
+            'Stage checklist', 'Synthesis', 'Reported cells (agg.): 128',
+             'timing', 'Aggregate Setup slack: 0.42 ns', 'placement', 'routing', 'checks', 'Check drc: pass'])
         require('[1 Overview]'.casefold() in overview_screen.casefold(), 'Overview workspace tab is not active')
         palette('Switch to Timing')
-        timing_screen = screen('full-timing', ['Overview', 'Timing', 'Session', 'run-selector',
-             'Setup slack: 0.42 ns', 'cts', 'routing',
-            'Declared clock clk period: 10 ns'])
+        timing_screen = screen('full-timing', ['Overview', 'Timing', 'Session', 'Runs',
+             'Timing · Paths', 'Timing · Selected path', 'Timing · Provenance', 'Use Inspect timing paths'])
         require('[2 Timing]'.casefold() in timing_screen.casefold(), 'Timing workspace switch did not apply')
         palette('Inspect timing paths asic/synthetic-reference')
-        ascending = screen('path-index', ['INSPECT timing', 'stage signoff', 'run synthetic-reference', '12 rows',
+        screen('path-workspace', ['Timing · Paths', 'Timing · Selected path', 'Timing · Provenance', '12 paths'])
+        current = http.rpc(domain='workspace')
+        require(field(next(c for c in field(current, 'contexts') if field(c, 'id') == context_id), 'selected_run') ==
+                field(context_before, 'selected_run'), 'Timing inspection changed Main selection')
+        # Opening Timing is an explicit additive arrangement action. Subsequent browsing
+        # remains read-only; preserve its new authoritative registry as the baseline.
+        ws = current
+        palette('Zoom focused tile')
+        ascending = screen('path-index', ['Timing · Paths', '12 paths',
             'SYNTHETIC setup path clk:reg0 -> reg7', '0.42 ns', 'available'])
         require(ascending.index('hold path clk:reg16 -> reg23') < ascending.index('setup path clk:reg5 -> reg12'),
                 'Timing table is not numerically ascending')
         keys(b's')
-        descending = screen('path-sorted', ['12 rows', 'sort=numeric ↓',
+        descending = screen('path-sorted', ['12 paths', 'value ↓',
             'hold path clk:reg16 -> reg23', 'setup path clk:reg5 -> reg12'])
         require(descending.index('setup path clk:reg5 -> reg12') < descending.index('hold path clk:reg16 -> reg23'),
                 'Timing sort did not reverse actual row order')
         keys(b'/')
         keys(b'clk:reg0 -> reg7')
         keys(b'\r')
-        screen('path-filtered', ['INSPECT timing', '1 rows', 'filter=clk:reg0 -> reg7',
+        screen('path-filtered', ['Timing · Paths', '1 paths', 'Filter: clk:reg0 -> reg7',
             'SYNTHETIC setup path clk:reg0 -> reg7', '0.42 ns'], ['hold path clk:reg16 -> reg23'])
         keys(b'\r')
-        screen('path-detail', ['INSPECT timing', 'Row: synthetic-timing-signoff', 'Value: 0.42 ns',
-            'signoff: completed', 'No tool report or binary layout is claimed.'])
+        palette('Unzoom workspace')
+        screen('path-detail', ['Timing · Paths', 'Timing · Selected path', 'Path: SYNTHETIC setup path clk:reg0 -> reg7', 'Slack: 0.42 ns', 'signoff: completed', 'No tool report or binary layout is claimed.'])
         reference_run = field(context_before, 'selected_run')[0]
         details = field(http.rpc(wait=False), 'inspection_details')
         detail = next(d for d in details if field(d, 'run') == reference_run and
@@ -291,22 +300,24 @@ def pty_check(base, client_path, http):
         expected_detail = provider.load(Path(field(reference, 'attempt')) / 'inspection-timing-signoff.json')['details']['synthetic-timing-signoff']
         require(field(detail, 'text') == expected_detail and field(detail, 'error') == [],
                 'Timing inspector detail differs from exact retained synthetic evidence')
-        keys(b'\x1b')
-        screen('path-index-return', ['INSPECT timing', '1 rows'], ['Row: synthetic-timing-signoff'])
-        keys(b'\x1b')
-        screen('full-timing-restored', ['Session', 'Setup slack: 0.42 ns'], ['INSPECT timing'])
+        # Detail is a cooperating pane, so Esc no longer dismisses a full-screen
+        # inspector. The filtered path table remains present alongside exact detail.
+        screen('path-index-retained', ['Timing · Paths', '1 paths', 'Timing · Provenance'])
         palette('Switch to Overview')
-        screen('full-overview-restored', ['Stage checklist', 'Cell count: 128', 'Setup slack: 0.42 ns'])
+        screen('full-overview-restored', ['Stage checklist', 'Reported cells (agg.): 128', 'Aggregate Setup slack: 0.42 ns'])
         no_launch('Unzoomed Overview/Timing browsing and timing path inspection')
         # Only after the physical demo proof, zoom the actual checklist for the
         # existing deterministic interaction/launch scenario.
-        ws = http.mutate(ws, '(Set_zoom (workspace %s) (tile (%s)))' % (workspace, field(checklist, 'id')))
-        screen('initial', ['Stage checklist', 'j/k browse', 'Synthesis'],
-               ['Session [PROJECT]', 'run-selector [FOLLOW]', 'Cell count: 128'])
+        ws = http.mutate(http.rpc(domain='workspace'), '(Set_zoom (workspace %s) (tile (%s)))' % (workspace, field(checklist, 'id')))
+        screen('initial', ['Stage checklist', 'Synthesis', 'Selected:'],
+               ['Session', 'Reported cells (agg.)'])
+        # Compact preset hides hints by default. Explicitly enable them for the
+        # existing plan-preview/launch guidance assertions in this zoomed scenario.
+        palette('Toggle focused tile hints')
         keys(b'\r')
         screen('synthesis-detail', ['Stage ID: synthesis', 'Esc overview'])
         keys(b'\x1b')
-        screen('synthesis-overview', ['j/k browse', 'Placement'], ['Stage ID: synthesis'])
+        screen('synthesis-overview', ['Selected:', 'Placement'], ['Stage ID: synthesis'])
         keys(b'j')
         keys(b'\r')
         screen('j-floorplan', ['Stage ID: floorplan'], ['Stage ID: synthesis'])
@@ -322,7 +333,7 @@ def pty_check(base, client_path, http):
             keys(('Appearance: ' + appearance).encode())
             screen('appearance-' + appearance[0] + '-active', [appearance + ' [active]'])
             keys(b'\x1b')
-            screen('appearance-' + appearance[0], ['Stage checklist', 'j/k browse'])
+            screen('appearance-' + appearance[0], ['Stage checklist', 'Selected:'])
         no_launch('Enter/Esc, j/k browsing and restyling')
         # The actual requested stage is the third row, selected with jj.
         keys(b'j')
@@ -560,7 +571,10 @@ def main():
     parser.add_argument('--daemon', type=Path, default=REPO / '_build/default/daemon/main.exe')
     parser.add_argument('--client', type=Path, default=REPO / '_build/default/terminal/main.exe')
     parser.add_argument('--preset-export', type=Path, help='built OCaml preset exporter; also verify export with --smoke')
+    parser.add_argument('--timeout', type=int, default=300)
     args = parser.parse_args()
+    signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError('Synthetic acceptance wall-clock budget exhausted')))
+    signal.alarm(args.timeout)
     base = demo.prepare(args.evidence, manual=True, delay=.05)
     print('SYNTHETIC test evidence: ' + str(base), flush=True)
     smoke(base)

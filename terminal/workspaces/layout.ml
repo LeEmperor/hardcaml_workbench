@@ -57,7 +57,14 @@ let rec place tree (g : G.t) =
     in
     let weights = List.map children ~f:weight in
     let sum = List.sum (module Int) weights ~f:Fn.id in
-    let weights = if sum = 0 then List.map children ~f:(fun _ -> 1) else weights in
+    let weights =
+      if sum = 0
+      then
+        List.map children ~f:(function
+          | Narrow _ when not vertical -> 0
+          | _ -> 1)
+      else weights
+    in
     let sum = Int.max 1 (List.sum (module Int) weights ~f:Fn.id) in
     let _, _, cells =
       List.fold2_exn
@@ -77,7 +84,8 @@ let rec place tree (g : G.t) =
     cells
 ;;
 
-let resolve tree kinds =
+let resolve ?(min_height_for_index = fun _ -> None) tree kinds =
+  let minimum i h = Int.max h (Option.value (min_height_for_index i) ~default:0) in
   let claimed = ref [] in
   let rec loop = function
     | Common.Leaf { kind; min_width; min_height; weight } ->
@@ -85,7 +93,7 @@ let resolve tree kinds =
         String.equal k kind && not (List.mem !claimed i ~equal:Int.equal))
       |> Option.map ~f:(fun (i, _) ->
         claimed := i :: !claimed;
-        Cell (i, min_width, min_height, weight))
+        Cell (i, min_width, minimum i min_height, weight))
     | Common.Stack children -> node children (fun cs -> Stack cs)
     | Common.Columns children -> node children (fun cs -> Columns cs)
     | Common.Narrow tree -> Option.map (loop tree) ~f:(fun t -> Narrow t)
@@ -98,7 +106,9 @@ let resolve tree kinds =
   let primary = loop tree in
   let extras =
     List.filter_mapi kinds ~f:(fun i _ ->
-      if List.mem !claimed i ~equal:Int.equal then None else Some (Cell (i, 24, 6, 1)))
+      if List.mem !claimed i ~equal:Int.equal
+      then None
+      else Some (Cell (i, 24, minimum i 6, 1)))
   in
   match primary, extras with
   | None, [] -> None
@@ -107,7 +117,7 @@ let resolve tree kinds =
   | Some tree, extras -> Some (Stack [ tree; Stack extras ])
 ;;
 
-let grid ~width ~height count =
+let grid ?(min_height_for_index = fun _ -> None) ~width ~height count =
   List.range 1 (Int.min count 4 + 1)
   |> List.find_map ~f:(fun columns ->
     let rows = (count + columns - 1) / columns in
@@ -120,19 +130,34 @@ let grid ~width ~height count =
              Columns
                (List.init
                   (Int.min columns (count - (row * columns)))
-                  ~f:(fun col -> Cell ((row * columns) + col, 24, 6, 1)))))
+                  ~f:(fun col ->
+                    let i = (row * columns) + col in
+                    Cell
+                      ( i
+                      , 24
+                      , Int.max 6 (Option.value (min_height_for_index i) ~default:0)
+                      , 1 )))))
       in
-      Some (place tree { G.x = 0; y = 0; width; height })))
+      let w, h = min_size tree in
+      if width < w || height < h
+      then None
+      else Some (place tree { G.x = 0; y = 0; width; height })))
 ;;
 
 (** Fit never writes persisted requested geometry. Host handles [Compact] by showing the
     focused tile; zoom should bypass this function entirely. *)
-let compute (definition : Definition.t) ~width ~height ~kinds =
+let compute
+  ?(min_height_for_index = fun _ -> None)
+  (definition : Definition.t)
+  ~width
+  ~height
+  ~kinds
+  =
   if List.is_empty kinds
   then Grid []
   else (
     let cells =
-      Option.bind (resolve definition.layout kinds) ~f:(fun tree ->
+      Option.bind (resolve ~min_height_for_index definition.layout kinds) ~f:(fun tree ->
         let w, h = min_size tree in
         if width >= w && height >= h
         then Some (place tree { G.x = 0; y = 0; width; height })
@@ -141,7 +166,7 @@ let compute (definition : Definition.t) ~width ~height ~kinds =
     let cells =
       match cells with
       | Some _ -> cells
-      | None -> grid ~width ~height (List.length kinds)
+      | None -> grid ~min_height_for_index ~width ~height (List.length kinds)
     in
     match cells with
     | None -> Compact

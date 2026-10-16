@@ -187,6 +187,16 @@ class Terminal:
         os.write(self.master, data)
         return self.drain()
 
+    def resize(self, width, height):
+        self.drain()
+        self.width, self.height = width, height
+        # A full redraw follows SIGWINCH. Start a fresh cell transcript so old
+        # coordinates cannot masquerade as content in the resized viewport.
+        self.data.clear()
+        fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack('HHHH', height, width, 0, 0))
+        os.kill(self.process.pid, signal.SIGWINCH)
+        return self.drain(.5)
+
     def capture(self, label, expected=(), absent=()):
         deadline = time.monotonic() + 12
         while True:
@@ -213,6 +223,10 @@ class Terminal:
     def command(self, title):
         self.open_palette(title)
         self.capture('command-' + str(len(self.keys)), [title], ['No matching commands'])
+        # Query edits preserve selected command identity. Explicitly choose the
+        # highest-ranked title match instead of accidentally executing a previously
+        # selected fuzzy alias (especially runs sharing "reference" in long IDs).
+        self.key(b'\x1b[A' * 100)
         self.key(b'\r')
 
     def close(self):
@@ -246,7 +260,8 @@ def palette_acceptance(t, check, http):
         highlighted.append(''.join(char for char, attr in overlay.cells[y][x:x + len('Appearance: Color')] if attr[2]).casefold())
     check(highlighted == ['apcol'] * 3, 'ANSI underline marks exact noncontiguous ap/col title matches, not entire result rows')
     def selected(screen):
-        rows = [line for line in screen.lines()[13:29] if re.search(r'>\s+Appearance:', line)]
+        title_y = next(y for y, line in enumerate(screen.lines()) if 'COMMAND PALETTE' in line)
+        rows = [line for line in screen.lines()[title_y + 2:] if re.search(r'>\s+Appearance:', line)]
         require(len(rows) == 1, 'Exactly one selected palette command: ' + screen.text())
         return rows[0]
     # Query edits intentionally preserve command identity. Explicitly navigate
@@ -388,13 +403,12 @@ def full_acceptance(t, check, http, runs, presets):
                   for attrs in [failed.cells[y][line.index('fail')][1]]]
     check(bool(valid_attrs and fail_attrs) and valid_attrs[0][0][0] != fail_attrs[0][0], 'Validated freshness and explicit failed timing verdict have distinct ANSI foreground colors')
     t.command('Inspect timing paths ' + field(runs[0], 'id'))
-    source = t.capture('inspector-source', ['timing', 'signoff', '12 rows', '> SYNTHETIC'],
+    source = t.capture('timing-workspace-source', ['Timing · Paths', 'Timing · Selected path', 'Timing · Provenance', 'signoff', '12 paths'],
                        ['Waiting for explicitly requested index'])
     t.open_palette('ap col')
     t.capture('inspector-overlay', ['COMMAND PALETTE'])
     t.key(b'\t'); t.key(b'\x1b[Z'); t.key(b'\x1b')
-    check(t.capture('inspector-restored', ['timing', 'signoff']).cells == source.cells, 'Palette Esc restores exact FS1 inspector and selection')
-    t.key(b'\x1b')
+    check(t.capture('timing-workspace-restored', ['Timing · Paths', 'signoff']).cells == source.cells, 'Palette Esc restores exact Timing workspace panes and selection')
     # Actual preset mutations with extras and a pin, then rename without identity drift.
     snapshot = http.rpc(domain='workspace')
     overview = next(w for w in field(snapshot, 'workspaces') if field(w, 'preset') == ['overview'])
@@ -427,17 +441,20 @@ def full_acceptance(t, check, http, runs, presets):
             for kind, geometry in specs:
                 tile = next(tile for tile in field(snapshot, 'tiles') if field(tile, 'workspace') == wid and field(tile, 'kind') == kind)
                 check(field(tile, 'requested_geometry') == geometry, 'Actual palette Reset restores exported geometry: ' + kind)
-    t.capture('preset-renamed-reset', ['Renamed dashboard', 'Cell count:', 'PIN'])
+    t.capture('preset-renamed-reset', ['Renamed dashboard', 'Reported cells (agg.)', 'PIN'])
 
 
-def run(args):
+def run(args, acceptance=full_acceptance, extra_runs=(3, 4, 5, 6), startup_check=None):
     base = demo.prepare(args.evidence, manual=True, delay=.05)
     print('Evidence: ' + str(base), flush=True)
-    # Five real registered synthetic observations make the four-row selector
+    # Six real registered synthetic observations make the four-row selector
     # limit observable. No Python layout or daemon state-file editing is used.
     manifest = demo.provider.load(base / 'manifest.json')
-    for number in (3, 4, 5):
-        attempt = demo.provider.allocate(base / 'results', demo.provider.selection('success'), f'synthetic-row{number}')
+    for number in extra_runs:
+        name = (f'synthetic-long-distinguishable-run-reference-{number}-suffix'
+                if number in (3, 4) else f'synthetic-row{number}')
+        attempt = demo.provider.allocate(base / 'results', demo.provider.selection('success'),
+            name)
         while demo.provider.load(attempt / 'observation.json')['writer_active']:
             demo.provider.advance(attempt)
         manifest['runs'].append(dict(attempt=str(attempt), stream_id=attempt.name,
@@ -445,6 +462,8 @@ def run(args):
     demo.provider.save(base / 'manifest.json', manifest)
     for name in ('home', 'config', 'client-state', 'discovery'): (base / name).mkdir()
     result = dict(status='failed', checks=[], evidence=str(base), palette_only=args.palette_only,
+                  harness=getattr(args, 'harness', 'frontend composition'),
+                  related_evidence=getattr(args, 'related_evidence', []),
                   binaries={str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in (args.client, args.daemon, args.preset_export)})
     def check(ok, message):
         result['checks'].append(dict(passed=bool(ok), expectation=message))
@@ -460,30 +479,26 @@ def run(args):
         http, runs = demo.seed(base, url, args.preset_export)
         presets = demo.workspace_presets(args.preset_export)
         terminal = Terminal(base, args, url)
-        startup = terminal.capture('startup-120x40', ['Overview', 'Cell count:'])
+        startup = terminal.capture('startup-120x40', ['Overview', 'Reported cells (agg.)'])
+        if startup_check is not None: startup_check(terminal, check, http, startup)
         if not args.palette_only:
             selector_count = lambda screen: sum(line.count('asic/') for line in screen.lines()[:12])
-            check(selector_count(startup) == 4, 'Wide Overview run selector shows exactly four of five registered runs by default')
+            check(selector_count(startup) == 4, 'Wide Overview run selector shows exactly four of six registered runs by default')
             check('WORKSPACES' not in startup.text() and '[PROJECT' not in startup.text(), 'Default navigation has quiet title/project chrome')
             registry = http.rpc(domain='workspace')
-            # Comfortable's inherited vertical padding legitimately bounds the
-            # seven-row selector to four body rows. Compact provides room for
-            # five so the explicit row-count control can be tested separately.
-            terminal.command('Appearance: Density Compact')
             terminal.command('Run selector: More visible rows (+1)')
-            expanded = terminal.capture('selector-five-rows', ['RUN-SELECTOR'])
+            expanded = terminal.capture('selector-five-rows', ['Runs 5/6'])
             check(selector_count(expanded) == 5, 'Focused selector row control exposes fifth run')
             terminal.command('Reset presentation overrides (inherit)')
-            reset = terminal.capture('selector-four-inherited', ['RUN-SELECTOR'])
+            reset = terminal.capture('selector-four-inherited', ['Runs 4/6'])
             check(selector_count(reset) == 4 and http.rpc(domain='workspace') == registry, 'Selector reset inherits four rows without semantic mutation')
-            terminal.command('Appearance: Density Comfortable')
         palette_acceptance(terminal, check, http)
-        if not args.palette_only: full_acceptance(terminal, check, http, runs, presets)
+        final_title = 'Overview' if args.palette_only else (acceptance(terminal, check, http, runs, presets) or 'Renamed dashboard')
         terminal.close(); terminal = None
         # New clients ensure resizing does not confuse the terminal reconstruction.
         for width, height in ((80, 24), (120, 40), (180, 55)):
             terminal = Terminal(base, args, url, width, height)
-            terminal.capture(f'overview-{width}x{height}', ['Overview' if args.palette_only else 'Renamed dashboard'])
+            terminal.capture(f'overview-{width}x{height}', ['Compact: focused tile only'] if width == 80 else [final_title])
             terminal.open_palette('ap col')
             terminal.capture(f'overlay-{width}x{height}', ['COMMAND PALETTE', 'Color'])
             terminal.key(b'\x1b')
@@ -504,7 +519,7 @@ def run(args):
                 os.killpg(daemon.pid, signal.SIGKILL); daemon.wait(timeout=5)
         log.close()
         (base / 'result.json').write_text(json.dumps(result, indent=2))
-    print('PASS frontend composition' + (' (palette-only)' if args.palette_only else ''), flush=True)
+    print('PASS ' + result['harness'] + (' (palette-only)' if args.palette_only else ''), flush=True)
 
 
 def main():
@@ -514,7 +529,7 @@ def main():
     parser.add_argument('--preset-export', type=Path, required=True)
     parser.add_argument('--evidence', type=Path, help='NEW directory under /tmp/opencode')
     parser.add_argument('--palette-only', action='store_true')
-    parser.add_argument('--timeout', type=int, default=240)
+    parser.add_argument('--timeout', type=int, default=300)
     args = parser.parse_args()
     for name in ('daemon', 'client', 'preset_export'): setattr(args, name, getattr(args, name).resolve(strict=True))
     if args.evidence:

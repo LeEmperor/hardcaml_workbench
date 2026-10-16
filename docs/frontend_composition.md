@@ -4,6 +4,12 @@ Implemented and verified 2026-10-16. This is the frontend follow-on to the
 aesthetics merge and completed FS2 milestone. The shared implementation plan is
 [frontend_composition_plan.md](frontend_composition_plan.md).
 
+**Subsequent owner-review refinements are delivered:** styled border titles and
+palette, reduced vertical spacing, horizontal stages, compact six-domain Overview,
+responsive run-selector capacity, and a dedicated Timing investigation workspace.
+See [the current guide and evidence](frontend_refinement.md). The earlier layout
+and vertical-padding descriptions below record the first composition slice.
+
 ## Where to change a workspace
 
 Workspace definitions now have one source directory:

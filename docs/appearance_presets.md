@@ -10,6 +10,12 @@ character highlighting and Tab/Shift-Tab navigation, quiet default Follow/projec
 badges, per-tile presentation controls, typed status colors and centralized OCaml
 workspace definitions. See [source map, controls and acceptance](frontend_composition.md).
 
+The subsequent [refinement](frontend_refinement.md) supplies styled palette/short
+panel borders, titles in borders, zero default vertical inset, one-row navigation,
+wide width-aware run labels, horizontal stages, compact Overview panels and a
+dedicated Timing investigation workspace. Padding now applies horizontally;
+explicit visibility/badge controls and the density axis remain supported.
+
 ## Try them
 
 Start the client using the normal [README instructions](../README.md). Press

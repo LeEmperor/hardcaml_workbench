@@ -32,11 +32,15 @@ let box ~width ~height view =
 
 (* Crop the image by terminal cells; no UTF-8 byte truncation, even for wide
    glyphs/combining marks. Query tails remain visible when entering long paths. *)
-let query ~attrs ~width text =
-  let prompt = View.text ~attrs "> " in
+let query ?prompt_attrs ?caret_attrs ?(caret = "▏") ~attrs ~width text =
+  let prompt_attrs = Option.value prompt_attrs ~default:attrs in
+  let caret_attrs = Option.value caret_attrs ~default:prompt_attrs in
+  let prompt = View.text ~attrs:prompt_attrs "> " in
   let view = View.text ~attrs text in
-  let room = Int.max 0 (width - View.width prompt) in
-  View.hcat [ prompt; View.crop ~l:(Int.max 0 (View.width view - room)) view ]
+  let caret = View.text ~attrs:caret_attrs caret in
+  let prompt = if width < 3 then View.none else prompt in
+  let room = Int.max 0 (width - View.width prompt - 1) in
+  View.hcat [ prompt; View.crop ~l:(Int.max 0 (View.width view - room)) view; caret ]
   |> box ~width ~height:1
 ;;
 
@@ -48,6 +52,7 @@ let matched ~attrs ~match_attrs text positions =
 ;;
 
 let result_row
+  ?marker_attrs
   ~attrs
   ~match_attrs
   ~width
@@ -88,7 +93,11 @@ let result_row
         title
   in
   View.hcat
-    ([ View.text ~attrs (if selected then "> " else "  "); title ]
+    ([ View.text
+         ~attrs:(Option.value marker_attrs ~default:attrs)
+         (if selected then "> " else "  ")
+     ; title
+     ]
      @ [ extra ]
      @ Option.to_list
          (Option.map command.unavailable ~f:(fun reason ->

@@ -12,6 +12,8 @@ type presentation =
   ; frame : bool option
   ; padding : int option
   ; visible_rows : int option
+  ; compact_summary : bool option [@sexp.default None]
+  ; horizontal_stages : bool option [@sexp.default None]
   }
 [@@deriving sexp]
 
@@ -31,6 +33,8 @@ let inherit_presentation =
   ; frame = None
   ; padding = None
   ; visible_rows = None
+  ; compact_summary = None
+  ; horizontal_stages = None
   }
 ;;
 
@@ -40,12 +44,14 @@ let tile ?(width = 80) ?(height = 10) ?(presentation = inherit_presentation) kin
 
 let navigation =
   tile
-    ~height:3
+    ~height:1
     ~presentation:
       { inherit_presentation with
         title = Some false
       ; binding_badge = Some "hidden"
       ; hints = Some false
+      ; frame = Some false
+      ; padding = Some 0
       }
     "workspace-tabs"
 ;;
@@ -79,7 +85,7 @@ let leaf ?(height = 6) ?(weight = 1) kind =
   Leaf { kind; min_width = 24; min_height = height; weight }
 ;;
 
-let navigation_leaf = leaf ~height:3 ~weight:0 "workspace-tabs"
+let navigation_leaf = leaf ~height:1 ~weight:0 "workspace-tabs"
 let session_leaf = leaf ~height:7 ~weight:0 "live-status"
 let selector_leaf = leaf ~height:7 ~weight:0 "run-selector"
 let checklist_leaf = leaf ~height:9 "stage-checklist"

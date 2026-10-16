@@ -22,3 +22,10 @@ together, then select the desired preset from the palette.
 
 See [the full source map, customization guide and verification](../../docs/frontend_composition.md)
 for display overrides, migration, palette controls and synthetic startup.
+
+The [subsequent refinement](../../docs/frontend_refinement.md) makes Overview a
+six-domain compact summary grid with horizontal stages and evolves Timing into
+Paths/Detail/Provenance panes. Optional `compact_summary` and `horizontal_stages`
+presentation fields select those modes; short titles now live in the shared border.
+`Layout.compute` accepts bounded per-index minimum-height requests so the visible
+run-row setting can increase actual selector height when the viewport permits.

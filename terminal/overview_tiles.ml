@@ -482,6 +482,133 @@ let inspection_lines rows =
     :: row.details)
 ;;
 
+(** Horizontal presentation preserves the original stage record and provider order.
+    Display labels are never identities. Actions are carried verbatim, never executed. *)
+module Stage_strip = struct
+  type item =
+    { stage : Asic.Stage.t
+    ; row : row
+    }
+
+  type t =
+    { lines : item list list
+    ; selected : item option
+    ; selected_line : row
+    }
+
+  let text ~appearance item =
+    (if item.row.active then "> " else "")
+    ^ marker appearance item.row
+    ^ item.row.label
+    ^ ": "
+    ^ item.row.value
+  ;;
+
+  let model ~appearance ~width ~run ~selected_id stages =
+    let items =
+      List.map stages ~f:(fun (stage : Asic.Stage.t) ->
+        { stage
+        ; row =
+            asic_stage_row
+              ~run
+              ~selected:(Option.equal String.equal selected_id (Some stage.id))
+              stage
+        })
+    in
+    let lines, line, _ =
+      List.fold items ~init:([], [], 0) ~f:(fun (lines, line, used) item ->
+        let cells = View.width (View.text (text ~appearance item)) in
+        let gap = if List.is_empty line then 0 else 3 in
+        if (not (List.is_empty line)) && used + gap + cells > Int.max 1 width
+        then lines @ [ line ], [ item ], cells
+        else lines, line @ [ item ], used + gap + cells)
+    in
+    let lines = lines @ if List.is_empty line then [] else [ line ] in
+    let selected = List.find items ~f:(fun item -> item.row.active) in
+    let selected_line =
+      match selected with
+      | None -> row ~role:Muted "Selected stage" "not available"
+      | Some item ->
+        { item.row with
+          label = "Selected: " ^ item.stage.name ^ " [" ^ item.stage.id ^ "]"
+        ; details = item.row.details
+        }
+    in
+    { lines; selected; selected_line }
+  ;;
+
+  let render ~appearance ~attrs ~width ~height t =
+    let width = Int.max 0 width
+    and height = Int.max 0 height in
+    let selected =
+      render ~appearance ~attrs ~width ~height:(Int.min 1 height) [ t.selected_line ]
+    in
+    let lines =
+      List.take t.lines (Int.max 0 (height - 1))
+      |> List.map ~f:(fun line ->
+        View.hcat
+          (List.concat_mapi line ~f:(fun i item ->
+             (if i = 0 then [] else [ View.text ~attrs:(attrs Role.Muted) " | " ])
+             @ [ View.text
+                   ~attrs:(attrs (if item.row.active then Role.Active else item.row.role))
+                   (text ~appearance item)
+               ])))
+    in
+    (* Selection stays visible even when wrapping exceeds the available strip height. *)
+    let view = View.vcat (lines @ if height = 0 then [] else [ selected ]) in
+    let view =
+      View.crop
+        ~r:(Int.max 0 (View.width view - width))
+        ~b:(Int.max 0 (View.height view - height))
+        view
+    in
+    View.zcat [ view; View.rectangle ~width ~height () ]
+  ;;
+end
+
+let%test_unit "horizontal stages wrap long duplicate labels without changing \
+               identity/actions"
+  =
+  let action : Asic.Selection.t =
+    { flow = "flow"
+    ; profile = "profile"
+    ; endpoint = "exact-endpoint"
+    ; assignments = [ "X=1" ]
+    }
+  in
+  let stages =
+    List.init 6 ~f:(fun i ->
+      { Asic.Stage.id = Int.to_string i
+      ; name = String.make 80 'a'
+      ; status = Completed
+      ; requested = false
+      ; reason = None
+      ; action = Some action
+      })
+  in
+  let appearance = Appearance.default in
+  let t =
+    Stage_strip.model
+      ~appearance
+      ~width:80
+      ~run:Fs0_fixture.run_a
+      ~selected_id:(Some "4")
+      stages
+  in
+  assert (List.length t.lines = 6);
+  assert (Asic.Stage.equal (Option.value_exn t.selected).stage (List.nth_exn stages 4));
+  assert (
+    List.equal
+      Asic.Stage.equal
+      (List.concat t.lines |> List.map ~f:(fun item -> item.Stage_strip.stage))
+      stages);
+  List.iter
+    [ 0, 0; 20, 2; 80, 4; 120, 5; 240, 8 ]
+    ~f:(fun (width, height) ->
+      let view = Stage_strip.render ~appearance ~attrs:(fun _ -> []) ~width ~height t in
+      assert (View.width view = width && View.height view = height))
+;;
+
 let%test_unit "stage outcomes preserve request and observation distinctions" =
   let check requested status expect =
     [%test_result: Status.t] (stage_status { name = "stage"; requested; status }) ~expect
