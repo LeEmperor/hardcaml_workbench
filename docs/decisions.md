@@ -128,3 +128,27 @@ visual default or delivered UI. See [source interpretation](design/README.md).
 
 Open after prototypes: preferred default/combinations, concrete dimensions/tokens,
 shared-library packaging, richer float behavior and real Ches editor hosting.
+
+## D5 — FS2 simulation evidence and feature-set boundaries
+
+Accepted by owner, 2026-10-16, before implementation: all recommendations from the
+FS1-completion/FS2 readiness review were approved, followed by the instruction to
+implement the substantial FS2 delivery.
+
+- Structured simulations default to project scope. Exact ASIC input association is
+  optional and evidence-backed; selected run context never creates provenance.
+- Reuse FS0 supervision and completed FS1 byte-transfer/export patterns, preserving
+  separate simulation attempt/case ownership rather than fabricating ASIC IDs.
+- Gate-level association requires exact consumed outputs/collateral references.
+  Simulation pass and ASIC acceptance remain independent until an explicit bridge.
+- Workbench owns bounded durable normalized simulation records and artifact copies.
+  Rerunning captured inputs on the current project is distinct from reproducing an
+  archived build/environment; the latter is not guaranteed by preserving a seed.
+- FS2 defines simulation semantics/configuration; FS3 may expose those through setup
+  and templates. Neither FS3 completion nor additional FS1 investigation blocks FS2.
+- First substantial delivery includes structured discovery/execution, live progress,
+  failures, targeted reruns, trace handoff, history and a real PDK-free Cyclesim path.
+  Embedded waveforms and automatic ASIC acceptance contribution remain separate.
+
+Implemented contract choices and bounds are in [simulation v1](fs2_simulation_contract.md);
+[FS2 acceptance](fs2_acceptance.md) records actual delivery and remaining limits.

@@ -57,10 +57,12 @@ Do not hardcode an illustrative stage list as a universal execution engine.
 
 Delivered: build/test/cancel, workspace context actions, discover → select →
 preview → run through supported known endpoints, finalization and bounded evidence
-inspection. The simulation/test module (F09) reuses the same
-test action and attempt identity rather than introducing a second runner.
+inspection. Generic tests retain the existing test action; FS2 structured simulation
+adds explicit discovery/launch/rerun commands over the same supervisor and job
+identities rather than introducing a second runner. The substantial FS2 milestone
+is accepted and closed; see [controls and evidence](../fs2_acceptance.md).
 Later: additional endpoints, supported continuation, configurable command aliases
-and external automation adapters. FS2 structured simulation remains unstarted.
+and external automation adapters.
 No second shell/recipe language is required.
 
 Dependencies: F01 capabilities; F02 actions; F05 allocation and outcomes; D2.

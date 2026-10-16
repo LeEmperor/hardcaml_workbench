@@ -12,9 +12,11 @@ preserves desired behavior without making every feature a first-demo requirement
 Shared run contexts and workspace terminology are accepted in D1. D2/D3's FS0
 defaults are also accepted; richer command grammar/shared preferences and exact
 immutable snapshots remain deferred in the [decision log](../decisions.md).
-The [generic simulation/test module](../features/simulation_and_tests.md) is delivered;
-structured FS2 cases/seeds/traces and embedded waveform exploration are separate
-later scope. FS1's adopted-evidence functionality is complete.
+The agreed [FS2 simulation/test milestone](../fs2_acceptance.md) is delivered,
+accepted and closed. [Named FS2 followups](fs2_followups.md) preserve FIFO adoption,
+trace streaming, responsiveness/reconnect/log retention and additional simulation
+capabilities with explicit activation and acceptance criteria. Embedded waveform
+exploration remains deferred separately. FS1's adopted-evidence functionality is complete.
 
 ## Inspector usability polish
 
@@ -34,7 +36,7 @@ The following are presentation followups, not FS1 feature blockers:
 Broader lifecycle race/cancellation permutations and larger-design performance
 measurements are coverage/scaling followups in the construction plan. Reactivate
 these bounded tasks when working on usability/adoption or when a concrete regression
-is observed; they need not delay FS2.
+is observed; they do not reopen the completed FS1 or FS2 milestones.
 
 ## Deferred extensions
 

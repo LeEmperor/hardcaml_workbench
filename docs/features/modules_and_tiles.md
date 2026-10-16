@@ -9,7 +9,10 @@ Local input and deferred/poll completion now invalidate the Bonsai view immediat
 the owner confirms Escape works. Domain delivery still polls every 500 ms and a
 100 ms display clock serves time-dependent content. Fully subscription-driven
 domain publication and measured high-tile-count scaling remain followups.
-Requirements below remain normative beyond the adopted scope; FS2 is unstarted.
+FS2 adds structured simulation state, independent investigation tiles and bounded
+history over the existing supervisor; its substantial milestone is accepted and
+closed. See [FS2 acceptance](../fs2_acceptance.md). Requirements below remain
+normative beyond the adopted scope.
 
 ## Ownership
 

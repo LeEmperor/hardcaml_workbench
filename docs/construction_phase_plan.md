@@ -16,7 +16,8 @@ first appearance slice are recorded below. FS1's adopted-evidence functional sco
 is now delivered, including richer paths, measured clock evidence, stage-specific
 physical/routing investigation and external binary handoff. Later F06 extensions
 remain separately qualified in the investigation record.
-No FS2 structured simulation implementation is claimed.
+FS2 structured project-scoped simulation is now delivered; see the M4 FS2 record
+and [FS2 acceptance](fs2_acceptance.md), added 2026-10-16.
 
 ## Evidence and candidate baseline
 
@@ -261,7 +262,8 @@ with immediate local input/completion redraw after the Escape-latency followup.
 ## M4 — Rich evidence and live acceptance (FS1/FS2)
 
 **FS1 adopted-evidence functional scope delivered: synthesis, aggregate and rich inspection.
-FS2 remains unstarted.** Exact commands/results are in [FS1 acceptance](fs1_acceptance.md).
+FS2 substantial project-scoped simulation delivered.** Exact commands/results are
+in [FS1 acceptance](fs1_acceptance.md) and [FS2 acceptance](fs2_acceptance.md).
 Features: F06/F09 and execution/regression extensions.
 
 - [x] F06 synthesis inspection over existing cache: count/name sorting, literal
@@ -309,7 +311,8 @@ Features: F06/F09 and execution/regression extensions.
   attribution. Native repeated/nonfinite metric diagnostics remain explicit.
 - [x] Byte-preserving bounded binary transfer and configured terminal-host external
   opening. Actual exported GDS SHA-256 matches; installed KLayout loads it headlessly.
-- [ ] Project-declared simulation/regression cases, seeds and failure/trace artifacts.
+- [x] Project-declared simulation/regression cases, seeds and failure/trace artifacts;
+  actual Cyclesim and native HTTP/PTY acceptance recorded below.
 - [x] Bounded terminal-result report/artifact catalog and text paging, exact
   run/attempt/hash/offset/limit identity and explicit stale/expired-page recovery.
   Optional external text opening exports verified sanitized text to the terminal
@@ -377,6 +380,49 @@ previous physical run; no new physical/signoff execution was needed. Embedded
 graphical editing, spatial heatmaps and unsupported source mapping remain F06
 extensions, not inferred capabilities of these tables or the external handoff.
 
+### FS2 substantial delivery — accepted and closed 2026-10-16
+
+Shared [implementation plan](fs2_implementation_plan.md),
+[provider/RPC contract](fs2_simulation_contract.md), and
+[controls/acceptance](fs2_acceptance.md).
+
+**Milestone closed: structured project-scoped simulation delivered and accepted.**
+The owner reported the basic demo works and authorized closeout. This is scoped
+manual launch/view acceptance, complementing the automated evidence below.
+
+- [x] Versioned companion simulation configuration and explicit bounded discovery;
+  suites/cases, canonical uint64 seeds and parameters remain project-owned.
+- [x] Existing-supervisor discovery/run jobs, per-root admission, logs, deadlines,
+  process-group cancellation, captured launch inputs and durable idempotency.
+- [x] Validated live events and bounded normalized detail; process outcome remains
+  separate from semantic cases. Malformed/truncated/duplicate streams are incomplete.
+- [x] Terminal launch form, attempt/case investigation, wrapped failure detail,
+  stream-labelled logs, independent tiles, cancellation and targeted reruns.
+- [x] Current-project reruns preserve original inputs and immediate parent identity
+  while creating a distinct job; original attempts remain retained within bounds.
+- [x] Workbench-owned bounded history/artifacts reopen after restart without replay;
+  unfinished history becomes interrupted, missing/corrupt evidence is explicit.
+- [x] Attempt/case-owned raw artifact transfer and terminal-host export/viewer action;
+  full SHA256 and page identity/size checks, actual Cyclesim VCD handoff.
+- [x] Real PDK-free Cyclesim example, deterministic failure/race fixtures, actual native
+  HTTP/PTY integration, full format/lint/runtest/build and existing interrupt matrix.
+- [x] Record scoped owner acceptance and transfer additional adoption, performance
+  and simulation capabilities to [named followups](backlog/fs2_followups.md).
+
+Generated-RTL/gate-level adapters, archived replay, embedded waveforms and ASIC
+acceptance contribution are separately activated followups, not open milestone
+checkboxes. The owner retains Git integration; the
+[post-integration verification handoff](fs2_acceptance.md#integration-handoff)
+does not claim the main branch is already updated or tested.
+
+Final combined checks passed serially through `scripts/with-switch.sh` with `-j 20`,
+build dir `/tmp/opencode/fs2-build-backend`. Final reviewed HTTP/PTY evidence:
+`/tmp/opencode/fs2-native-yx27d5_b/result.json`, **45 checks passed**. Real standalone
+Cyclesim proof: `/tmp/opencode/fs2-provider-tzid09_h/` (12 case executions, 768 cycle
+comparisons). Five-mode interrupt regression: `workbench-terminal-interrupt-ou1stfm9`.
+No full ASIC flow, sibling source changes, staging, commits or pushes were needed.
+Retention and slow-storage responsiveness limits are explicit in the acceptance record.
+
 ### Inspector input responsiveness
 
 **Inspector Escape responsiveness:** the manual demo's delay was reproduced as
@@ -395,14 +441,16 @@ claiming exhaustive terminal or provider coverage. FS1 has no remaining function
 blockers for the adopted evidence. Breadcrumbs, mode-specific help, an explicit
 Close inspector command and more concise detail presentation are
 [usability followups](backlog/README.md#inspector-usability-polish); broader lifecycle
-race matrices and larger-design performance remain coverage work. FS2 may proceed
-independently; its structured-simulation scope has not been delivered by this work.
+race matrices and larger-design performance remain coverage work. FS2's independent
+structured-simulation delivery and acceptance are recorded above.
 
-### Earlier proposed execution followup — deferred in favor of FS1
+### Earlier proposed execution followup — generic detail remains deferred
 
 The initial takeover review proposed an identity-safe selected-attempt detail view. This
 is a follow-on to F02/F09's existing execution UI within M4, not delivery of FS2
-structured simulation or a new ASIC orchestration engine. **Not implemented yet.**
+structured simulation or a new ASIC orchestration engine. **Generic selected-job
+detail is not implemented yet.** FS2 now provides dedicated simulation attempt/case
+detail and logs; it does not claim this broader generic-job followup is complete.
 
 - [ ] Enter/Esc detail navigation over existing `Job.t` identity, kind, state, phase,
   created/started/finished timestamps and exact outcome, with explicit missing fields.
@@ -474,7 +522,7 @@ This is a reusable renderer over actual FS0 tiles, not a selected final aestheti
 | M1 | Headless Demo A delivered; physical/container cancellation evidence extended in M4 |
 | M2 | Tile-host Demo B delivered; bounded UI/coverage/performance gaps above |
 | M3 | Autosaved-session/L2 Demo C delivered; templates and appearance persistence gaps above |
-| M4 | FS1 adopted-evidence investigation/operation scope delivered, including rich paths, measured clocks, physical/routing tables and binary handoff; FS2 and later F06 extensions pending |
+| M4 | FS1 adopted-evidence investigation/operation scope delivered; substantial FS2 project-scoped simulation delivered with real Cyclesim/native HTTP/PTY evidence; later F06 extensions remain |
 | M5 | Later adoption scope; no full multi-monitor acceptance claim |
 | V1 | A–E skins/axes/captures delivered; rich gallery and default review pending |
 

@@ -1,7 +1,8 @@
 # Feature inventory
 
-Updated 2026-10-16 against current source and FS0/FS1 evidence. **FS0 Demos A–C and
-FS1's adopted-evidence functional scope are delivered with explicit limits.**
+Updated 2026-10-16 against current source and FS0/FS1/FS2 evidence. **FS0 Demos A–C
+and FS1's adopted-evidence functional scope are delivered with explicit limits;
+the substantial project-scoped FS2 milestone is accepted and closed.**
 **Requested** means desired support, not
 delivered behavior. Demo scope is deliberately smaller than the full
 inventory. Dependencies below are semantic dependencies, not a demand to finish an
@@ -23,7 +24,7 @@ land in FS0 without requiring all visual variants before functional demos.
 | [F06 Hardware inspection](features/hardware_inspection.md) | Inspect synthesis, hierarchy, timing, physical evidence and checks | RTL/hierarchy, synthesis, timing paths, measured clocks, stage-specific physical/routing/congestion, checks, report paging and text/binary handoff delivered | FS1 complete for adopted evidence; embedded graphics, unsupported mappings and later provider extensions remain |
 | [F07 Project setup](features/project_setup.md) | Initialize existing repositories and offer approachable starter layouts | Root manifest exists; initialization/templates pending | Configure existing specimen; creation later |
 | [F08 External clients](features/external_clients.md) | Ches summaries/source jumps, automation, MCP and eventual embedded editing | Application RPC exists; integrations pending | Keep contracts usable outside the TUI; clients later |
-| [F09 Simulation and tests](features/simulation_and_tests.md) | Run tests/simulations, inspect attempts/logs/failures, later explore structured cases/traces | Project-scoped module/tile, attempts/logs/cancel delivered over existing supervisor | Real PDK-free tests passed; no structured cases/seeds/traces (FS2) |
+| [F09 Simulation and tests](features/simulation_and_tests.md) | Run tests/simulations, inspect cases/seeds/failures and traces | Generic tests plus structured FS2 suites, progress, reruns, durable history and exact trace export delivered over existing supervisor | Real Cyclesim/native HTTP/PTY passed; gate-level adapters, archived-build replay and embedded waveforms remain later |
 | [F10 Run contexts](features/run_contexts.md) | Link selectors across workspaces, detach for investigation and relink | Daemon-owned revisioned Main/independent contexts and pins delivered/persisted | Linked selectors, independent/relink, move semantics; multi-monitor acceptance later |
 | [F11 Run-summary cache](features/run_summary_cache.md) | Switch runs quickly without repeatedly parsing reports; reuse summaries after restart | Bounded L1/L2, coalescing, observation invalidation and explicit Refresh delivered | Fixture 2→2 report calls; real exact restart identity with Cached_unverified; no cheap revision query |
 | [F12 Appearance and gallery](features/appearance.md) | Mix skins/tabs/color/icons/density over composable tiles; compare A–E before selecting defaults | First A–E skins and independent presentation controls delivered; richer gallery/review pending | Actual host palette controls and shared synthetic captures |
@@ -81,10 +82,13 @@ launch-and-view and follow/pin-run first; immutable snapshots are deferred.
 The [construction plan](construction_phase_plan.md) records delivered conditions,
 true leftovers and consolidated candidate/evidence links. [Acceptance](fs0_acceptance.md)
 and [installed checks](fs0_install_checks.md) record runtime results. FS1's
-adopted-evidence scope and FS5's first appearance slice are delivered; no FS2
-structured-simulation delivery is claimed. [FS1 investigation](fs1_investigation.md)
-records current completion, real evidence, provider adoption and limits. The owner
-confirmed the Escape-responsiveness fix; inspector presentation polish and broader
-race/scaling coverage are followups, not FS1 feature blockers.
+adopted-evidence scope and FS5's first appearance slice are delivered.
+[FS1 investigation](fs1_investigation.md) records current completion, real evidence,
+provider adoption and limits. The owner confirmed the Escape-responsiveness fix;
+inspector presentation polish and broader race/scaling coverage are followups,
+not FS1 feature blockers. [Substantial FS2 delivery](fs2_acceptance.md) includes
+structured project-scoped simulation and real Cyclesim acceptance. The agreed FS2
+milestone is accepted and closed; [followups](backlog/fs2_followups.md) preserve later
+scope independently of closure.
 Later feature scope remains recorded here without becoming a release
 prerequisite. [Backlog](backlog/README.md) retains unrelated deferred ideas.
