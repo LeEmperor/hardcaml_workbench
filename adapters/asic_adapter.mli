@@ -87,6 +87,17 @@ val inspect_finalization
   -> string
   -> Dune_adapter.Invocation.t
 
+(** Public read-only rich inspection. [detail] carries row ID and expected source digest. *)
+val inspection
+  :  Config.t
+  -> root:string
+  -> environment:V1.Environment_selection.t
+  -> execution_file:string
+  -> domain:string
+  -> stage:string
+  -> detail:(string * string) option
+  -> Dune_adapter.Invocation.t
+
 (** Explicit inputs only. The configured results root owns the finalizations store; no
     current selection, configured support-tools default, or collateral is guessed. *)
 val finalize

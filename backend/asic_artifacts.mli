@@ -10,7 +10,9 @@ open Hardcaml_workbench_protocol
     [sha256] is always observed and verified at listing. Labels mark sources without a
     provider-declared hash as [observed SHA-256; not provider-declared]. Labels are
     control-sanitized and truncated to 160 bytes, preserving the hash qualifier.
-    NUL-containing or malformed UTF-8 files are binary, with metadata only. *)
+    NUL-containing or malformed UTF-8 files are binary, accessible via [read_bytes].
+    Checkpoint views require explicit hash-bearing selected evidence or a mapped raw
+    artifact; directories and unhashed checkpoint manifests are never scanned. *)
 val list : summary:Asic.Summary.t -> Asic_artifact.Reference.t list
 
 (** Accept only a previously listed, unchanged server reference (retain it server-side;
@@ -30,3 +32,15 @@ val read
   -> offset:int
   -> limit:int
   -> Asic_artifact.Page.t
+
+(** Raw transfer for either text or binary references, using the same authorization,
+    descriptor, size and complete-file SHA-256 verification as [read]. [offset] and
+    [next_offset] count raw bytes; [limit] must be 1..65536 raw bytes. [bytes_hex] encodes
+    exactly the requested slice, without sanitization, newline conversion or UTF-8
+    decoding. EOF at the file size succeeds with an empty payload. Errors are returned in
+    [Byte_page.error] with no payload, no offset advancement and [eof=false]. *)
+val read_bytes
+  :  reference:Asic_artifact.Reference.t
+  -> offset:int
+  -> limit:int
+  -> Asic_artifact.Byte_page.t

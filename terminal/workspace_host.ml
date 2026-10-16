@@ -14,6 +14,8 @@ type local =
   ; terminal_result : Terminal_result_view.State.t
   ; artifacts : Artifact_view.t option
   ; artifact_generation : int
+  ; inspection : Inspection_view.t option
+  ; inspection_generation : int
   }
 
 type layout_mode =
@@ -38,6 +40,7 @@ type action =
   | Edit_acceptance of Run_ref.t * string
   | Finalize_collect of Run_ref.t * string
   | Browse_artifacts of Run_ref.t
+  | Browse_inspection of Run_ref.t * string * string
   | Launch_asic of Asic.Preview.t * bool
   | Apply_default_layout
   | Local_headers
@@ -86,6 +89,7 @@ type t =
   ; palette : palette option
   ; prefix : int
   ; paste : bool
+  ; inspection_paste : W.Tile_id.t option
   ; chrome : bool
   ; notice : string
   ; editing_filter : bool
@@ -102,6 +106,7 @@ let empty =
   ; palette = None
   ; prefix = 0
   ; paste = false
+  ; inspection_paste = None
   ; chrome = true
   ; notice = "Loading workspace registry"
   ; editing_filter = false
@@ -121,6 +126,8 @@ let default_local =
   ; terminal_result = Terminal_result_view.State.empty
   ; artifacts = None
   ; artifact_generation = 0
+  ; inspection = None
+  ; inspection_generation = 0
   }
 ;;
 
@@ -761,6 +768,214 @@ let drop_last_codepoint text =
   loop 0 0
 ;;
 
+type inspection_filter_result =
+  | Filter_interrupt
+  | Filter_handled of t
+  | Filter_pass
+
+(** This gate runs before global paste/command handling. The starting tile owns the entire
+    bracketed paste, including when polling changes focus or removes its view. No result
+    from this gate carries a command or provider operation. *)
+let route_inspection_filter_event t (event : Bonsai_term.Event.t) =
+  if is_interrupt event
+  then Filter_interrupt
+  else (
+    let target =
+      match t.inspection_paste with
+      | Some id -> Some (id, (local t id).inspection)
+      | None
+        when (not t.paste)
+             && Option.is_none t.palette
+             && (not t.editing_filter)
+             && t.prefix = 0 ->
+        Option.bind (focused t) ~f:(fun tile ->
+          Option.bind (local t tile.id).inspection ~f:(fun view ->
+            if view.editing then Some (tile.id, Some view) else None))
+      | None -> None
+    in
+    match target with
+    | None -> Filter_pass
+    | Some (id, view) ->
+      let decoded = decode_event event in
+      let captured = Option.is_some t.inspection_paste in
+      let t, view =
+        match decoded, view with
+        | Some Paste_end, view ->
+          ( { t with paste = false; inspection_paste = None }
+          , Option.map view ~f:(fun view -> { view with Inspection_view.pasting = false })
+          )
+        | _, None ->
+          ( { t with
+              notice =
+                "Inspection filter paste owner changed; payload ignored until end marker"
+            }
+          , None )
+        | Some Paste_start, Some view when not captured ->
+          ( { t with paste = true; inspection_paste = Some id; prefix = 0 }
+          , Some { view with pasting = true; filter_notice = None } )
+        | Some (Character c), Some view ->
+          t, Some (Inspection_view.append_filter_text view (String.of_char c))
+        | Some (Text text), Some view ->
+          t, Some (Inspection_view.append_filter_text view text)
+        | _, Some view when captured -> t, Some (Inspection_view.reject_filter_text view)
+        | Some (Enter | Escape), Some view -> t, Some { view with editing = false }
+        | Some Clear_filter, Some view ->
+          t, Some { view with filter = ""; filter_notice = None }
+        | Some Backspace, Some view ->
+          t, Some { view with filter = drop_last_codepoint view.filter }
+        | _, Some view ->
+          (match event with
+           | Key_press _ -> t, Some (Inspection_view.reject_filter_text view)
+           | _ -> t, Some view)
+      in
+      let t =
+        match view with
+        | None -> t
+        | Some view ->
+          let local_state = local t id in
+          set_local
+            t
+            id
+            { local_state with inspection = Some (Inspection_view.normalize view) }
+      in
+      Filter_handled t)
+;;
+
+let%test_unit "production inspection filter gate captures bracketed endpoint paste \
+               without dispatching hotkeys"
+  =
+  let open Bonsai_term.Event in
+  let registry =
+    W.initial ~session_id:(W.Session_id.of_string "inspection-paste-events")
+  in
+  let tile = List.hd_exn registry.tiles in
+  let view =
+    { (Inspection_view.create ~run:Fs0_fixture.run_a ~domain:"timing" ~stage:"signoff" ()) with
+      editing = true
+    }
+  in
+  let host = receive empty registry in
+  let host =
+    set_local
+      { host with focus = Some tile.id; chrome = false }
+      tile.id
+      { default_local with inspection = Some view }
+  in
+  let send host event =
+    match route_inspection_filter_event host event with
+    | Filter_handled host -> host
+    | Filter_interrupt | Filter_pass -> assert false
+  in
+  let key key = Key_press { key; mods = [] } in
+  let view host = Option.value_exn (local host tile.id).inspection in
+  let host = send host (Paste `Start) in
+  assert (host.paste && Option.is_some host.inspection_paste && (view host).pasting);
+  let payload = "endpoint/out[3]/Q jtr / ; q b (Inspect refresh)" in
+  let host =
+    String.fold payload ~init:host ~f:(fun host c -> send host (key (ASCII c)))
+  in
+  let host = send host (key (Uchar (Uchar.of_scalar_exn 0x754c))) in
+  assert (String.equal (view host).filter (payload ^ "界"));
+  assert (String.equal (view host).stage "signoff");
+  assert ((view host).generation = 0 && Option.is_none (view host).requested);
+  assert (Option.is_none host.palette && host.prefix = 0);
+  let previous = (view host).filter in
+  let host =
+    List.fold
+      [ key Enter
+      ; key (ASCII '\n')
+      ; key (ASCII '\r')
+      ; key (ASCII '\000')
+      ; key Escape
+      ; key Backspace
+      ; key Tab
+      ; Key_press { key = ASCII 'r'; mods = [ Ctrl ] }
+      ]
+      ~init:host
+      ~f:send
+  in
+  assert (
+    String.equal (view host).filter previous && (view host).editing && (view host).pasting);
+  assert (Option.is_some (view host).filter_notice);
+  List.iter
+    [ Key.ASCII 'c'; ASCII 'C'; Uchar (Uchar.of_char 'c') ]
+    ~f:(fun key ->
+      match route_inspection_filter_event host (Key_press { key; mods = [ Ctrl ] }) with
+      | Filter_interrupt -> ()
+      | _ -> assert false);
+  let owner_changed = { host with focus = None } in
+  let owner_changed = send owner_changed (key (ASCII 'j')) in
+  assert (String.equal (view owner_changed).filter (previous ^ "j"));
+  let host = send host (Paste `End) in
+  assert (
+    (not host.paste) && Option.is_none host.inspection_paste && not (view host).pasting);
+  let host = send host (key Backspace) in
+  assert (String.equal (view host).filter payload);
+  let host = send host (key Enter) in
+  assert ((not (view host).editing) && Option.is_none (view host).requested);
+  assert (String.equal (view host).stage "signoff" && (view host).generation = 0);
+  match route_inspection_filter_event host (key (ASCII 'r')) with
+  | Filter_pass -> ()
+  | _ -> assert false
+;;
+
+let%test_unit "inspection filter paste enforces 4096 UTF-8 bytes and consumes orphaned \
+               paste until end"
+  =
+  let open Bonsai_term.Event in
+  let registry =
+    W.initial ~session_id:(W.Session_id.of_string "inspection-paste-boundary")
+  in
+  let tile = List.hd_exn registry.tiles in
+  let view =
+    { (Inspection_view.create ~run:Fs0_fixture.run_a ~domain:"timing" ~stage:"signoff" ()) with
+      editing = true
+    ; filter = String.make 4094 'a'
+    }
+  in
+  let host = receive empty registry in
+  let host =
+    set_local
+      { host with focus = Some tile.id }
+      tile.id
+      { default_local with inspection = Some view }
+  in
+  let send host event =
+    match route_inspection_filter_event host event with
+    | Filter_handled host -> host
+    | _ -> assert false
+  in
+  let key key = Key_press { key; mods = [] } in
+  let current host = Option.value_exn (local host tile.id).inspection in
+  let host = send host (Paste `Start) in
+  let host = send host (key (Uchar (Uchar.of_scalar_exn 0x754c))) in
+  assert (String.length (current host).filter = 4094);
+  assert (Option.is_some (current host).filter_notice);
+  let host = send host (key (Uchar (Uchar.of_scalar_exn 0xe9))) in
+  assert (String.length (current host).filter = 4096);
+  assert (String.is_suffix (current host).filter ~suffix:"é");
+  let host = send host (key (ASCII 'r')) in
+  assert (String.length (current host).filter = 4096 && (current host).generation = 0);
+  let host = send host (Paste `End) |> fun host -> send host (key Backspace) in
+  assert (String.length (current host).filter = 4094);
+  let appended = Inspection_view.append_filter_text (current host) "é界" in
+  assert (
+    String.length appended.filter = 4096 && String.is_suffix appended.filter ~suffix:"é");
+  let rejected = Inspection_view.append_filter_text (current host) "\255" in
+  assert (
+    String.equal rejected.filter (current host).filter
+    && Option.is_some rejected.filter_notice);
+  let host = send host (Paste `Start) in
+  let host = set_local host tile.id default_local in
+  let host = send host (key (ASCII 'r')) in
+  assert (
+    host.paste
+    && Option.is_none (local host tile.id).inspection
+    && Option.is_none host.palette);
+  let host = send host (Paste `End) in
+  assert ((not host.paste) && Option.is_none host.inspection_paste)
+;;
+
 let input t event ~commands : t * effect =
   match event with
   | Paste_start -> { t with paste = true; prefix = 0 }, No_effect
@@ -1367,6 +1582,9 @@ let%test_unit "actual catalog and palette can cancel an allocated owned launch b
     ; finalizations = []
     ; artifacts = []
     ; artifact_pages = []
+    ; artifact_byte_pages = []
+    ; inspections = []
+    ; inspection_details = []
     }
   in
   let commands = asic_cancel_commands snapshot in

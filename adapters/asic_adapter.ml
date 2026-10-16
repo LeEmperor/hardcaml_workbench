@@ -94,6 +94,16 @@ let report config ~root ~environment execution_file =
   provider config ~root ~environment [ "report"; execution_file; "--json" ]
 ;;
 
+let inspection config ~root ~environment ~execution_file ~domain ~stage ~detail =
+  provider
+    config
+    ~root
+    ~environment
+    ([ "inspect"; execution_file; "--domain"; domain; "--stage"; stage; "--json" ]
+     @ Option.value_map detail ~default:[] ~f:(fun (row_id, digest) ->
+       [ "--row-id"; row_id; "--expected-digest"; digest ]))
+;;
+
 let inspect_finalization config ~root ~environment attempt =
   provider config ~root ~environment [ "finalization-inspect"; attempt; "--json" ]
 ;;

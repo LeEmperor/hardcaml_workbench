@@ -331,6 +331,15 @@ let artifact_inspector host tile =
         Artifact_view.reconcile_scope view ~scope:reference.run)))
 ;;
 
+let inspection_explorer host tile =
+  Option.bind (H.local host tile.W.Tile.id).inspection ~f:(fun view ->
+    Option.bind host.H.registry ~f:(fun registry ->
+      W.resolve_tile registry tile.id
+      |> Result.ok
+      |> Option.bind ~f:(fun reference ->
+        Inspection_view.reconcile_scope view ~scope:reference.run)))
+;;
+
 let rows host data tile ~width ~height =
   let local = H.local host tile.W.Tile.id in
   let scope =
@@ -378,9 +387,10 @@ let rows host data tile ~width ~height =
         (Job.Kind.to_string job.kind))
   in
   let rows =
-    match artifact_inspector host tile with
-    | Some view -> Artifact_view.rows view ~width ~height
-    | None ->
+    match inspection_explorer host tile, artifact_inspector host tile with
+    | Some view, _ -> Inspection_view.rows view ~width ~height
+    | None, Some view -> Artifact_view.rows view ~width ~height
+    | None, None ->
       (match tile.kind with
        | "run-selector" -> run_rows ()
        | "execution" | "project-tests" ->
@@ -453,6 +463,7 @@ let rows host data tile ~width ~height =
           | Some run -> ("Run: " ^ run_label run) :: data.run_lines run kind))
   in
   if Option.is_some local.artifacts
+     || Option.is_some local.inspection
      || String.equal tile.kind "synthesis"
      || Terminal_result_view.supports tile.kind
      || (String.equal tile.kind "logs" && local.follow)
@@ -756,7 +767,11 @@ let scroll_focused host data dimensions ~delta =
 ;;
 
 (** Fit uses responsive tracks; Preferred preserves saved shelf dimensions. *)
-let render host data ({ Dimensions.width; height } as dimensions) =
+let inspection_viewport (dimensions : Dimensions.t) =
+  Int.max 1 dimensions.width, Int.max 1 dimensions.height
+;;
+
+let render_workspace host data ({ Dimensions.width; height } as dimensions) =
   let appearance = host.H.appearance in
   let width = Int.max 1 width
   and height = Int.max 1 height in
@@ -918,6 +933,30 @@ let render host data ({ Dimensions.width; height } as dimensions) =
       |> colored appearance Surface
     in
     View.zcat [ overlay; frame ] |> box ~width:dimensions.width ~height:dimensions.height
+;;
+
+(* A focused explorer covers the workspace. Do not construct the obscured tile images:
+   those have different widths and would wrap the same large source a second time. *)
+let render host data dimensions =
+  let inspection_tile =
+    match host.H.inspection_paste with
+    | None -> H.focused host
+    | Some id ->
+      Option.bind host.registry ~f:(fun registry ->
+        List.find registry.tiles ~f:(fun tile -> W.Tile_id.equal tile.id id))
+  in
+  match host.H.palette, Option.bind inspection_tile ~f:(inspection_explorer host) with
+  | None, Some view ->
+    let width, height = inspection_viewport dimensions in
+    lines
+      ~appearance:host.appearance
+      ~role:Surface
+      ~width
+      ~height
+      (Inspection_view.rows view ~width ~height)
+    |> colored host.appearance Surface
+    |> box ~width ~height
+  | _ -> render_workspace host data dimensions
 ;;
 
 let appearance_cases =
@@ -1344,6 +1383,171 @@ let%test_unit "artifact overlay cannot render retained page after tile binding c
   let changed = { host with registry = Some (bind snapshot Fs0_fixture.run_b) } in
   assert (Option.is_none (artifact_inspector changed tile));
   assert (not (String.is_substring (frame changed) ~substring:page.text))
+;;
+
+let%test_unit "inspection overlay and input share full viewport and visibly reverse from \
+               bottom"
+  =
+  let snapshot = W.initial ~session_id:(W.Session_id.of_string "inspection-viewport") in
+  let tile = List.hd_exn snapshot.tiles in
+  let run = Fs0_fixture.run_a in
+  let bind snapshot run =
+    W.apply
+      snapshot
+      (Mutate
+         { expected_revision = snapshot.W.Snapshot.revision
+         ; mutation = Set_tile_binding { tile = tile.id; binding = Pin_run run }
+         })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let snapshot = bind snapshot run in
+  let row : Asic_inspection.Row.t =
+    { id = "row"
+    ; category = "path"
+    ; producer = "sta"
+    ; corner = None
+    ; group = None
+    ; name = "path"
+    ; value = Some 0.
+    ; unit_ = Some "ns"
+    ; status = "ok"
+    ; source = "/report"
+    ; fields = []
+    }
+  in
+  let index : Asic_inspection.Index.t =
+    { run
+    ; execution_file = "/execution"
+    ; execution_sha256 = "sha"
+    ; domain = "timing"
+    ; stage = "signoff"
+    ; source_digest = "digest"
+    ; rows = [ row ]
+    ; diagnostics = []
+    ; truncated = false
+    ; cached_unverified = false
+    }
+  in
+  let detail : Asic_inspection.Detail.t =
+    { run
+    ; domain = "timing"
+    ; stage = "signoff"
+    ; source_digest = "digest"
+    ; row_id = "row"
+    ; text =
+        String.concat
+          ~sep:"\n"
+          (List.init 120 ~f:(fun i -> sprintf "detail-%03d %s" i (String.make 130 'x')))
+    ; error = None
+    }
+  in
+  let inspector =
+    { (Inspection_view.create ~scope:run ~run ~domain:"timing" ~stage:"signoff" ()) with
+      index = Some index
+    ; selected = Some "row"
+    ; requested = Some ("digest", "row")
+    ; detail = Some detail
+    }
+  in
+  let host = H.receive H.empty snapshot in
+  let host = { host with focus = Some tile.id } in
+  let data =
+    { project = None
+    ; jobs = []
+    ; runs = []
+    ; log_lines = (fun _ -> assert false)
+    ; run_lines = (fun _ _ -> assert false)
+    ; run_context = (fun _ -> assert false)
+    ; summary = (fun _ -> assert false)
+    ; status = "fixture"
+    ; environment = "fixture"
+    ; asic_lines = []
+    }
+  in
+  List.iter
+    [ { Dimensions.width = 120; height = 40 }; { width = 112; height = 40 } ]
+    ~f:(fun dimensions ->
+      let width, height = inspection_viewport dimensions in
+      assert (width = dimensions.width && height = dimensions.height);
+      let step state action =
+        let state, operation = Inspection_view.input ~width ~height state action in
+        assert (Option.is_none operation);
+        Option.value_exn state
+      in
+      let bottom =
+        List.fold (List.init 1000 ~f:Fn.id) ~init:inspector ~f:(fun state _ ->
+          step state Down)
+      in
+      let up = step bottom Up in
+      assert (up.scroll = bottom.scroll - 1);
+      let host_for inspection =
+        H.set_local host tile.id { H.default_local with inspection = Some inspection }
+      in
+      let frame state = render (host_for state) data dimensions in
+      assert (View.width (frame bottom) = width && View.height (frame bottom) = height);
+      assert (not (String.equal (plain_text (frame bottom)) (plain_text (frame up))));
+      let stale =
+        { (host_for bottom) with registry = Some (bind snapshot Fs0_fixture.run_b) }
+      in
+      assert (Option.is_none (inspection_explorer stale tile)))
+;;
+
+let%test_unit "unterminated inspection paste keeps query and rejection visible without \
+               chrome after polling"
+  =
+  let open Bonsai_term.Event in
+  let registry =
+    W.initial ~session_id:(W.Session_id.of_string "inspection-paste-visible")
+  in
+  let tile = List.hd_exn registry.tiles in
+  let inspector =
+    { (Inspection_view.create ~run:Fs0_fixture.run_a ~domain:"timing" ~stage:"signoff" ()) with
+      editing = true
+    }
+  in
+  let host = H.receive H.empty registry in
+  let host =
+    H.set_local
+      { host with focus = Some tile.id; chrome = false }
+      tile.id
+      { H.default_local with inspection = Some inspector }
+  in
+  let send host event =
+    match H.route_inspection_filter_event host event with
+    | H.Filter_handled host -> host
+    | _ -> assert false
+  in
+  let host = send host (Paste `Start) in
+  let host =
+    String.fold "endpoint/Q jtr" ~init:host ~f:(fun host c ->
+      send host (Key_press { key = ASCII c; mods = [] }))
+  in
+  let host = send host (Key_press { key = Enter; mods = [] }) in
+  let host = H.receive host registry in
+  let data =
+    { project = None
+    ; jobs = []
+    ; runs = []
+    ; log_lines = (fun _ -> assert false)
+    ; run_lines = (fun _ _ -> assert false)
+    ; run_context = (fun _ -> assert false)
+    ; summary = (fun _ -> assert false)
+    ; status = "fixture"
+    ; environment = "fixture"
+    ; asic_lines = []
+    }
+  in
+  let frame host = render host data { width = 120; height = 40 } |> plain_text in
+  List.iter
+    [ host; { host with focus = None } ]
+    ~f:(fun host ->
+      let text = frame host in
+      assert (String.is_substring text ~substring:"FILTER PASTE ACTIVE");
+      assert (String.is_substring text ~substring:"filter=endpoint/Q jtr");
+      assert (String.is_substring text ~substring:"rejects controls"));
+  let host = send host (Paste `End) in
+  assert (not (String.is_substring (frame host) ~substring:"FILTER PASTE ACTIVE"))
 ;;
 
 let%test_unit "filter input remains visible after polling and with chrome hidden" =

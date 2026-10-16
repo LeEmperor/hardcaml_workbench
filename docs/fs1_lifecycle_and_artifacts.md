@@ -5,7 +5,10 @@ evidence. This records the implemented producer lifecycle, bounded terminal-resu
 artifact browser, and explicit external text export. It supplements
 [FS1 acceptance](fs1_acceptance.md): that earlier record's statements that a
 finalization producer and artifact viewer are absent predate this slice.
-The full normative FS1/F06 scope is still incomplete.
+The subsequent [rich investigation delivery](fs1_investigation.md) completes the
+adopted-evidence FS1 scope, including timing paths, measured clock reports,
+physical/routing tables and exact binary handoff. This record preserves the
+lifecycle and text-viewer evidence from the earlier slice.
 
 ## Finalize from the command palette
 
@@ -279,8 +282,8 @@ collect/accept/cancel specimens above.
 - `terminal/artifact_view.ml`, `terminal/artifact_export.ml`: bounded reader,
   stale/expired-page recovery, complete sanitized export, and direct launch.
 
-Rich timing-path investigation, measured clock/CTS, routing/congestion and other
-full FS1/F06 investigation surfaces remain incomplete. Binary external rendering
-is not implemented. General artifact provenance beyond the selected adopted
-terminal result is not implemented; this bounded catalog is not a general
-artifact explorer or a claim of complete provenance across all tool outputs.
+The later investigation slice adds timing-path exploration, measured clocks,
+physical/routing/congestion tables and byte-preserving external handoff. General
+artifact provenance beyond the selected adopted terminal result and embedded
+graphical editing remain later work; the bounded catalog is not a claim of
+complete provenance across all tool outputs.

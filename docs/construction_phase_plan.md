@@ -11,8 +11,10 @@ FS0 covers M0–M3's functional slices, not every normative feature requirement.
 FS1/FS2 map to richer M4 evidence and simulation; FS3 maps to M5 adoption.
 FS5/V1 is an independent appearance gallery, not a functional-demo gate.
 FS1's synthesis and aggregate terminal/physical investigation slices and FS5's
-first appearance slice are recorded below. FS1 remains open for richer paths,
-measured CTS, stage-specific physical/routing investigation and artifact viewers.
+first appearance slice are recorded below. FS1's adopted-evidence functional scope
+is now delivered, including richer paths, measured clock evidence, stage-specific
+physical/routing investigation and external binary handoff. Later F06 extensions
+remain separately qualified in the investigation record.
 No FS2 structured simulation implementation is claimed.
 
 ## Evidence and candidate baseline
@@ -249,7 +251,7 @@ and richer endpoint forms remain explicit gaps; clock-driven redraw remains curr
 
 ## M4 — Rich evidence and live acceptance (FS1/FS2)
 
-**FS1 in progress: synthesis and aggregate physical/terminal inspection delivered.
+**FS1 adopted-evidence functional scope delivered: synthesis, aggregate and rich inspection.
 FS2 remains unstarted.** Exact commands/results are in [FS1 acceptance](fs1_acceptance.md).
 Features: F06/F09 and execution/regression extensions.
 
@@ -287,14 +289,23 @@ Features: F06/F09 and execution/regression extensions.
 - [x] Actual native HTTP/PTY import of collection-only, accepted and rejected
   operations; independent tiles/pins, exact reference form, restart/L2, no warm
   provider reads, Unicode/paste entry and bottom/reverse-scroll recovery.
-- [ ] Rich timing path/corner/group exploration, measured CTS/skew/coverage and
-  stage-specific placement/routing/congestion views.
+- [x] Retained setup/hold path tables with corner/group/producer/stage selection,
+  literal filtering, numeric/name sorting, violated/near-limit filtering and
+  source-fenced detail. Real acceptance independently checks all 1020 path spans.
+- [x] Measured clock latency/network skew and setup/hold check skew, supplied
+  source/generated headers and relationships, propagation/coverage excerpts and
+  explicit conflicting-header diagnostics; absent relationships are not inferred.
+- [x] Stage-specific die/core/cell/macro/placement metrics and global/detailed
+  routing/congestion tables with original units, step/occurrence and carry-forward
+  attribution. Native repeated/nonfinite metric diagnostics remain explicit.
+- [x] Byte-preserving bounded binary transfer and configured terminal-host external
+  opening. Actual exported GDS SHA-256 matches; installed KLayout loads it headlessly.
 - [ ] Project-declared simulation/regression cases, seeds and failure/trace artifacts.
 - [x] Bounded terminal-result report/artifact catalog and text paging, exact
   run/attempt/hash/offset/limit identity and explicit stale/expired-page recovery.
   Optional external text opening exports verified sanitized text to the terminal
   host before invoking a configured executable, never opening a daemon path locally.
-- [ ] General source viewers, binary/graphical artifact rendering and provenance
+- [ ] General source viewers, embedded graphical artifact rendering and provenance
   navigation beyond the selected adopted terminal result.
 - [x] Real synthesis→floorplan→placement→CTS→routing→signoff completion; separate
   external precheck/gate-level acceptance pass. Earlier 600-second signoff timeout
@@ -335,7 +346,27 @@ without replay. Artifact reads launch no provider work. External text handoff wa
 verified with a local observer executable, not a claim about a real GUI renderer.
 Final format/lint, full build/runtest, installed workflow and five-mode interrupts
 passed after integration. No provider upgrade or new physical implementation run
-was needed for this followup.
+was needed for that lifecycle followup.
+
+**Final FS1 investigation delivery (2026-10-16):** [scope, controls and evidence](fs1_investigation.md).
+Provider-owned `inspect` schema 1 is installed privately at
+`/tmp/opencode/workbench-fs1-inspection-provider/generations/59466eda06df463e8d921678830ff5c2`.
+Its receipt identifies captured snapshot `0423a76848cdc41f79ec5fd67502445b08b783050d8eba9de83991e8550cda09`,
+not an authoritative linked-source stamp. All four domains passed actual HTTP/PTY
+and L2 restart acceptance at `/tmp/opencode/workbench-fs1-investigation-hd0uuqio`;
+binary handoff preserves the exact GDS bytes, and actual headless KLayout loading
+passed. Original provider results/config/state were unchanged. The owner's existing
+example config was initially left pinned to its prior provider. A subsequent manual
+demo reported `invalid command: inspect`; its provider setting was then updated to
+the verified generation above. The active owner processes were not stopped. Restart
+and explicit re-registration preserve the saved workspace and adopt the new config.
+
+Final provider focused tests, Workbench format/lint/full build/full runtest,
+installed native workflow, five-mode interrupts (`...-xth8tynj`) and original
+synthesis inspector (`...-arle_91_`) passed. Inspection is read-only over the
+previous physical run; no new physical/signoff execution was needed. Embedded
+graphical editing, spatial heatmaps and unsupported source mapping remain F06
+extensions, not inferred capabilities of these tables or the external handoff.
 
 ### Earlier proposed execution followup — deferred in favor of FS1
 
@@ -413,7 +444,7 @@ This is a reusable renderer over actual FS0 tiles, not a selected final aestheti
 | M1 | Headless Demo A delivered; full physical/container cancellation acceptance later |
 | M2 | Tile-host Demo B delivered; bounded UI/coverage/performance gaps above |
 | M3 | Autosaved-session/L2 Demo C delivered; templates and appearance persistence gaps above |
-| M4 | FS1 synthesis/aggregate terminal timing/check/resources/declared clocks delivered with real physical/acceptance/cancellation evidence; rich explorers and FS2 pending |
+| M4 | FS1 adopted-evidence investigation/operation scope delivered, including rich paths, measured clocks, physical/routing tables and binary handoff; FS2 and later F06 extensions pending |
 | M5 | Later adoption scope; no full multi-monitor acceptance claim |
 | V1 | A–E skins/axes/captures delivered; rich gallery and default review pending |
 

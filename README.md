@@ -20,8 +20,10 @@ Workbench can also launch collection/acceptance, observe and cancel its owned
 finalization, and browse bounded report/artifact text with optional terminal-host
 external text opening.
 Real physical completion, external acceptance pass/fail inspection and owned-container
-cancellation are exercised. Rich timing paths, measured CTS/congestion, simulation
-helpers and appearance-gallery polish remain open. See the
+cancellation are exercised. FS1 now also delivers retained timing-path exploration,
+measured clock reports, stage-specific physical/routing/congestion tables and exact
+binary external handoff. These complete the adopted-evidence FS1 scope; embedded
+graphical editing, simulation helpers and appearance-gallery polish remain later work. See the
 [FS1 evidence and limits](docs/fs1_acceptance.md) and [delivery record](docs/construction_phase_plan.md).
 
 ## Documentation
@@ -31,6 +33,7 @@ helpers and appearance-gallery polish remain open. See the
 - [Synthesis inspection](docs/synthesis_inspection.md) — FS1 cell tables, sorting/filtering and evidence drilldown.
 - [FS1 physical inspection](docs/fs1_acceptance.md) — metrics, timing/check/resource views, exact finalization import, real acceptance and limits.
 - [Finalization and reports](docs/fs1_lifecycle_and_artifacts.md) — collect/accept palette commands, reconnect/cancel, paged artifact reading and configured external text viewing.
+- [FS1 investigation completion](docs/fs1_investigation.md) — timing paths, measured clocks, physical/routing evidence, binary handoff, exact installed provider and adoption instructions.
 - [Feature list](docs/feature_list.md) — concise scope/status and focused feature specs.
 - [Feature sets](docs/feature_sets.md) — FS0 initial demos and later themed work groups.
 - [Decision log](docs/decisions.md) — accepted run contexts; remaining command/snapshot policy.

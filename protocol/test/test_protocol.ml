@@ -689,6 +689,9 @@ let%expect_test "ASIC metrics round-trip and old summary sexps have no metrics" 
     ; finalizations = [ finalization ]
     ; artifacts = []
     ; artifact_pages = []
+    ; artifact_byte_pages = []
+    ; inspections = []
+    ; inspection_details = []
     ; cache_error = None
     }
   in
@@ -706,8 +709,15 @@ let%expect_test "ASIC metrics round-trip and old summary sexps have no metrics" 
     | Sexp.List fields ->
       Sexp.List
         (List.filter fields ~f:(function
-          | Sexp.List (Sexp.Atom ("finalizations" | "artifacts" | "artifact_pages") :: _)
-            -> false
+          | Sexp.List
+              (Sexp.Atom
+                 ( "finalizations"
+                 | "artifacts"
+                 | "artifact_pages"
+                 | "artifact_byte_pages"
+                 | "inspections"
+                 | "inspection_details" )
+              :: _) -> false
           | _ -> true))
     | _ -> assert false
   in

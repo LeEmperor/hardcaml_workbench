@@ -15,6 +15,8 @@ module Launch_preferences = Terminal_presentation.Launch_preferences
 module Asic_intents = Terminal_presentation.Asic_intents
 module Artifact_view = Terminal_presentation.Artifact_view
 module Artifact_export = Terminal_presentation.Artifact_export
+module Artifact_binary_export = Terminal_presentation.Artifact_binary_export
+module Inspection_view = Terminal_presentation.Inspection_view
 module Fs0_fixture = Terminal_presentation.Fs0_fixture
 
 let console_limit = 500
@@ -80,6 +82,7 @@ type session =
   ; mutable asic_reads : Asic_intents.t
   ; mutable remembered_acceptance : string
   ; mutable artifact_viewer : string option
+  ; mutable artifact_binary_viewer : string option
   ; mutable artifact_export_busy : bool
   }
 
@@ -245,6 +248,7 @@ let create_session
       ; asic_reads = Asic_intents.empty
       ; remembered_acceptance = ""
       ; artifact_viewer = None
+      ; artifact_binary_viewer = None
       ; artifact_export_busy = false
       }
     in
@@ -558,7 +562,25 @@ let reconcile_synthesis session =
             Option.value_map session.last_dimensions ~default:view ~f:(fun dimensions ->
               Artifact_view.clamp view ~width:dimensions.width ~height:dimensions.height)))
       in
-      session.host <- Host.set_local session.host tile.id { local with artifacts };
+      let inspection =
+        Option.bind local.inspection ~f:(fun view ->
+          Workspace.resolve_tile registry tile.id
+          |> Result.ok
+          |> Option.bind ~f:(fun reference ->
+            Inspection_view.reconcile_scope view ~scope:reference.run)
+          |> Option.map ~f:(fun view ->
+            let view =
+              Option.value_map
+                session.asic
+                ~default:view
+                ~f:(Inspection_view.reconcile view)
+            in
+            Option.value_map session.last_dimensions ~default:view ~f:(fun dimensions ->
+              let width, height = Host_view.inspection_viewport dimensions in
+              Inspection_view.clamp view ~width ~height)))
+      in
+      session.host
+      <- Host.set_local session.host tile.id { local with artifacts; inspection };
       if String.equal tile.kind "synthesis"
       then (
         let local = Host.local session.host tile.id in
@@ -664,7 +686,7 @@ let capture_artifact_request session (tile : Workspace.Tile.t) view operation =
     |> Option.map ~f:(fun ticket -> tile.id, ticket))
 ;;
 
-let asic_request ?artifact_request session operation =
+let asic_request ?artifact_request ?inspection_request session operation =
   match current_project session with
   | None -> return ()
   | Some project ->
@@ -710,6 +732,23 @@ let asic_request ?artifact_request session operation =
           in
           session.host
           <- Host.set_local session.host tile_id { local with artifacts = Some artifacts }));
+    if current
+    then
+      Option.iter inspection_request ~f:(fun (tile_id, ticket) ->
+        reconcile_synthesis session;
+        let local = Host.local session.host tile_id in
+        Option.iter local.inspection ~f:(fun view ->
+          let inspection =
+            Inspection_view.apply_response
+              view
+              ticket
+              (Result.map response ~f:(fun _ -> ()))
+          in
+          session.host
+          <- Host.set_local
+               session.host
+               tile_id
+               { local with inspection = Some inspection }));
     if request_id >= session.asic_applied_id && current
     then (
       match response with
@@ -860,6 +899,118 @@ let export_artifact_text session tile_id ~viewer (reference : Asic_artifact.Refe
             notice
               ("External text export failed: "
                ^ Artifact_view.safe (Error.to_string_hum error))))
+;;
+
+let export_artifact_binary session tile_id ~viewer (reference : Asic_artifact.Reference.t)
+  =
+  let notice = artifact_export_notice session tile_id in
+  if session.artifact_export_busy
+  then (
+    notice "Another artifact export is in progress";
+    return ())
+  else (
+    match current_project session with
+    | None ->
+      notice "Binary export requires an open project";
+      return ()
+    | Some project ->
+      session.artifact_export_busy <- true;
+      let instance_id = session.hello.instance_id in
+      let client = session.client in
+      let owner_current () =
+        V1.Daemon_instance_id.equal instance_id session.hello.instance_id
+        && Option.value_map (current_project session) ~default:false ~f:(fun p ->
+          Project_id.equal p.id project.id)
+      in
+      Monitor.protect
+        ~finally:(fun () ->
+          session.artifact_export_busy <- false;
+          return ())
+        (fun () ->
+          let call operation =
+            let%map result =
+              request session.diagnostics_file (fun () ->
+                Http.Client.asic client { instance_id; project = project.id; operation })
+            in
+            Result.map_error result ~f:Error.of_string
+          in
+          let fetch ~(reference : Asic_artifact.Reference.t) ~offset ~limit ~check =
+            let key =
+              Asic_artifact.byte_read_key
+                ~run:reference.run
+                ~artifact_id:reference.id
+                ~offset
+                ~limit
+            in
+            let rec poll remaining response =
+              check ();
+              if not (owner_current ())
+              then return (Or_error.error_string "Binary export owner changed")
+              else (
+                match response with
+                | Error e -> return (Error e)
+                | Ok (snapshot : Asic.Snapshot.t) ->
+                  if not
+                       (List.exists
+                          snapshot.artifacts
+                          ~f:(Artifact_export.same_reference reference))
+                  then
+                    return
+                      (Or_error.error_string "Binary export reference changed or expired")
+                  else (
+                    match Plain_rpc.progress ~wait:true [ key ] snapshot with
+                    | Failed e -> return (Or_error.error_string e)
+                    | Complete ->
+                      return
+                        (List.find snapshot.artifact_byte_pages ~f:(fun p ->
+                           Run_ref.equal p.run reference.run
+                           && String.equal p.artifact_id reference.id
+                           && String.equal p.terminal_attempt reference.terminal_attempt
+                           && String.equal p.sha256 reference.sha256
+                           && p.offset = offset
+                           && p.limit = limit)
+                         |> Or_error.of_option
+                              ~error:
+                                (Error.of_string
+                                   "Exact binary page expired; retry explicitly"))
+                    | Pending ->
+                      if remaining = 0
+                      then
+                        return
+                          (Or_error.error_string
+                             "Binary page observation budget exhausted")
+                      else (
+                        let%bind () = Clock.after (Time_float.Span.of_ms 100.) in
+                        check ();
+                        let%bind response = call Get in
+                        poll (remaining - 1) response)))
+            in
+            check ();
+            let%bind response =
+              call
+                (Read_artifact_bytes
+                   { run = reference.run; artifact_id = reference.id; offset; limit })
+            in
+            poll 1200 response
+          in
+          notice "Exporting exact binary (≤16 MiB); verifying SHA256 before launch";
+          let%map result =
+            Artifact_binary_export.run
+              ~viewer
+              ~reference
+              ~fetch
+              ~publish:Artifact_binary_export.publish_private
+              ~launch:(fun ~prog ~args ->
+                if owner_current ()
+                then Artifact_export.launch_viewer ~prog ~args
+                else
+                  return
+                    (Or_error.error_string "Binary export owner changed before launch"))
+          in
+          match result with
+          | Ok path ->
+            notice ("Verified binary retained: " ^ path ^ " (metadata.sexp alongside)")
+          | Error e -> notice ("Binary export failed: " ^ Error.to_string_hum e)))
 ;;
 
 let add_default_tiles session (registry : Workspace.Snapshot.t) workspace =
@@ -2118,6 +2269,7 @@ let session_of_baseline_fixture (fixture : Baseline_fixture.t) =
     ; asic_reads = Asic_intents.empty
     ; remembered_acceptance = ""
     ; artifact_viewer = None
+    ; artifact_binary_viewer = None
     ; artifact_export_busy = false
     }
   in
@@ -2290,6 +2442,17 @@ let host_catalog session =
           "catalog report bounded text"
           (Browse_artifacts run.run)
       ]
+      @ List.map Inspection_view.defaults ~f:(fun (domain, stage) ->
+        Host.command
+          ("asic.inspection." ^ domain ^ "." ^ Host_view.run_label run.run)
+          ("Inspect "
+           ^ (if String.equal domain "timing" then "timing paths" else domain)
+           ^ " "
+           ^ Host_view.run_label run.run
+           ^ " · "
+           ^ stage)
+          "typed rows endpoints corner group producer"
+          (Browse_inspection (run.run, domain, stage)))
       @ Option.value_map run.execution_file ~default:[] ~f:(fun execution_file ->
         [ Host.command
             ("asic.finalize." ^ Host_view.run_label run.run)
@@ -2443,6 +2606,7 @@ let execute_host session captured action ~exit =
              ?scope
              ~generation
              ~viewer_configured:(Option.is_some session.artifact_viewer)
+             ~binary_viewer_configured:(Option.is_some session.artifact_binary_viewer)
              run
          in
          let operation = Asic.Operation.List_artifacts run in
@@ -2451,8 +2615,36 @@ let execute_host session captured action ~exit =
          <- Host.set_local
               session.host
               tile.id
-              { local with artifacts = Some view; artifact_generation = generation };
+              { local with
+                artifacts = Some view
+              ; inspection = None
+              ; artifact_generation = generation
+              };
          async (fun () -> asic_request ?artifact_request session operation)
+       | _ -> Effect.Ignore)
+    | Browse_inspection (run, domain, stage) ->
+      (match Host.focused session.host, session.host.registry with
+       | Some tile, Some registry ->
+         let scope =
+           Workspace.resolve_tile registry tile.id
+           |> Result.ok
+           |> Option.bind ~f:(fun r -> r.run)
+         in
+         let local = Host.local session.host tile.id in
+         let generation = local.inspection_generation + 1 in
+         let view = Inspection_view.create ?scope ~generation ~run ~domain ~stage () in
+         session.host
+         <- Host.set_local
+              session.host
+              tile.id
+              { local with
+                inspection = Some view
+              ; inspection_generation = generation
+              ; artifacts = None
+              };
+         let operation = Inspection_view.operation view in
+         let inspection_request = tile.id, Inspection_view.capture view operation in
+         async (fun () -> asic_request ~inspection_request session operation)
        | _ -> Effect.Ignore)
     | Edit_acceptance (run, execution_file) ->
       let key = submission_key "finalize-accept" in
@@ -2770,13 +2962,16 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
      | _ -> None)
 ;;
 
-let host_handler session event ~exit =
-  reconcile_synthesis session;
+let host_handler_overlays session event ~exit =
   let focused =
     Option.bind (Host.focused session.host) ~f:(fun tile ->
       Option.map (Host.local session.host tile.id).artifacts ~f:(fun view -> tile, view))
   in
   let input = Host.decode_event event in
+  let inspection =
+    Option.bind (Host.focused session.host) ~f:(fun tile ->
+      Option.map (Host.local session.host tile.id).inspection ~f:(fun view -> tile, view))
+  in
   let bypass =
     Option.is_some session.host.palette
     || session.host.editing_filter
@@ -2784,11 +2979,117 @@ let host_handler session event ~exit =
     || session.host.prefix > 0
     ||
     match input with
-    | Some (Host.Focus | Character ' ' | Paste_start | Paste_end) -> true
+    | Some (Host.Focus | Paste_start | Paste_end) -> true
+    | Some (Character ' ') ->
+      not (Option.exists inspection ~f:(fun (_, view) -> view.editing))
     | _ -> false
   in
-  match focused with
-  | Some (tile, view)
+  match inspection, focused with
+  | Some (tile, view), _ when not bypass ->
+    let action =
+      if view.editing
+      then (
+        match input with
+        | Some Host.Enter -> Some Inspection_view.Open
+        | Some Escape -> Some Back
+        | Some Backspace -> Some Backspace
+        | Some (Character c) -> Some (Character c)
+        | Some (Text text) -> Some (Text text)
+        | _ -> None)
+      else (
+        match event, input with
+        | _, Some Host.Enter -> Some Inspection_view.Open
+        | _, Some Escape -> Some Back
+        | _, Some (Next | Character 'j') -> Some Down
+        | _, Some (Previous | Character 'k') -> Some Up
+        | _, Some (Character 'n') -> Some Page_down
+        | _, Some (Character 'N') -> Some Page_up
+        | _, Some (Character '/') -> Some Filter
+        | _, Some (Character 's') -> Some Sort
+        | _, Some (Character 'c') -> Some (Cycle Corner)
+        | _, Some (Character 'g') -> Some (Cycle Group)
+        | _, Some (Character 'p') -> Some (Cycle Producer)
+        | _, Some (Character 'v') -> Some Near
+        | _, Some (Character 't') -> Some Stage
+        | _, Some (Character 'r') -> Some Refresh
+        | _, Some (Character 'd') -> Some Info
+        | Key_press { key = Arrow `Right; mods = [] }, _ -> Some Page_down
+        | Key_press { key = Arrow `Left; mods = [] }, _ -> Some Page_up
+        | _ -> None)
+    in
+    let operation =
+      Option.bind action ~f:(fun action ->
+        let width, height =
+          Option.value_map
+            session.last_dimensions
+            ~default:(80, 24)
+            ~f:Host_view.inspection_viewport
+        in
+        let inspection, operation = Inspection_view.input ~width ~height view action in
+        let local = Host.local session.host tile.id in
+        let inspection_generation =
+          Option.value_map inspection ~default:local.inspection_generation ~f:(fun v ->
+            v.generation)
+        in
+        session.host
+        <- Host.set_local
+             session.host
+             tile.id
+             { local with inspection; inspection_generation };
+        Option.bind operation ~f:(fun operation ->
+          Option.map inspection ~f:(fun view ->
+            operation, (tile.id, Inspection_view.capture view operation))))
+    in
+    Some
+      (Option.value_map
+         operation
+         ~default:Bonsai_term.Effect.Ignore
+         ~f:(fun (operation, inspection_request) ->
+           Bonsai_term.Effect.of_deferred_thunk (fun () ->
+             asic_request ~inspection_request session operation)))
+  | _, Some (tile, view)
+    when (not bypass)
+         &&
+         match input with
+         | Some (Character 'b') -> true
+         | _ -> false ->
+    let reference =
+      match view.reading with
+      | Some r -> Some r.artifact
+      | None -> List.nth view.catalog view.selected
+    in
+    let selected =
+      let open Or_error.Let_syntax in
+      let%bind viewer =
+        Or_error.of_option
+          session.artifact_binary_viewer
+          ~error:
+            (Error.of_string
+               "Binary view disabled; configure --artifact-binary-viewer \
+                ABSOLUTE_EXECUTABLE")
+      in
+      let%bind reference =
+        Or_error.of_option
+          reference
+          ~error:(Error.of_string "Select a known physical file")
+      in
+      let%bind () =
+        if List.exists view.catalog ~f:(Artifact_export.same_reference reference)
+        then Ok ()
+        else Or_error.error_string "Artifact reference changed"
+      in
+      let%map () = Artifact_binary_export.eligible reference in
+      viewer, reference
+    in
+    (match selected with
+     | Error e ->
+       artifact_export_notice session tile.id (Error.to_string_hum e);
+       Some Bonsai_term.Effect.Ignore
+     | Ok (viewer, reference) ->
+       Some
+         (Bonsai_term.Effect.of_deferred_thunk (fun () ->
+            export_artifact_binary session tile.id ~viewer reference)))
+  | _, Some (tile, view)
     when (not bypass)
          &&
          match input with
@@ -2802,7 +3103,7 @@ let host_handler session event ~exit =
        Some
          (Bonsai_term.Effect.of_deferred_thunk (fun () ->
             export_artifact_text session tile.id ~viewer reference)))
-  | Some (tile, view) when not bypass ->
+  | _, Some (tile, view) when not bypass ->
     let action =
       match event, input with
       | _, Some Host.Enter -> Some Artifact_view.Open
@@ -2847,6 +3148,19 @@ let host_handler session event ~exit =
            Bonsai_term.Effect.of_deferred_thunk (fun () ->
              asic_request ?artifact_request session operation)))
   | _ -> host_handler_regular session event ~exit
+;;
+
+let host_handler session event ~exit =
+  if Host.is_interrupt event
+  then Some (exit ())
+  else (
+    reconcile_synthesis session;
+    match Host.route_inspection_filter_event session.host event with
+    | Filter_interrupt -> Some (exit ())
+    | Filter_handled host ->
+      session.host <- host;
+      Some Bonsai_term.Effect.Ignore
+    | Filter_pass -> host_handler_overlays session event ~exit)
 ;;
 
 let fs0_fixture scenario =
@@ -3509,6 +3823,7 @@ let run_legacy
   ~wait
   ~diagnostics_file
   ~artifact_viewer
+  ~artifact_binary_viewer
   ()
   =
   let diagnostics_file =
@@ -3565,6 +3880,7 @@ let run_legacy
       | Error message -> return (Or_error.error_string message)
       | Ok session ->
         session.artifact_viewer <- artifact_viewer;
+        session.artifact_binary_viewer <- artifact_binary_viewer;
         reconcile_selection session;
         if plain || not (Core_unix.isatty Core_unix.stdout)
         then (
@@ -3703,6 +4019,7 @@ let run
   ~wait
   ~diagnostics_file
   ~artifact_viewer
+  ~artifact_binary_viewer
   ()
   =
   let fail message =
@@ -3739,6 +4056,7 @@ let run
         ~wait
         ~diagnostics_file
         ~artifact_viewer
+        ~artifact_binary_viewer
         ()
   else if List.count
             [ Option.is_some asic_operation
@@ -3877,6 +4195,15 @@ let command =
          ~doc:
            "ABSOLUTE_EXECUTABLE enable x to export sanitized ASIC text to a private \
             local .txt and open it (no shell; disabled by default)"
+     and artifact_binary_viewer =
+       flag
+         "--artifact-binary-viewer"
+         (optional
+            (Command.Arg_type.create (fun path ->
+               Artifact_binary_export.executable path |> Or_error.ok_exn)))
+         ~doc:
+           "ABSOLUTE_EXECUTABLE enable b to export verified exact .gds/.png/.def/.odb \
+            bytes and open a private local file (no shell; disabled by default)"
      and hierarchy =
        flag
          "--hierarchy"
@@ -3958,7 +4285,8 @@ let command =
          ~refresh_integration
          ~wait
          ~diagnostics_file
-         ~artifact_viewer)
+         ~artifact_viewer
+         ~artifact_binary_viewer)
 ;;
 
 let () = Command_unix.run command

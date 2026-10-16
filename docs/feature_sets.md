@@ -98,7 +98,7 @@ large-detail indexes can follow measured need in later feature-set slices.
 
 ## FS1 — ASIC evidence investigation
 
-**In progress:** first F06 slice is the [cached synthesis inspector](synthesis_inspection.md):
+**Delivered for the adopted evidence interfaces, with explicit limits:** first F06 slice is the [cached synthesis inspector](synthesis_inspection.md):
 cell table sorting/filtering, row detail and evidence drilldown. It consumes FS0
 summaries without invoking tools. Subsequent [FS1 delivery](fs1_acceptance.md) adds
 synthesis area/diagnostic metrics, explicit finalization import, aggregate signed
@@ -107,9 +107,19 @@ configuration and full evidence inspection. Real physical completion, separate
 external acceptance pass/fail import and owned-container cancellation are exercised.
 Workbench-owned collect/accept lifecycle, cancellation/reconnect and bounded text
 report/artifact viewing with explicit terminal-host export are also delivered;
-see [lifecycle evidence](fs1_lifecycle_and_artifacts.md). Rich timing paths,
-measured CTS, stage-specific placement/routing/congestion and binary/graphical
-viewers remain open; this is not completion of all FS1/F06 scope.
+see [lifecycle evidence](fs1_lifecycle_and_artifacts.md). The final
+[investigation slice](fs1_investigation.md) delivers retained setup/hold paths,
+corner/group/producer/stage navigation, measured clock latency/skew and supplied
+relationships, stage-specific placement/routing/congestion tables, and byte-exact
+external GDS handoff verified by headless KLayout loading. Provider-owned parsing,
+bounded L1/L2 indexes and on-demand detail preserve original measurement context.
+
+This completes the useful FS1 investigation/operation scope against this adopted
+provider, not every future F06 capability. Missing generated-clock/source-mapping
+evidence remains unavailable rather than inferred; embedded graphical editors,
+spatial heatmaps, arbitrary-tool adoption and exhaustive lifecycle-race coverage
+remain later extensions. No new physical execution or signoff verdict was produced
+by the final read-only inspection acceptance.
 
 Timing summaries/path detail, checks, clocks and physical/resource slices with
 original evidence and context. Full physical operation/cancellation acceptance

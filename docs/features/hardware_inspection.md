@@ -21,8 +21,12 @@ acceptance pass/fail imports, cache reopening and active-container cancellation
 are verified in [FS1 acceptance](../fs1_acceptance.md). The followup
 [finalization lifecycle and artifact browser](../fs1_lifecycle_and_artifacts.md)
 adds daemon-owned collection/acceptance, bounded report paging and explicit
-external text opening on the terminal host. Rich paths, measured CTS,
-stage-specific placement/routing/congestion and binary/graphical viewers remain open.
+external text opening on the terminal host. The final
+[FS1 investigation slice](../fs1_investigation.md) adds path/corner/group/producer
+exploration, measured clock latency/network/check skew, supplied clock headers and
+relationships, stage-specific physical/routing/congestion tables, and exact binary
+external handoff. Real GDS loading by KLayout is verified headlessly. Embedded
+graphical/editor surfaces and unsupported source mappings remain later extensions.
 
 ## Feature slices
 

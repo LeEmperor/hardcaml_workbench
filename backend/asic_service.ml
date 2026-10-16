@@ -1,6 +1,8 @@
 open! Core
 open! Async
+module Inspection = Asic_inspection
 open Hardcaml_workbench_protocol
+module Inspection_wire = Hardcaml_workbench_protocol.Asic_inspection
 module Config = Hardcaml_workbench_project_integration.Asic_config
 module Adapter = Hardcaml_workbench_adapters.Asic_adapter
 module Public = Asic_public
@@ -141,6 +143,10 @@ type project =
   ; mutable finalizations : Finalization_stored.t list
   ; mutable artifacts : Asic_artifact.Reference.t list
   ; mutable artifact_pages : Asic_artifact.Page.t list
+  ; mutable artifact_byte_pages : Asic_artifact.Byte_page.t list
+  ; mutable inspections : Inspection_wire.Index.t list
+  ; mutable inspection_details : Inspection_wire.Detail.t list
+  ; inspection_refreshes : bool ref String.Table.t
   ; hot : Asic.Summary.t String.Table.t
   ; mutable recency : string list
   ; tasks : task String.Table.t
@@ -318,6 +324,10 @@ let load_project t ~root ~environment =
     ; finalizations = []
     ; artifacts = []
     ; artifact_pages = []
+    ; artifact_byte_pages = []
+    ; inspections = []
+    ; inspection_details = []
+    ; inspection_refreshes = String.Table.create ()
     ; hot = String.Table.create ()
     ; recency = []
     ; tasks = String.Table.create ()
@@ -417,9 +427,10 @@ let load_project t ~root ~environment =
 let config p = Option.value_exn p.config ~message:"Project has no ASIC configuration"
 let invoke p f = f (config p) ~root:p.root ~environment:p.environment
 
-let query t _p cancel invocation =
+let query ?(max_bytes = 16 * 1024 * 1024) ?(before = fun () -> ()) t _p cancel invocation =
   Throttle.enqueue t.queries (fun () ->
     Public.require (not (Deferred.is_determined cancel)) "ASIC query cancelled";
+    before ();
     let%map output =
       Asic_process.run
         ~seconds:30.
@@ -428,6 +439,9 @@ let query t _p cancel invocation =
         ~on_line:(fun _ -> Deferred.unit)
         invocation
     in
+    Public.require
+      (String.length output <= max_bytes)
+      "ASIC query response exceeds budget";
     Public.decode output)
 ;;
 
@@ -507,7 +521,10 @@ let hot p (summary : Asic.Summary.t) =
          not (Run_ref.equal r.Asic_artifact.Reference.run summary.run));
     p.artifact_pages
     <- List.filter p.artifact_pages ~f:(fun page ->
-         not (Run_ref.equal page.Asic_artifact.Page.run summary.run)));
+         not (Run_ref.equal page.Asic_artifact.Page.run summary.run));
+    p.artifact_byte_pages
+    <- List.filter p.artifact_byte_pages ~f:(fun page ->
+         not (Run_ref.equal page.Asic_artifact.Byte_page.run summary.run)));
   Hashtbl.set p.hot ~key:id ~data:summary;
   p.recency <- id :: List.filter p.recency ~f:(fun key -> not (String.equal id key));
   let retained = List.take p.recency 32
@@ -521,7 +538,24 @@ let hot p (summary : Asic.Summary.t) =
        List.exists p.artifacts ~f:(fun r ->
          Run_ref.equal r.run page.Asic_artifact.Page.run
          && String.equal r.id page.artifact_id));
+  p.artifact_byte_pages
+  <- List.filter p.artifact_byte_pages ~f:(fun page ->
+       List.exists p.artifacts ~f:(fun r ->
+         Run_ref.equal r.run page.Asic_artifact.Byte_page.run
+         && String.equal r.id page.artifact_id
+         && String.equal r.terminal_attempt page.terminal_attempt
+         && String.equal r.sha256 page.sha256));
   p.recency <- retained
+;;
+
+let prune_byte_pages p =
+  p.artifact_byte_pages
+  <- List.filter p.artifact_byte_pages ~f:(fun page ->
+       List.exists p.artifacts ~f:(fun r ->
+         Run_ref.equal r.Asic_artifact.Reference.run page.Asic_artifact.Byte_page.run
+         && String.equal r.id page.artifact_id
+         && String.equal r.terminal_attempt page.terminal_attempt
+         && String.equal r.sha256 page.sha256))
 ;;
 
 let expected_plan p (run : Run_ref.t) =
@@ -611,6 +645,26 @@ let observe_unlocked t p cancel (run : Run_ref.t) =
   if current.cursor <= next.cursor
   then (
     replace_run p next;
+    if not (Option.equal String.equal current.execution_file next.execution_file)
+    then
+      p.inspections
+      <- List.filter p.inspections ~f:(fun index ->
+           not (Run_ref.equal index.Inspection_wire.Index.run run))
+    else if current.cursor < next.cursor
+    then
+      (* A public execution path can be reused by a newer source generation. Retain
+         offline index evidence, but do not present it or its old details as current. *)
+      p.inspections
+      <- List.map p.inspections ~f:(fun index ->
+           if Run_ref.equal index.Inspection_wire.Index.run run
+           then { index with cached_unverified = true }
+           else index);
+    if current.cursor < next.cursor
+       || not (Option.equal String.equal current.execution_file next.execution_file)
+    then
+      p.inspection_details
+      <- List.filter p.inspection_details ~f:(fun detail ->
+           not (Run_ref.equal detail.Inspection_wire.Detail.run run));
     if current.cursor < next.cursor
        || not (Option.equal String.equal current.execution_file next.execution_file)
     then
@@ -855,6 +909,9 @@ let snapshot p : Asic.Snapshot.t =
   ; finalizations = List.map p.finalizations ~f:(fun f -> f.value)
   ; artifacts = p.artifacts
   ; artifact_pages = p.artifact_pages
+  ; artifact_byte_pages = p.artifact_byte_pages
+  ; inspections = p.inspections
+  ; inspection_details = p.inspection_details
   ; cache_error = p.cache_error
   }
 ;;
@@ -1467,6 +1524,210 @@ let reserve_finalization t p ~key ~run ~execution_file ~acceptance =
          raise exn))
 ;;
 
+let inspection_matches (index : Inspection_wire.Index.t) ~run ~domain ~stage =
+  Run_ref.equal index.run run
+  && String.equal index.domain domain
+  && String.equal index.stage stage
+;;
+
+let publish_inspection p (index : Inspection_wire.Index.t) =
+  p.inspections
+  <- List.take
+       (index
+        :: List.filter p.inspections ~f:(fun old ->
+          not
+            (inspection_matches
+               old
+               ~run:index.run
+               ~domain:index.domain
+               ~stage:index.stage)))
+       8;
+  p.inspection_details
+  <- List.filter p.inspection_details ~f:(fun detail ->
+       List.exists p.inspections ~f:(fun current ->
+         inspection_matches
+           current
+           ~run:detail.Inspection_wire.Detail.run
+           ~domain:detail.domain
+           ~stage:detail.stage
+         && String.equal current.source_digest detail.source_digest))
+;;
+
+let check_inspection_current p cancel (registered : Asic.Run.t) =
+  Public.require (not (Deferred.is_determined cancel)) "Inspection read cancelled";
+  let current = find_run p registered.run in
+  (* [registered] is the immutable pre-read snapshot. Path equality alone cannot fence an
+     observation that advances the generation at the same public execution path. *)
+  Public.require
+    (Asic.Reference.equal current.reference registered.reference
+     && current.cursor = registered.cursor
+     && Option.equal String.equal current.execution_file registered.execution_file)
+    "Registered execution changed during inspection; request again"
+;;
+
+let inspection_hash t p cancel registered execution_file =
+  Throttle.enqueue t.queries (fun () ->
+    check_inspection_current p cancel registered;
+    In_thread.run (fun () -> Inspection.execution_hash ~registered ~execution_file))
+;;
+
+let load_inspection t p cancel ~run ~domain ~stage ~refresh =
+  serialized p "inspection-publication" (fun () ->
+    let registered = find_run p run in
+    let execution_file =
+      Option.value_exn
+        registered.execution_file
+        ~message:"No registered execution_file; Observe first"
+    in
+    let fetch () =
+      p.inspections
+      <- List.map p.inspections ~f:(fun index ->
+           if inspection_matches index ~run ~domain ~stage
+           then { index with cached_unverified = true }
+           else index);
+      let%bind () = check_provider t p cancel in
+      let%bind execution_sha256 = inspection_hash t p cancel registered execution_file in
+      let%bind response =
+        query
+          ~max_bytes:Inspection.index_limit
+          ~before:(fun () -> check_inspection_current p cancel registered)
+          t
+          p
+          cancel
+          (invoke p (fun c ~root ~environment ->
+             Adapter.inspection
+               c
+               ~root
+               ~environment
+               ~execution_file
+               ~domain
+               ~stage
+               ~detail:None))
+      in
+      let index =
+        Inspection.parse_index
+          ~registered
+          ~execution_file
+          ~execution_sha256
+          ~domain
+          ~stage
+          response
+      in
+      let%bind after = inspection_hash t p cancel registered execution_file in
+      Public.require
+        (String.equal after execution_sha256)
+        "Execution bytes changed during inspection";
+      let%map () =
+        Throttle.enqueue t.queries (fun () ->
+          check_inspection_current p cancel registered;
+          In_thread.run (fun () ->
+            Inspection.save
+              ~rebuild_invalid:true
+              ~state_dir:t.state_dir
+              ~identity:p.identity
+              index))
+      in
+      index
+    in
+    let started_refresh = !refresh in
+    let cached () =
+      match
+        List.find p.inspections ~f:(fun index ->
+          inspection_matches index ~run ~domain ~stage)
+      with
+      | Some index ->
+        Public.require
+          (String.equal index.execution_file execution_file)
+          "Stale inspection execution";
+        return index
+      | None ->
+        Throttle.enqueue t.queries (fun () ->
+          check_inspection_current p cancel registered;
+          In_thread.run (fun () ->
+            Inspection.load
+              ~state_dir:t.state_dir
+              ~identity:p.identity
+              ~run
+              ~execution_file
+              ~domain
+              ~stage))
+    in
+    let%bind initial =
+      Monitor.try_with (fun () -> if started_refresh then fetch () else cached ())
+    in
+    (* Inspect is an explicit user read. Warm ordinary loads stay offline, while a
+       missing/invalid cache falls back to the same bounded read-only query as Refresh.
+       Rendering/Get never enters this path. A refresh also upgrades an in-flight cache
+       lookup under the same wait key without issuing a duplicate fetch. *)
+    let%bind index =
+      if !refresh && not started_refresh
+      then fetch ()
+      else (
+        match initial with
+        | Ok index -> return index
+        | Error _ when not started_refresh -> fetch ()
+        | Error exn -> raise exn)
+    in
+    check_inspection_current p cancel registered;
+    publish_inspection p index;
+    Deferred.unit)
+;;
+
+let load_inspection_detail t p cancel ~run ~domain ~stage ~source_digest ~row_id =
+  serialized p "inspection-publication" (fun () ->
+    let registered = find_run p run in
+    let index =
+      List.find p.inspections ~f:(fun index ->
+        inspection_matches index ~run ~domain ~stage)
+      |> Option.value_exn ~message:"Load inspection index before requesting detail"
+    in
+    Public.require
+      (String.equal index.source_digest source_digest
+       && List.exists index.rows ~f:(fun row -> String.equal row.id row_id))
+      "Stale inspection digest or unknown row";
+    let%bind () = check_provider t p cancel in
+    let%bind hash = inspection_hash t p cancel registered index.execution_file in
+    Public.require
+      (String.equal hash index.execution_sha256)
+      "Inspection execution bytes changed";
+    let%bind response =
+      query
+        ~max_bytes:(512 * 1024)
+        ~before:(fun () -> check_inspection_current p cancel registered)
+        t
+        p
+        cancel
+        (invoke p (fun c ~root ~environment ->
+           Adapter.inspection
+             c
+             ~root
+             ~environment
+             ~execution_file:index.execution_file
+             ~domain
+             ~stage
+             ~detail:(Some (row_id, source_digest))))
+    in
+    let detail = Inspection.parse_detail ~registered ~index ~row_id response in
+    let%map after = inspection_hash t p cancel registered index.execution_file in
+    Public.require (String.equal after hash) "Execution bytes changed during detail read";
+    check_inspection_current p cancel registered;
+    p.inspection_details
+    <- List.take
+         (detail
+          :: List.filter p.inspection_details ~f:(fun old ->
+            not
+              (String.equal
+                 (Inspection_wire.detail_key
+                    ~run:old.run
+                    ~domain:old.domain
+                    ~stage:old.stage
+                    ~source_digest:old.source_digest
+                    ~row_id:old.row_id)
+                 (Inspection_wire.detail_key ~run ~domain ~stage ~source_digest ~row_id)))
+         )
+         8)
+;;
+
 let handle_operation t p operation =
   let enqueue ~key ~kind f =
     schedule t p ~key ~kind ~execution:false (fun task -> f (Ivar.read task.cancel))
@@ -1479,6 +1740,83 @@ let handle_operation t p operation =
   in
   match operation with
   | Asic.Operation.Get -> Deferred.unit
+  | Inspect { run; domain; stage; refresh } ->
+    ignore (find_run p run : Asic.Run.t);
+    Inspection.validate_selection ~domain ~stage;
+    let key = Inspection_wire.index_key ~run ~domain ~stage in
+    (match Hashtbl.find p.inspection_refreshes key with
+     | Some requested -> if refresh then requested := true
+     | None ->
+       let requested = ref refresh in
+       Hashtbl.set p.inspection_refreshes ~key ~data:requested;
+       (try
+          schedule t p ~key ~kind:"inspection" ~execution:false (fun task ->
+            task.pending <- { task.pending with run = Some run };
+            Monitor.protect
+              ~finally:(fun () ->
+                Hashtbl.remove p.inspection_refreshes key;
+                Deferred.unit)
+              (fun () ->
+                load_inspection
+                  t
+                  p
+                  (Ivar.read task.cancel)
+                  ~run
+                  ~domain
+                  ~stage
+                  ~refresh:requested))
+        with
+        | exn ->
+          Hashtbl.remove p.inspection_refreshes key;
+          raise exn));
+    Deferred.unit
+  | Inspect_detail { run; domain; stage; source_digest; row_id } ->
+    ignore (find_run p run : Asic.Run.t);
+    Inspection.validate_selection ~domain ~stage;
+    Inspection.validate_digest source_digest;
+    Inspection.validate_row_id row_id;
+    schedule
+      t
+      p
+      ~key:(Inspection_wire.detail_key ~run ~domain ~stage ~source_digest ~row_id)
+      ~kind:"inspection-detail"
+      ~execution:false
+      (fun task ->
+         task.pending <- { task.pending with run = Some run };
+         let cancel = Ivar.read task.cancel in
+         let%bind result =
+           Monitor.try_with (fun () ->
+             load_inspection_detail t p cancel ~run ~domain ~stage ~source_digest ~row_id)
+         in
+         match result with
+         | Ok () -> Deferred.unit
+         | Error exn ->
+           let detail : Inspection_wire.Detail.t =
+             { run
+             ; domain
+             ; stage
+             ; source_digest
+             ; row_id
+             ; text = ""
+             ; error = Some (Exn.to_string exn)
+             }
+           in
+           let key d =
+             Inspection_wire.detail_key
+               ~run:d.Inspection_wire.Detail.run
+               ~domain:d.domain
+               ~stage:d.stage
+               ~source_digest:d.source_digest
+               ~row_id:d.row_id
+           in
+           p.inspection_details
+           <- List.take
+                (detail
+                 :: List.filter p.inspection_details ~f:(fun old ->
+                   not (String.equal (key old) (key detail))))
+                8;
+           raise exn);
+    Deferred.unit
   | Finalize { key; run; execution_file; acceptance } ->
     reserve_finalization t p ~key ~run ~execution_file ~acceptance
   | Observe_finalization key ->
@@ -1528,7 +1866,69 @@ let handle_operation t p operation =
       p.artifacts <- List.filter p.artifacts ~f:(fun r -> Hashtbl.mem p.hot r.run.id);
       p.artifact_pages
       <- List.filter p.artifact_pages ~f:(fun page ->
-           not (Run_ref.equal page.Asic_artifact.Page.run run)));
+           not (Run_ref.equal page.Asic_artifact.Page.run run));
+      p.artifact_byte_pages
+      <- List.filter p.artifact_byte_pages ~f:(fun page ->
+           not (Run_ref.equal page.Asic_artifact.Byte_page.run run));
+      prune_byte_pages p);
+    Deferred.unit
+  | Read_artifact_bytes { run; artifact_id; offset; limit } ->
+    ignore (find_run p run : Asic.Run.t);
+    Public.require (String.length artifact_id <= 256) "Artifact ID exceeds budget";
+    Public.require
+      (offset >= 0 && limit > 0 && limit <= 64 * 1024)
+      "Artifact byte page requires nonnegative offset and limit 1..65536";
+    enqueue
+      ~key:(Asic_artifact.byte_read_key ~run ~artifact_id ~offset ~limit)
+      ~kind:"artifact-byte-read"
+      (fun cancel ->
+         Public.require
+           (not (Deferred.is_determined cancel))
+           "Artifact byte read cancelled";
+         let summary = Hashtbl.find_exn p.hot run.id in
+         Public.require (Run_ref.equal summary.run run) "Wrong artifact summary run";
+         let terminal = Option.value_exn summary.terminal in
+         let reference =
+           List.find_exn p.artifacts ~f:(fun reference ->
+             Run_ref.equal reference.Asic_artifact.Reference.run run
+             && String.equal reference.id artifact_id
+             && String.equal reference.terminal_attempt terminal.attempt)
+         in
+         let%map page =
+           Throttle.enqueue t.queries (fun () ->
+             Public.require
+               (not (Deferred.is_determined cancel))
+               "Artifact byte read cancelled";
+             In_thread.run (fun () -> Asic_artifacts.read_bytes ~reference ~offset ~limit))
+         in
+         Public.require
+           (not (Deferred.is_determined cancel))
+           "Artifact byte read cancelled";
+         let current = Hashtbl.find_exn p.hot run.id in
+         Public.require
+           (Run_ref.equal current.run run
+            && String.equal current.source_digest summary.source_digest
+            && Option.value_map current.terminal ~default:false ~f:(fun terminal ->
+              String.equal terminal.attempt reference.terminal_attempt)
+            && List.mem p.artifacts reference ~equal:Asic_artifact.Reference.equal
+            && Run_ref.equal page.Asic_artifact.Byte_page.run run
+            && String.equal page.artifact_id artifact_id
+            && String.equal page.terminal_attempt reference.terminal_attempt
+            && String.equal page.sha256 reference.sha256
+            && page.offset = offset
+            && page.limit = limit)
+           "Artifact byte reference is stale; list current adopted artifacts";
+         prune_byte_pages p;
+         p.artifact_byte_pages
+         <- List.take
+              (page
+               :: List.filter p.artifact_byte_pages ~f:(fun old ->
+                 not
+                   (Run_ref.equal old.run run
+                    && String.equal old.artifact_id artifact_id
+                    && old.offset = offset
+                    && old.limit = limit)))
+              8);
     Deferred.unit
   | Read_artifact { run; artifact_id; offset; limit } ->
     ignore (find_run p run : Asic.Run.t);

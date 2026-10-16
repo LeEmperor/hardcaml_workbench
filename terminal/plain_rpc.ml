@@ -40,6 +40,12 @@ let keys (operation : Asic.Operation.t) (snapshot : Asic.Snapshot.t) =
   | List_artifacts run -> [ "artifacts:" ^ run.id ]
   | Read_artifact { run; artifact_id; offset; limit } ->
     [ Asic_artifact.read_key ~run ~artifact_id ~offset ~limit ]
+  | Read_artifact_bytes { run; artifact_id; offset; limit } ->
+    [ Asic_artifact.byte_read_key ~run ~artifact_id ~offset ~limit ]
+  | Inspect { run; domain; stage; refresh = _ } ->
+    [ Asic_inspection.index_key ~run ~domain ~stage ]
+  | Inspect_detail { run; domain; stage; source_digest; row_id } ->
+    [ Asic_inspection.detail_key ~run ~domain ~stage ~source_digest ~row_id ]
   | Cancel key ->
     [ (if List.exists snapshot.operations ~f:(fun op -> String.equal op.key key)
        then key
@@ -81,6 +87,48 @@ let%test_unit "artifact waits distinguish offset and byte budget with the shared
       (Asic_artifact.read_key ~run ~artifact_id:"exact-report" ~offset:0 ~limit:4096));
   assert (not (String.equal (key 0 4096) (key 0 65536)));
   assert (not (String.equal (key 0 4096) (key 4096 4096)))
+;;
+
+let%test_unit "FS1 waits use shared index detail and binary page identities" =
+  let run = Fs0_fixture.run_a in
+  let keys_for op = keys op Fs0_fixture.snapshot in
+  let index refresh =
+    keys_for (Inspect { run; domain = "timing"; stage = "signoff"; refresh })
+  in
+  assert (
+    List.equal
+      String.equal
+      (index false)
+      [ Asic_inspection.index_key ~run ~domain:"timing" ~stage:"signoff" ]);
+  assert (List.equal String.equal (index false) (index true));
+  let detail digest row_id =
+    keys_for
+      (Inspect_detail
+         { run; domain = "timing"; stage = "signoff"; source_digest = digest; row_id })
+  in
+  assert (
+    List.equal
+      String.equal
+      (detail "digest" "row")
+      [ Asic_inspection.detail_key
+          ~run
+          ~domain:"timing"
+          ~stage:"signoff"
+          ~source_digest:"digest"
+          ~row_id:"row"
+      ]);
+  assert (not (List.equal String.equal (detail "digest" "row") (detail "changed" "row")));
+  assert (not (List.equal String.equal (detail "digest" "row") (detail "digest" "other")));
+  let bytes offset limit =
+    keys_for (Read_artifact_bytes { run; artifact_id = "gds"; offset; limit })
+  in
+  assert (
+    List.equal
+      String.equal
+      (bytes 0 65536)
+      [ Asic_artifact.byte_read_key ~run ~artifact_id:"gds" ~offset:0 ~limit:65536 ]);
+  assert (not (List.equal String.equal (bytes 0 65536) (bytes 65536 65536)));
+  assert (not (List.equal String.equal (bytes 0 65536) (bytes 0 4096)))
 ;;
 
 type progress =
@@ -245,6 +293,9 @@ let%test_unit "Observe waits for its read, independently of a long execution" =
     ; finalizations = []
     ; artifacts = []
     ; artifact_pages = []
+    ; artifact_byte_pages = []
+    ; inspections = []
+    ; inspection_details = []
     }
   in
   let watched = keys (Observe run) snapshot in
@@ -323,6 +374,9 @@ let%test_unit "Observe does not await the lifetime of a coalesced automatic obse
     ; finalizations = []
     ; artifacts = []
     ; artifact_pages = []
+    ; artifact_byte_pages = []
+    ; inspections = []
+    ; inspection_details = []
     }
   in
   assert (List.is_empty (keys (Observe run) snapshot));
@@ -355,6 +409,9 @@ let%test_unit "a targeted operation failure fails without treating historical fa
     ; finalizations = []
     ; artifacts = []
     ; artifact_pages = []
+    ; artifact_byte_pages = []
+    ; inspections = []
+    ; inspection_details = []
     }
   in
   assert (

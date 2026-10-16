@@ -8,6 +8,8 @@
   terminal_result_view
   artifact_view
   artifact_export
+  artifact_binary_export
+  inspection_view
   presentation
   state
   workspace_host
