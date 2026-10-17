@@ -34,6 +34,50 @@ def pane_body(screen, title):
     return [line[left + 1:right].strip() for line in lines[top + 1:bottom]]
 
 
+def pane_rect(screen, title):
+    """Locate actual outer frame cells; adjacent frames must not share cells."""
+    lines = screen.lines()
+    for y, line in enumerate(lines):
+        start = 0
+        while (left := line.find('╭', start)) >= 0:
+            right = line.index('╮', left)
+            header = line[left + 1:right].strip()
+            if header.casefold().startswith(title.casefold()):
+                bottom = next(i for i in range(y + 1, len(lines)) if lines[i][left:left + 1] == '╰')
+                return left, y, right + 1, bottom + 1
+            start = right + 1
+    raise AssertionError('Missing framed pane: ' + title)
+
+
+def sidebar_geometry(screen, check):
+    rects = {title: pane_rect(screen, title) for title in (
+        'session', 'runs', 'stage checklist', 'synthesis', 'timing',
+        'placement', 'routing', 'checks', 'finalization', 'planned-run')}
+    session, runs, stages, plan = (rects[k] for k in ('session', 'runs', 'stage checklist', 'planned-run'))
+    check(abs((session[2] - session[0]) - screen.width / 3) <= 1,
+          'Overview sidebar occupies one third of actual terminal cells')
+    check(session[0] == runs[0] == stages[0] == plan[0] and session[2] == runs[2] == stages[2] == plan[2]
+          and session[3] == runs[1] and runs[3] == stages[1] and stages[3] == plan[1],
+          'Session, run list, vertical checklist and planned run are tightly stacked')
+    check(abs((stages[3] - stages[1]) - (plan[3] - plan[1])) <= 1,
+          'Checklist and planned run divide remaining sidebar approximately in half')
+    previous = session[1]
+    for title in ('synthesis', 'timing', 'placement', 'routing', 'checks', 'finalization'):
+        left, top, right, bottom = rects[title]
+        check(left == session[2] and right == screen.width and top == previous,
+              'Full-width right stack order and zero gutter: ' + title)
+        previous = bottom
+    check(previous == plan[3], 'Six right domains and left sidebar finish at the same row')
+    values = list(rects.values())
+    check(all(a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1]
+              for i, a in enumerate(values) for b in values[i + 1:]),
+          'Actual frame rectangles never overlap, including zero-gutter neighbors')
+    for title in rects:
+        left, top, right, _ = rects[title]
+        check(screen.lines()[top][left + 1:right - 1].strip().startswith(title),
+              'Lowercase unadorned tile title: ' + title)
+
+
 def acceptance(t, check, http, runs, presets):
     def snapshot(): return http.rpc(domain='workspace')
     def mutate(op): return http.mutate(snapshot(), op)
@@ -53,22 +97,27 @@ def acceptance(t, check, http, runs, presets):
     overview_screen = t.capture('refinement-overview-120x40', [
         'Session', 'Runs', 'Stage checklist', 'Synthesis', 'timing',
         'placement', 'routing', 'checks', 'finalization', 'Reported cells (agg.): 128',
-        'Aggregate Setup slack: 0.42 ns', 'Check drc: pass'])
+        'Aggregate Setup slack: 0.42 ns', 'Check drc: pass', 'planned-run'])
+    sidebar_geometry(overview_screen, check)
     lines = overview_screen.lines()
     nav_y = next(y for y, line in enumerate(lines) if '[1 Overview]' in line)
-    session_y = next(y for y, line in enumerate(lines) if 'SESSION' in line)
-    check(session_y == nav_y + 2 and not lines[nav_y + 1].strip(), 'One-row workspace tabs followed by exactly one normal gutter')
+    session_y = pane_rect(overview_screen, 'session')[1]
+    check(session_y == nav_y + 1, 'One-row workspace tabs directly precede dense panels')
     check('╭' in lines[session_y] and '╮' in lines[session_y], 'Short Session and selector retain rounded title frames')
-    selector_y = next(y for y, line in enumerate(lines) if 'RUNS ' in line)
-    check(selector_y == session_y, 'Session and wide shallow selector share the upper band')
+    selector_y = pane_rect(overview_screen, 'runs')[1]
+    check(selector_y > session_y, 'Run list is vertical beneath Session')
+    # A narrow sidebar clips presentation, so zoom to verify full opaque labels.
+    t.command('Zoom focused tile')
+    full_runs = t.capture('sidebar-run-identity-zoom', ['synthetic-long-distinguishable-run-reference-3-suffix'])
     for number in (3, 4):
         label = f'synthetic-long-distinguishable-run-reference-{number}-suffix'
-        check(label in overview_screen.text(), 'Run selector uses available width for full distinguishable label: ' + label)
+        check(label in full_runs.text(), 'Zoom preserves the complete distinguishable run label: ' + label)
+    t.command('Unzoom workspace')
     stage_names = ['Synthesis', 'Floorplan', 'Placement', 'CTS', 'Routing', 'Signoff']
-    strip = [line for line in lines if ': completed' in line and any(name in line for name in stage_names)]
-    check(all(any(name + ': completed' in line for line in strip) for name in stage_names), 'Horizontal progression exposes all six explicit stage outcomes')
-    check(any(sum(name + ': completed' in line for name in stage_names) > 1 for line in strip), 'Multiple stages share horizontal rows')
-    check('Selected:' in overview_screen.text(), 'Horizontal strip retains a separate selected-stage line')
+    strip = [line for line in pane_body(overview_screen, 'stage checklist')
+             if ': completed' in line and any(name in line for name in stage_names)]
+    check(all(any(name + ': completed' in line for line in strip) for name in stage_names), 'Vertical checklist exposes all six explicit stage outcomes')
+    check(all(sum(name + ': completed' in line for name in stage_names) == 1 for line in strip), 'One explicit stage per checklist row')
     check('Acceptance (agg.): not_evaluated' in overview_screen.text(), 'Compact finalization preserves explicit not-evaluated acceptance despite completed physical flow')
 
     # Assert palette chrome against actual ANSI cell attributes and bounded geometry.
@@ -94,21 +143,21 @@ def acceptance(t, check, http, runs, presets):
     t.capture('selector-five-row-cap', ['5/6'])
     t.command('Run selector: More visible rows (+1)')
     expanded = t.capture('selector-height-after', ['6/6'])
-    bottom = lambda s: next(y for y, line in enumerate(s.lines()) if y > session_y and line.count('╰') >= 1 and line.rfind('╰') > 20)
+    bottom = lambda s: pane_rect(s, 'runs')[3] - 1
     check(bottom(expanded) > bottom(before_expand), 'Increasing row cap grows the actual selector outer viewport')
-    check(sum('asic/' in line for line in expanded.lines()[selector_y + 1:bottom(expanded)]) == 6, 'Expanded selector renders six distinct real runs')
+    check(len([line for line in pane_body(expanded, 'runs') if 'asic/' in line]) == 6, 'Expanded selector renders six distinct real runs')
     t.command('Reset presentation overrides (inherit)')
     t.capture('selector-height-reset', ['4/6'])
     t.key(b'/'); t.key(b'synthetic-long-distinguishable'); t.key(b'\r')
     two = t.capture('selector-two-matching-runs', ['Runs 2/2 (cap 4)'])
-    check(sum('asic/synthetic-long-distinguishable' in line for line in two.lines()[selector_y + 1:bottom(two)]) == 2, 'Selector reports actual two matching runs, not requested four-row capacity')
+    check(sum('asic/' in line for line in pane_body(two, 'runs')) == 2, 'Selector reports actual two matching runs, not requested four-row capacity (full labels verified in zoom)')
     t.key(b'\x15'); t.capture('selector-filter-reset', ['Runs 4/6 (cap 4)'])
 
     # Focus the exact checklist through public zoom semantics, then browse without
     # executing its advertised action. Identity is independently checked over HTTP.
     checklist = next(tile for tile in field(snapshot(), 'tiles') if field(tile, 'workspace') == overview_id and field(tile, 'kind') == 'stage-checklist')
     mutate('(Set_zoom (workspace %s) (tile (%s)))' % (sexp(overview_id), sexp(field(checklist, 'id'))))
-    t.capture('stage-focused', ['Stage checklist', 'Selected:'], ['Session'])
+    t.capture('stage-focused', ['Stage checklist', 'Synthesis: completed'], ['Session'])
     t.key(b'j'); t.key(b'j'); t.key(b'\r')
     t.capture('stage-placement-exact-detail', ['Stage ID: placement', 'endpoint placement', 'Requested: true'])
     t.key(b'\x1b')
@@ -167,15 +216,17 @@ def acceptance(t, check, http, runs, presets):
     check(all(body[i].startswith(prefix) for i, prefix in enumerate(('Path:', 'Slack:', 'Corner:', 'Endpoints:'))), '120x40 Detail uses exactly four compact path/slack/axis/endpoint summary rows')
     check(body[4:4 + len(expected.splitlines())] == expected.splitlines(), '120x40 Detail exposes the complete exact provider text from line five within the actual visible panel height')
     lines = polished.lines()
-    path_y = next(y for y, line in enumerate(lines) if 'TIMING · PATHS' in line)
-    detail_y = next(y for y, line in enumerate(lines) if 'TIMING · SELECTED PATH' in line)
-    context_y = next(y for y, line in enumerate(lines) if 'TIMING · PROVENANCE' in line)
-    check(path_y == detail_y and context_y > detail_y and 'STAGE CHECKLIST' not in polished.text(), 'Fresh Timing preset has Paths left and Detail-over-Context right, without a vertical checklist')
+    path_y = pane_rect(polished, 'timing · paths')[1]
+    detail_y = pane_rect(polished, 'timing · selected path')[1]
+    context_y = pane_rect(polished, 'timing · provenance')[1]
+    check(path_y == detail_y and context_y > detail_y and 'stage checklist' not in polished.text().casefold(), 'Fresh Timing preset has Paths left and Detail-over-Context right, without a vertical checklist')
 
     # Pane focus/scroll is independent of selected path and shared filter state.
     # At the polished large size this short provider payload fits without scrolling;
     # use a bounded shorter viewport to exercise real scroll rather than a no-op.
-    t.resize(120, 32)
+    # Zero gutters leave more Detail rows than the former 32-row viewport.
+    # This still fits Timing's full topology while making the payload scroll.
+    t.resize(120, 28)
     t.key(b'\t'); t.key(b'j')
     scrolled = t.capture('timing-detail-pane-scrolled', ['1 paths', 'Filter: clk:reg0 -> reg7', 'Slack: 0.42 ns'])
     check(not pane_body(scrolled, 'Timing · Selected path')[0].startswith('Path:'), 'Independent Detail scroll moves its compact prefix while Paths selection/filter remain visible')
@@ -253,6 +304,8 @@ def acceptance(t, check, http, runs, presets):
         t.key(b'\x1b')
         t.capture('fs1-' + domain + '-restored', ['Timing · Paths', 'Timing · Provenance'], ['INSPECT ' + domain])
     t.command('Switch to Overview')
+    t.resize(180, 55)
+    sidebar_geometry(t.capture('sidebar-overview-180x55', ['planned-run', 'Reported cells (agg.)']), check)
     t.resize(80, 24)
     t.capture('refinement-overview-80x24', ['Compact: focused tile only', 'Stage checklist'])
     check(t.process.poll() is None, 'Tiny focused fallback remains interactive')
@@ -283,7 +336,7 @@ def main():
     def two_run_count(t, check, http, startup):
         check(len(field(http.rpc(wait=False), 'runs')) == 2, 'Two-run capacity fixture has exactly two real registered observations')
         screen = t.capture('selector-only-two-registered-runs', ['Runs 2/2 (cap 4)'])
-        check(sum('asic/' in line for line in screen.lines()[:10]) == 2, 'With only two registered runs, selector labels and renders 2/2 instead of claiming four visible runs')
+        check(sum('asic/' in line for line in pane_body(screen, 'runs')) == 2, 'With only two registered runs, selector labels and renders 2/2 instead of claiming four visible runs')
     try:
         two = argparse.Namespace(**vars(args))
         two.evidence = args.evidence.with_name(args.evidence.name + '-two-runs')

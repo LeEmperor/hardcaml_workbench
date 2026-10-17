@@ -10,37 +10,59 @@ type resolved =
   | Cell of int * int * int * int
   | Stack of resolved list
   | Columns of resolved list
+  | Weighted_columns of (int * resolved) list
   | Narrow of resolved
 
-let rec min_size = function
+let rec min_size ?(gutter = 0) = function
   | Cell (_, w, h, _) -> w, h
-  | Narrow tree -> min_size tree
+  | Narrow tree -> min_size ~gutter tree
+  | Weighted_columns children ->
+    let sum = List.sum (module Int) children ~f:fst in
+    let unit_width, height =
+      List.fold children ~init:(0, 0) ~f:(fun (u, h) (weight, child) ->
+        let w, ch = min_size ~gutter child in
+        Int.max u ((w + weight - 1) / weight), Int.max h ch)
+    in
+    (unit_width * sum) + (gutter * (List.length children - 1)), height
   | Stack children ->
-    let sizes = List.map children ~f:min_size in
+    let sizes = List.map children ~f:(min_size ~gutter) in
     List.fold
       sizes
-      ~init:(0, Int.max 0 (List.length sizes - 1))
+      ~init:(0, gutter * Int.max 0 (List.length sizes - 1))
       ~f:(fun (w, h) (a, b) -> Int.max w a, h + b)
   | Columns children ->
-    let sizes = List.map children ~f:min_size in
+    let sizes = List.map children ~f:(min_size ~gutter) in
     List.fold
       sizes
-      ~init:(Int.max 0 (List.length sizes - 1), 0)
+      ~init:(gutter * Int.max 0 (List.length sizes - 1), 0)
       ~f:(fun (w, h) (a, b) -> w + a, Int.max h b)
 ;;
 
 let rec weight = function
   | Cell (_, _, _, w) -> w
   | Narrow _ -> 0
+  | Weighted_columns children ->
+    List.fold children ~init:0 ~f:(fun w (_, child) -> Int.max w (weight child))
   | Stack children | Columns children ->
     List.fold children ~init:0 ~f:(fun w child -> Int.max w (weight child))
 ;;
 
-let rec place tree (g : G.t) =
+let rec place ?(gutter = 0) tree (g : G.t) =
   match tree with
   | Cell (i, _, min_height, weight) ->
     [ (i, if weight = 0 then { g with height = min_height } else g) ]
-  | Narrow tree -> place tree g
+  | Narrow tree -> place ~gutter tree g
+  | Weighted_columns children ->
+    let total = g.width - (gutter * (List.length children - 1)) in
+    let sum = List.sum (module Int) children ~f:fst in
+    let _, _, cells =
+      List.fold children ~init:(0, 0, []) ~f:(fun (offset, used, cells) (w, child) ->
+        let width = (total * (used + w) / sum) - (total * used / sum) in
+        ( offset + width + gutter
+        , used + w
+        , cells @ place ~gutter child { g with x = g.x + offset; width } ))
+    in
+    cells
   | Stack children | Columns children ->
     let vertical =
       match tree with
@@ -48,12 +70,14 @@ let rec place tree (g : G.t) =
       | _ -> false
     in
     let minimum child =
-      let w, h = min_size child in
+      let w, h = min_size ~gutter child in
       if vertical then h else w
     in
     let total = if vertical then g.height else g.width in
     let spare =
-      total - List.sum (module Int) children ~f:minimum - List.length children + 1
+      total
+      - List.sum (module Int) children ~f:minimum
+      - (gutter * (List.length children - 1))
     in
     let weights = List.map children ~f:weight in
     let sum = List.sum (module Int) weights ~f:Fn.id in
@@ -79,7 +103,7 @@ let rec place tree (g : G.t) =
             then { g with y = g.y + offset; height = size }
             else { g with x = g.x + offset; width = size }
           in
-          offset + size + 1, used_weight + w, cells @ place child cell)
+          offset + size + gutter, used_weight + w, cells @ place ~gutter child cell)
     in
     cells
 ;;
@@ -96,6 +120,14 @@ let resolve ?(min_height_for_index = fun _ -> None) tree kinds =
         Cell (i, min_width, minimum i min_height, weight))
     | Common.Stack children -> node children (fun cs -> Stack cs)
     | Common.Columns children -> node children (fun cs -> Columns cs)
+    | Common.Weighted_columns children ->
+      (match
+         List.filter_map children ~f:(fun (w, child) ->
+           Option.map (loop child) ~f:(fun child -> Int.max 1 w, child))
+       with
+       | [] -> None
+       | [ (_, child) ] -> Some child
+       | children -> Some (Weighted_columns children))
     | Common.Narrow tree -> Option.map (loop tree) ~f:(fun t -> Narrow t)
   and node children make =
     match List.filter_map children ~f:loop with
@@ -117,7 +149,7 @@ let resolve ?(min_height_for_index = fun _ -> None) tree kinds =
   | Some tree, extras -> Some (Stack [ tree; Stack extras ])
 ;;
 
-let grid ?(min_height_for_index = fun _ -> None) ~width ~height count =
+let grid ?(gutter = 0) ?(min_height_for_index = fun _ -> None) ~width ~height count =
   List.range 1 (Int.min count 4 + 1)
   |> List.find_map ~f:(fun columns ->
     let rows = (count + columns - 1) / columns in
@@ -138,35 +170,37 @@ let grid ?(min_height_for_index = fun _ -> None) ~width ~height count =
                       , Int.max 6 (Option.value (min_height_for_index i) ~default:0)
                       , 1 )))))
       in
-      let w, h = min_size tree in
+      let w, h = min_size ~gutter tree in
       if width < w || height < h
       then None
-      else Some (place tree { G.x = 0; y = 0; width; height })))
+      else Some (place ~gutter tree { G.x = 0; y = 0; width; height })))
 ;;
 
 (** Fit never writes persisted requested geometry. Host handles [Compact] by showing the
     focused tile; zoom should bypass this function entirely. *)
 let compute
+  ?(gutter = 0)
   ?(min_height_for_index = fun _ -> None)
   (definition : Definition.t)
   ~width
   ~height
   ~kinds
   =
+  let gutter = Int.max 0 gutter in
   if List.is_empty kinds
   then Grid []
   else (
     let cells =
       Option.bind (resolve ~min_height_for_index definition.layout kinds) ~f:(fun tree ->
-        let w, h = min_size tree in
+        let w, h = min_size ~gutter tree in
         if width >= w && height >= h
-        then Some (place tree { G.x = 0; y = 0; width; height })
+        then Some (place ~gutter tree { G.x = 0; y = 0; width; height })
         else None)
     in
     let cells =
       match cells with
       | Some _ -> cells
-      | None -> grid ~min_height_for_index ~width ~height (List.length kinds)
+      | None -> grid ~gutter ~min_height_for_index ~width ~height (List.length kinds)
     in
     match cells with
     | None -> Compact

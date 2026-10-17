@@ -2,6 +2,7 @@
 import json
 import re
 import time
+import urllib.error
 import urllib.request
 
 
@@ -12,9 +13,9 @@ class Atom(str):
 def sexp(value):
     if isinstance(value, Atom):
         return str(value)
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return '(' + ' '.join(sexp(v) for v in value) + ')'
-    return json.dumps(str(value), ensure_ascii=True)
+    return json.dumps(str(value), ensure_ascii=False)
 
 
 def parse(text):
@@ -71,7 +72,11 @@ class Client:
         request = urllib.request.Request(self.url + path,
             data=None if data is None else sexp(data).encode(),
             headers={'Content-Type': 'application/sexp', 'X-Workbench-Protocol': '1'})
-        with urllib.request.urlopen(request, timeout=30) as response:
+        try:
+            response = urllib.request.urlopen(request, timeout=30)
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
             text = response.read().decode()
         result = parse(text)
         self.history.append(dict(path=path, request=None if data is None else sexp(data), response=text))

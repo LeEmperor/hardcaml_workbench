@@ -114,6 +114,7 @@ type t =
   ; presentation : T.overrides
   ; workspace_presentation : (string * T.overrides) list
   ; timing : (string * Timing_workspace.t) list
+  ; planned_run : Planned_run.t
   }
 
 let empty =
@@ -134,6 +135,7 @@ let empty =
   ; presentation = T.inherit_
   ; workspace_presentation = []
   ; timing = []
+  ; planned_run = Planned_run.empty
   }
 ;;
 
@@ -554,7 +556,15 @@ let appearance_commands t =
       "theme style skin colors icons density preset"
       (Set_appearance appearance)
   in
-  List.map Appearance.Preset.all ~f:(fun preset ->
+  List.map Appearance.Scheme.all ~f:(fun scheme ->
+    command
+      ("appearance.scheme." ^ Appearance.Scheme.key scheme)
+      ("Color scheme: "
+       ^ Appearance.Scheme.label scheme
+       ^ if Appearance.Scheme.equal scheme t.appearance.scheme then " [active]" else "")
+      "theme palette background colors client local"
+      (Set_appearance { t.appearance with scheme }))
+  @ List.map Appearance.Preset.all ~f:(fun preset ->
     make
       ("preset." ^ Appearance.Preset.key preset)
       (Appearance.Preset.label preset)
@@ -633,6 +643,7 @@ let project_scoped_kind kind =
     ; "asic"
     ; "live-status"
     ; "workspace-tabs"
+    ; "planned-run"
     ]
     kind
     ~equal:String.equal
@@ -1099,6 +1110,7 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
         [ "live-status"
         ; "workspace-tabs"
         ; "stage-checklist"
+        ; "planned-run"
         ; "run-selector"
         ; "placement"
         ; "cts"
@@ -2115,6 +2127,8 @@ let%test_unit "overview utilities and explicit Testing creation are available ad
           | _ -> false)));
   assert (project_scoped_kind "live-status" && project_scoped_kind "workspace-tabs");
   assert (not (project_scoped_kind "stage-checklist"));
+  assert (project_scoped_kind "planned-run");
+  assert (List.exists commands ~f:(fun c -> String.equal c.id "tile.add.planned-run"));
   assert (List.exists commands ~f:(fun c -> String.equal c.id "workspace.create-testing"));
   let testing =
     { (List.last_exn s.workspaces) with name = "Renamed tests"; preset = Some "testing" }
@@ -2125,6 +2139,69 @@ let%test_unit "overview utilities and explicit Testing creation are available ad
       (List.exists
          (catalog (receive host s) ~project:None ~jobs:[])
          ~f:(fun c -> String.equal c.id "workspace.create-testing")))
+;;
+
+let%test_unit "planned-run browsing and scheme commands have no producer effect or run \
+               binding"
+  =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "planned-run-commands") in
+  let tile = { (List.hd_exn registry.tiles) with kind = "planned-run" } in
+  let registry = { registry with tiles = tile :: List.tl_exn registry.tiles } in
+  let host = receive empty registry in
+  let host = { host with focus = Some tile.id } in
+  assert (T.Binding.equal (binding_kind tile) Project);
+  let _, effect = input host Enter ~commands:[] in
+  (match effect with
+   | Activate -> ()
+   | _ -> assert false);
+  let selection : Asic.Selection.t =
+    { flow = "flow"; profile = "profile"; endpoint = "endpoint"; assignments = [] }
+  in
+  let planned_run, ticket = Planned_run.begin_plan host.planned_run selection in
+  let pending =
+    set_local
+      { host with planned_run }
+      tile.id
+      { default_local with utility_detail = true; scroll = 7 }
+  in
+  let escaped, effect = input pending Escape ~commands:[] in
+  (match effect with
+   | No_effect -> ()
+   | _ -> assert false);
+  assert (phys_equal escaped.planned_run pending.planned_run);
+  assert (Planned_run.current_ticket escaped.planned_run ticket);
+  let second = { tile with id = W.Tile_id.of_string "second-plan-tile" } in
+  let pending = set_local pending second.id default_local in
+  assert (phys_equal pending.planned_run planned_run);
+  let host = pending in
+  let changed =
+    receive
+      host
+      { registry with
+        revision = registry.revision + 1
+      ; contexts =
+          List.map registry.contexts ~f:(fun context ->
+            { context with selected_run = Some Fs0_fixture.run_b })
+      }
+  in
+  assert (phys_equal changed.planned_run host.planned_run);
+  List.iter Appearance.Scheme.all ~f:(fun scheme ->
+    let command =
+      List.find_exn (appearance_commands host) ~f:(fun c ->
+        String.equal c.id ("appearance.scheme." ^ Appearance.Scheme.key scheme))
+    in
+    match command.action with
+    | Set_appearance appearance ->
+      let changed = set_appearance host appearance in
+      assert (Appearance.Scheme.equal changed.appearance.scheme scheme);
+      assert (
+        Appearance.equal
+          { changed.appearance with scheme = host.appearance.scheme }
+          host.appearance);
+      assert (phys_equal changed.planned_run host.planned_run);
+      assert (phys_equal changed.registry host.registry);
+      assert (phys_equal changed.locals host.locals)
+    | _ -> assert false)
 ;;
 
 let%test_unit "finalization form dispatches only an explicit exact attempt and captured \

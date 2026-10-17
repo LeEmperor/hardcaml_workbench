@@ -4,6 +4,133 @@ open Hardcaml_workbench_workspaces
 
 let kinds d = List.map d.Definition.tiles ~f:(fun t -> t.Common.kind)
 
+let%test_unit "Timing and Testing thirds preserve investigation and visible FS2 geometry" =
+  List.iter [ Timing.definition; Testing.definition ] ~f:(fun d ->
+    List.iter
+      [ 80, 24; 120, 40; 180, 55 ]
+      ~f:(fun (width, terminal_height) ->
+        let height = terminal_height - 2 in
+        match Layout.compute d ~width ~height ~kinds:(kinds d) with
+        | Compact -> assert false
+        | Grid cells ->
+          assert (List.length cells = List.length d.tiles);
+          List.iteri cells ~f:(fun i (a : Workspace.Geometry.t) ->
+            assert (a.x >= 0 && a.y >= 0 && a.width >= 24 && a.height >= 1);
+            assert (a.x + a.width <= width && a.y + a.height <= height);
+            List.iter
+              (List.drop cells (i + 1))
+              ~f:(fun b ->
+                assert (
+                  a.x + a.width <= b.x
+                  || b.x + b.width <= a.x
+                  || a.y + a.height <= b.y
+                  || b.y + b.height <= a.y)));
+          let cell kind =
+            List.nth_exn
+              cells
+              (List.findi_exn (kinds d) ~f:(fun _ k -> String.equal kind k) |> fst)
+          in
+          if width = 80
+          then (
+            (* The generic narrow grid retains every pane, including FS2. *)
+            List.iter cells ~f:(fun g -> assert (g.height >= 6));
+            if String.equal d.id "testing" then assert ((cell "simulation").width >= 24))
+          else (
+            let session = cell "live-status"
+            and selector = cell "run-selector" in
+            assert ((cell "workspace-tabs").height = 1);
+            assert (session.x = 0 && session.y = 1 && session.width = width / 3);
+            assert (session.height = 7 && selector.height = 7);
+            assert (selector.x = session.width && selector.width = width - session.width);
+            assert (selector.y = session.y);
+            if String.equal d.id "timing"
+            then (
+              let paths = cell "timing-paths"
+              and detail = cell "timing-detail"
+              and context = cell "timing-context" in
+              assert (paths.x = 0 && paths.y = session.y + session.height);
+              assert (paths.width >= 32 && paths.height >= 10);
+              assert (detail.x = paths.width && detail.y = paths.y);
+              assert (detail.width >= 48 && detail.height >= 10);
+              assert (context.x = detail.x && context.width = detail.width);
+              assert (context.y = detail.y + detail.height && context.height >= 8);
+              assert (paths.height = detail.height + context.height);
+              assert (context.y + context.height = height))
+            else (
+              let tests = cell "project-tests"
+              and simulation = cell "simulation"
+              and execution = cell "execution"
+              and logs = cell "logs" in
+              assert (tests.x = 0 && tests.width = session.width);
+              assert (tests.y = session.y + session.height && tests.height >= 6);
+              assert (tests.y + tests.height = height);
+              assert (simulation.y = selector.y + selector.height);
+              assert (simulation.height = if width = 120 then 15 else 24);
+              assert (execution.y = simulation.y + simulation.height);
+              assert (logs.y = execution.y + execution.height);
+              List.iter [ simulation; execution; logs ] ~f:(fun g ->
+                assert (g.x = selector.x && g.width = selector.width && g.height >= 6));
+              assert (logs.y + logs.height = height)))))
+;;
+
+let%test_unit "Timing and Testing sparse membership retains duplicate and custom extras" =
+  List.iter [ Timing.definition; Testing.definition ] ~f:(fun d ->
+    let ks =
+      ("custom-provider"
+       :: List.rev
+            (List.filter (kinds d) ~f:(fun k ->
+               not (List.mem [ "live-status"; "project-tests" ] k ~equal:String.equal))))
+      @ [ "run-selector" ]
+    in
+    match Layout.compute d ~width:180 ~height:100 ~kinds:ks with
+    | Compact -> assert false
+    | Grid cells ->
+      assert (List.length cells = List.length ks);
+      let selector_index =
+        List.findi_exn ks ~f:(fun _ k -> String.equal k "run-selector") |> fst
+      in
+      let selector = List.nth_exn cells selector_index
+      and duplicate = List.last_exn cells
+      and custom = List.hd_exn cells in
+      assert (selector.height = 7 && selector.width = 180);
+      assert (custom.width = 180 && duplicate.width = 180);
+      assert (custom.y >= selector.y + selector.height);
+      assert (duplicate.y >= custom.y + custom.height))
+;;
+
+let%test_unit "weighted widths and configurable gutters are full-rectangle partitions" =
+  List.iter [ 0; 1 ] ~f:(fun gutter ->
+    List.iter
+      [ 120, 55; 180, 55 ]
+      ~f:(fun (width, height) ->
+        match
+          Layout.compute
+            ~gutter
+            Overview.definition
+            ~width
+            ~height
+            ~kinds:(kinds Overview.definition)
+        with
+        | Compact -> assert false
+        | Grid cells ->
+          let session = List.nth_exn cells 1 in
+          let synthesis = List.nth_exn cells 4 in
+          assert (Int.abs (session.width - ((width - gutter) / 3)) <= 1);
+          assert (synthesis.x = session.width + gutter);
+          assert (synthesis.x + synthesis.width = width)));
+  let d = Overview.definition in
+  let ks = kinds d in
+  let selector required =
+    match
+      Layout.compute d ~width:120 ~height:38 ~kinds:ks ~min_height_for_index:(fun i ->
+        if i = 2 then Some required else None)
+    with
+    | Compact -> assert false
+    | Grid cells -> List.nth_exn cells 2
+  in
+  assert ((selector 12).height > (selector 7).height)
+;;
+
 let%test_unit "runtime minima change real selector geometry, including duplicate fallback"
   =
   let d = Overview.definition in
@@ -47,7 +174,7 @@ let%test_unit "actual terminal content bounds at80x24,120x40,large" =
       match Layout.compute d ~width ~height ~kinds:(kinds d) with
       | Compact -> assert (width = 80)
       | Grid cells ->
-        assert (List.length cells = 10);
+        assert (List.length cells = 11);
         List.iteri cells ~f:(fun i (a : Workspace.Geometry.t) ->
           assert (a.x >= 0 && a.y >= 0 && a.width > 0 && a.height > 0);
           assert (a.x + a.width <= width && a.y + a.height <= height);
@@ -55,13 +182,13 @@ let%test_unit "actual terminal content bounds at80x24,120x40,large" =
             (List.drop cells (i + 1))
             ~f:(fun b ->
               assert (
-                a.x + a.width < b.x
-                || b.x + b.width < a.x
-                || a.y + a.height < b.y
-                || b.y + b.height < a.y))))
+                a.x + a.width <= b.x
+                || b.x + b.width <= a.x
+                || a.y + a.height <= b.y
+                || b.y + b.height <= a.y))))
 ;;
 
-let%test_unit "wide shallow selector and six compact evidence panels cover Overview" =
+let%test_unit "one-third sidebar splits stages and plan above six full-width domains" =
   let d = Overview.definition in
   (* Reserve two rows for the host's global header/footer at 120x40. *)
   match Layout.compute d ~width:120 ~height:38 ~kinds:(kinds d) with
@@ -74,21 +201,51 @@ let%test_unit "wide shallow selector and six compact evidence panels cover Overv
     in
     let session = cell "live-status"
     and selector = cell "run-selector" in
-    assert (session.width = 24 && session.height = 7);
-    assert (selector.x > session.x && selector.y = session.y && selector.height = 7);
-    assert (selector.width > 3 * session.width);
-    assert ((cell "stage-checklist").y > session.y);
-    assert ((cell "synthesis").y > selector.y);
-    assert ((cell "timing").y = (cell "synthesis").y);
-    assert ((cell "timing").x > (cell "synthesis").x);
-    assert ((cell "placement").y > (cell "timing").y);
-    assert ((cell "checks").y > (cell "placement").y);
+    assert (session.width = 40 && session.height = Overview.session_height);
+    assert (selector.x = session.x && selector.y = session.y + session.height);
+    assert (selector.width = session.width && selector.height = Overview.selector_height);
+    assert ((cell "stage-checklist").y = selector.y + selector.height);
+    let stages = cell "stage-checklist"
+    and plan = cell "planned-run" in
+    assert (stages.x = 0 && stages.width = session.width);
+    assert (plan.x = 0 && plan.width = session.width);
+    assert (plan.y = stages.y + stages.height);
+    assert (plan.y + plan.height = 38);
+    assert (stages.height >= Overview.checklist_height);
+    assert (plan.height >= Overview.planned_run_height);
+    assert (Int.abs (stages.height - plan.height) <= 1);
+    let bottom = ref session.y in
     List.iter
       [ "synthesis"; "timing"; "placement"; "routing"; "checks"; "finalization" ]
       ~f:(fun kind ->
         let g = cell kind in
-        assert (g.width >= 59 && g.height >= 6));
+        assert (g.x = 40 && g.width = 80 && g.height >= 5 && g.y = !bottom);
+        bottom := g.y + g.height);
+    assert (!bottom = 38);
     assert ((cell "workspace-tabs").height = 1)
+;;
+
+let%test_unit "six-row selector preserves readable stages and balanced plan at120x40" =
+  let d = Overview.definition in
+  List.iter [ 7; 9 ] ~f:(fun selector_height ->
+    match
+      Layout.compute
+        d
+        ~width:120
+        ~height:38
+        ~kinds:(kinds d)
+        ~min_height_for_index:(fun i -> if i = 2 then Some selector_height else None)
+    with
+    | Compact -> assert false
+    | Grid cells ->
+      let selector = List.nth_exn cells 2
+      and stages = List.nth_exn cells 3
+      and plan = List.nth_exn cells 10 in
+      assert (selector.height = selector_height);
+      assert (stages.height >= 10 && plan.height >= 10);
+      assert (Int.abs (stages.height - plan.height) <= 1);
+      assert (stages.y = selector.y + selector.height);
+      assert (plan.y = stages.y + stages.height && plan.y + plan.height = 38))
 ;;
 
 let%test_unit "shuffled membership keeps tile-to-cell association and duplicate extras" =
@@ -114,7 +271,8 @@ let%test_unit "shuffled membership keeps tile-to-cell association and duplicate 
     and duplicate = List.nth_exn cells 7 in
     assert (nav.y = 0 && nav.height = 1);
     assert (session.x = 0 && session.height = 7);
-    assert (selector.y = session.y && selector.x > 0 && selector.height = 7);
+    assert (
+      selector.y = session.y + session.height && selector.x = 0 && selector.height = 7);
     assert (duplicate.y > (List.nth_exn cells 6).y)
 ;;
 
@@ -140,10 +298,10 @@ let%test_unit "all presets preserve extras and duplicates with bounded disjoint 
                 (List.drop cells (i + 1))
                 ~f:(fun b ->
                   assert (
-                    a.x + a.width < b.x
-                    || b.x + b.width < a.x
-                    || a.y + a.height < b.y
-                    || b.y + b.height < a.y))))));
+                    a.x + a.width <= b.x
+                    || b.x + b.width <= a.x
+                    || a.y + a.height <= b.y
+                    || b.y + b.height <= a.y))))));
   assert (
     match
       Layout.compute
@@ -196,8 +354,8 @@ let%test_unit "sparse membership and resize thresholds never overflow or overlap
                 (List.drop cells (i + 1))
                 ~f:(fun b ->
                   assert (
-                    a.x + a.width < b.x
-                    || b.x + b.width < a.x
-                    || a.y + a.height < b.y
-                    || b.y + b.height < a.y)))))
+                    a.x + a.width <= b.x
+                    || b.x + b.width <= a.x
+                    || a.y + a.height <= b.y
+                    || b.y + b.height <= a.y)))))
 ;;

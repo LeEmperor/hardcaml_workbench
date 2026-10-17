@@ -495,6 +495,60 @@ Synthesis area/check counters are now projected into the current summary.
 
 ## V1 — Independent appearance gallery (FS5)
 
+### Black/status polish and actual ASIC example adoption — 2026-10-16
+
+Delivered from owner feedback. [Shared plan](real_example_polish_plan.md),
+[launch commands and evidence](real_asic_example_demo.md).
+
+- [x] Checklist/planned-run split remaining left-column space with equal weights;
+  Session/Runs above and six full-width domain summaries at right.
+- [x] Neutral field labels and value-only semantic colors, including selector
+  lifecycle tokens; width-aware meaningful Session run prefixes and hash suffixes.
+- [x] Black Carbon default/legacy fallback and bright white headers, with preserved
+  status/metric/focus distinctions and all alternative schemes.
+- [x] Persistent inspection-capable provider installed at2 jobs; actual example
+  configuration repaired from expired temporary paths, prior provider/current preserved.
+- [x] Read-only adoption of exact original named signoff/finalization references
+  through normal APIs; actual native Overview/Timing/all-domain detail verified.
+- [x] Persistent demo binary refresh with receipts/rollback tests; final copies
+  match normal build. Full format/lint/tests/build passed serially at2.
+- [ ] Provider optional live stage-plan envelope remains absent; checklist states
+  stay not reported. No new real stage actions or execution are claimed by adoption.
+
+Final actual evidence: example `.dev/workbench-real-demo/receipts/acceptance-b72a4a8afe9441e698eda6a6da24e7a5/`,
+673 cells, setup11.6755ns, hold0.125029ns, retained acceptancepass,1020 timing paths
+plus one input-reference row.2235 canonical input/provider files unchanged; no EDA.
+Separate synthetic UI/regression evidence includes polish196, refinement98/two-run12,
+composition46, FS2 45 and five interrupt cases; exact roots and scope are in the guide.
+No Git staging/commits/pushes. Existing sibling user edits and live sessions preserved.
+
+### Dense Overview sidebar, color schemes and planned-run — 2026-10-16
+
+Delivered from the owner's Lazygit-inspired packing/layout and theme request.
+[Shared plan](overview_sidebar_plan.md), [controls/source settings/evidence](overview_sidebar.md).
+
+- [x] Overview1:2 sidebar/main split with Session/Runs/vertical stages on the left;
+  synthesis/timing/placement/routing/checks/finalization/planned-run stacked at right.
+- [x] Zero blank-cell gutters with adjacent disjoint frames, lowercase unadorned
+  titles, configurable source weights/minimum heights and bounded live selector growth.
+- [x] Carbon/Slate/Crimson/Neon scheme axis with live palette commands, independent
+  skin/intensity/icons/density; Slate default, Ches-inspired Crimson, typed state colors.
+- [x] Project-scoped planned-run preview with pending/failed/stale/ready states,
+  inspectable exact identity, receipt/poll/intent fences and guarded explicit launch.
+- [x] Preserve Timing topology and shared module/query identity; no provider work
+  caused by visual changes or plan inspection and no fake queued/allocated identity.
+- [x] Full normal format/lint/tests/build at2; actual sidebar106, composition45,
+  refinement96/two-run12, FS2 45, synthetic launch/cancel and five interrupt cases.
+- [ ] Owner visual review of the four schemes and denser default arrangement.
+
+Final normal-binary evidence: `/tmp/opencode/overview-sidebar-835bf5f34f02/`.
+Regression roots: `frontend-composition-b5bc7783c26e`, `frontend-refinement-7dad2f910d25`
+and its `-two-runs` companion, `synthetic-flow-d0emyda4`, `fs2-native-y2sbyizx`,
+`workbench-terminal-interrupt-wbg9s_ny` (all under `/tmp/opencode`). Existing user
+staged work/index and live session state were preserved; no staging/commits/physical
+flows. Native pending/failure scenarios clear the old daemon preview; retained stale
+preview and same-selection receipt races have separately identified pure coverage.
+
 ### Owner-review panel and investigation refinement — 2026-10-16
 
 Delivered after manual feedback on the composition slice. [Shared implementation

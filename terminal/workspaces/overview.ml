@@ -1,5 +1,18 @@
 open Common
 
+(** Source-level layout policy. Weights divide the whole available width, not just spare
+    space after minima. Heights include each tile's frame. *)
+let sidebar_weight = 1
+
+let main_weight = 2
+let session_height = 7
+let selector_height = 7
+let checklist_height = 10
+let planned_run_height = 10
+let checklist_weight = 1
+let planned_run_weight = 1
+let summary_height = 5
+
 let compact kind =
   tile
     ~presentation:
@@ -21,7 +34,8 @@ let definition : Definition.t =
       ; { checklist with
           presentation =
             { inherit_presentation with
-              horizontal_stages = Some true
+              horizontal_stages = Some false
+            ; compact_summary = Some true
             ; run_reference = Some false
             ; hints = Some false
             }
@@ -32,15 +46,37 @@ let definition : Definition.t =
       ; compact "routing"
       ; compact "checks"
       ; compact "finalization"
+      ; compact "planned-run"
       ]
   ; layout =
       Stack
         [ navigation_leaf
-        ; Columns [ Narrow session_leaf; selector_leaf ]
-        ; leaf ~height:5 ~weight:0 "stage-checklist"
-        ; Columns [ leaf ~height:6 "synthesis"; leaf ~height:6 "timing" ]
-        ; Columns [ leaf ~height:6 "placement"; leaf ~height:6 "routing" ]
-        ; Columns [ leaf ~height:6 "checks"; leaf ~height:6 "finalization" ]
+        ; Weighted_columns
+            [ ( sidebar_weight
+              , Stack
+                  [ leaf ~height:session_height ~weight:0 "live-status"
+                  ; leaf ~height:selector_height ~weight:0 "run-selector"
+                  ; leaf
+                      ~height:checklist_height
+                      ~weight:checklist_weight
+                      "stage-checklist"
+                  ; leaf
+                      ~height:planned_run_height
+                      ~weight:planned_run_weight
+                      "planned-run"
+                  ] )
+            ; ( main_weight
+              , Stack
+                  (List.map
+                     (fun kind -> leaf ~height:summary_height kind)
+                     [ "synthesis"
+                     ; "timing"
+                     ; "placement"
+                     ; "routing"
+                     ; "checks"
+                     ; "finalization"
+                     ]) )
+            ]
         ]
   }
 ;;

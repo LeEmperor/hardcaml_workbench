@@ -24,63 +24,166 @@ module Role = struct
     | Active_tab
     | Inactive_tab
     | Matched
+    | Heading
 
   let rgb r g b = Attr.Color.rgb ~r ~g ~b
-  let background = rgb 17 22 35
-  let foreground = rgb 224 233 249
-  let surface = rgb 43 55 83
-  let card = rgb 25 34 53
-  let muted = rgb 153 173 202
 
-  let backdrop (appearance : Appearance.t) = function
-    | Surface | Selection | Active_tab | Matched -> surface
+  type palette =
+    { background : Attr.Color.t
+    ; foreground : Attr.Color.t
+    ; surface : Attr.Color.t
+    ; card : Attr.Color.t
+    ; muted : Attr.Color.t
+    ; border : Attr.Color.t
+    ; accent : Attr.Color.t
+    ; selective : Attr.Color.t
+    ; metric : Attr.Color.t
+    ; success : Attr.Color.t
+    ; warning : Attr.Color.t
+    ; failure : Attr.Color.t
+    }
+
+  let palette (appearance : Appearance.t) =
+    let make
+      background
+      foreground
+      surface
+      card
+      muted
+      border
+      accent
+      selective
+      metric
+      success
+      warning
+      failure
+      =
+      let c (r, g, b) = rgb r g b in
+      { background = c background
+      ; foreground = c foreground
+      ; surface = c surface
+      ; card = c card
+      ; muted = c muted
+      ; border = c border
+      ; accent = c accent
+      ; selective = c selective
+      ; metric = c metric
+      ; success = c success
+      ; warning = c warning
+      ; failure = c failure
+      }
+    in
+    match appearance.scheme with
+    | Carbon ->
+      make
+        (0, 0, 0)
+        (216, 216, 220)
+        (35, 35, 35)
+        (17, 17, 17)
+        (153, 153, 163)
+        (91, 91, 104)
+        (151, 177, 226)
+        (151, 169, 198)
+        (220, 196, 147)
+        (151, 198, 151)
+        (225, 185, 116)
+        (235, 139, 151)
+    | Slate ->
+      make
+        (28, 31, 36)
+        (218, 221, 226)
+        (49, 55, 64)
+        (34, 38, 44)
+        (157, 165, 177)
+        (100, 112, 128)
+        (153, 184, 213)
+        (157, 178, 195)
+        (214, 197, 157)
+        (155, 197, 168)
+        (224, 188, 130)
+        (226, 144, 154)
+    (* Adapted from read-only Ches ui/theme.ml Crimson: warm ground and rose accent. Lift
+       muted/border/error luminance for small evidence text and status contrast. *)
+    | Crimson ->
+      make
+        (12, 10, 10)
+        (224, 210, 210)
+        (53, 35, 40)
+        (19, 16, 16)
+        (167, 139, 145)
+        (112, 83, 92)
+        (232, 93, 117)
+        (208, 140, 154)
+        (255, 203, 107)
+        (158, 206, 106)
+        (255, 184, 108)
+        (255, 112, 136)
+    | Neon ->
+      make
+        (17, 22, 35)
+        (224, 233, 249)
+        (43, 55, 83)
+        (25, 34, 53)
+        (153, 173, 202)
+        (132, 151, 236)
+        (99, 218, 255)
+        (117, 202, 221)
+        (255, 207, 102)
+        (115, 231, 167)
+        (255, 202, 105)
+        (255, 116, 144)
+  ;;
+
+  let backdrop (appearance : Appearance.t) role =
+    let p = palette appearance in
+    match role with
+    | Selection | Active_tab ->
+      (match appearance.scheme with
+       | Carbon -> rgb 48 48 56
+       | Slate -> rgb 64 75 88
+       | Crimson -> rgb 76 39 49
+       | Neon -> rgb 43 55 83)
+    | Surface | Matched -> p.surface
     | Foreground ->
       (match appearance.preset with
-       | Studio | Structured_studio -> card
-       | _ -> background)
-    | _ -> background
+       | Studio | Structured_studio -> p.card
+       | _ -> p.background)
+    | _ -> p.background
   ;;
 
   let attrs (appearance : Appearance.t) role =
+    let p = palette appearance in
     let accent =
       match appearance.color with
-      | Restrained -> foreground
-      | Selective -> rgb 117 202 221
-      | Vivid -> rgb 99 218 255
+      | Restrained -> p.foreground
+      | Selective -> p.selective
+      | Vivid -> p.accent
     in
     let fg =
       match role with
-      | Muted | Inactive_tab -> muted
+      | Muted | Inactive_tab -> p.muted
       | Border ->
         (match appearance.color with
-         | Vivid -> rgb 132 151 236
-         | _ -> muted)
+         | Vivid -> p.border
+         | _ -> p.muted)
       | Focus | Selection | Active_tab -> accent
       | Metric | Matched ->
         (match appearance.color with
-         | Vivid -> rgb 255 207 102
-         | _ -> foreground)
-      | Success ->
-        (match appearance.color with
-         | Restrained -> foreground
-         | _ -> rgb 115 231 167)
-      | Warning ->
-        (match appearance.color with
-         | Restrained -> foreground
-         | _ -> rgb 255 202 105)
-      | Failure ->
-        (match appearance.color with
-         | Restrained -> foreground
-         | _ -> rgb 255 116 144)
+         | Vivid -> p.metric
+         | _ -> p.foreground)
+      | Success -> p.success
+      | Warning -> p.warning
+      | Failure -> p.failure
       | Running -> accent
-      | _ -> foreground
+      | Heading -> rgb 255 255 255
+      | _ -> p.foreground
     in
     let bg = backdrop appearance role in
     [ Attr.fg fg; Attr.bg bg ]
     @
     match role with
     | Matched -> [ Attr.underline; Attr.bold ]
-    | Focus | Selection | Metric | Active_tab -> [ Attr.bold ]
+    | Focus | Selection | Metric | Active_tab | Heading -> [ Attr.bold ]
     | _ -> []
   ;;
 end
@@ -101,7 +204,7 @@ let box ~width ~height view =
 
 let colored appearance role view =
   let bg = Role.backdrop appearance role in
-  View.with_colors ~fill_backdrop:true view ~fg:Role.foreground ~bg
+  View.with_colors ~fill_backdrop:true view ~fg:(Role.palette appearance).foreground ~bg
 ;;
 
 let lines ?(appearance = Appearance.default) ?(role = Role.Foreground) ~width ~height rows
@@ -119,13 +222,6 @@ let studio (appearance : Appearance.t) =
   match appearance.preset with
   | Studio | Structured_studio -> true
   | _ -> false
-;;
-
-let focus_marker (appearance : Appearance.t) focused =
-  match appearance.icons with
-  | None_ -> ""
-  | Ascii -> if focused then "> " else "- "
-  | Unicode -> if focused then "◆ " else "· "
 ;;
 
 let frame_tile ?(enabled = true) appearance ~focused ~width ~height content =
@@ -204,6 +300,33 @@ let run_selector_row ~width ~status_width ~cursor ~active run status =
   ^ String.make (Int.max 0 (label_width - cell_width label)) ' '
   ^ " "
   ^ status
+;;
+
+(** Lifecycle vocabulary only: an acceptance verdict or words inside an ID/report do not
+    describe the execution lifecycle. Unknown provider values stay neutral. *)
+let run_status_role = function
+  | "completed" -> Role.Success
+  | "failed" -> Failure
+  | "running" | "starting" -> Running
+  | "pending" | "queued" | "cancelled" | "interrupted" | "skipped" -> Warning
+  | _ -> Foreground
+;;
+
+let run_selector_view appearance ~width ~status_width ~cursor ~active run status =
+  let status_role = run_status_role status in
+  let row = run_selector_row ~width ~status_width ~cursor ~active run status in
+  let identity_width = Int.max 0 (width - status_width) in
+  let identity = E.text (E.clip ~width:identity_width (E.plain row)) in
+  let status = E.text (E.clip ~width:status_width (E.plain status)) in
+  let attrs role =
+    Role.attrs appearance role
+    @ if cursor then [ Attr.bg (Role.backdrop appearance Selection) ] else []
+  in
+  View.hcat
+    [ View.text ~attrs:(attrs (if cursor then Selection else Foreground)) identity
+    ; View.text ~attrs:(attrs status_role) status
+    ]
+  |> box ~width ~height:1
 ;;
 
 let request_scope (execution : Asic.Run.t) =
@@ -385,7 +508,8 @@ let checklist_preview host data tile =
             H.stage_plan (Some stage), Option.bind data.asic ~f:(fun asic -> asic.preview)
           with
           | Ok (Plan selection), Some preview
-            when Asic.Selection.equal selection preview.selection -> Some preview
+            when Asic.Selection.equal selection preview.selection
+                 && Planned_run.launchable host.planned_run preview -> Some preview
           | _ -> None)))
 ;;
 
@@ -465,23 +589,7 @@ let utility_rows host data tile =
       let facts =
         Option.bind selected_run ~f:data.summary
         |> Option.value_map ~default:[] ~f:(fun summary ->
-          Overview_tiles.summary_rows summary
-          |> List.filter_mapi ~f:(fun i row ->
-            if i = 0 && not policy.freshness
-            then None
-            else if i = 0
-            then
-              Some
-                { row with
-                  role =
-                    (match E.freshness_role summary.freshness with
-                     | Validated | Running -> Running
-                     | Failed -> Failure
-                     | Pending | Stale -> Warning
-                     | Passed -> Success
-                     | Plain | Muted -> Muted)
-                }
-            else Some row))
+          Overview_tiles.summary_rows ~freshness:policy.freshness summary)
       in
       let interaction =
         if (not local.utility_detail) || not policy.hints
@@ -509,14 +617,15 @@ let utility_rows host data tile =
                 (Option.value_map selected_run ~default:"none selected" ~f:run_label)
             ]
           else [])
-         @ stages
-         @ interaction
-         @ facts)
+         @ (if H.compact_summary host tile && not local.utility_detail
+            then Overview_tiles.checklist_rows ~compact:true ~stages ~aggregate:facts ()
+            else stages @ facts)
+         @ interaction)
     | _ -> None)
 ;;
 
 let utility_attrs appearance : Overview_tiles.Role.t -> Attr.t list = function
-  | Heading -> Role.attrs appearance Metric
+  | Heading -> Role.attrs appearance Heading
   | Foreground -> Role.attrs appearance Foreground
   | Muted -> Role.attrs appearance Muted
   | Active -> Role.attrs appearance Selection
@@ -538,7 +647,7 @@ let inspection_explorer host tile =
 let evidence_attrs appearance : E.Role.t -> Attr.t list = function
   | Plain -> Role.attrs appearance Foreground
   | Muted -> Role.attrs appearance Muted
-  | Validated -> Role.attrs appearance Running
+  | Validated -> Role.attrs appearance Success
   | Passed -> Role.attrs appearance Success
   | Failed -> Role.attrs appearance Failure
   | Pending | Stale -> Role.attrs appearance Warning
@@ -654,12 +763,13 @@ let compact_rows host data tile =
   else
     Option.map (tile_run host tile) ~f:(fun run ->
       Overview_summary.rows
+        ~compact:(H.compact_summary host tile)
+        ~freshness:(H.policy host tile).freshness
         ~kind:tile.W.Tile.kind
         ~run
         ~summary:(data.summary run)
         ~stages:(Overview_tiles.observed_stages ~asic:data.asic ~run)
-        ()
-      |> List.filteri ~f:(fun i _ -> i <> 1 || (H.policy host tile).freshness))
+        ())
 ;;
 
 let semantic_rows host data tile ~width ~height =
@@ -746,6 +856,45 @@ let semantic_rows host data tile ~width ~height =
       else None)
 ;;
 
+(* A shallow plan panel must show state and endpoint before verbose explanatory metadata.
+   Summary facts each occupy one display-cell-clipped line; Enter retains the complete
+   wrapped typed model, including exact identity and JSON. *)
+let planned_rows host tile ~width =
+  let detail = (H.local host tile.W.Tile.id).utility_detail in
+  let model = Planned_run.model host.H.planned_run in
+  let rows = Planned_run.rows model ~detail in
+  if detail
+  then
+    List.concat_map rows ~f:(fun row ->
+      wrap_cells ~width (Artifact_view.safe row.Planned_run.text)
+      |> List.map ~f:(fun text -> { row with text }))
+  else (
+    let selection =
+      Option.value_map model.selection ~default:[] ~f:(fun selection ->
+        [ { Planned_run.role = Fact
+          ; text = "endpoint: " ^ selection.Asic.Selection.endpoint
+          }
+        ; { role = Fact
+          ; text = "flow: " ^ selection.flow ^ " / profile: " ^ selection.profile
+          }
+        ; { role = Fact
+          ; text =
+              ("assignments: "
+               ^
+               if List.is_empty selection.assignments
+               then "(none)"
+               else String.concat ~sep:"; " selection.assignments)
+          }
+        ])
+    in
+    List.take rows 1 @ selection
+    |> List.map ~f:(fun row ->
+      { row with
+        Planned_run.text =
+          E.text (E.clip ~width (E.plain (Artifact_view.safe row.Planned_run.text)))
+      }))
+;;
+
 let rows host data tile ~width ~height =
   let local = H.local host tile.W.Tile.id in
   let scope =
@@ -819,6 +968,8 @@ let rows host data tile ~width ~height =
     | None, Some view -> Artifact_view.rows view ~width ~height
     | None, None ->
       (match tile.kind with
+       | "planned-run" ->
+         planned_rows host tile ~width |> List.map ~f:(fun row -> row.Planned_run.text)
        | "run-selector" -> run_rows ()
        | kind when Option.is_some (Timing_workspace.pane kind) ->
          (match Timing_workspace.pane kind, H.timing host tile with
@@ -1093,7 +1244,7 @@ let tile_view host data tile ~width ~height =
   let binding =
     match tile.binding with
     | Pin_run run -> "PIN " ^ run_label run
-    | Follow -> if H.project_scoped_kind tile.kind then "PROJECT" else "FOLLOW"
+    | Follow -> if H.project_scoped_kind tile.kind then "project" else "follow"
   in
   let _, _, _, body_width, body_height = body_geometry host tile ~width ~height in
   let geometry = panel_geometry host tile ~width ~height in
@@ -1120,14 +1271,6 @@ let tile_view host data tile ~width ~height =
          |> List.rev)
     else rows
   in
-  let rows =
-    if focused && (not show_title) && not (String.equal tile.kind "workspace-tabs")
-    then (
-      match rows with
-      | [] -> [ "> focused tile" ]
-      | first :: rest -> (focus_marker appearance true ^ first) :: rest)
-    else rows
-  in
   let header =
     if show_title || show_badge
     then (
@@ -1137,12 +1280,12 @@ let tile_view host data tile ~width ~height =
         else if not (String.equal tile.kind "synthesis")
         then (
           match tile.kind with
-          | "live-status" -> "Session"
-          | "workspace-tabs" -> "Workspaces"
-          | "stage-checklist" -> "Stage checklist"
-          | "timing-paths" -> "Timing · Paths"
-          | "timing-detail" -> "Timing · Selected path"
-          | "timing-context" -> "Timing · Provenance"
+          | "live-status" -> "session"
+          | "workspace-tabs" -> "workspaces"
+          | "stage-checklist" -> "stage checklist"
+          | "timing-paths" -> "timing · paths"
+          | "timing-detail" -> "timing · selected path"
+          | "timing-context" -> "timing · provenance"
           | "run-selector" ->
             let total =
               List.count data.runs ~f:(fun (run, status) ->
@@ -1151,7 +1294,7 @@ let tile_view host data tile ~width ~height =
                   ~substring:(String.lowercase local.filter))
             in
             sprintf
-              "Runs %d/%d (cap %d)"
+              "runs %d/%d (cap %d)"
               (Int.min total (Int.min body_height policy.run_selector_rows))
               total
               policy.run_selector_rows
@@ -1164,18 +1307,14 @@ let tile_view host data tile ~width ~height =
           | Metrics -> "synthesis/metrics"
           | Evidence -> "synthesis/evidence")
       in
-      (* A tile-title badge indicates real tile focus, not a navigation tab. *)
+      (* Host-generated titles stay lowercase; binding badges retain exact run IDs. Focus
+         belongs to border styling, never a decorative title prefix. *)
       let title =
         if not show_title
         then ""
-        else
-          focus_marker appearance focused
-          ^
-          if studio appearance
-          then "[ " ^ title ^ " ]"
-          else if Appearance.Preset.equal appearance.preset Instrument
-          then String.uppercase title
-          else title
+        else if studio appearance
+        then "[ " ^ title ^ " ]"
+        else title
       in
       let room =
         if geometry.border > 0 then Int.max 0 (geometry.inner_width - 2) else body_width
@@ -1202,17 +1341,7 @@ let tile_view host data tile ~width ~height =
         heading
         ^ E.text (E.clip ~width:(Int.max 0 (room - cell_width heading)) (E.plain filter))
       in
-      [ View.text
-          ~attrs:
-            (Role.attrs
-               appearance
-               (if studio appearance
-                then if focused then Selection else Surface
-                else if focused
-                then Focus
-                else Border))
-          heading
-      ])
+      [ View.text ~attrs:(Role.attrs appearance Heading) heading ])
     else []
   in
   let border_title = if geometry.border > 0 then View.vcat header else View.none in
@@ -1244,6 +1373,7 @@ let tile_view host data tile ~width ~height =
     match compact with
     | Some rows ->
       Overview_tiles.render
+        ~selected_bg:(Role.backdrop appearance Selection)
         ~appearance
         ~attrs:(utility_attrs appearance)
         ~width:body_width
@@ -1253,18 +1383,56 @@ let tile_view host data tile ~width ~height =
       (match utility_rows host data tile with
        | None ->
          (match semantic with
+          | None
+            when String.equal tile.kind "run-selector"
+                 && Option.is_none local.inspection
+                 && Option.is_none local.artifacts ->
+            let candidates =
+              List.filter data.runs ~f:(fun (run, status) ->
+                String.is_substring
+                  (String.lowercase (run_label run ^ " " ^ status))
+                  ~substring:(String.lowercase local.filter))
+            in
+            let status_width =
+              Int.min
+                (Int.max 0 (body_width / 3))
+                (List.fold candidates ~init:0 ~f:(fun n (_, status) ->
+                   Int.max n (cell_width status)))
+            in
+            (* [rows] already applies the selector's cursor paging. Resolve each row
+               against the same typed candidate and keep status styling out of IDs. *)
+            let selected =
+              Option.first_some
+                local.cursor
+                (Option.map (tile_run host tile) ~f:run_label)
+            in
+            let selected_index =
+              List.findi candidates ~f:(fun _ (run, _) ->
+                Option.equal String.equal selected (Some (run_label run)))
+              |> Option.value_map ~default:0 ~f:fst
+            in
+            let available = Int.min body_height policy.run_selector_rows in
+            let start =
+              Int.clamp_exn
+                local.scroll
+                ~min:(Int.max 0 (selected_index - Int.max 1 available + 1))
+                ~max:selected_index
+            in
+            List.drop candidates start
+            |> Fn.flip List.take (Int.max 0 available)
+            |> List.map ~f:(fun (run, status) ->
+              run_selector_view
+                appearance
+                ~width:body_width
+                ~status_width
+                ~cursor:(Option.equal String.equal selected (Some (run_label run)))
+                ~active:(Option.equal Run_ref.equal (tile_run host tile) (Some run))
+                run
+                status)
+            |> View.vcat
+            |> box ~width:body_width ~height:body_height
           | None -> body
           | Some rows ->
-            let rows =
-              if focused && not show_title
-              then (
-                match rows with
-                | first :: rest ->
-                  E.clip ~width:body_width (E.plain (focus_marker appearance true) @ first)
-                  :: rest
-                | [] -> [])
-              else rows
-            in
             E.render ~attrs:(evidence_attrs appearance) rows
             |> box ~width:body_width ~height:body_height
             |> colored appearance Foreground)
@@ -1282,6 +1450,7 @@ let tile_view host data tile ~width ~height =
          if List.is_empty stages
          then
            Overview_tiles.render
+             ~selected_bg:(Role.backdrop appearance Selection)
              ~appearance
              ~attrs:(utility_attrs appearance)
              ~width:body_width
@@ -1321,7 +1490,6 @@ let tile_view host data tile ~width ~height =
                        ^ fit_label
                            ~width:(Int.max 0 (body_width - overhead))
                            item.stage.id
-                   ; role = Active
                    }
                }
            in
@@ -1329,6 +1497,7 @@ let tile_view host data tile ~width ~height =
            let hint_height = Int.min (List.length hints) (Int.max 0 (body_height - 2)) in
            let strip =
              Overview_tiles.Stage_strip.render
+               ~selected_bg:(Role.backdrop appearance Selection)
                ~appearance
                ~attrs:(utility_attrs appearance)
                ~width:body_width
@@ -1363,6 +1532,7 @@ let tile_view host data tile ~width ~height =
          View.vcat
            [ lines ~appearance ~role:Muted ~width:body_width ~height:hint_height hints
            ; Overview_tiles.render
+               ~selected_bg:(Role.backdrop appearance Selection)
                ~appearance
                ~attrs:(utility_attrs appearance)
                ~width:body_width
@@ -1404,6 +1574,7 @@ let tile_view host data tile ~width ~height =
            then tabline
            else
              Overview_tiles.render
+               ~selected_bg:(Role.backdrop appearance Selection)
                ~appearance
                ~attrs:(utility_attrs appearance)
                ~width:body_width
@@ -1433,6 +1604,7 @@ let tile_view host data tile ~width ~height =
          |> box ~width:body_width ~height:body_height
        | Some rows ->
          Overview_tiles.render
+           ~selected_bg:(Role.backdrop appearance Selection)
            ~appearance
            ~attrs:(utility_attrs appearance)
            ~width:body_width
@@ -1440,7 +1612,27 @@ let tile_view host data tile ~width ~height =
            (List.drop rows local.scroll))
   in
   let body =
-    if Option.is_some local.inspection || Option.is_some local.artifacts
+    if String.equal tile.kind "planned-run"
+    then
+      planned_rows host tile ~width:body_width
+      |> List.map ~f:(fun row ->
+        let role =
+          match row.Planned_run.role with
+          | Fact -> Role.Foreground
+          | Muted -> Muted
+          | Warning -> Warning
+          | Error -> Failure
+          | Success -> Success
+        in
+        role, row.text)
+      |> Fn.flip List.drop local.scroll
+      |> Fn.flip List.take body_height
+      |> List.map ~f:(fun (role, text) ->
+        lines ~appearance ~role ~width:body_width ~height:1 [ text ])
+      |> View.vcat
+      |> box ~width:body_width ~height:body_height
+      |> colored appearance Foreground
+    else if Option.is_some local.inspection || Option.is_some local.artifacts
     then body
     else (
       match Timing_workspace.pane tile.kind, H.timing host tile with
@@ -1541,6 +1733,9 @@ let tile_layout host ({ Dimensions.width; height } : Dimensions.t) =
       let rec minimum i = function
         | P.Layout.Cell (index, _, height, _) -> if i = index then height else 0
         | Narrow tree -> minimum i tree
+        | Weighted_columns children ->
+          List.fold children ~init:0 ~f:(fun height (_, tree) ->
+            Int.max height (minimum i tree))
         | Stack children | Columns children ->
           List.fold children ~init:0 ~f:(fun height tree ->
             Int.max height (minimum i tree))
@@ -1983,11 +2178,13 @@ let render_palette host dimensions background =
         let attrs = Role.attrs appearance role in
         (* Selection owns the row backdrop; matching owns underline and a warm foreground.
            The two remain distinct even on the selected command. *)
-        let match_attrs = Role.attrs appearance Matched in
+        let match_attrs =
+          Role.attrs appearance Matched @ [ Attr.bg (Role.backdrop appearance role) ]
+        in
         Palette_view.result_row
           ~attrs
           ~match_attrs
-          ~marker_attrs:(Role.attrs appearance Focus)
+          ~marker_attrs:(Role.attrs appearance role)
           ~width
           ~selected
           result
@@ -2065,7 +2262,7 @@ let appearance_cases =
     List.concat_map Appearance.Color.all ~f:(fun color ->
       List.concat_map Appearance.Icons.all ~f:(fun icons ->
         List.map Appearance.Density.all ~f:(fun density ->
-          { Appearance.preset; color; icons; density }))))
+          { Appearance.preset; color; scheme = Slate; icons; density }))))
 ;;
 
 let plain_text view =
@@ -2151,7 +2348,7 @@ let%test_unit "Overview renders four primary domains with shallow frames and bou
   in
   let navigation = cell (find "workspace-tabs") in
   assert (navigation.height = 1);
-  assert ((cell (find "live-status")).y = navigation.y + 2);
+  assert ((cell (find "live-status")).y = navigation.y + 1);
   List.iter [ "live-status"; "run-selector" ] ~f:(fun kind ->
     let tile = find kind in
     let g = cell tile in
@@ -2163,12 +2360,12 @@ let%test_unit "Overview renders four primary domains with shallow frames and bou
     assert (rows = g.height - 2));
   let image = render_workspace host data dimensions |> plain_text in
   List.iter [ "synthesis"; "timing"; "placement"; "routing" ] ~f:(fun kind ->
-    assert (String.is_substring image ~substring:(String.uppercase kind));
+    assert (String.is_substring image ~substring:kind);
     let tile = find kind in
     let g = cell tile in
     let panel = tile_view host data tile ~width:g.width ~height:g.height in
     let first = View.crop ~b:(g.height - 1) panel |> plain_text in
-    assert (String.is_substring first ~substring:(String.uppercase kind));
+    assert (String.is_substring first ~substring:kind);
     let body =
       View.crop ~l:1 ~t:1 panel |> box ~width:(g.width - 2) ~height:1 |> plain_text
     in
@@ -2176,7 +2373,11 @@ let%test_unit "Overview renders four primary domains with shallow frames and bou
       String.is_substring
         body
         ~substring:
-          (if String.equal kind "timing" then "Stage: not reported" else "completed"));
+          (match kind with
+           | "synthesis" -> "Reported cells (agg.): 50"
+           | "timing" -> "Aggregate slack: unavailable"
+           | "placement" -> "Aggregate resources: unavailable"
+           | _ -> "Routing-stage metrics: unsupported"));
     assert (not (String.is_substring body ~substring:(String.uppercase kind))));
   assert (String.is_substring image ~substring:"Reported cells (agg.): 50");
   let selector = find "run-selector" in
@@ -2216,9 +2417,165 @@ let%test_unit "Overview renders four primary domains with shallow frames and bou
   assert (Option.is_some (semantic_rows explicit data synthesis ~width:60 ~height:12))
 ;;
 
-let%test_unit "host horizontal stages wrap while preserving exact selected identity and \
-               detail"
-  =
+let%test_unit "two-row compact facts retain stages and stale warnings with freshness off" =
+  let host, data, find = refinement_fixture P.Overview.definition in
+  let synthesis = find "synthesis" in
+  let data =
+    { data with
+      summary =
+        (fun run ->
+          Option.map (data.summary run) ~f:(fun s ->
+            { s with freshness = Cached_unverified }))
+    }
+  in
+  let before = compact_rows host data synthesis |> Option.value_exn in
+  let quiet =
+    H.set_local
+      host
+      synthesis.id
+      { H.default_local with presentation = { T.inherit_ with freshness = Some false } }
+  in
+  let after = compact_rows quiet data synthesis |> Option.value_exn in
+  assert (Poly.equal (List.take before 2) (List.take after 2));
+  (* Warning freshness survives chrome suppression; ordinary validated freshness is
+     optional, without hiding either the metric or the independent stage. *)
+  assert (List.length after = List.length before);
+  let validated =
+    { data with
+      summary =
+        (fun run ->
+          Option.map (data.summary run) ~f:(fun s -> { s with freshness = Validated }))
+    }
+  in
+  let before_validated = compact_rows host validated synthesis |> Option.value_exn in
+  let after_validated = compact_rows quiet validated synthesis |> Option.value_exn in
+  assert (List.length after_validated = List.length before_validated - 1);
+  assert (Poly.equal (List.take before_validated 2) (List.take after_validated 2));
+  let text = tile_view quiet data synthesis ~width:100 ~height:4 |> plain_text in
+  List.iter
+    [ "Reported cells (agg.): 50"; "cached/unverified"; "synthesis: completed" ]
+    ~f:(fun substring -> assert (String.is_substring text ~substring));
+  let checklist = find "stage-checklist" in
+  let normal = utility_rows host data checklist |> Option.value_exn in
+  assert (List.length normal = 6);
+  assert (List.for_all normal ~f:(fun row -> Option.is_some row.Overview_tiles.status));
+  let detailed =
+    H.set_local host checklist.id { H.default_local with utility_detail = true }
+  in
+  let details =
+    utility_rows detailed data checklist
+    |> Option.value_exn
+    |> Overview_tiles.inspection_lines
+    |> String.concat ~sep:"\n"
+  in
+  List.iter
+    [ "Stage ID: synthesis"; "Source digest:"; "Accept (agg.)" ]
+    ~f:(fun substring -> assert (String.is_substring details ~substring))
+;;
+
+let%test_unit "shallow plan always shows readiness and endpoint; detail retains metadata" =
+  let host, data, find = refinement_fixture P.Overview.definition in
+  let tile = find "planned-run" in
+  let snapshot = Option.value_exn data.asic in
+  let selection : Asic.Selection.t =
+    { flow = String.concat (List.init 100 ~f:(fun _ -> "界"))
+    ; profile = "Exact-Profile"
+    ; endpoint = "signoff"
+    ; assignments = [ String.make 100 'A' ]
+    }
+  in
+  let preview : Asic.Preview.t =
+    { selection
+    ; plan_identity = "Exact-Identity-AbC"
+    ; plan_json = "{\"exact\":\"Metadata-AbC\"}"
+    }
+  in
+  let key = List.hd_exn (Plain_rpc.keys (Plan selection) snapshot) in
+  let snapshot =
+    { snapshot with
+      preview = Some preview
+    ; operations =
+        [ { key; kind = "plan"; state = "completed"; run = None; error = None } ]
+    }
+  in
+  let host =
+    { host with planned_run = Planned_run.receive host.planned_run ~revision:1 snapshot }
+  in
+  List.iter [ 4; 5 ] ~f:(fun height ->
+    let image = tile_view host data tile ~width:60 ~height in
+    assert (View.width image = 60 && View.height image = height);
+    let text = plain_text image in
+    assert (String.is_substring text ~substring:"ready:");
+    assert (String.is_substring text ~substring:"endpoint: signoff"));
+  let detail = H.set_local host tile.id { H.default_local with utility_detail = true } in
+  let full =
+    planned_rows detail tile ~width:30
+    |> List.map ~f:(fun row -> row.Planned_run.text)
+    |> String.concat
+  in
+  List.iter
+    [ "Exact-Identity-AbC"
+    ; "Metadata-AbC"
+    ; selection.flow
+    ; List.hd_exn selection.assignments
+    ]
+    ~f:(fun substring -> assert (String.is_substring full ~substring))
+;;
+
+let%test_unit "live schemes change semantic paint without geometry registry or queries" =
+  let host, data, find = refinement_fixture P.Overview.definition in
+  let dimensions = { Dimensions.width = 120; height = 40 } in
+  let layout host =
+    tile_layout host dimensions
+    |> fun (_, _, cells) ->
+    List.map cells ~f:(fun (tile, geometry) -> tile.W.Tile.id, geometry)
+  in
+  let original = layout host in
+  let plain = render host data dimensions |> plain_text in
+  List.iter Appearance.Scheme.all ~f:(fun scheme ->
+    let appearance = { host.H.appearance with scheme } in
+    let command =
+      List.find_exn (H.appearance_commands host) ~f:(fun c ->
+        String.equal c.H.id ("appearance.scheme." ^ Appearance.Scheme.key scheme))
+    in
+    (* A local Set_appearance action carries no request/query payload. *)
+    let changed =
+      match command.action with
+      | Set_appearance selected -> H.set_appearance host selected
+      | _ -> failwith "scheme action must be client-local"
+    in
+    assert (phys_equal changed.registry host.registry);
+    assert (phys_equal changed.locals host.locals);
+    assert (phys_equal changed.focus host.focus);
+    assert (Poly.equal original (layout changed));
+    assert (String.equal plain (render changed data dimensions |> plain_text));
+    let title =
+      tile_view changed data (find "live-status") ~width:40 ~height:5 |> plain_text
+    in
+    assert (String.is_prefix title ~prefix:"╭ session ─");
+    List.iter Appearance.Color.all ~f:(fun color ->
+      let appearance = { appearance with color } in
+      let attrs = Role.attrs appearance in
+      assert (not (Poly.equal (attrs Success) (attrs Failure)));
+      assert (not (Poly.equal (attrs Warning) (attrs Foreground)));
+      assert (
+        not
+          (Poly.equal
+             (Role.backdrop appearance Selection)
+             (Role.backdrop appearance Foreground))));
+    List.iter Appearance.Scheme.all ~f:(fun other ->
+      if not (Appearance.Scheme.equal scheme other)
+      then (
+        let other = { appearance with scheme = other } in
+        assert (
+          not
+            (Poly.equal
+               (Role.backdrop appearance Background)
+               (Role.backdrop other Background)));
+        assert (not (Poly.equal (Role.attrs appearance Focus) (Role.attrs other Focus))))))
+;;
+
+let%test_unit "host vertical stages preserve exact selected identity and detail" =
   let host, data, find = refinement_fixture P.Overview.definition in
   let tile = find "stage-checklist" in
   let host =
@@ -2233,10 +2590,7 @@ let%test_unit "host horizontal stages wrap while preserving exact selected ident
       let image = tile_view host data tile ~width ~height in
       assert (View.width image = width && View.height image = height));
   let text = tile_view host data tile ~width:120 ~height:5 |> plain_text in
-  List.iter
-    [ "synthesis"; "floorplan"; "placement"; "cts"; "routing"; "signoff" ]
-    ~f:(fun stage -> assert (String.is_substring text ~substring:stage));
-  assert (String.is_substring text ~substring:"Selected: signoff");
+  assert (String.is_substring text ~substring:"signoff: completed");
   let detail =
     H.set_local host tile.id { (H.local host tile.id) with utility_detail = true }
   in
@@ -2311,7 +2665,7 @@ let%test_unit "Timing panes render typed selection and exact scoped detail with 
   List.iter [ paths; detail; context ] ~f:(fun tile ->
     let image = tile_view host data tile ~width:70 ~height:14 in
     assert (String.is_prefix (plain_text image) ~prefix:"╭");
-    assert (String.is_substring (plain_text image) ~substring:"TIMING"));
+    assert (String.is_substring (plain_text image) ~substring:"timing"));
   let path_image = tile_view host data paths ~width:70 ~height:14 |> plain_text in
   assert (String.is_substring path_image ~substring:"path-29/endpoint/Q");
   assert (String.is_substring path_image ~substring:"violated");
@@ -2522,6 +2876,216 @@ let%test_unit "selector width budget preserves useful IDs and aligns compact sta
   List.iter [ 0; 1; 2; 3; 5; 10; 20 ] ~f:(fun width ->
     let label = fit_label ~width "界é selected run identity 界é" in
     assert (cell_width label <= width))
+;;
+
+let%test_unit "actual utility and selector token images carry independent attributes" =
+  let appearance = { Appearance.default with density = Compact; icons = None_ } in
+  let ansi view =
+    let buffer = Buffer.create 200 in
+    Notty.Render.to_buffer
+      buffer
+      Notty.Cap.ansi
+      (0, 0)
+      (View.width view, View.height view)
+      (View.Private.notty_image view);
+    Buffer.contents buffer
+  in
+  let slice view ~x ~width = View.crop ~l:x view |> box ~width ~height:1 |> ansi in
+  let token role text = View.text ~attrs:(Role.attrs appearance role) text |> ansi in
+  let utility =
+    Overview_tiles.render
+      ~appearance
+      ~attrs:(utility_attrs appearance)
+      ~width:40
+      ~height:1
+      [ Overview_tiles.row ~role:Success "Evidence" "validated" ]
+  in
+  assert (String.equal (slice utility ~x:0 ~width:10) (token Foreground "Evidence: "));
+  assert (String.equal (slice utility ~x:10 ~width:9) (token Success "validated"));
+  assert (not (String.equal (token Foreground "validated") (token Success "validated")));
+  List.iter Appearance.Scheme.all ~f:(fun scheme ->
+    let appearance = { appearance with scheme } in
+    let bg = Role.backdrop appearance Selection in
+    let expected role text =
+      View.text ~attrs:(Role.attrs appearance role @ [ Attr.bg bg ]) text |> ansi
+    in
+    List.iter
+      [ "validated", Overview_tiles.Role.Success, Role.Success
+      ; "cached/unverified", Warning, Warning
+      ; "pending", Warning, Warning
+      ; "running", Running, Running
+      ; "cancelled", Warning, Warning
+      ; "future-value", Foreground, Foreground
+      ]
+      ~f:(fun (value, utility_role, value_role) ->
+        let image =
+          Overview_tiles.render
+            ~selected_bg:bg
+            ~appearance
+            ~attrs:(utility_attrs appearance)
+            ~width:40
+            ~height:1
+            [ Overview_tiles.row ~active:true ~role:utility_role "Evidence" value ]
+        in
+        assert (
+          String.equal (slice image ~x:0 ~width:10) (expected Foreground "Evidence: "));
+        assert (
+          String.equal
+            (slice image ~x:10 ~width:(cell_width value))
+            (expected value_role value))));
+  let stage_appearance = { appearance with icons = Ascii } in
+  let stage_bg = Role.backdrop stage_appearance Selection in
+  let stage : Asic.Stage.t =
+    { id = "synthesis"
+    ; name = "Synthesis"
+    ; status = Completed
+    ; requested = true
+    ; reason = None
+    ; action = None
+    }
+  in
+  let strip =
+    Overview_tiles.Stage_strip.model
+      ~appearance:stage_appearance
+      ~width:80
+      ~run:Fs0_fixture.run_a
+      ~selected_id:(Some stage.id)
+      [ stage ]
+  in
+  let image =
+    Overview_tiles.Stage_strip.render
+      ~selected_bg:stage_bg
+      ~appearance:stage_appearance
+      ~attrs:(utility_attrs stage_appearance)
+      ~width:80
+      ~height:2
+      strip
+  in
+  let expected role text =
+    View.text ~attrs:(Role.attrs stage_appearance role @ [ Attr.bg stage_bg ]) text
+    |> ansi
+  in
+  assert (String.equal (slice image ~x:0 ~width:6) (expected Selection "> [+] "));
+  assert (String.equal (slice image ~x:6 ~width:11) (expected Foreground "Synthesis: "));
+  assert (String.equal (slice image ~x:17 ~width:9) (expected Success "completed"));
+  let detail = View.crop ~t:1 image in
+  let label = strip.selected_line.label ^ ": " in
+  assert (
+    String.equal (slice detail ~x:6 ~width:(cell_width label)) (expected Foreground label));
+  assert (
+    String.equal
+      (slice detail ~x:(6 + cell_width label) ~width:9)
+      (expected Success "completed"));
+  let run = { Fs0_fixture.run_a with id = "failed-running-identity" } in
+  List.iter
+    [ "completed", Role.Success
+    ; "failed", Failure
+    ; "running", Running
+    ; "starting", Running
+    ; "pending", Warning
+    ; "queued", Warning
+    ; "cancelled", Warning
+    ; "interrupted", Warning
+    ; "skipped", Warning
+    ; "pass", Foreground
+    ; "future-status", Foreground
+    ]
+    ~f:(fun (status, role) ->
+      List.iter [ false; true ] ~f:(fun cursor ->
+        let width = 65
+        and status_width = cell_width status in
+        let image =
+          run_selector_view
+            appearance
+            ~width
+            ~status_width
+            ~cursor
+            ~active:true
+            run
+            status
+        in
+        let expected role text =
+          View.text
+            ~attrs:
+              (Role.attrs appearance role
+               @ if cursor then [ Attr.bg (Role.backdrop appearance Selection) ] else [])
+            text
+          |> ansi
+        in
+        let identity = if cursor then ">* " else " * " in
+        assert (
+          String.equal
+            (slice image ~x:0 ~width:3)
+            (expected (if cursor then Selection else Foreground) identity));
+        assert (
+          String.equal
+            (slice image ~x:3 ~width:(cell_width (run_label run)))
+            (expected (if cursor then Selection else Foreground) (run_label run)));
+        assert (
+          String.equal
+            (slice image ~x:(width - status_width) ~width:status_width)
+            (expected role status))));
+  let clipped =
+    run_selector_view
+      appearance
+      ~width:20
+      ~status_width:3
+      ~cursor:false
+      ~active:false
+      run
+      "completed"
+  in
+  assert (String.equal (slice clipped ~x:17 ~width:3) (token Success "com"))
+;;
+
+let%test_unit "default Carbon ground is black and actual tile headers are neutral white" =
+  assert (Appearance.Scheme.equal Appearance.default.scheme Carbon);
+  let host, data, find = refinement_fixture P.Overview.definition in
+  let ansi view =
+    let buffer = Buffer.create 200 in
+    Notty.Render.to_buffer
+      buffer
+      Notty.Cap.ansi
+      (0, 0)
+      (View.width view, View.height view)
+      (View.Private.notty_image view);
+    Buffer.contents buffer
+  in
+  let expected =
+    View.text
+      ~attrs:[ Attr.fg (Role.rgb 255 255 255); Attr.bg (Role.rgb 0 0 0); Attr.bold ]
+      "session"
+  in
+  let tile = find "live-status" in
+  List.iter Appearance.Preset.all ~f:(fun preset ->
+    List.iter [ false; true ] ~f:(fun focused ->
+      let appearance = { Appearance.default with preset } in
+      let host =
+        { host with H.appearance; focus = (if focused then Some tile.id else None) }
+      in
+      let image = tile_view host data tile ~width:60 ~height:8 in
+      let y, line =
+        plain_text image
+        |> String.split_lines
+        |> List.findi_exn ~f:(fun _ line -> String.is_substring line ~substring:"session")
+      in
+      let prefix =
+        String.substr_index_exn line ~pattern:"session" |> String.prefix line
+      in
+      let header =
+        View.crop ~l:(cell_width prefix) ~t:y image |> box ~width:7 ~height:1
+      in
+      assert (String.equal (ansi header) (ansi expected));
+      let geometry = panel_geometry host tile ~width:60 ~height:8 in
+      if geometry.border > 0
+      then (
+        let corner = if Appearance.Preset.equal preset Instrument then "╭" else "┌" in
+        let expected =
+          View.text
+            ~attrs:(Role.attrs appearance (if focused then Focus else Border))
+            corner
+        in
+        assert (String.equal (ansi (box ~width:1 ~height:1 image)) (ansi expected)))))
 ;;
 
 let%test_unit "palette prompt caret and fuzzy spans have independent typed attributes" =
@@ -2752,7 +3316,7 @@ let%test_unit "actual preset host resolves quiet chrome, headerless pins and sel
   let host = H.receive H.empty registry in
   let image host tile = tile_view host data tile ~width:100 ~height:16 |> plain_text in
   let normal = image host synthesis in
-  assert (not (String.is_substring normal ~substring:"FOLLOW"));
+  assert (not (String.is_substring normal ~substring:"follow"));
   assert (
     not (String.is_substring normal ~substring:("Run: " ^ run_label Fs0_fixture.run_a)));
   assert (String.is_substring normal ~substring:"Evidence: cached/unverified");
@@ -2781,7 +3345,7 @@ let%test_unit "actual preset host resolves quiet chrome, headerless pins and sel
   in
   let narrow_pin = tile_view titled_pin data pinned ~width:32 ~height:6 |> plain_text in
   assert (String.is_substring narrow_pin ~substring:("PIN " ^ run_label Fs0_fixture.run_a));
-  assert (not (String.is_substring pinned_text ~substring:"Evidence: cached/unverified"));
+  assert (String.is_substring pinned_text ~substring:"Evidence: cached/unverified");
   assert (String.is_substring pinned_text ~substring:"Reported cells (agg.): 50");
   let hidden =
     H.set_local
@@ -2801,7 +3365,7 @@ let%test_unit "actual preset host resolves quiet chrome, headerless pins and sel
     && nav_policy.padding = 0);
   let nav = image host navigation in
   assert (
-    (not (String.is_substring nav ~substring:"PROJECT"))
+    (not (String.is_substring nav ~substring:"project"))
     && not (String.is_substring nav ~substring:"j/k browse"));
   let selector_host =
     H.set_local host selector.id { H.default_local with cursor = Some "asic/run-11" }
@@ -2833,8 +3397,9 @@ let%test_unit "actual preset host resolves quiet chrome, headerless pins and sel
   let select_cell = cell selector
   and synthesis_cell = cell synthesis in
   assert (
-    select_cell.width > (cell (find "live-status")).width
-    && select_cell.y < synthesis_cell.y);
+    select_cell.width = (cell (find "live-status")).width
+    && select_cell.x < synthesis_cell.x
+    && select_cell.y > synthesis_cell.y);
   let renamed =
     { registry with
       workspaces =
@@ -3210,7 +3775,7 @@ let%test_unit "checklist follows exact run and pin with selected-stage detail an
   let compact =
     tile_view compact_host data following ~width:40 ~height:10 |> plain_text
   in
-  List.iter [ "Selected: placement"; "placement: running" ] ~f:(fun text ->
+  List.iter [ "placement: running" ] ~f:(fun text ->
     assert (String.is_substring compact ~substring:text));
   let missing = { data with asic = None } in
   let fallback = utility_rows host missing following |> Option.value_exn in
@@ -3237,6 +3802,16 @@ let%test_unit "checklist follows exact run and pin with selected-stage detail an
   let data = { data with asic = Some snapshot } in
   let host =
     H.browse_stages compact_host following.id ~run:Fs0_fixture.run_b ~stages ~delta:5
+  in
+  let key = List.hd_exn (Plain_rpc.keys (Plan selection) snapshot) in
+  let snapshot =
+    { snapshot with
+      operations =
+        [ { key; kind = "plan"; state = "completed"; run = None; error = None } ]
+    }
+  in
+  let host =
+    { host with planned_run = Planned_run.receive host.planned_run ~revision:1 snapshot }
   in
   assert (Option.is_some (checklist_preview host data following));
   List.iter [ 8; 9; 10; 12; 14 ] ~f:(fun height ->
@@ -3339,7 +3914,7 @@ let%test_unit "simulation tile renders project scope and independent selection a
       assert (View.width view = width && View.height view = height));
   let text = tile_view host data tile ~width:120 ~height:24 |> plain_text in
   assert (String.is_substring text ~substring:"Structured simulation");
-  assert (not (String.is_substring text ~substring:"[PROJECT]"));
+  assert (not (String.is_substring text ~substring:"[project]"));
   let explicit =
     H.set_local
       host
@@ -3351,7 +3926,7 @@ let%test_unit "simulation tile renders project scope and independent selection a
   assert (
     String.is_substring
       (tile_view explicit data tile ~width:120 ~height:24 |> plain_text)
-      ~substring:"[PROJECT]");
+      ~substring:"[project]");
   assert (String.is_substring text ~substring:"/host/trace.vcd");
   assert (not (String.is_substring text ~substring:"No run selected"));
   let local = H.local host tile.id in

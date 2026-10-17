@@ -53,6 +53,7 @@ type row =
   ; active : bool
   ; workspace : Workspace.Workspace_id.t option
   ; details : string list
+  ; display_run : Run_ref.t option
   }
 
 let row
@@ -61,10 +62,11 @@ let row
   ?(active = false)
   ?workspace
   ?(details = [])
+  ?display_run
   label
   value
   =
-  { label; value; role; status; active; workspace; details }
+  { label; value; role; status; active; workspace; details; display_run }
 ;;
 
 let status_role : Status.t -> Role.t = function
@@ -141,6 +143,40 @@ let asic_stage_row ~run ~selected (stage : Asic.Stage.t) =
     (Status.label status)
 ;;
 
+(** Compact Overview keeps the six explicit stage observations ahead of aggregate facts.
+    Callers retain full rows for inspection; this only controls presentation. *)
+let checklist_rows ?(compact = false) ~stages ~aggregate () =
+  if not compact
+  then aggregate @ stages
+  else (
+    match stages with
+    | [] -> aggregate
+    | first :: rest ->
+      { first with
+        details =
+          first.details
+          @ List.concat_map aggregate ~f:(fun row ->
+            (row.label ^ ": " ^ row.value) :: row.details)
+      }
+      :: rest)
+;;
+
+let%test_unit "compact checklist prioritizes explicit stages and retains aggregate \
+               inspection"
+  =
+  let stages =
+    List.init 6 ~f:(fun i -> row ~status:Status.Unknown (Int.to_string i) "not reported")
+  in
+  let aggregate = [ row ~details:[ "source digest" ] "Accept (agg.)" "pass" ] in
+  let compact = checklist_rows ~compact:true ~stages ~aggregate () in
+  assert (List.length compact = 6);
+  assert (
+    List.for_all compact ~f:(fun r -> Option.equal Status.equal r.status (Some Unknown)));
+  assert (List.mem (List.hd_exn compact).details "Accept (agg.): pass" ~equal:String.equal);
+  assert (List.mem (List.hd_exn compact).details "source digest" ~equal:String.equal);
+  assert (List.length (checklist_rows ~stages ~aggregate ()) = 7)
+;;
+
 let execution ~asic ~run =
   Option.bind asic ~f:(fun (snapshot : Asic.Snapshot.t) ->
     List.find snapshot.runs ~f:(fun execution -> Run_ref.equal execution.run run))
@@ -159,7 +195,69 @@ let short_id text =
   else text
 ;;
 
-let run_label (run : Run_ref.t) = Option.value run.label ~default:(short_id run.id)
+let run_label (run : Run_ref.t) =
+  Option.filter run.label ~f:(fun label -> not (String.is_empty (String.strip label)))
+  |> Option.value ~default:run.id
+;;
+
+(** Keep combining marks attached to their preceding scalar. All clipping budgets are
+    terminal cells, and a suffix is contiguous (never skip a wide scalar to fill a gap). *)
+let display_clusters text =
+  let rec loop offset acc =
+    if offset >= String.length text
+    then List.rev acc
+    else (
+      let decoded = Stdlib.String.get_utf_8_uchar text offset in
+      let length = Stdlib.Uchar.utf_decode_length decoded in
+      let scalar = String.sub text ~pos:offset ~len:length in
+      let acc =
+        match acc with
+        | previous :: rest
+          when View.uchar_tty_width (Stdlib.Uchar.utf_decode_uchar decoded) = 0 ->
+          (previous ^ scalar) :: rest
+        | _ -> scalar :: acc
+      in
+      loop (offset + length) acc)
+  in
+  loop 0 []
+;;
+
+let cell_width text = View.width (View.text text)
+
+let take_cells ~width clusters =
+  let rec loop remaining = function
+    | [] -> []
+    | cluster :: rest ->
+      let cells = cell_width cluster in
+      if cells > remaining then [] else cluster :: loop (remaining - cells) rest
+  in
+  loop (Int.max 0 width) clusters
+;;
+
+let fit_run_label ~width (run : Run_ref.t) =
+  let width = Int.max 0 width in
+  let head = run_label run in
+  let full = if String.equal head run.id then head else head ^ " · " ^ run.id in
+  if cell_width full <= width
+  then full
+  else if width <= 2
+  then String.concat (take_cells ~width (display_clusters head))
+  else (
+    let tail_budget = Int.min 8 (Int.max 1 (width - 2)) in
+    let tail =
+      display_clusters run.id
+      |> List.rev
+      |> take_cells ~width:tail_budget
+      |> List.rev
+      |> String.concat
+    in
+    let prefix =
+      display_clusters head
+      |> take_cells ~width:(width - cell_width tail - 1)
+      |> String.concat
+    in
+    prefix ^ "…" ^ tail)
+;;
 
 (** Status vocabularies are field-specific. An unfamiliar value remains visible but
     neutral: e.g. operation completion cannot turn acceptance into a pass. These aggregate
@@ -197,7 +295,8 @@ let freshness_label : Asic.Summary.Freshness.t -> string * Role.t = function
     has that identity when loading host data. Cached facts retain their reported verdict,
     with freshness visible on every row and in inspection. No metrics, check counts, or
     summary completion are used to populate stages. *)
-let summary_rows (summary : Asic.Summary.t) =
+let summary_rows ?(freshness = true) (summary : Asic.Summary.t) =
+  let show_freshness = freshness in
   let freshness, freshness_role = freshness_label summary.freshness in
   let details =
     [ "Run: " ^ run_identity summary.run
@@ -222,42 +321,44 @@ let summary_rows (summary : Asic.Summary.t) =
     in
     row ~role:(Fact.role field value) ~details:(details @ extra) label visible
   in
-  row ~role:freshness_role ~details "Freshness" freshness
-  ::
-  (match summary.terminal with
-   | None ->
-     [ fact Summary_completion "Outcome (agg.)" summary.completion
-     ; fact Verdict "Accept (agg.)" summary.acceptance
-     ; row ~role:Muted ~details "Terminal result" "not imported"
-     ]
-   | Some terminal ->
-     let extra =
-       [ "Finalization attempt: " ^ terminal.attempt
-       ; "Results file: " ^ terminal.results_file
-       ; "Results digest: " ^ terminal.results_digest
-       ]
-     in
-     [ fact ~extra Operation "Operation (agg.)" terminal.operation_status
-     ; fact ~extra Physical_completion "Physical (agg.)" terminal.physical_completion
-     ; fact ~extra Verdict "Accept (agg.)" terminal.acceptance
-     ; fact ~extra Verdict "Timing (agg.)" terminal.timing_goal
-     ]
-     @
-     if List.is_empty terminal.checks
-     then
-       [ row ~role:Muted ~details:(details @ extra) "Checks (aggregate)" "not reported" ]
-     else
-       List.map terminal.checks ~f:(fun (check : Asic.Check.t) ->
-         fact
-           ~extra:
-             (extra
-              @ Option.to_list
-                  (Option.map check.reason ~f:(fun reason -> "Reason: " ^ reason))
-              @ Option.to_list
-                  (Option.map check.source ~f:(fun source -> "Source: " ^ source)))
-           Verdict
-           ("Check " ^ check.name ^ " (aggregate)")
-           check.status))
+  (if show_freshness || not (Asic.Summary.Freshness.equal summary.freshness Validated)
+   then [ row ~role:freshness_role ~details "Freshness" freshness ]
+   else [])
+  @
+  match summary.terminal with
+  | None ->
+    [ fact Summary_completion "Outcome (agg.)" summary.completion
+    ; fact Verdict "Accept (agg.)" summary.acceptance
+    ; row ~role:Muted ~details "Terminal result" "not imported"
+    ]
+  | Some terminal ->
+    let extra =
+      [ "Finalization attempt: " ^ terminal.attempt
+      ; "Results file: " ^ terminal.results_file
+      ; "Results digest: " ^ terminal.results_digest
+      ]
+    in
+    [ fact ~extra Operation "Operation (agg.)" terminal.operation_status
+    ; fact ~extra Physical_completion "Physical (agg.)" terminal.physical_completion
+    ; fact ~extra Verdict "Accept (agg.)" terminal.acceptance
+    ; fact ~extra Verdict "Timing (agg.)" terminal.timing_goal
+    ]
+    @
+    if List.is_empty terminal.checks
+    then
+      [ row ~role:Muted ~details:(details @ extra) "Checks (aggregate)" "not reported" ]
+    else
+      List.map terminal.checks ~f:(fun (check : Asic.Check.t) ->
+        fact
+          ~extra:
+            (extra
+             @ Option.to_list
+                 (Option.map check.reason ~f:(fun reason -> "Reason: " ^ reason))
+             @ Option.to_list
+                 (Option.map check.source ~f:(fun source -> "Source: " ^ source)))
+          Verdict
+          ("Check " ^ check.name ^ " (aggregate)")
+          check.status)
 ;;
 
 (** [observation] must identify its run explicitly. [expected_stages] supplies labels
@@ -397,6 +498,7 @@ let status_rows
       (Option.value_map project ~default:"none open" ~f:(fun p -> p.name))
   ; linkage
   ; row
+      ?display_run:selected_run
       ~details:
         (Option.to_list
            (Option.map selected_run ~f:(fun run -> "Run: " ^ run_identity run)))
@@ -437,7 +539,35 @@ let marker (appearance : Appearance.t) (row : row) =
 (** Map roles to the host's theme, e.g. [Active -> Host_view.Role.Selection]. Full values
     and identity are available through [inspection_lines] before clipping. [title=None]
     makes a headerless tile. No nested frame or background is imposed. *)
-let render ?title ~(appearance : Appearance.t) ~attrs ~width ~height rows =
+let row_spans ~appearance ~width ~indent row =
+  let prefix =
+    indent
+    ^ (if row.active && Option.is_some row.status then "> " else "")
+    ^ marker appearance row
+  in
+  let label = row.label ^ if String.is_empty row.value then "" else ": " in
+  let value =
+    Option.value_map row.display_run ~default:row.value ~f:(fun run ->
+      fit_run_label ~width:(Int.max 0 (width - cell_width (prefix ^ label))) run)
+  in
+  [ (if row.active then Role.Active else row.role), prefix
+  ; Role.Foreground, label
+  ; row.role, value
+  ]
+;;
+
+let render_row ?selected_bg ~appearance ~attrs ~width ~indent row =
+  View.hcat
+    (List.map (row_spans ~appearance ~width ~indent row) ~f:(fun (role, text) ->
+       let attrs =
+         attrs role
+         @ Option.value_map selected_bg ~default:[] ~f:(fun bg ->
+           if row.active then [ Attr.bg bg ] else [])
+       in
+       View.text ~attrs text))
+;;
+
+let render ?title ?selected_bg ~(appearance : Appearance.t) ~attrs ~width ~height rows =
   let width = Int.max 0 width
   and height = Int.max 0 height in
   let heading =
@@ -456,15 +586,7 @@ let render ?title ~(appearance : Appearance.t) ~attrs ~width ~height rows =
     | Compact | Comfortable -> ""
   in
   let content =
-    List.map rows ~f:(fun row ->
-      let value = if String.is_empty row.value then "" else ": " ^ row.value in
-      View.text
-        ~attrs:(attrs row.role)
-        (indent
-         ^ (if row.active && Option.is_some row.status then "> " else "")
-         ^ marker appearance row
-         ^ row.label
-         ^ value))
+    List.map rows ~f:(render_row ?selected_bg ~appearance ~attrs ~width ~indent)
   in
   let view = View.vcat (List.take (heading @ content) height) in
   let view =
@@ -537,11 +659,17 @@ module Stage_strip = struct
     { lines; selected; selected_line }
   ;;
 
-  let render ~appearance ~attrs ~width ~height t =
+  let render ?selected_bg ~appearance ~attrs ~width ~height t =
     let width = Int.max 0 width
     and height = Int.max 0 height in
     let selected =
-      render ~appearance ~attrs ~width ~height:(Int.min 1 height) [ t.selected_line ]
+      render
+        ?selected_bg
+        ~appearance
+        ~attrs
+        ~width
+        ~height:(Int.min 1 height)
+        [ t.selected_line ]
     in
     let lines =
       List.take t.lines (Int.max 0 (height - 1))
@@ -549,10 +677,7 @@ module Stage_strip = struct
         View.hcat
           (List.concat_mapi line ~f:(fun i item ->
              (if i = 0 then [] else [ View.text ~attrs:(attrs Role.Muted) " | " ])
-             @ [ View.text
-                   ~attrs:(attrs (if item.row.active then Role.Active else item.row.role))
-                   (text ~appearance item)
-               ])))
+             @ [ render_row ?selected_bg ~appearance ~attrs ~width ~indent:"" item.row ])))
     in
     (* Selection stays visible even when wrapping exceeds the available strip height. *)
     let view = View.vcat (lines @ if height = 0 then [] else [ selected ]) in
@@ -711,6 +836,11 @@ let%test_unit "cached summary facts retain freshness and do not acquire stage st
     }
   in
   let rows = summary_rows summary in
+  assert (List.length (summary_rows ~freshness:false summary) = List.length rows);
+  let validated = { summary with freshness = Validated } in
+  assert (
+    List.length (summary_rows ~freshness:false validated)
+    = List.length (summary_rows validated) - 1);
   let completion = List.nth_exn rows 1 in
   [%test_result: Role.t] completion.role ~expect:Success;
   [%test_result: string] completion.value ~expect:"completed (cached/unverified)";
@@ -820,4 +950,45 @@ let%test_unit "navigation retains registry identities and missing destinations a
   assert (Option.is_none testing.workspace);
   assert (not testing.active);
   [%test_result: string] testing.value ~expect:"not created"
+;;
+
+let%test_unit "Session labels use actual cells and retain distinguishable hash suffixes" =
+  let run =
+    { Fs0_fixture.run_a with
+      label = Some "Placement customer design"
+    ; id = "opaque0123456789abcdef0123456789abcdef"
+    }
+  in
+  assert (
+    String.equal (fit_run_label ~width:100 run) ("Placement customer design · " ^ run.id));
+  let short = fit_run_label ~width:26 run in
+  assert (String.is_prefix short ~prefix:"Placement");
+  assert (String.is_suffix short ~suffix:"…89abcdef");
+  assert (cell_width short <= 26);
+  let other = { run with id = "opaque0123456789abcdef0123456789abcdea" } in
+  assert (not (String.equal short (fit_run_label ~width:26 other)));
+  List.iter [ ""; "   " ] ~f:(fun label ->
+    let unlabeled = { run with label = Some label } in
+    assert (String.is_prefix (fit_run_label ~width:26 unlabeled) ~prefix:"opaque");
+    assert (String.equal (fit_run_label ~width:100 unlabeled) run.id);
+    assert (Option.equal String.equal unlabeled.label (Some label)));
+  List.iter
+    [ run
+    ; { run with label = None }
+    ; { run with label = Some "界é customer"; id = "識別界éabcdef界é" }
+    ]
+    ~f:(fun run ->
+      List.iter (List.init 100 ~f:Fn.id) ~f:(fun width ->
+        let label = fit_run_label ~width run in
+        assert (Stdlib.String.is_valid_utf_8 label);
+        assert (cell_width label <= width)));
+  let rows =
+    [ row ~display_run:run ~details:[ "Run: " ^ run_identity run ] "Run" (run_label run) ]
+  in
+  let spans =
+    row_spans ~appearance:Appearance.default ~width:32 ~indent:" " (List.hd_exn rows)
+  in
+  assert (cell_width (String.concat (List.map spans ~f:snd)) <= 32);
+  assert (
+    List.mem (inspection_lines rows) ("Run: " ^ run_identity run) ~equal:String.equal)
 ;;

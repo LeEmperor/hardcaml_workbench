@@ -413,11 +413,11 @@ let%test_unit "Timing investigation layout fits 120x40 without a default vertica
     and detail = geometry "timing-detail"
     and context = geometry "timing-context" in
     assert (nav.height = 1);
-    assert (session.y = selector.y && selector.width > 80);
-    assert (paths.y > session.y + session.height);
+    assert (session.y = selector.y && session.width = 40 && selector.width = 80);
+    assert (paths.y >= session.y + session.height);
     assert (paths.width >= 44 && paths.width <= 50 && detail.width >= 68);
     assert (
-      detail.x = context.x && detail.y = paths.y && context.y > detail.y + detail.height);
+      detail.x = context.x && detail.y = paths.y && context.y >= detail.y + detail.height);
     assert (detail.height >= 10 && context.height >= 8);
     List.iter cells ~f:(fun cell ->
       assert (cell.x + cell.width <= 120 && cell.y + cell.height <= 38))

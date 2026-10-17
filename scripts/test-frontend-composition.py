@@ -189,6 +189,8 @@ class Terminal:
 
     def resize(self, width, height):
         self.drain()
+        if (width, height) == (self.width, self.height):
+            return self.drain(.5)
         self.width, self.height = width, height
         # A full redraw follows SIGWINCH. Start a fresh cell transcript so old
         # coordinates cannot masquerade as content in the resized viewport.
@@ -248,11 +250,13 @@ def palette_acceptance(t, check, http):
     overlay = t.capture('fuzzy-overlay', ['COMMAND PALETTE', 'Color Vivid', 'Color Selective', 'Color Restrained'])
     # 120x40 bounds are x=16,y=10,w=88,h=20. Require real nonblank
     # background outside the panel and exact cell equality there.
-    outside = [(y, x) for y in range(t.height) for x in range(t.width)
+    # The final global status row legitimately dismisses transient notices on input;
+    # all workspace cells outside the palette must remain byte/attribute-identical.
+    outside = [(y, x) for y in range(t.height - 1) for x in range(t.width)
                if not (16 <= x < 104 and 10 <= y < 30)]
     check(any(before.cells[y][x][0].strip() for y, x in outside), 'Underlying workspace visibly survives outside bounded overlay')
     check(all(before.cells[y][x] == overlay.cells[y][x] for y, x in outside), 'Overlay preserves source cells and attributes outside bounds')
-    result_rows = [(y, line) for y, line in enumerate(overlay.lines()) if 'Color ' in line]
+    result_rows = [(y, line) for y, line in enumerate(overlay.lines()) if 'Appearance: Color ' in line]
     check(all(any(a[2] for _, a in overlay.cells[y]) for y, _ in result_rows), 'Actual fuzzy result characters have ANSI underline attributes')
     highlighted = []
     for y, line in result_rows:
@@ -283,7 +287,7 @@ def palette_acceptance(t, check, http):
     t.open_palette('ap col')
     t.key(b'\t'); t.key(b'\x1b[Z'); t.key(b'\x1b')
     restored = t.capture('escaped-workspace', absent=['COMMAND PALETTE'])
-    check(stable.cells == restored.cells, 'Esc restores exact source workspace and focus after Tab/Shift-Tab')
+    check(stable.cells[:-1] == restored.cells[:-1], 'Esc restores exact source workspace cells and focus after Tab/Shift-Tab (status notices may dismiss)')
     check(http.rpc(domain='workspace') == registry, 'Palette navigation and appearance do not mutate semantic workspace state')
 
 
@@ -329,6 +333,9 @@ def full_acceptance(t, check, http, runs, presets):
     metrics = t.capture('validated-metrics', ['Freshness: Validated', 'Acceptance (reported):'])
     validation = metrics.attrs_for('Validated')
     check(bool(validation), 'Typed Validated freshness is visible in actual synthesis Metrics')
+    freshness_labels = metrics.attrs_for('Freshness:')
+    check(bool(freshness_labels) and freshness_labels[0][0][0] != validation[0][0][0],
+          'Typed Freshness label remains neutral independently of the validated value color')
     semantic_before = http.rpc(domain='workspace')
     t.command('Toggle focused tile title')
     t.capture('title-hidden', ['Synthesis metrics', '940'], absent=['SYNTHESIS/METRICS'])
@@ -482,8 +489,15 @@ def run(args, acceptance=full_acceptance, extra_runs=(3, 4, 5, 6), startup_check
         startup = terminal.capture('startup-120x40', ['Overview', 'Reported cells (agg.)'])
         if startup_check is not None: startup_check(terminal, check, http, startup)
         if not args.palette_only:
-            selector_count = lambda screen: sum(line.count('asic/') for line in screen.lines()[:12])
-            check(selector_count(startup) == 4, 'Wide Overview run selector shows exactly four of six registered runs by default')
+            def selector_count(screen):
+                lines = screen.lines()
+                top = next(y for y, line in enumerate(lines) if 'runs ' in line.casefold() and '╭' in line)
+                title_x = lines[top].casefold().index('runs ')
+                left = lines[top].rfind('╭', 0, title_x)
+                right = lines[top].index('╮', title_x)
+                bottom = next(y for y in range(top + 1, len(lines)) if lines[y][left:left + 1] == '╰')
+                return sum('asic/' in line[left + 1:right] for line in lines[top + 1:bottom])
+            check(selector_count(startup) == 4, 'Overview sidebar run selector shows exactly four of six registered runs by default')
             check('WORKSPACES' not in startup.text() and '[PROJECT' not in startup.text(), 'Default navigation has quiet title/project chrome')
             registry = http.rpc(domain='workspace')
             terminal.command('Run selector: More visible rows (+1)')

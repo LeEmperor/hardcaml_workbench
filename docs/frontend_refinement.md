@@ -5,6 +5,12 @@ Implemented and verified 2026-10-16 following the owner's visual review of the
 the earlier record retains its historical verification. Shared implementation plan:
 [frontend_refinement_plan.md](frontend_refinement_plan.md).
 
+**Latest owner-review pass:** Overview now uses a wide left sidebar with a vertical
+checklist and individual stacked right panels, plus planned-run. Titles are lowercase,
+gutters tighter, and Carbon/Slate/Crimson/Neon schemes switch live. Timing's composed
+investigation remains. See [current Overview/theme/plan controls](overview_sidebar.md);
+the paired-panel/horizontal-strip descriptions below are historical.
+
 ## Visible changes
 
 ### Panels and palette

@@ -5,6 +5,14 @@ host, not a separate renderer or synthetic-only application. No final product
 default has been selected. The aesthetics worktree now starts with A/Instrument,
 vivid color, Unicode markers and comfortable density as an experimental review preset.
 
+**Current scheme/default:** Carbon now uses black ground with bright white headers.
+Use **Color
+scheme: Carbon / Slate / Crimson / Neon** in the palette to hot-swap independently
+of skin, intensity, icons and density. Tile titles are lowercase and unadorned;
+focused frames retain emphasis. Labels stay neutral while typed status values keep
+their colors. [Current controls and real-example demo](real_asic_example_demo.md);
+[earlier scheme comparisons](overview_sidebar.md).
+
 **Frontend composition follow-on delivered:** bounded fuzzy palette with matched
 character highlighting and Tab/Shift-Tab navigation, quiet default Follow/project
 badges, per-tile presentation controls, typed status colors and centralized OCaml
@@ -23,7 +31,7 @@ Start the client using the normal [README instructions](../README.md). Press
 
 | Palette command | Treatment |
 | --- | --- |
-| `Appearance: A - Instrument` | Rounded Unicode frames, uppercase labels and synthesis-count emphasis |
+| `Appearance: A - Instrument` | Rounded Unicode frames, lowercase border titles and synthesis-count emphasis |
 | `Appearance: B - Structured` | Rectangular frames and clear focus emphasis |
 | `Appearance: C - Minimal` | Borderless, quieter chrome |
 | `Appearance: D - Studio` | Filled card surfaces and tile-title badges |

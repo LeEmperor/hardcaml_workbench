@@ -21,6 +21,7 @@ module Timing_workspace = Terminal_presentation.Timing_workspace
 module Fs0_fixture = Terminal_presentation.Fs0_fixture
 module Simulation_view = Terminal_presentation.Simulation_view
 module Simulation_export = Terminal_presentation.Simulation_export
+module Planned_run = Terminal_presentation.Planned_run
 
 let console_limit = 500
 let minimum_width = 68
@@ -273,6 +274,14 @@ let current_project session =
   State.current_project ~opened:session.opened session.snapshot
 ;;
 
+let plan_scope session (project : Project.t) =
+  Sexp.to_string_mach
+    (Sexp.List
+       [ V1.Daemon_instance_id.sexp_of_t session.hello.instance_id
+       ; Project_id.sexp_of_t project.id
+       ])
+;;
+
 let project_artifacts session =
   match current_project session with
   | None -> []
@@ -286,12 +295,22 @@ let project_artifacts session =
 let reconcile_selection session =
   match current_project session with
   | None ->
+    session.host
+    <- { session.host with
+         planned_run = Planned_run.reset session.host.planned_run ~scope:""
+       };
+    session.asic <- None;
     session.selected_target <- None;
     session.selected_configuration <- None;
     session.selected_artifact <- None;
     session.artifact_view <- None;
     session.hierarchy_view <- None
   | Some project ->
+    let planned_run =
+      Planned_run.reset session.host.planned_run ~scope:(plan_scope session project)
+    in
+    if not (phys_equal planned_run session.host.planned_run) then session.asic <- None;
+    session.host <- { session.host with planned_run };
     let target, configuration =
       State.reconcile_selection
         project
@@ -750,22 +769,56 @@ let capture_artifact_request session (tile : Workspace.Tile.t) view operation =
     |> Option.map ~f:(fun ticket -> tile.id, ticket))
 ;;
 
-let asic_request ?artifact_request ?inspection_request session operation =
+let asic_request ?artifact_request ?inspection_request ?plan_request session operation =
   match current_project session with
   | None -> return ()
   | Some project ->
     let instance_id = session.hello.instance_id in
+    let client = session.client in
     session.asic_request_id <- session.asic_request_id + 1;
     let request_id = session.asic_request_id in
+    let scope = plan_scope session project in
+    let planned_run = Planned_run.reset session.host.planned_run ~scope in
+    let planned_run, plan_ticket =
+      match operation with
+      | Asic.Operation.Plan _ when Option.is_some plan_request ->
+        planned_run, plan_request
+      | Asic.Operation.Plan selection ->
+        let planned_run, ticket = Planned_run.begin_plan planned_run selection in
+        planned_run, Some ticket
+      | _ -> planned_run, None
+    in
+    session.host <- { session.host with planned_run };
     let%map response =
       request session.diagnostics_file (fun () ->
-        Http.Client.asic session.client { instance_id; project = project.id; operation })
+        Http.Client.asic client { instance_id; project = project.id; operation })
     in
     let current =
-      V1.Daemon_instance_id.equal instance_id session.hello.instance_id
+      phys_equal client session.client
+      && V1.Daemon_instance_id.equal instance_id session.hello.instance_id
       && Option.value_map (current_project session) ~default:false ~f:(fun p ->
         Project_id.equal p.id project.id)
     in
+    let plan_current =
+      Option.value_map plan_ticket ~default:true ~f:(fun ticket ->
+        Planned_run.current_ticket session.host.planned_run ticket)
+    in
+    if current
+    then
+      Option.iter plan_ticket ~f:(fun ticket ->
+        (* IDs order request issuance, not daemon snapshot capture. A higher-ID Get can
+           still have read the old same-selection completed task before Plan reached the
+           daemon. Require a request issued after the receipt. *)
+        let floor = session.asic_request_id + 1 in
+        session.host
+        <- { session.host with
+             planned_run =
+               Planned_run.receipt
+                 session.host.planned_run
+                 ticket
+                 ~floor
+                 (Result.map response ~f:(fun _ -> ()))
+           });
     (* A rejected/timed-out launch must release its pending view even when a newer Get
        snapshot has already arrived. Never retry a potentially accepted launch. *)
     if current
@@ -812,11 +865,16 @@ let asic_request ?artifact_request ?inspection_request session operation =
     then (
       match response with
       | Error message ->
-        if Option.is_none artifact_request
+        if Option.is_none artifact_request && plan_current
         then session.host <- { session.host with notice = "ASIC: " ^ message }
       | Ok snapshot ->
         session.asic_applied_id <- request_id;
         session.asic <- Some snapshot;
+        session.host
+        <- { session.host with
+             planned_run =
+               Planned_run.receive session.host.planned_run ~revision:request_id snapshot
+           };
         reconcile_synthesis session);
     if current && Option.is_some artifact_request then reconcile_synthesis session
 ;;
@@ -1335,6 +1393,7 @@ and reconnect session =
        ; palette = None
        ; prefix = 0
        ; editing_filter = false
+       ; planned_run = Planned_run.reset session.host.planned_run ~scope:""
        };
     session.asic <- None;
     session.host
@@ -2624,6 +2683,14 @@ let host_catalog session =
           "run synth preview"
           (Edit_plan (flow.id, profile))))
     @ Option.value_map asic.preview ~default:[] ~f:(fun preview ->
+      let plan_unavailable =
+        if Planned_run.launchable session.host.planned_run preview
+        then None
+        else
+          Some
+            "Current plan is pending, failed, stale or unconfirmed; prepare again \
+             explicitly"
+      in
       let label =
         sprintf
           "%s / %s → %s [%s]"
@@ -2631,8 +2698,10 @@ let host_catalog session =
           preview.selection.profile
           preview.selection.endpoint
           preview.plan_identity
+        |> Artifact_view.safe
       in
       [ Host.command
+          ?unavailable:plan_unavailable
           "asic.launch"
           ("Launch " ^ label)
           "run synth"
@@ -2641,7 +2710,7 @@ let host_catalog session =
           ?unavailable:
             (if Option.is_some session.view_on_allocation
              then Some "Another launch-and-view is awaiting allocation"
-             else None)
+             else plan_unavailable)
           "asic.launch-view"
           ("Launch and view in captured context: " ^ label)
           "run select"
@@ -2864,7 +2933,7 @@ let execute_host session captured action ~exit =
   let open Bonsai_term in
   let captured_client = session.client in
   let captured_project = Option.map (current_project session) ~f:(fun p -> p.id) in
-  let async f =
+  let async ?(on_rejected = ignore) f =
     Effect.of_deferred_thunk (fun () ->
       if Host.current session.host captured
          && phys_equal captured_client session.client
@@ -2874,6 +2943,7 @@ let execute_host session captured action ~exit =
               (Option.map (current_project session) ~f:(fun p -> p.id))
       then f ()
       else (
+        on_rejected ();
         session.host
         <- { session.host with
              notice = "Command target changed before dispatch; reopen palette"
@@ -3155,9 +3225,34 @@ let execute_host session captured action ~exit =
     | Inspect_hierarchy -> async (fun () -> inspect_hierarchy session)
     | Discover_asic -> async (fun () -> asic_request session Discover)
     | Asic (Plan selection as operation) ->
-      async (fun () ->
-        let%bind () = save_preferences session selection in
-        asic_request session operation)
+      (match current_project session with
+       | None -> Effect.Ignore
+       | Some project ->
+         (* Fence at command acceptance, before effect dispatch or preference I/O can
+            yield to a poll, a newer Plan, or Launch. *)
+         let planned_run =
+           Planned_run.reset session.host.planned_run ~scope:(plan_scope session project)
+         in
+         let planned_run, ticket = Planned_run.begin_plan planned_run selection in
+         session.host <- { session.host with planned_run };
+         async
+           ~on_rejected:(fun () ->
+             session.host
+             <- { session.host with
+                  planned_run =
+                    Planned_run.receipt
+                      session.host.planned_run
+                      ticket
+                      ~floor:Int.max_value
+                      (Error "Command target changed before Plan dispatch")
+                })
+           (fun () ->
+             if not (Planned_run.current_ticket session.host.planned_run ticket)
+             then return ()
+             else (
+               let response = asic_request ~plan_request:ticket session operation in
+               let%bind () = save_preferences session selection in
+               response)))
     | Asic (Cancel key as operation) ->
       async (fun () ->
         if Option.value_map session.asic ~default:false ~f:(fun snapshot ->
@@ -3292,19 +3387,29 @@ let execute_host session captured action ~exit =
          };
       Effect.Ignore
     | Launch_asic (preview, view) ->
-      if not
-           (Option.value_map session.asic ~default:false ~f:(fun asic ->
-              Option.equal Asic.Preview.equal asic.preview (Some preview)))
-      then (
+      let ready () =
+        Planned_run.launchable session.host.planned_run preview
+        && Option.value_map session.asic ~default:false ~f:(fun asic ->
+          Option.equal Asic.Preview.equal asic.preview (Some preview))
+      in
+      let invalidated () =
         session.host
         <- { session.host with
              notice = "ASIC preview invalidated; prepare the plan again"
-           };
+           }
+      in
+      if not (ready ())
+      then (
+        invalidated ();
         Effect.Ignore)
       else (
         let key = submission_key "asic-run" in
         async (fun () ->
-          if view && Option.is_some session.view_on_allocation
+          if not (ready ())
+          then (
+            invalidated ();
+            return ())
+          else if view && Option.is_some session.view_on_allocation
           then (
             session.host
             <- { session.host with
@@ -3374,9 +3479,40 @@ let execute_host session captured action ~exit =
 
 let scroll_host session delta =
   reconcile_synthesis session;
-  Option.iter session.last_dimensions ~f:(fun dimensions ->
-    session.host
-    <- Host_view.scroll_focused session.host (host_data session) dimensions ~delta)
+  match Host.focused session.host with
+  | Some tile when String.equal tile.kind "planned-run" ->
+    let local = Host.local session.host tile.id in
+    Option.iter session.last_dimensions ~f:(fun dimensions ->
+      let _, _, layout = Host_view.tile_layout session.host dimensions in
+      Option.iter
+        (List.find layout ~f:(fun (t, _) -> Workspace.Tile_id.equal t.id tile.id))
+        ~f:(fun (_, geometry) ->
+          let _, _, _, width, height =
+            Host_view.body_geometry
+              session.host
+              tile
+              ~width:geometry.width
+              ~height:geometry.height
+          in
+          let count =
+            Host_view.rows
+              (Host.set_local session.host tile.id { local with scroll = 0 })
+              (host_data session)
+              tile
+              ~width
+              ~height
+            |> List.length
+          in
+          let bound = Int.max 0 (count - height) in
+          let scroll =
+            Int64.(max zero (min (of_int bound) (of_int local.scroll + of_int delta)))
+            |> Int64.to_int_exn
+          in
+          session.host <- Host.set_local session.host tile.id { local with scroll }))
+  | _ ->
+    Option.iter session.last_dimensions ~f:(fun dimensions ->
+      session.host
+      <- Host_view.scroll_focused session.host (host_data session) dimensions ~delta)
 ;;
 
 let browse_host session delta =
@@ -3499,7 +3635,10 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
   | Host.Execute (capture, action) -> Some (execute_host session capture action ~exit)
   | Host.Activate ->
     Option.iter (Host.focused host) ~f:(fun tile ->
-      if List.mem [ "stage-checklist"; "live-status" ] tile.kind ~equal:String.equal
+      if List.mem
+           [ "stage-checklist"; "live-status"; "planned-run" ]
+           tile.kind
+           ~equal:String.equal
       then
         session.host
         <- Host.set_local
@@ -3687,6 +3826,7 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
                || String.equal tile.kind "simulation"
                || String.equal tile.kind "synthesis"
                || String.equal tile.kind "live-status"
+               || String.equal tile.kind "planned-run"
                || String.equal tile.kind "stage-checklist" ->
           scroll_host session (if Char.equal ch '[' then -1 else 1)
         | _ ->

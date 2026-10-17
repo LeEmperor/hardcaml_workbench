@@ -5,6 +5,7 @@ prepare prints commands; daemon/client explicitly exec an already built binary.
 seed uses real daemon HTTP, including registration, summaries, FS1 and layouts.
 """
 import argparse
+import hashlib
 import os
 from pathlib import Path
 import shlex
@@ -12,11 +13,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.dont_write_bytecode = True
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / 'demo/synthetic_flow'))
 import provider
+import simulation_provider
 from http_client import Client, field, parse, sexp
 
 
@@ -56,7 +59,52 @@ def prepare(directory=None, manual=False, delay=1.5):
     runs = provider.seed(results)
     provider.save(base / 'manifest.json', dict(synthetic=True, label=provider.LABEL,
         project_root=str(root), results_root=str(results), runs=runs))
+    install_simulation(base)
     return base
+
+
+def install_simulation(base):
+    """Explicit, additive prepare/seed upgrade; preflight every owned destination."""
+    manifest_path = base / 'manifest.json'
+    manifest = provider.load(manifest_path)
+    root = base / 'project'
+    if (manifest.get('synthetic') is not True or manifest.get('label') != provider.LABEL or
+            manifest.get('project_root') != str(root) or
+            manifest.get('results_root') != str(base / 'results') or
+            not isinstance(manifest.get('runs'), list)):
+        raise RuntimeError('Refusing upgrade: manifest.json is not this prepared SYNTHETIC demo. '
+                           'Use prepare --dir NEW_DIRECTORY, or restore its original manifest.')
+    previous = manifest.get('simulation_install', {})
+    if previous and (previous.get('owner') != 'synthetic-flow-fs2' or previous.get('version') != 1):
+        raise RuntimeError('Unsupported synthetic FS2 ownership/version; use a new prepared directory.')
+    source = root / 'synthetic-provider'
+    config = [['schema_version', '1'], ['provider_executable', str(Path(sys.executable).resolve())],
+              ['provider_args', [str(source / 'simulation_provider.py')]],
+              ['discovery_timeout_seconds', '10'], ['run_timeout_seconds', '20']]
+    files = {root / 'hardcaml-workbench-simulation.sexp': (sexp(config) + '\n').encode()}
+    for name in ('simulation_provider.py', 'simulation_wire.py'):
+        files[source / name] = (REPO / 'demo/synthetic_flow' / name).read_bytes()
+    hashes = {}
+    for path, data in files.items():
+        relative = str(path.relative_to(root))
+        hashes[relative] = hashlib.sha256(data).hexdigest()
+        # Symlink parents must never redirect an additive upgrade outside the demo.
+        if any(p.is_symlink() for p in (base, root, path.parent, path)):
+            raise RuntimeError('Refusing synthetic upgrade through symlink: ' + str(path))
+        if path.exists():
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+            owned = previous.get('sha256', {}).get(relative)
+            if actual != hashes[relative] and actual != owned:
+                raise RuntimeError('Refusing to overwrite unrelated or edited file: ' + str(path) +
+                    '. Keep your configuration/provider; prepare --dir NEW_DIRECTORY for the demo, '
+                    'or explicitly relocate this conflicting file before seed.')
+    source.mkdir(exist_ok=True)
+    for path, data in files.items():
+        if not path.exists() or path.read_bytes() != data:
+            path.write_bytes(data)
+    manifest['simulation_install'] = dict(owner='synthetic-flow-fs2', version=1, sha256=hashes)
+    provider.save(manifest_path, manifest)
+    return manifest
 
 
 def workspace_presets(executable=None):
@@ -89,9 +137,121 @@ def apply_workspace_presets(client, snapshot, presets):
     return snapshot
 
 
+def ensure_workspaces(client, snapshot, presets):
+    """Stable preset identity wins over display names, including custom collisions."""
+    for identity in ('overview', 'timing', 'testing'):
+        if any(field(w, 'preset') == [identity] for w in field(snapshot, 'workspaces')):
+            continue
+        before = {field(w, 'id') for w in field(snapshot, 'workspaces')}
+        names = {field(w, 'name') for w in field(snapshot, 'workspaces')}
+        name = field(presets[identity], 'name')
+        if name in names:
+            name += ' (synthetic default)'
+            while name in names:
+                name += '+'
+        snapshot = client.mutate(snapshot,
+            '(Create_workspace (window %s) (name %s) (context %s))' %
+            (sexp(field(field(snapshot, 'windows')[0], 'id')), sexp(name),
+             sexp(field(snapshot, 'main_context'))))
+        created = next(w for w in field(snapshot, 'workspaces') if field(w, 'id') not in before)
+        specs = [[field(t, 'kind'), field(t, 'geometry')] for t in field(presets[identity], 'tiles')]
+        snapshot = client.mutate(snapshot,
+            '(Apply_preset (workspace %s) (preset %s) (tiles %s))' %
+            (sexp(field(created, 'id')), sexp(identity), sexp(specs)))
+    return snapshot
+
+
+def simulation_poll(client, operation, predicate, label, seconds=30):
+    """FS2 rpc returns promptly: explicitly Observe/Get, never ASIC wait semantics."""
+    deadline = time.monotonic() + seconds
+    notice = 0
+    while True:
+        snapshot = client.rpc(operation, domain='simulation', wait=False)
+        if predicate(snapshot):
+            return snapshot
+        now = time.monotonic()
+        if now >= deadline:
+            raise TimeoutError('SYNTHETIC ' + label + ' timed out; retry explicit seed with the same directory/keys.')
+        if now >= notice:
+            print('SYNTHETIC waiting: ' + label, flush=True)
+            notice = now + 2
+        time.sleep(.1)
+
+
+def discover_simulation(client):
+    snapshot = client.rpc('Discover', domain='simulation', wait=False)
+    job = field(snapshot, 'discovery_job')[0]
+    deadline = time.monotonic() + 30
+    notice = 0
+    while True:
+        snapshot = client.raw('/api/v1/snapshot', [['instance_id', client.instance]])
+        found = next((j for j in field(snapshot, 'jobs') if field(j, 'id') == job), None)
+        if found and field(found, 'state') in ('Complete', 'Failed', 'Cancelled'):
+            break
+        now = time.monotonic()
+        if now >= deadline:
+            raise TimeoutError('SYNTHETIC discovery timed out; retry seed (active discovery coalesces).')
+        if now >= notice:
+            print('SYNTHETIC waiting: FS2 Discover job ' + str(job), flush=True)
+            notice = now + 2
+        time.sleep(.1)
+    snapshot = client.rpc(domain='simulation', wait=False)
+    if field(snapshot, 'discovery_error') or not field(snapshot, 'discovery_digest'):
+        raise RuntimeError('SYNTHETIC FS2 discovery failed: ' + sexp(snapshot))
+    return field(snapshot, 'discovery_digest')[0]
+
+
+def seed_simulation(base, client):
+    digest = discover_simulation(client)
+    path = base / 'simulation-seed.json'
+    receipts = provider.load(path) if path.exists() else {'version': 1, 'submissions': {}}
+    if receipts.get('version') != 1:
+        raise RuntimeError('Unsupported simulation-seed.json version; preserve it and use a new demo.')
+    for label, failed in (('pass', False), ('failure', True)):
+        key = 'synthetic-fs2-v1-' + label
+        receipt = receipts['submissions'].get(key)
+        if receipt is None:
+            operation = '(Launch (submission_key %s) (discovery_digest %s) (selection %s))' % (
+                sexp(key), sexp(digest), sexp(simulation_provider.selection(failed)))
+            receipt = dict(label='SYNTHETIC representative ' + label, operation=operation)
+            receipts['submissions'][key] = receipt
+            # Persist exact payload BEFORE submitting: recovery across catalog/config
+            # revisions retries the original reservation, not a changed digest.
+            provider.save(path, receipts)
+        print('SYNTHETIC FS2 seed: ' + label + ' (' + key + ')', flush=True)
+        try:
+            snapshot = client.rpc(receipt['operation'], domain='simulation', wait=False)
+        except RuntimeError as error:
+            # These exact errors occur only AFTER durable reservation lookup. A
+            # never-accepted/evicted payload may adopt the freshly discovered digest.
+            if 'Stale simulation discovery digest' not in str(error):
+                raise
+            old = parse(receipt['operation'])
+            for entry in old[1:]:
+                if entry[0] == 'discovery_digest':
+                    entry[1] = digest
+            receipt['operation'] = '(' + old[0] + ' ' + ' '.join(sexp(v) for v in old[1:]) + ')'
+            provider.save(path, receipts)
+            snapshot = client.rpc(receipt['operation'], domain='simulation', wait=False)
+        detail = field(snapshot, 'detail')[0]
+        receipt.update(attempt_id=field(detail, 'id'), job=field(detail, 'job'))
+        provider.save(path, receipts)
+        snapshot = simulation_poll(client, '(Observe %s)' % sexp(receipt['attempt_id']),
+            lambda s: field(field(s, 'detail')[0], 'lifecycle') not in ('Queued', 'Running'),
+            label + ' attempt ' + receipt['attempt_id'])
+        detail = field(snapshot, 'detail')[0]
+        if field(detail, 'outcome') != ('Failed' if failed else 'Passed') or field(detail, 'exit_code') != ['0']:
+            raise RuntimeError('SYNTHETIC representative attempt did not finish as declared: ' + sexp(detail))
+        receipt['detail'] = detail
+        provider.save(path, receipts)
+        print('SYNTHETIC FS2 ' + label + ': ' + field(detail, 'outcome') +
+              ', process exit 0, reports/traces retained.', flush=True)
+    return receipts
+
+
 def seed(base, url, preset_export=None):
+    manifest = install_simulation(base)
     presets = workspace_presets(preset_export)
-    manifest = provider.load(base / 'manifest.json')
     # Explicit selection also works with an externally started daemon whose PATH
     # lacks Dune. The terminal must use the same selection/project-session key.
     client = Client(url, manifest['project_root'], switch=switch_name())
@@ -115,6 +275,7 @@ def seed(base, url, preset_export=None):
         registered.append(run)
     # Stable existing workspace IDs; avoid duplicating tiles on repeated seed.
     ws = client.rpc(domain='workspace')
+    ws = ensure_workspaces(client, ws, presets)
     overview = next((w for w in field(ws, 'workspaces') if field(w, 'preset') == ['overview']), None)
     if overview is None:
         raise RuntimeError('Synthetic seed requires a workspace with stable preset ID overview')
@@ -124,10 +285,11 @@ def seed(base, url, preset_export=None):
     ws = client.mutate(ws, '(Select_run (workspace %s) (context %s) (expected_selection_revision %s) (run (%s)))' %
         (workspace, context_id, field(context, 'selection_revision'), sexp(registered[0])))
     ws = apply_workspace_presets(client, ws, presets)
+    seed_simulation(base, client)
     provider.save(base / 'workspace-presets.json', presets)
     provider.save(base / 'seed-http.json', client.history)
     provider.save(base / 'seeded.json', dict(url=url, project=client.project, runs=registered, workspace=ws))
-    print('SYNTHETIC reference and failed candidate registered; FS1 evidence imported.')
+    print('SYNTHETIC reference and failed candidate registered; FS1 and FS2 evidence imported.', flush=True)
     return client, registered
 
 

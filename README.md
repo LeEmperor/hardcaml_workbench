@@ -57,6 +57,8 @@ embedded waveforms and real gate-level adapters remain later integrations.
 - [Try the appearance presets](docs/appearance_presets.md) — A–E skins and independent color/icon/density controls.
 - [Workspace composition and palette](docs/frontend_composition.md) — per-workspace OCaml definitions, floating fuzzy palette, configurable badges/chrome and typed status emphasis.
 - [Refined Overview and Timing](docs/frontend_refinement.md) — border titles, compact summaries, horizontal stages, wide run labels and cooperative Timing investigation panes.
+- [Current Overview sidebar and schemes](docs/overview_sidebar.md) — tightly packed vertical sidebar/right summaries, live Carbon/Slate/Crimson/Neon schemes and exact planned-run preview.
+- [Real ASIC example demo and current polish](docs/real_asic_example_demo.md) — black default, value-only status colors, split checklist/planned-run sidebar and verified actual-example launch commands.
 - [Interactive synthetic flow](docs/synthetic_flow.md) — populated Overview/Timing, live checklist, simulated launches and FS1 inspection without EDA tools.
 - [Formatting guide](docs/formatting_guide.md) — retained source conventions.
 - [Backlog](docs/backlog/README.md) — explicitly deferred ideas and reactivation triggers.
@@ -105,7 +107,31 @@ Separate foreground startup is:
   --environment opam:PROJECT_SWITCH
 ```
 
-### Open the completed FS1 example
+### Open the current real ASIC example demo
+
+The actual example has a prepared persistent provider and isolated demo state.
+From this checkout, Terminal1:
+
+```sh
+python3 -B scripts/real-asic-example-demo.py daemon
+```
+
+Terminal2:
+
+```sh
+python3 -B scripts/real-asic-example-demo.py seed
+python3 -B scripts/real-asic-example-demo.py client
+```
+
+This adopts real retained named signoff evidence without EDA. See
+[the current guide](docs/real_asic_example_demo.md) for exact provenance, limits and
+`refresh-binaries` after future builds. It replaces the volatile historical setup below.
+
+### Historical FS1 manual demo (superseded)
+
+The commands in this section record the earlier temporary installation and evidence
+paths, which may no longer exist after reboot. Use the persistent launcher above
+for current testing rather than copying these old provider/result paths.
 
 This local demo inspects the retained `hardcaml_asic_example` physical execution
 and its accepted finalization; it does not rerun implementation or acceptance.

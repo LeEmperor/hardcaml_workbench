@@ -147,12 +147,40 @@ let%test_unit "short border title reclaims a row and preserves skin fallback" =
       (View.Private.notty_image view);
     Buffer.contents buffer
   in
-  let unicode = render appearance "Session" in
-  assert (String.is_substring unicode ~substring:"╭ Session ─");
+  let unicode = render appearance "session" in
+  assert (String.is_substring unicode ~substring:"╭ session ─");
   assert (String.is_substring unicode ~substring:"│ only content row");
   assert (String.is_substring unicode ~substring:"╰─");
   let ascii = render { appearance with icons = Ascii } "PIN exact/run" in
   assert (String.is_substring ascii ~substring:"+ PIN exact/run -");
   assert (String.is_substring ascii ~substring:"| only content row");
   assert (not (String.is_substring (render appearance "") ~substring:"Session"))
+;;
+
+let%test_unit "rounded labels are exact and retain evidence identity" =
+  let g =
+    geometry ~framed:true ~width:32 ~height:3 ~horizontal_padding:0 ~vertical_padding:0
+  in
+  let image =
+    render
+      Appearance.default
+      ~attrs:[]
+      ~title:(View.text "timing PIN Run-AbC")
+      ~geometry:g
+      ~width:32
+      ~height:3
+      View.none
+  in
+  let buffer = Buffer.create 200 in
+  Notty.Render.to_buffer
+    buffer
+    Notty.Cap.dumb
+    (0, 0)
+    (32, 3)
+    (View.Private.notty_image image);
+  assert (
+    String.is_prefix
+      (Buffer.contents buffer)
+      ~prefix:
+        ("╭ timing PIN Run-AbC " ^ String.concat (List.init 10 ~f:(fun _ -> "─")) ^ "╮"))
 ;;

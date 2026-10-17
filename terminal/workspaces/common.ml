@@ -78,6 +78,7 @@ type tree =
       }
   | Stack of tree list
   | Columns of tree list
+  | Weighted_columns of (int * tree) list
   | Narrow of tree
 [@@deriving sexp]
 

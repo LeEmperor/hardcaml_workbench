@@ -22,6 +22,8 @@ Project/provider commands remain useful without the application.
 | [Appearance presets](appearance_presets.md) | Try the implemented A–E skins and independent presentation controls |
 | [Frontend composition](frontend_composition.md) | Where workspace layouts live; bounded fuzzy palette, per-tile chrome, status colors, preset migration and actual PTY evidence |
 | [Frontend refinement](frontend_refinement.md) | Current panel/palette styling, compact six-domain Overview, run-selector sizing and dedicated Timing investigation workspace |
+| [Overview sidebar and schemes](overview_sidebar.md) | Latest dense Overview composition, color-scheme controls, planned-run semantics and native verification |
+| [Real ASIC example demo](real_asic_example_demo.md) | Current black-theme/status polish, split checklist/planned-run sidebar and exact commands for genuine retained ASIC evidence |
 | [Synthetic flow demo](synthetic_flow.md) | Launch populated Overview/Timing workspaces and operate a simulated flow through the real daemon, without EDA |
 | [Synthesis inspection](synthesis_inspection.md) | FS1/F06 cell table, filter/sort, row detail and evidence controls |
 | [FS1 acceptance](fs1_acceptance.md) | Aggregate timing/resources/checks, declared-clock context, finalization import, real physical/acceptance/cancellation evidence and remaining scope |

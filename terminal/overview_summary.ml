@@ -8,7 +8,8 @@ let supports = function
   | _ -> false
 ;;
 
-let rows ?stage_id ~kind ~run ~summary ~stages () =
+let rows ?(compact = false) ?(freshness = true) ?stage_id ~kind ~run ~summary ~stages () =
+  let show_freshness = freshness in
   let stage_id = Option.value stage_id ~default:kind in
   let summary =
     Option.filter summary ~f:(fun (s : Asic.Summary.t) -> Run_ref.equal s.run run)
@@ -150,7 +151,35 @@ let rows ?stage_id ~kind ~run ~summary ~stages () =
   in
   (* Keep freshness ahead of cached facts even in a very short panel. Stage request and
      outcomes remain independent of imported metrics and terminal acceptance. *)
-  stage :: freshness :: evidence
+  let freshness_rows =
+    if show_freshness
+       || not
+            (Option.exists summary ~f:(fun s ->
+               Asic.Summary.Freshness.equal s.freshness Validated))
+    then [ freshness ]
+    else []
+  in
+  if not compact
+  then (stage :: freshness_rows) @ evidence
+  else (
+    let evidence =
+      let failures, others =
+        List.partition_tf evidence ~f:(fun r -> O.Role.equal r.role Failure)
+      in
+      List.map (failures @ others) ~f:(fun (r : O.row) ->
+        { r with
+          value =
+            (r.value
+             ^
+             match summary with
+             | Some { freshness = Validated; _ } -> ""
+             | _ -> " (" ^ freshness.value ^ ")")
+        ; details = r.details @ O.inspection_lines [ stage; freshness ]
+        })
+    in
+    match evidence with
+    | [] -> freshness_rows @ [ stage ]
+    | first :: rest -> (first :: stage :: rest) @ freshness_rows)
 ;;
 
 let%test_unit "typed metrics preserve zero, units, missing and nonfinite without a \
@@ -224,7 +253,61 @@ let%test_unit "typed metrics preserve zero, units, missing and nonfinite without
   let rs = rows ~kind:"finalization" ~run ~summary:(Some (summary [])) ~stages:[] () in
   let acceptance = List.nth_exn rs 2 in
   [%test_result: string] acceptance.value ~expect:"not_evaluated";
-  [%test_result: O.Role.t] acceptance.role ~expect:Warning
+  [%test_result: O.Role.t] acceptance.role ~expect:Warning;
+  let failed : Asic.Stage.t =
+    { id = "timing"
+    ; name = "Timing"
+    ; status = Failed
+    ; requested = true
+    ; reason = Some "tool failed"
+    ; action = None
+    }
+  in
+  let compact =
+    rows
+      ~compact:true
+      ~kind:"timing"
+      ~run
+      ~summary:(Some (summary [ metric (Some 0.) "available" ]))
+      ~stages:[ failed ]
+      ()
+  in
+  let first = List.hd_exn compact in
+  assert (String.is_substring first.value ~substring:"0 ns");
+  assert (String.is_substring first.value ~substring:"refresh failed");
+  assert (Option.is_none first.status);
+  assert (O.Status.equal (Option.value_exn (List.nth_exn compact 1).status) Failed);
+  let inspected = O.inspection_lines compact |> String.concat ~sep:"\n" in
+  assert (String.is_substring inspected ~substring:"tool failed");
+  assert (String.is_substring inspected ~substring:"Refresh error: offline");
+  let quiet =
+    rows
+      ~compact:true
+      ~freshness:false
+      ~kind:"timing"
+      ~run
+      ~summary:(Some (summary [ metric (Some 0.) "available" ]))
+      ~stages:[ failed ]
+      ()
+  in
+  assert (String.is_substring (List.hd_exn quiet).value ~substring:"refresh failed");
+  assert (List.exists quiet ~f:(fun row -> String.equal row.label "Evidence"));
+  let failed_summary =
+    { (summary []) with
+      terminal = Some { (terminal []) with operation_status = "failed" }
+    }
+  in
+  let compact =
+    rows
+      ~compact:true
+      ~kind:"finalization"
+      ~run
+      ~summary:(Some failed_summary)
+      ~stages:[]
+      ()
+  in
+  [%test_result: string] (List.hd_exn compact).label ~expect:"Operation (agg.)";
+  [%test_result: O.Role.t] (List.hd_exn compact).role ~expect:Failure
 ;;
 
 let%test_unit "typed compact facts fence run, availability and acceptance" =
@@ -287,7 +370,7 @@ let%test_unit "compact evidence uses actual panel content bounds at accepted ter
             ~horizontal_padding:1
             ~vertical_padding:0
         in
-        assert (geometry.content_height >= 4);
+        assert (geometry.content_height >= 3);
         let content =
           O.render
             ~appearance

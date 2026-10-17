@@ -309,15 +309,15 @@ def pty_check(base, client_path, http):
         # Only after the physical demo proof, zoom the actual checklist for the
         # existing deterministic interaction/launch scenario.
         ws = http.mutate(http.rpc(domain='workspace'), '(Set_zoom (workspace %s) (tile (%s)))' % (workspace, field(checklist, 'id')))
-        screen('initial', ['Stage checklist', 'Synthesis', 'Selected:'],
+        screen('initial', ['Stage checklist', '> ✓ Synthesis: completed'],
                ['Session', 'Reported cells (agg.)'])
         # Compact preset hides hints by default. Explicitly enable them for the
         # existing plan-preview/launch guidance assertions in this zoomed scenario.
         palette('Toggle focused tile hints')
         keys(b'\r')
-        screen('synthesis-detail', ['Stage ID: synthesis', 'Esc overview'])
+        screen('synthesis-detail', ['Stage ID: synthesis', 'Action: r prepares NEW run through endpoint'])
         keys(b'\x1b')
-        screen('synthesis-overview', ['Selected:', 'Placement'], ['Stage ID: synthesis'])
+        screen('synthesis-overview', ['> ✓ Synthesis: completed', 'Placement'], ['Stage ID: synthesis'])
         keys(b'j')
         keys(b'\r')
         screen('j-floorplan', ['Stage ID: floorplan'], ['Stage ID: synthesis'])
@@ -333,7 +333,7 @@ def pty_check(base, client_path, http):
             keys(('Appearance: ' + appearance).encode())
             screen('appearance-' + appearance[0] + '-active', [appearance + ' [active]'])
             keys(b'\x1b')
-            screen('appearance-' + appearance[0], ['Stage checklist', 'Selected:'])
+            screen('appearance-' + appearance[0], ['Stage checklist', '> ✓ Synthesis: completed'])
         no_launch('Enter/Esc, j/k browsing and restyling')
         # The actual requested stage is the third row, selected with jj.
         keys(b'j')

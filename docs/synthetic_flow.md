@@ -64,6 +64,12 @@ The latest [frontend refinement](frontend_refinement.md) adds border titles,
 horizontal stages and compact Overview panels. Timing now uses a composed
 investigation workspace rather than a full-window timing overlay.
 
+The subsequent [sidebar/schemes pass](overview_sidebar.md) is now the current
+Overview: Session, Runs and a wider vertical checklist at left; individual domain
+summaries and planned-run stacked at right. Timing keeps its investigation topology.
+Use a new directory name such as `synthetic-sidebar` to review clean defaults.
+Palette **Color scheme: Carbon / Slate / Crimson / Neon** changes the live client.
+
 `q` exits the client while the daemon stays alive. Ctrl-C stops the foreground
 daemon. `--url` permits explicitly connecting to another endpoint; `--daemon` and
 `--client` override binary paths. No setup command builds binaries automatically.
@@ -86,6 +92,11 @@ placement inside the reference run. The normal allocation/context machinery
 selects the new run. Stages advance at 1.5 seconds each by default; stages beyond
 the selected endpoint are explicitly not requested. Selecting signoff instead
 exercises the entire six-stage simulation (about nine seconds).
+
+Overview's **planned-run** tile displays the pending/ready preview prepared by `r`,
+including flow/profile/endpoint and assignments. Enter exposes full plan identity
+and metadata. This is not yet a queued job; only explicit Launch starts execution.
+Changing the selected historical run does not retarget that project-scoped plan.
 
 The separate **Launch …** action runs without changing the selection.
 Run selection, pinning, inspection, scrolling and appearance changes do not launch
@@ -185,6 +196,11 @@ stage labels and bounded palette passed synthetic HTTP/PTY at
 synthetic HTTP/PTY at `/tmp/opencode/synthetic-flow-y0hx51su/`. Refinement57,
 two-run12, composition44, FS2 45 and five interrupt cases passed with final normal
 format/lint/full tests/build at `-j 2`; see [current evidence](frontend_refinement.md#verification).
+
+**Current sidebar/schemes/plan pass:** final normal binaries passed106 HTTP/PTY
+checks at `/tmp/opencode/overview-sidebar-835bf5f34f02/`; synthetic launch/cancel
+passed at `/tmp/opencode/synthetic-flow-d0emyda4/`. Full final normal-checkout
+format/lint/tests/build passed serially at2. See [latest evidence](overview_sidebar.md#verification).
 
 Historical first-slice evidence: formatting, lint, full tests and build passed; terminal tests were repeated after
 checklist viewport/preview refinements. Final provider + real HTTP + PTY acceptance
