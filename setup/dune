@@ -1,0 +1,23 @@
+(library
+ (name hardcaml_workbench_setup)
+ (modules initialization)
+ (libraries
+  core
+  core_unix
+  core_unix.filename_unix
+  hardcaml_workbench_project_integration)
+ (preprocess
+  (pps ppx_jane))
+ (lint
+  (pps ppx_js_style)))
+
+(executable
+ (name main)
+ (modules main)
+ (public_name hardcaml-workbench-init)
+ (package hardcaml_workbench)
+ (libraries core core_unix.command_unix hardcaml_workbench_setup)
+ (preprocess
+  (pps ppx_jane))
+ (lint
+  (pps ppx_js_style)))

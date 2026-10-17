@@ -46,6 +46,7 @@ embedded waveforms and real gate-level adapters remain later integrations.
 - [FS1 investigation completion](docs/fs1_investigation.md) — timing paths, measured clocks, physical/routing evidence, binary handoff, exact installed provider and adoption instructions.
 - [FS2 simulation controls and acceptance](docs/fs2_acceptance.md) — suites, seeds, failures, reruns, history and trace export; real Cyclesim/native HTTP/PTY evidence.
 - [FS2 provider/RPC contract](docs/fs2_simulation_contract.md) — configure a project-owned simulation provider and implement structured discovery/events.
+- [FS3 adoption](docs/fs3_adoption.md) — initialize existing projects, import/export/clone layouts and retain presentation preferences.
 - [Feature list](docs/feature_list.md) — concise scope/status and focused feature specs.
 - [Feature sets](docs/feature_sets.md) — FS0 initial demos and later themed work groups.
 - [Decision log](docs/decisions.md) — accepted run contexts; remaining command/snapshot policy.

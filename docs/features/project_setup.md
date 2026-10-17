@@ -1,6 +1,9 @@
 # F07 — Project setup and approachable presets
 
-Status: requested; current root manifest remains supported.
+Status: bounded existing-project initializer delivered; current root manifest remains
+supported. See [FS3 adoption](../fs3_adoption.md) for the initializer, portable
+starter templates and persistent presentation preferences. Configuration-directory
+migration, upward discovery and new-project creation remain requested.
 
 ## Requirements
 

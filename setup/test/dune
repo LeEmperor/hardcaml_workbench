@@ -1,0 +1,18 @@
+(library
+ (name test_initialization)
+ (modules test_initialization)
+ (libraries
+  core
+  core_unix
+  core_unix.filename_unix
+  core_unix.sys_unix
+  hardcaml_workbench_setup)
+ (preprocess
+  (pps ppx_jane))
+ (inline_tests))
+
+(rule
+ (alias runtest)
+ (deps test_cli.py)
+ (action
+  (run python3 %{dep:test_cli.py} %{exe:../main.exe})))

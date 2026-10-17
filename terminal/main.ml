@@ -12,6 +12,7 @@ module Synthesis_view = Terminal_presentation.Synthesis_view
 module Terminal_result_view = Terminal_presentation.Terminal_result_view
 module Plain_rpc = Terminal_presentation.Plain_rpc
 module Launch_preferences = Terminal_presentation.Launch_preferences
+module Presentation_preferences = Terminal_presentation.Presentation_preferences
 module Asic_intents = Terminal_presentation.Asic_intents
 module Artifact_view = Terminal_presentation.Artifact_view
 module Artifact_export = Terminal_presentation.Artifact_export
@@ -83,6 +84,9 @@ type session =
   ; mutable view_on_allocation : (string * Host.launch_target) option
   ; mutable remembered_selection : Asic.Selection.t option
   ; mutable preferences_loaded : bool
+  ; mutable presentation_preferences_loaded : string option
+  ; mutable presentation_preferences : Presentation_preferences.t option
+  ; mutable presentation_preference_notice : string option
   ; mutable preference_saves : unit Deferred.t
   ; mutable asic_reads : Asic_intents.t
   ; mutable remembered_acceptance : string
@@ -249,6 +253,9 @@ let create_session
       ; view_on_allocation = None
       ; remembered_selection = None
       ; preferences_loaded = false
+      ; presentation_preferences_loaded = None
+      ; presentation_preferences = None
+      ; presentation_preference_notice = None
       ; preference_saves = Deferred.unit
       ; asic_reads = Asic_intents.empty
       ; remembered_acceptance = ""
@@ -465,7 +472,7 @@ let snapshot_request session ~instance_id =
     Http.Client.snapshot session.client { instance_id })
 ;;
 
-let preference_location session =
+let preference_context session =
   let opened = Option.value_exn session.opened in
   let project_key =
     Sexp.to_string_mach
@@ -481,7 +488,105 @@ let preference_location session =
     | _ -> failwith "No XDG_STATE_HOME or HOME for terminal preferences"
   in
   let state_directory = Filename.concat state_directory "hardcaml-workbench/terminal" in
+  project_key, state_directory
+;;
+
+let preference_location session =
+  let project_key, state_directory = preference_context session in
   project_key, Launch_preferences.path ~state_directory ~project_key
+;;
+
+let presentation_preference_error session message error =
+  let message = message ^ ": " ^ Error.to_string_hum error in
+  session.presentation_preference_notice <- Some message;
+  append_diagnostic session.diagnostics_file message
+;;
+
+let load_presentation_preferences session =
+  if Option.is_none session.opened
+  then return ()
+  else (
+    match Or_error.try_with (fun () -> preference_context session) with
+    | Error error ->
+      presentation_preference_error
+        session
+        "Could not load presentation preferences; using defaults (file left untouched)"
+        error;
+      return ()
+    | Ok (project_key, state_directory) ->
+      if Option.equal
+           String.equal
+           session.presentation_preferences_loaded
+           (Some project_key)
+      then return ()
+      else (
+        (* Reopening a changed canonical project/environment must not carry the previous
+           context's presentation into the new registry. *)
+        if Option.is_some session.presentation_preferences_loaded
+        then
+          session.host
+          <- { session.host with
+               appearance = Appearance.default
+             ; layout_mode = Fit
+             ; chrome = true
+             ; locals = []
+             };
+        session.presentation_preferences_loaded <- Some project_key;
+        session.presentation_preferences <- None;
+        session.presentation_preference_notice <- None;
+        let%map result =
+          In_thread.run (fun () ->
+            Or_error.try_with (fun () ->
+              Presentation_preferences.load ~state_directory ~project_key))
+        in
+        match result with
+        | Ok preferences ->
+          session.presentation_preferences <- preferences;
+          Option.iter preferences ~f:(fun preferences ->
+            session.host <- Presentation_preferences.apply preferences session.host)
+        | Error error ->
+          presentation_preference_error
+            session
+            "Could not load presentation preferences; using defaults (file left \
+             untouched)"
+            error))
+;;
+
+let save_presentation_preferences session =
+  (* Capture before yielding, so polling and later keypresses cannot change this save. *)
+  match Or_error.try_with (fun () -> preference_context session) with
+  | Error error ->
+    presentation_preference_error session "Could not save presentation preferences" error;
+    return ()
+  | Ok (project_key, state_directory) ->
+    let preferences = Presentation_preferences.capture ~project_key session.host in
+    session.presentation_preferences <- Some preferences;
+    let previous = session.preference_saves in
+    let finished = Ivar.create () in
+    session.preference_saves <- Ivar.read finished;
+    Monitor.protect
+      ~finally:(fun () ->
+        Ivar.fill_exn finished ();
+        Deferred.unit)
+      (fun () ->
+        let%bind () = previous in
+        let%map result =
+          In_thread.run (fun () ->
+            Or_error.try_with (fun () ->
+              Presentation_preferences.save ~state_directory preferences))
+        in
+        if Option.equal
+             String.equal
+             session.presentation_preferences_loaded
+             (Some project_key)
+        then (
+          match result with
+          | Ok () -> session.presentation_preference_notice <- None
+          | Error error ->
+            presentation_preference_error
+              session
+              "Could not save presentation preferences"
+              error))
 ;;
 
 let load_preferences session =
@@ -732,6 +837,8 @@ let workspace_request session operation =
         session.host <- { session.host with notice = "Workspace: " ^ message }
       | Ok snapshot ->
         session.host <- Host.receive session.host snapshot;
+        Option.iter session.presentation_preferences ~f:(fun preferences ->
+          session.host <- Presentation_preferences.apply preferences session.host);
         reconcile_synthesis session)
 ;;
 
@@ -1248,6 +1355,7 @@ let refresh_simulation session =
 
 let refresh_host session =
   let%bind () = load_preferences session in
+  let%bind () = load_presentation_preferences session in
   let%bind () = workspace_request session Get in
   let%bind () = initialize_host_layout session in
   let%bind () = refresh_simulation session in
@@ -2435,7 +2543,19 @@ let render session dimensions =
   let render_host () =
     session.last_dimensions <- Some dimensions;
     reconcile_synthesis session;
-    Host_view.render session.host (host_data session) dimensions
+    let host =
+      match session.presentation_preference_notice with
+      | None -> session.host
+      | Some notice ->
+        { session.host with
+          chrome = true
+        ; notice =
+            String.concat
+              ~sep:" | "
+              (List.filter [ notice; session.host.notice ] ~f:(Fn.non String.is_empty))
+        }
+    in
+    Host_view.render host (host_data session) dimensions
   in
   match session.host.registry with
   | None
@@ -2490,6 +2610,9 @@ let session_of_baseline_fixture (fixture : Baseline_fixture.t) =
     ; view_on_allocation = None
     ; remembered_selection = None
     ; preferences_loaded = true
+    ; presentation_preferences_loaded = Some "fixture"
+    ; presentation_preferences = None
+    ; presentation_preference_notice = None
     ; preference_saves = Deferred.unit
     ; asic_reads = Asic_intents.empty
     ; remembered_acceptance = ""
@@ -3561,16 +3684,19 @@ let execute_host session captured action ~exit =
           | _ -> { local with follow = true; scroll = 0 }
         in
         session.host <- Host.set_local session.host id local);
-      Effect.Ignore
+      (match action with
+       | Local_headers ->
+         Effect.of_deferred_thunk (fun () -> save_presentation_preferences session)
+       | _ -> Effect.Ignore)
     | Toggle_chrome ->
       session.host <- { session.host with chrome = not session.host.chrome };
-      Effect.Ignore
+      Effect.of_deferred_thunk (fun () -> save_presentation_preferences session)
     | Set_appearance appearance ->
       session.host <- Host.set_appearance session.host appearance;
-      Effect.Ignore
+      Effect.of_deferred_thunk (fun () -> save_presentation_preferences session)
     | Set_layout_mode layout_mode ->
       session.host <- { session.host with layout_mode };
-      Effect.Ignore
+      Effect.of_deferred_thunk (fun () -> save_presentation_preferences session)
     | Synthesis_mode mode ->
       change_synthesis session (fun _ local ->
         { local with synthesis = Synthesis_view.State.set_mode local.synthesis mode });
@@ -4975,7 +5101,14 @@ let run_legacy
           | _ -> assert false)
         else
           Monitor.try_with_or_error (fun () ->
-            Bonsai_term.start_with_exit ~dispose:true ~mouse:No_mouse_events (tui session))
+            let%bind result =
+              Bonsai_term.start_with_exit
+                ~dispose:true
+                ~mouse:No_mouse_events
+                (tui session)
+            in
+            let%map () = session.preference_saves in
+            result)
           >>| Or_error.join
           >>| Result.map_error ~f:(fun error ->
             append_diagnostic diagnostics_file ("terminal error: " ^ error_message error);

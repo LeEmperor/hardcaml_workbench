@@ -2111,14 +2111,14 @@ let render_workspace host data ({ Dimensions.width; height } as dimensions) =
           ~role:Muted
           ~width
           ~height:1
-          [ (if compact
+          [ (if not (String.is_empty host.notice)
+             then host.notice
+             else if compact
              then
                "Compact: focused tile only | Tab: next tile | enlarge terminal for grid"
-             else if String.is_empty host.notice
-             then
+             else
                "Space c c commands | Tab/Shift-Tab focus | j/k browse | Enter inspect | \
-                q exit"
-             else host.notice)
+                q exit")
           ]
       ]
   in

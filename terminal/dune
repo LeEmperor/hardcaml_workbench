@@ -27,6 +27,7 @@
   host_view
   plain_rpc
   launch_preferences
+  presentation_preferences
   asic_intents
   simulation_view
   simulation_export)
@@ -35,6 +36,7 @@
   core
   core_unix
   core_unix.filename_unix
+  core_unix.sys_unix
   hardcaml_workbench_protocol
   hardcaml_workbench_workspaces
   bonsai_term
@@ -45,6 +47,22 @@
  (inline_tests
   (flags
    (-source-tree-root .))))
+
+(executable
+ (name presentation_preferences_probe)
+ (modules presentation_preferences_probe)
+ (libraries core terminal_presentation hardcaml_workbench_protocol)
+ (preprocess
+  (pps ppx_jane)))
+
+(rule
+ (alias runtest)
+ (deps test_presentation_preferences_restart.py)
+ (action
+  (run
+   python3
+   %{dep:test_presentation_preferences_restart.py}
+   %{exe:presentation_preferences_probe.exe})))
 
 (executable
  (name main)

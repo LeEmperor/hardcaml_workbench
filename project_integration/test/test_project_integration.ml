@@ -4,6 +4,25 @@ open Hardcaml_workbench_project_integration
 
 let manifest body = Manifest.parse_string body
 
+let%test_unit "versioned manifest serialization round-trips quoted values and defaults" =
+  List.iter
+    [ { Manifest.project_name = "a project \"name\"; with (sexps)\nand a newline"
+      ; driver = None
+      ; build_alias = Manifest.default_build_alias
+      ; test_alias = Manifest.default_test_alias
+      }
+    ; { Manifest.project_name = "demo"
+      ; driver = Some "./work bench/driver.exe"
+      ; build_alias = "app/@build"
+      ; test_alias = "@check"
+      }
+    ]
+    ~f:(fun value ->
+      match Manifest.parse_string (Manifest.to_string value) with
+      | Error message -> failwith message
+      | Ok parsed -> [%test_eq: Manifest.t] parsed value)
+;;
+
 let%expect_test "manifest defaults and explicit references" =
   List.iter
     [ "(lang hardcaml-workbench 1) (project (name demo)) (dune)"

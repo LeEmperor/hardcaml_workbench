@@ -3,8 +3,9 @@
 Status (2026-10-15): **FS0 named workspace/tile host and autosaved session restoration
 delivered** with Main/independent contexts and pins. See [terminal](../fs0_terminal.md)
 and [acceptance](../fs0_acceptance.md). Requirements below remain normative: current
-geometry is shelf-based, template export/clone is absent, local chrome/header
-preferences do not persist, and multi-monitor adoption acceptance remains later.
+geometry is shelf-based and multi-monitor adoption acceptance remains later.
+FS3 now provides CLI template export/import/clone and persistent local chrome/header
+preferences; see [adoption guide](../fs3_adoption.md).
 
 ## User outcome
 
@@ -52,12 +53,12 @@ Templates create independent view instances, but may deliberately link them to M
 Major/minor roles are optional layout defaults, not mandatory editor/document
 structure. Workbench can have an overview without a required primary document.
 
-The planned daemon registry owns semantic session/window/workspace/tile instances
+The daemon registry owns semantic session/window/workspace/tile instances
 and context bindings. Clients project this registry and own local active-workspace
 presentation, dimensions, focus, scroll, overlays and effective geometry. Saved
 requested layouts/preferences are versioned UI configuration; do not turn another
-client's terminal dimensions into global layout truth. This registry does not yet
-exist in the fixed application and must be built once, not independently per skin.
+client's terminal dimensions into global layout truth. The shared registry is
+implemented once and reused across skins.
 
 ## First demo / later
 

@@ -217,10 +217,10 @@ Features: F04/F05/F10/F11. **Demo C delivered via autosaved session state.**
   the full workspace snapshot, including the two-tile real demo.
 - [x] Separate semantic registry from client focus/filter/scroll/dimensions; clamping
   stays local. Interactive launch inputs have a separate client preference store.
-- [ ] Template export/clone and project-shared template versus personal session UX.
-  Autosaved named arrangements are not a template library.
-- [ ] Persist local chrome/header preferences and other deliberately local appearance
-  choices if selected for adoption; they currently reset with the client.
+- [x] FS3 CLI template export/import/clone separates portable layouts from personal
+  session state; generic/ASIC starters included. TUI template browsing remains later.
+- [x] FS3 persists explicit client appearance, layout mode, chrome/header choices in
+  a separate project/environment-scoped store; transient navigation stays local.
 - [x] Later observations invalidate freshness; explicit Refresh materializes current
   public reports. Missing-source/refresh-failed data remains labeled.
 - [ ] Benchmark cold/L1/L2 latency and sizes; expand full missing-reference and
@@ -255,8 +255,8 @@ human functional acceptance of the viewed Overview, not broader flow/signoff cov
 The unchecked M0–M3 items are bounded followups, not grounds to label delivered
 demos “not started.” Final parent-wide checks passed. Prioritize missing interactive
 race/reconnect/launch-and-view/cancellation coverage, then measured scaling and
-adoption choices. Template export/clone, freeform geometry, persisted local chrome
-and richer endpoint forms remain explicit gaps; domain refresh remains clock-driven,
+adoption choices. FS3 supplies CLI templates and persisted local chrome; freeform
+geometry and richer endpoint forms remain explicit gaps; domain refresh remains clock-driven,
 with immediate local input/completion redraw after the Escape-latency followup.
 
 ## M4 — Rich evidence and live acceptance (FS1/FS2)
@@ -525,14 +525,32 @@ Synthesis area/check counters are now projected into the current summary.
 
 ## M5 — Multi-window polish and adoption (FS3)
 
-**Later scope; shared registry primitives exist, adoption acceptance pending.**
+**First adoption slice delivered; full multi-monitor acceptance pending.**
 
 - [ ] Two attached monitor surfaces, convergence/local navigation and cross-window
   workspace/tile movement acceptance.
-- [ ] Starter templates, existing-project initialization and explicit config migration.
+- [x] Existing-project initializer with validated current-format manifest and atomic
+  no-clobber publication; no build/VCS/provider execution.
+- [x] Versioned portable generic/ASIC templates, atomic Main-linked instantiation,
+  export/clone and CLI listing. New view identities exclude source pins/run state.
+- [x] Persistent local appearance/layout/chrome/header choices, malformed-file recovery
+  and project/environment/session identity checks.
+- [x] Actual private-daemon HTTP template lifecycle and restart restoration, plus
+  real PTY appearance change/restart acceptance (`scripts/test-fs3-adoption.py`).
+- [ ] Explicit configuration-directory migration/precedence, upward discovery and
+  new-project creation; TUI template discovery/selection comfort.
 - [ ] High-volume log/event responsiveness and help/discoverability measurements.
 - [ ] Reviewed appearance presets, SSH/tmux controls and glyph fallback validation.
 - [ ] Final adopted-scope checks and deliberate provider-version adoption.
+
+See [FS3 adoption](fs3_adoption.md) for commands, boundaries and verification.
+Parent build and repository tests pass at `-j 10`; the metadata-fixture integration
+exercises actual executables/HTTP/PTY without ASIC tools. It is not full multi-monitor
+or installed-package acceptance.
+Final evidence: `/tmp/opencode/fs3-adoption-ry427qxc/result.json`; five-mode Ctrl-C
+regression: `/tmp/opencode/workbench-terminal-interrupt-sfrzonk0/`. Lint and changed
+OCaml file formatting pass; repository-wide formatting still reports inherited
+FS1 differences listed in the adoption guide.
 
 ## V1 — Independent appearance gallery (FS5)
 
@@ -725,9 +743,9 @@ This is a reusable renderer over actual FS0 tiles, not a selected final aestheti
 | M0 | Accepted FS0 defaults and candidate/fixture baseline delivered; broader matrix remains |
 | M1 | Headless Demo A delivered; physical/container cancellation evidence extended in M4 |
 | M2 | Tile-host Demo B delivered; bounded UI/coverage/performance gaps above |
-| M3 | Autosaved-session/L2 Demo C delivered; templates and appearance persistence gaps above |
+| M3 | Autosaved-session/L2 Demo C delivered; FS3 adds CLI templates and appearance persistence |
 | M4 | FS1 adopted-evidence investigation/operation scope delivered; substantial FS2 project-scoped simulation delivered with real Cyclesim/native HTTP/PTY evidence; later F06 extensions remain |
-| M5 | Later adoption scope; no full multi-monitor acceptance claim |
+| M5 | Initializer, CLI templates and presentation persistence delivered; multi-monitor acceptance later |
 | V1 | A–E skins/axes/captures delivered; rich gallery and default review pending |
 
 Keep acceptance records authoritative for exact commands/results. New provider
