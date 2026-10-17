@@ -26,6 +26,7 @@ Project/provider commands remain useful without the application.
 | [Real ASIC example demo](real_asic_example_demo.md) | Current black-theme/status polish, split checklist/planned-run sidebar and exact commands for genuine retained ASIC evidence |
 | [Synthetic Testing and dual demo](synthetic_testing.md) | Three default workspaces, seeded FS2 cases/results/artifacts, roomier Session layouts and synthetic/actual-example launch pairs |
 | [Launch and stage consistency](launch_stage_consistency.md) | Exact plan-to-launch lifecycle, real structured stage observations and read-only refresh of existing runs |
+| [Checklist preparation and launch](checklist_launch_workflow.md) | Restored real j/k/r preparation, on-demand capability discovery, visible Launch availability and exact input capture |
 | [Synthetic flow demo](synthetic_flow.md) | Launch populated Overview/Timing workspaces and operate a simulated flow through the real daemon, without EDA |
 | [Synthesis inspection](synthesis_inspection.md) | FS1/F06 cell table, filter/sort, row detail and evidence controls |
 | [FS1 acceptance](fs1_acceptance.md) | Aggregate timing/resources/checks, declared-clock context, finalization import, real physical/acceptance/cancellation evidence and remaining scope |

@@ -191,7 +191,7 @@ def acceptance(t, check, http, runs, presets):
     check(producers() == initial_producers, 'Planning, pending/failure inspection and historical selection invoke no flow run/finalize')
     t.open_palette('Launch')
     t.capture('sidebar-failed-launch-unavailable',
-              ['Current plan is pending, failed, stale or unconfirmed'] if retained else ['No matching commands'])
+              ['Launch', 'Current plan is pending, failed, stale or unconfirmed'] if retained else ['Launch', 'No preview:'])
     t.key(b'\x1b')
 
     # Explicit retry then explicit Launch is the sole allocation in this harness.

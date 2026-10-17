@@ -494,6 +494,17 @@ let artifact_inspector host tile =
 
 (* Previews are project-scoped plans for NEW runs, not evidence belonging to the observed
    run. Only advertise a matching selection beside a checklist action. *)
+let checklist_selection host data run stage =
+  Stage_action.resolve
+    ~stage
+    ~remembered:host.H.remembered_selection
+    ~observed:
+      (Option.bind data.asic ~f:(fun snapshot ->
+         List.find snapshot.runs ~f:(fun execution -> Run_ref.equal execution.run run)
+         |> Option.bind ~f:(fun execution -> execution.selection)))
+    ~snapshot:data.asic
+;;
+
 let checklist_preview host data tile =
   Option.bind host.H.registry ~f:(fun registry ->
     W.resolve_tile registry tile.W.Tile.id
@@ -505,10 +516,12 @@ let checklist_preview host data tile =
         (H.stage_cursor (H.local host tile.id) ~run ~stages)
         ~f:(fun stage ->
           match
-            H.stage_plan (Some stage), Option.bind data.asic ~f:(fun asic -> asic.preview)
+            ( checklist_selection host data run stage
+            , Option.bind data.asic ~f:(fun asic -> asic.preview) )
           with
-          | Ok (Plan selection), Some preview
+          | Ok selection, Some preview
             when Asic.Selection.equal selection preview.selection
+                 && Option.is_none host.stage_preparation
                  && Planned_run.launchable host.planned_run preview -> Some preview
           | _ -> None)))
 ;;
@@ -600,6 +613,25 @@ let utility_rows host data tile =
               "Interaction"
               "Esc overview; r prepares a NEW run through advertised endpoint"
           ]
+          @ (match selected_run, selected with
+             | Some run, Some stage ->
+               [ (match checklist_selection host data run stage with
+                  | Error reason -> Overview_tiles.row ~role:Warning "New run" reason
+                  | Ok selection ->
+                    Overview_tiles.row
+                      ~role:Muted
+                      "New run inputs"
+                      (selection.flow
+                       ^ "/"
+                       ^ selection.profile
+                       ^ " → "
+                       ^ selection.endpoint
+                       ^ " | assignments: "
+                       ^ String.concat ~sep:"; " selection.assignments))
+               ]
+             | _ -> [])
+          @ Option.value_map host.stage_preparation ~default:[] ~f:(fun reason ->
+            [ Overview_tiles.row ~role:Warning "Preparation" reason ])
           @ (checklist_preview host data tile
              |> Option.value_map ~default:[] ~f:(fun preview ->
                [ Overview_tiles.row
@@ -863,67 +895,73 @@ let planned_rows host tile ~width =
   let detail = (H.local host tile.W.Tile.id).utility_detail in
   let model = Planned_run.model host.H.planned_run in
   let rows = Planned_run.rows model ~detail in
-  if detail
-  then
-    List.concat_map rows ~f:(fun row ->
-      wrap_cells ~width (Artifact_view.safe row.Planned_run.text)
-      |> List.map ~f:(fun text -> { row with text }))
-  else (
-    let selection =
-      Option.value_map model.selection ~default:[] ~f:(fun selection ->
-        [ { Planned_run.role = Fact
-          ; text = "endpoint: " ^ selection.Asic.Selection.endpoint
+  match host.H.stage_preparation with
+  | Some reason ->
+    [ { Planned_run.role = Warning; text = reason }
+    ; { Planned_run.role = Muted; text = "Launch disabled; press r to retry preparation" }
+    ]
+  | None ->
+    if detail
+    then
+      List.concat_map rows ~f:(fun row ->
+        wrap_cells ~width (Artifact_view.safe row.Planned_run.text)
+        |> List.map ~f:(fun text -> { row with text }))
+    else (
+      let selection =
+        Option.value_map model.selection ~default:[] ~f:(fun selection ->
+          [ { Planned_run.role = Fact
+            ; text = "endpoint: " ^ selection.Asic.Selection.endpoint
+            }
+          ; { role = Fact
+            ; text = "flow: " ^ selection.flow ^ " / profile: " ^ selection.profile
+            }
+          ; { role = Fact
+            ; text =
+                ("assignments: "
+                 ^
+                 if List.is_empty selection.assignments
+                 then "(none)"
+                 else String.concat ~sep:"; " selection.assignments)
+            }
+          ])
+      in
+      let state =
+        String.lowercase (Sexp.to_string (Planned_run.sexp_of_status model.status))
+      in
+      let launch =
+        String.lowercase
+          (Sexp.to_string (Planned_run.sexp_of_launch_status model.launch.state))
+      in
+      let headline =
+        List.map (List.take rows 1) ~f:(fun row ->
+          { row with
+            Planned_run.text =
+              state
+              ^ ": plan / "
+              ^ (if Option.is_none model.preview
+                 then "separate launch: "
+                 else if Planned_run.equal_status model.status Ready
+                 then "last launch: "
+                 else "retained preview launch: ")
+              ^ launch
+          })
+      in
+      headline
+      @ List.take selection 1
+      @ [ { Planned_run.role = Fact
+          ; text = Planned_run.launch_label model ^ ": " ^ model.launch.message
           }
-        ; { role = Fact
-          ; text = "flow: " ^ selection.flow ^ " / profile: " ^ selection.profile
-          }
-        ; { role = Fact
-          ; text =
-              ("assignments: "
-               ^
-               if List.is_empty selection.assignments
-               then "(none)"
-               else String.concat ~sep:"; " selection.assignments)
-          }
-        ])
-    in
-    let state =
-      String.lowercase (Sexp.to_string (Planned_run.sexp_of_status model.status))
-    in
-    let launch =
-      String.lowercase
-        (Sexp.to_string (Planned_run.sexp_of_launch_status model.launch.state))
-    in
-    let headline =
-      List.map (List.take rows 1) ~f:(fun row ->
+        ]
+      @ Option.value_map model.launch.run_id ~default:[] ~f:(fun id ->
+        [ { Planned_run.role = Fact; text = "exact allocated run: " ^ id } ])
+      @ Option.value_map model.launch.key ~default:[] ~f:(fun key ->
+        [ { Planned_run.role = Fact; text = "submission key: " ^ key } ])
+      @ List.drop selection 1
+      |> List.map ~f:(fun row ->
         { row with
           Planned_run.text =
-            state
-            ^ ": plan / "
-            ^ (if Option.is_none model.preview
-               then "separate launch: "
-               else if Planned_run.equal_status model.status Ready
-               then "last launch: "
-               else "retained preview launch: ")
-            ^ launch
-        })
-    in
-    headline
-    @ List.take selection 1
-    @ [ { Planned_run.role = Fact
-        ; text = Planned_run.launch_label model ^ ": " ^ model.launch.message
-        }
-      ]
-    @ Option.value_map model.launch.run_id ~default:[] ~f:(fun id ->
-      [ { Planned_run.role = Fact; text = "exact allocated run: " ^ id } ])
-    @ Option.value_map model.launch.key ~default:[] ~f:(fun key ->
-      [ { Planned_run.role = Fact; text = "submission key: " ^ key } ])
-    @ List.drop selection 1
-    |> List.map ~f:(fun row ->
-      { row with
-        Planned_run.text =
-          E.text (E.clip ~width (E.plain (Artifact_view.safe row.Planned_run.text)))
-      }))
+            E.text (E.clip ~width (E.plain (Artifact_view.safe row.Planned_run.text)))
+        }))
 ;;
 
 let rows host data tile ~width ~height =
@@ -2532,6 +2570,18 @@ let%test_unit "shallow plan always shows readiness and endpoint; detail retains 
   let host =
     { host with planned_run = Planned_run.receive host.planned_run ~revision:1 snapshot }
   in
+  let preparing =
+    { host with stage_preparation = Some "Preparing NEW run through routing" }
+  in
+  let preparation_text =
+    planned_rows preparing tile ~width:80
+    |> List.map ~f:(fun row -> row.Planned_run.text)
+    |> String.concat ~sep:"\n"
+  in
+  assert (
+    String.is_substring preparation_text ~substring:"Preparing NEW run through routing");
+  assert (String.is_substring preparation_text ~substring:"Launch disabled");
+  assert (not (String.is_substring preparation_text ~substring:"ready:"));
   List.iter [ 4; 5 ] ~f:(fun height ->
     let image = tile_view host data tile ~width:60 ~height in
     assert (View.width image = 60 && View.height image = height);

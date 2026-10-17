@@ -55,10 +55,14 @@ elif args[:1] in [['lifecycle-wait'], ['lifecycle-output'], ['lifecycle-malforme
 elif args == ['--version', '--json']:
     emit(dict(cli_contract=dict(version=4, capabilities=dict(namedflow1=True))))
 elif args[:2] == ['flow', 'list']:
-    emit(envelope('flow-list', declaration=envelope('flow-catalog', entries=[
-        dict(methodology=dict(id='standard'), default_profile='balanced',
-             profiles=[dict(id='balanced'), dict(id='synth_delay')])],
-        default=dict(flow='standard', profile='balanced'))))
+    if os.path.exists('fail-discovery'):
+        sys.exit(1)
+    time.sleep(0.1)
+    with open(os.path.join(os.path.dirname(__file__), 'production_flow_list.json')) as src:
+        value = json.load(src)
+    if os.path.exists('invalid-discovery'):
+        value['declaration']['default']['profile'] = 'missing'
+    emit(value)
 elif args[:2] == ['flow', 'describe']:
     emit(envelope('flow-describe', entry=dict(
         methodology=dict(id=option('--flow'), endpoints=['synthesis', 'signoff']),

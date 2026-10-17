@@ -84,11 +84,13 @@ Timing slack/terminal checks can still be unavailable for a synthesis-only run.
 Completion is not timing measurement or acceptance. View categories such as Timing
 and Checks are not themselves canonical physical stage IDs.
 
-**Stage actions remain separate:** the real observation state does not advertise
-fresh per-stage launch selections, so normalized rows have no `r` action. Use
-**Discover ASIC flows and runs → Plan ASIC standard / balanced (enter endpoint)**,
-enter `synthesis` (or another supported endpoint), then explicitly Launch. The new
-status display does not invent a stage-action contract.
+**Subsequent stage-action integration:** the real observation still does not
+advertise an action directly, but the project catalog explicitly declares fresh
+prefix endpoints. Checklist r now resolves from those typed capabilities, performing
+discovery as part of the explicit command when needed, then invokes normal Plan.
+Launch remains separate and visible with availability reasons. See
+[the restored checklist workflow](checklist_launch_workflow.md). This does not infer
+an action from status or guess endpoint names.
 
 ## Load the fix without rerunning your jobs
 

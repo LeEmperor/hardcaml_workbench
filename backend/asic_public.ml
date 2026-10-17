@@ -69,16 +69,118 @@ let metadata j =
     "Installed provider requires exact CLI4 + namedflow1=true"
 ;;
 
-let flows j =
+let canonical_stages =
+  [ "synthesis"; "floorplan"; "placement"; "cts"; "routing"; "signoff" ]
+;;
+
+let catalog_identity j =
+  let s = text j in
+  require
+    (String.length s > 0
+     && String.length s <= 256
+     && String.for_all s ~f:(function
+       | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' | '.' -> true
+       | _ -> false))
+    "Invalid catalog identity/text budget";
+  s
+;;
+
+let catalog_list ~limit j =
+  let xs = list j in
+  require (List.length xs <= limit) "Catalog entry budget exceeded";
+  xs
+;;
+
+let catalog_unique xs =
+  require
+    (List.length xs = List.length (List.dedup_and_sort xs ~compare:String.compare))
+    "Duplicate catalog identity"
+;;
+
+(* Only this explicit public fresh-prefix contract authorizes checklist mapping.
+   Legacy/other provider catalogs remain useful for ordinary explicit Plan/Run. *)
+let flow_catalog j =
+  require
+    (String.length (Yojson.Safe.to_string j) <= 1024 * 1024)
+    "Catalog byte budget exceeded";
   let j = envelope j "hardcaml-asic.flow-list" 1 in
   let catalog = envelope (field "declaration" j) "hardcaml-asic.flow-catalog" 1 in
-  list (field "entries" catalog)
-  |> List.map ~f:(fun e ->
-    { Asic.Flow.id = text (field "id" (field "methodology" e))
-    ; profiles = List.map (list (field "profiles" e)) ~f:(fun p -> text (field "id" p))
-    ; default_profile = text (field "default_profile" e)
-    })
+  let capabilities = field "capabilities" j in
+  let matches j key value = Poly.equal (field key j) (`String value) in
+  let supported =
+    matches capabilities "backend_recipe" "librelane.classic.v1"
+    && matches capabilities "input" "fresh"
+    && matches capabilities "stage_selection" "complete-prefix-through-declared-endpoint"
+    && Poly.equal (field "continuation" capabilities) (`Bool false)
+  in
+  List.iter [ "backend_recipe"; "input"; "stage_selection" ] ~f:(fun key ->
+    match field key capabilities with
+    | `Null -> ()
+    | value -> ignore (catalog_identity value : string));
+  let flows =
+    catalog_list ~limit:128 (field "entries" catalog)
+    |> List.map ~f:(fun e ->
+      let methodology = field "methodology" e in
+      List.iter [ "backend_recipe"; "input" ] ~f:(fun key ->
+        match field key methodology with
+        | `Null -> ()
+        | value -> ignore (catalog_identity value : string));
+      let id = catalog_identity (field "id" methodology) in
+      let profiles =
+        catalog_list ~limit:64 (field "profiles" e)
+        |> List.map ~f:(fun p -> catalog_identity (field "id" p))
+      in
+      catalog_unique profiles;
+      let default_profile = catalog_identity (field "default_profile" e) in
+      require
+        (List.mem profiles default_profile ~equal:String.equal)
+        "Unknown catalog entry default profile";
+      let fresh_stage_endpoints =
+        if supported
+           && matches methodology "backend_recipe" "librelane.classic.v1"
+           && matches methodology "input" "fresh"
+        then (
+          let endpoints =
+            catalog_list ~limit:6 (field "endpoints" methodology)
+            |> List.map ~f:catalog_identity
+          in
+          catalog_unique endpoints;
+          require
+            (List.for_all endpoints ~f:(fun endpoint ->
+               List.mem canonical_stages endpoint ~equal:String.equal))
+            "Unknown fresh-prefix endpoint";
+          endpoints)
+        else []
+      in
+      { Asic.Flow.id; profiles; default_profile; fresh_stage_endpoints })
+  in
+  catalog_unique (List.map flows ~f:(fun f -> f.Asic.Flow.id));
+  let catalog_default =
+    match field "default" catalog with
+    | `Null ->
+      require (not supported) "Fresh-prefix catalog requires an explicit default pair";
+      (* An absent legacy extension is not an invented default. A supplied null is
+         malformed rather than a declaration of an actual pair. *)
+      (match catalog with
+       | `Assoc fields ->
+         require
+           (not (List.Assoc.mem fields "default" ~equal:String.equal))
+           "Catalog default must be an explicit pair"
+       | _ -> ());
+      None
+    | value ->
+      let flow = catalog_identity (field "flow" value) in
+      let profile = catalog_identity (field "profile" value) in
+      require
+        (List.exists flows ~f:(fun f ->
+           String.equal f.id flow && List.mem f.profiles profile ~equal:String.equal))
+        "Unknown catalog default flow/profile pair";
+      Some { Asic.Flow_default.flow; profile }
+  in
+  flows, catalog_default
 ;;
+
+let flows j = fst (flow_catalog j)
 
 let preview selection j : Asic.Preview.t =
   let j = envelope j "hardcaml-asic.methodology-plan" 1 in
@@ -200,10 +302,6 @@ let validate_stages (stages : Asic.Stage.t list) =
     (String.length (Sexp.to_string_mach ([%sexp_of: Asic.Stage.t list] stages))
      <= 256 * 1024)
     "Normalized stage-plan exceeds byte budget"
-;;
-
-let canonical_stages =
-  [ "synthesis"; "floorplan"; "placement"; "cts"; "routing"; "signoff" ]
 ;;
 
 (* CLI4 observation state is a provider-validated journal prefix, not a report or a

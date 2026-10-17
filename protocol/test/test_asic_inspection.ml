@@ -79,6 +79,7 @@ let%test_unit "inspection wire codecs preserve unknown values and provenance" =
   let snapshot : Asic.Snapshot.t =
     { configured = true
     ; flows = []
+    ; catalog_default = None
     ; description_json = None
     ; preview = None
     ; runs = []

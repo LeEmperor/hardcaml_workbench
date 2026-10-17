@@ -172,6 +172,7 @@ let fixture_operation ?run ?error key kind state : Asic.Pending.t =
 let fixture_snapshot ?(operations = []) ?(summaries = []) runs : Asic.Snapshot.t =
   { configured = true
   ; flows = []
+  ; catalog_default = None
   ; description_json = None
   ; preview = None
   ; runs

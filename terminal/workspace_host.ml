@@ -48,6 +48,8 @@ type action =
   | Browse_artifacts of Run_ref.t
   | Browse_inspection of Run_ref.t * string * string
   | Launch_asic of Asic.Preview.t * bool
+  | Unavailable_launch
+  | Prepare_stage of Asic.Stage.t * Run_ref.t
   | Apply_default_layout
   | Create_testing_workspace
   | Local_headers
@@ -115,6 +117,9 @@ type t =
   ; workspace_presentation : (string * T.overrides) list
   ; timing : (string * Timing_workspace.t) list
   ; planned_run : Planned_run.t
+  ; stage_preparation : string option
+  ; stage_generation : int
+  ; remembered_selection : Asic.Selection.t option
   }
 
 let empty =
@@ -136,6 +141,9 @@ let empty =
   ; workspace_presentation = []
   ; timing = []
   ; planned_run = Planned_run.empty
+  ; stage_preparation = None
+  ; stage_generation = 0
+  ; remembered_selection = None
   }
 ;;
 
@@ -490,8 +498,41 @@ let switch t id =
       List.Assoc.find workspace_focus ~equal:String.equal (W.Workspace_id.to_string id)
       |> Option.join
     in
-    let t = { t with active = Some id; focus; workspace_focus } in
+    let changed = not (Option.equal W.Workspace_id.equal t.active (Some id)) in
+    let t =
+      { t with
+        active = Some id
+      ; focus
+      ; workspace_focus
+      ; stage_generation = (t.stage_generation + if changed then 1 else 0)
+      ; stage_preparation =
+          (if changed && Option.is_some t.stage_preparation
+           then Some "Stage preparation context changed; press r again"
+           else t.stage_preparation)
+      }
+    in
     Option.value_map t.registry ~default:t ~f:(receive t))
+;;
+
+let%test_unit "workspace roundtrip cannot revive a pending stage preparation" =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "stage-roundtrip") in
+  let host = receive empty registry in
+  let original = Option.value_exn host.active in
+  let other =
+    List.find_exn registry.workspaces ~f:(fun workspace ->
+      not (W.Workspace_id.equal workspace.id original))
+  in
+  let host =
+    { host with stage_preparation = Some "Preparing routing"; stage_generation = 3 }
+  in
+  let switched = switch host other.id in
+  let restored = switch switched original in
+  assert (Option.equal W.Workspace_id.equal restored.active host.active);
+  assert (restored.stage_generation > host.stage_generation);
+  assert (
+    String.is_substring
+      (Option.value_exn restored.stage_preparation)
+      ~substring:"context changed")
 ;;
 
 (** Cursor identity is a registry ID, never a display name or an ordinal. An unset or
@@ -544,6 +585,155 @@ let current t c =
 
 let command ?unavailable id title aliases action =
   { id; title; aliases; action; unavailable }
+;;
+
+let launch_commands t ~preview ~view_pending =
+  let model = Planned_run.model t.planned_run in
+  let unavailable =
+    Option.first_some
+      t.stage_preparation
+      (match preview with
+       | None ->
+         Some
+           ("No preview: "
+            ^ model.message
+            ^ "; focus checklist and press r to prepare; reopen palette when ready")
+       | Some preview when Planned_run.launchable t.planned_run preview -> None
+       | Some _ ->
+         Some
+           (model.message
+            ^ "; "
+            ^ model.launch.message
+            ^ "; prepare again if failed/stale; reopen palette when ready"))
+  in
+  List.map
+    [ "asic.launch", "Launch", false
+    ; "asic.launch-view", "Launch and view in captured context", true
+    ]
+    ~f:(fun (id, title, view) ->
+      let title, action =
+        match preview with
+        | None -> title, Unavailable_launch
+        | Some preview ->
+          ( sprintf
+              "%s %s / %s → %s [%s]"
+              title
+              preview.selection.flow
+              preview.selection.profile
+              preview.selection.endpoint
+              preview.plan_identity
+            |> Artifact_view.safe
+          , Launch_asic (preview, view) )
+      in
+      command
+        ?unavailable:
+          (if view && view_pending
+           then Some "Another launch-and-view is awaiting allocation"
+           else unavailable)
+        id
+        title
+        "run synth launch"
+        action)
+;;
+
+let%test_unit "Launch remains searchable without preview and preserves captured disabled \
+               reasons"
+  =
+  let commands = launch_commands empty ~preview:None ~view_pending:false in
+  assert (List.length commands = 2);
+  List.iter commands ~f:(fun command ->
+    assert (Option.is_some command.unavailable);
+    match command.action with
+    | Unavailable_launch -> ()
+    | _ -> assert false);
+  let reason = "Preparing NEW run through routing; reopen palette when ready" in
+  let pending =
+    launch_commands
+      { empty with stage_preparation = Some reason }
+      ~preview:None
+      ~view_pending:false
+  in
+  assert (
+    List.for_all pending ~f:(fun command ->
+      Option.equal String.equal command.unavailable (Some reason)));
+  (* A palette captures availability. It cannot silently promote an unavailable command to
+     a newly arrived preview on Enter. *)
+  assert (
+    List.for_all pending ~f:(fun command ->
+      String.is_substring (Option.value_exn command.unavailable) ~substring:"reopen"));
+  let ranked =
+    Palette_search.rank
+      ~query:"launch"
+      (List.map commands ~f:(fun command ->
+         command, [ { Palette_search.text = command.title; weight = 100 } ]))
+  in
+  assert (List.length ranked = 2)
+;;
+
+let%test_unit "launch catalog captures exact ready preview and explains pending failed \
+               stale states"
+  =
+  let selection : Asic.Selection.t =
+    { flow = "standard"
+    ; profile = "balanced"
+    ; endpoint = "routing"
+    ; assignments = [ "CLK=9" ]
+    }
+  in
+  let preview : Asic.Preview.t =
+    { selection; plan_identity = "exact-routing-plan"; plan_json = "{}" }
+  in
+  let key = List.hd_exn (Plain_rpc.keys (Plan selection) Fs0_fixture.snapshot) in
+  let snapshot =
+    { Fs0_fixture.snapshot with
+      preview = Some preview
+    ; operations =
+        [ { key; kind = "plan"; state = "completed"; run = None; error = None } ]
+    }
+  in
+  let ready =
+    { empty with
+      planned_run = Planned_run.receive empty.planned_run ~revision:1 snapshot
+    }
+  in
+  let commands host = launch_commands host ~preview:(Some preview) ~view_pending:false in
+  List.iter (commands ready) ~f:(fun command ->
+    assert (Option.is_none command.unavailable);
+    match command.action with
+    | Launch_asic (actual, _) -> assert (Asic.Preview.equal preview actual)
+    | _ -> assert false);
+  let planned_run, ticket =
+    Planned_run.begin_plan ready.planned_run { selection with endpoint = "signoff" }
+  in
+  let pending = { ready with planned_run } in
+  let failed =
+    { pending with
+      planned_run =
+        Planned_run.receipt
+          planned_run
+          ticket
+          ~floor:2
+          (Error "provider rejected captured plan")
+    }
+  in
+  let stale =
+    { ready with
+      planned_run =
+        Planned_run.receive
+          ready.planned_run
+          ~revision:2
+          { snapshot with operations = [] }
+    }
+  in
+  List.iter
+    [ pending
+    ; failed
+    ; stale
+    ; { ready with stage_preparation = Some "Preparing routing" }
+    ]
+    ~f:(fun host ->
+      List.iter (commands host) ~f:(fun command ->
+        assert (Option.is_some command.unavailable)))
 ;;
 
 let set_appearance t appearance = { t with appearance }
@@ -2609,6 +2799,7 @@ let%test_unit "actual catalog and palette can cancel an allocated owned launch b
     { configured = true
     ; launches = []
     ; flows = []
+    ; catalog_default = None
     ; description_json = None
     ; preview = None
     ; runs = []

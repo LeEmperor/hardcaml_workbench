@@ -78,10 +78,11 @@ The installed provider does not emit the optional Workbench `stage_plan` envelop
 Workbench now also normalizes its existing public schema3 recipe and exact stage
 occurrences. After read-only Refresh, the checklist shows recorded completed stages
 and not-requested stages rather than requiring that optional envelope. This does
-not infer stage success from aggregate completion. Fresh stage actions are still
-not advertised: use the explicit Plan palette commands for real planning. See
-[launch/checklist consistency and restart instructions](launch_stage_consistency.md).
-The synthetic provider remains useful for demonstrating advertised checklist `r` actions.
+not infer stage success from aggregate completion. Checklist r now uses the real
+project's explicit fresh-prefix catalog declaration when no direct stage action is
+present, discovering it on demand as part of that command. See
+[launch/checklist consistency](launch_stage_consistency.md) and
+[the restored r → Plan → Launch workflow](checklist_launch_workflow.md).
 
 The current Timing UI counter says `1021 paths`, but it counts all index rows;
 the precise evidence is 1,020 `timing_path` rows and one `input_references` row.

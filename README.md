@@ -59,6 +59,8 @@ embedded waveforms and real gate-level adapters remain later integrations.
 - [Refined Overview and Timing](docs/frontend_refinement.md) — border titles, compact summaries, horizontal stages, wide run labels and cooperative Timing investigation panes.
 - [Current Overview sidebar and schemes](docs/overview_sidebar.md) — tightly packed vertical sidebar/right summaries, live Carbon/Slate/Crimson/Neon schemes and exact planned-run preview.
 - [Real ASIC example demo and current polish](docs/real_asic_example_demo.md) — black default, value-only status colors, split checklist/planned-run sidebar and verified actual-example launch commands.
+- [Launch/checklist consistency](docs/launch_stage_consistency.md) — exact submitted-run tracking beside preview readiness, real stage observations and read-only refresh after upgrade.
+- [Checklist r → Plan → Launch](docs/checklist_launch_workflow.md) — real capability-backed stage shortcuts, cold-catalog discovery and visible launch-command availability.
 - [Interactive synthetic flow](docs/synthetic_flow.md) — populated Overview/Timing, live checklist, simulated launches and FS1 inspection without EDA tools.
 - [Synthetic Testing and both demo launch pairs](docs/synthetic_testing.md) — Overview/Timing/Testing defaults, synthetic FS2 pass/failure evidence, wider Session panels and actual-example hand-validation.
 - [Formatting guide](docs/formatting_guide.md) — retained source conventions.

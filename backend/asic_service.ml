@@ -152,6 +152,7 @@ type project =
   ; tasks : task String.Table.t
   ; reservations : reservation String.Table.t
   ; mutable flows : Asic.Flow.t list
+  ; mutable catalog_default : Asic.Flow_default.t option
   ; mutable description : string option
   ; mutable preview : Asic.Preview.t option
   ; mutable desired_plan : Asic.Selection.t option
@@ -333,6 +334,7 @@ let load_project t ~root ~environment =
     ; tasks = String.Table.create ()
     ; reservations = String.Table.create ()
     ; flows = []
+    ; catalog_default = None
     ; description = None
     ; preview = None
     ; desired_plan = None
@@ -863,6 +865,7 @@ let load_summary t p cancel (run : Run_ref.t) =
 let snapshot p : Asic.Snapshot.t =
   { configured = Option.is_some p.config
   ; flows = p.flows
+  ; catalog_default = p.catalog_default
   ; description_json = p.description
   ; preview = p.preview
   ; runs = p.runs
@@ -2001,8 +2004,18 @@ let handle_operation t p operation =
           ~f:(fun observer -> Ivar.fill_if_empty observer.cancel ()));
     Deferred.unit
   | Discover ->
-    public_query ~key:"discover" ~kind:"discover" (invoke p Adapter.discover) (fun j ->
-      p.flows <- Public.flows j);
+    (* Retire the previous mapping immediately, including on refresh failure. The
+       invocation and publication belong to this immutable captured project config. *)
+    p.flows <- [];
+    p.catalog_default <- None;
+    let invocation = invoke p Adapter.discover in
+    enqueue ~key:"discover" ~kind:"discover" (fun cancel ->
+      let%bind () = check_provider t p cancel in
+      let%map j = query ~max_bytes:(1024 * 1024) t p cancel invocation in
+      Public.require (not (Deferred.is_determined cancel)) "ASIC discovery cancelled";
+      let flows, catalog_default = Public.flow_catalog j in
+      p.flows <- flows;
+      p.catalog_default <- catalog_default);
     Deferred.unit
   | Describe flow ->
     p.desired_description <- Some flow;

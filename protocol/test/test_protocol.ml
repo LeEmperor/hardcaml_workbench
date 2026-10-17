@@ -680,7 +680,14 @@ let%expect_test "ASIC metrics round-trip and old summary sexps have no metrics" 
         operation);
   let snapshot : Asic.Snapshot.t =
     { configured = true
-    ; flows = []
+    ; flows =
+        [ { id = "standard"
+          ; profiles = [ "balanced" ]
+          ; default_profile = "balanced"
+          ; fresh_stage_endpoints = [ "synthesis"; "routing" ]
+          }
+        ]
+    ; catalog_default = Some { flow = "standard"; profile = "balanced" }
     ; description_json = None
     ; preview = None
     ; runs = []
@@ -726,7 +733,8 @@ let%expect_test "ASIC metrics round-trip and old summary sexps have no metrics" 
         (List.filter fields ~f:(function
           | Sexp.List
               (Sexp.Atom
-                 ( "launches"
+                 ( "catalog_default"
+                 | "launches"
                  | "finalizations"
                  | "artifacts"
                  | "artifact_pages"
@@ -741,7 +749,8 @@ let%expect_test "ASIC metrics round-trip and old summary sexps have no metrics" 
     Asic.Snapshot.equal
       (Asic.Snapshot.t_of_sexp legacy_snapshot)
       { snapshot with
-        launches = []
+        catalog_default = None
+      ; launches = []
       ; finalizations = []
       ; artifacts = []
       ; artifact_pages = []

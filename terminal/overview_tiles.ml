@@ -894,6 +894,7 @@ let%test_unit "process completion is not stage evidence; mismatched and duplicat
   let asic : Asic.Snapshot.t =
     { configured = true
     ; flows = []
+    ; catalog_default = None
     ; description_json = None
     ; preview = None
     ; runs =

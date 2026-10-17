@@ -22,6 +22,7 @@ module Fs0_fixture = Terminal_presentation.Fs0_fixture
 module Simulation_view = Terminal_presentation.Simulation_view
 module Simulation_export = Terminal_presentation.Simulation_export
 module Planned_run = Terminal_presentation.Planned_run
+module Stage_action = Terminal_presentation.Stage_action
 
 let console_limit = 500
 let minimum_width = 68
@@ -502,7 +503,9 @@ let load_preferences session =
             Some (Launch_preferences.decode ~project_key (Sexp.of_string content))))
     in
     match result with
-    | Ok selection -> session.remembered_selection <- selection
+    | Ok selection ->
+      session.remembered_selection <- selection;
+      session.host <- { session.host with remembered_selection = selection }
     | Error error ->
       append_diagnostic
         session.diagnostics_file
@@ -511,6 +514,7 @@ let load_preferences session =
 
 let save_preferences session selection =
   session.remembered_selection <- Some selection;
+  session.host <- { session.host with remembered_selection = Some selection };
   let previous = session.preference_saves in
   let finished = Ivar.create () in
   session.preference_saves <- Ivar.read finished;
@@ -2688,6 +2692,10 @@ let host_catalog session =
         "run synth last used"
         (Asic (Plan selection))
     ])
+  @ Host.launch_commands
+      session.host
+      ~preview:(Option.bind session.asic ~f:(fun asic -> asic.preview))
+      ~view_pending:(Option.is_some session.view_on_allocation)
   @ Option.value_map session.asic ~default:[] ~f:(fun asic ->
     List.concat_map asic.flows ~f:(fun flow ->
       Host.command
@@ -2701,47 +2709,6 @@ let host_catalog session =
           ("Plan ASIC " ^ flow.id ^ " / " ^ profile ^ " (enter endpoint)")
           "run synth preview"
           (Edit_plan (flow.id, profile))))
-    @ Option.value_map asic.preview ~default:[] ~f:(fun preview ->
-      let plan_unavailable =
-        if Planned_run.launchable session.host.planned_run preview
-        then None
-        else if Planned_run.equal_status
-                  (Planned_run.model session.host.planned_run).status
-                  Ready
-        then
-          Some
-            "Exact launch pending, active, detached or unconfirmed; Refresh/Observe \
-             before another launch"
-        else
-          Some
-            "Current plan is pending, failed, stale or unconfirmed; prepare again \
-             explicitly"
-      in
-      let label =
-        sprintf
-          "%s / %s → %s [%s]"
-          preview.selection.flow
-          preview.selection.profile
-          preview.selection.endpoint
-          preview.plan_identity
-        |> Artifact_view.safe
-      in
-      [ Host.command
-          ?unavailable:plan_unavailable
-          "asic.launch"
-          ("Launch " ^ label)
-          "run synth"
-          (Launch_asic (preview, false))
-      ; Host.command
-          ?unavailable:
-            (if Option.is_some session.view_on_allocation
-             then Some "Another launch-and-view is awaiting allocation"
-             else plan_unavailable)
-          "asic.launch-view"
-          ("Launch and view in captured context: " ^ label)
-          "run select"
-          (Launch_asic (preview, true))
-      ])
     @ Host.asic_cancel_commands asic
     @ List.map asic.finalizations ~f:(fun finalization ->
       Host.command
@@ -3250,6 +3217,118 @@ let execute_host session captured action ~exit =
     | Inspect_artifact -> async (fun () -> inspect_artifact session)
     | Inspect_hierarchy -> async (fun () -> inspect_hierarchy session)
     | Discover_asic -> async (fun () -> asic_request session Discover)
+    | Prepare_stage (stage, run) ->
+      let remembered = session.remembered_selection in
+      let observed =
+        Option.bind session.asic ~f:(fun snapshot ->
+          List.find snapshot.runs ~f:(fun execution -> Run_ref.equal execution.run run)
+          |> Option.bind ~f:(fun execution -> execution.selection))
+      in
+      let generation = session.host.stage_generation + 1 in
+      let instance = session.hello.instance_id in
+      let message =
+        "Preparing NEW run through "
+        ^ stage.id
+        ^ "; discovering capabilities if needed; reopen palette when ready"
+      in
+      session.host
+      <- { session.host with
+           stage_generation = generation
+         ; stage_preparation = Some message
+         ; notice = message
+         };
+      let current () =
+        Host.current session.host captured
+        && phys_equal captured_client session.client
+        && V1.Daemon_instance_id.equal instance session.hello.instance_id
+        && Option.equal
+             Project_id.equal
+             captured_project
+             (Option.map (current_project session) ~f:(fun p -> p.id))
+        && generation = session.host.stage_generation
+      in
+      let fail reason =
+        if generation = session.host.stage_generation
+        then
+          session.host
+          <- { session.host with stage_preparation = Some reason; notice = reason }
+      in
+      async
+        ~on_rejected:(fun () -> fail "Stage preparation target changed; press r again")
+        (fun () ->
+          let missing () =
+            Option.value_map session.asic ~default:true ~f:(fun snapshot ->
+              let flow =
+                match Option.first_some remembered observed with
+                | Some selection -> Some selection.Asic.Selection.flow
+                | None -> Option.map snapshot.catalog_default ~f:(fun pair -> pair.flow)
+              in
+              not
+                (List.exists snapshot.flows ~f:(fun candidate ->
+                   Option.equal String.equal flow (Some candidate.id)
+                   && List.mem
+                        candidate.fresh_stage_endpoints
+                        stage.id
+                        ~equal:String.equal)))
+          in
+          let rec discover remaining =
+            if (not (current ())) || remaining = 0
+            then return ()
+            else if (not (missing ()))
+                    && not
+                         (Option.exists session.asic ~f:(fun snapshot ->
+                            List.exists snapshot.operations ~f:(fun op ->
+                              String.equal op.kind "discover" && Plain_rpc.active op)))
+            then return ()
+            else (
+              let%bind () = Clock.after (Time_float.Span.of_ms 100.) in
+              if not (current ())
+              then return ()
+              else (
+                let%bind () = asic_request session Get in
+                discover (remaining - 1)))
+          in
+          let%bind () =
+            if Option.is_none stage.action && missing ()
+            then (
+              let%bind () = asic_request session Discover in
+              discover 50)
+            else return ()
+          in
+          if not (current ())
+          then (
+            fail "Stage preparation superseded or context changed; press r again";
+            return ())
+          else (
+            match
+              Stage_action.resolve ~stage ~remembered ~observed ~snapshot:session.asic
+            with
+            | Error reason ->
+              fail ("Stage preparation failed: " ^ reason ^ "; press r to retry");
+              return ()
+            | Ok selection ->
+              let planned_run, ticket =
+                Planned_run.begin_plan session.host.planned_run selection
+              in
+              session.host
+              <- { session.host with
+                   planned_run
+                 ; stage_preparation = None
+                 ; remembered_selection = Some selection
+                 ; notice =
+                     "Planning NEW run; Space c c: Launch when ready (reopen palette)"
+                 };
+              let response = asic_request ~plan_request:ticket session (Plan selection) in
+              let%bind () = save_preferences session selection in
+              response))
+    | Unavailable_launch ->
+      session.host
+      <- { session.host with
+           notice =
+             "Captured launch was unavailable; reopen palette to capture the ready \
+              preview"
+         };
+      Effect.Ignore
     | Asic (Plan selection as operation) ->
       (match current_project session with
        | None -> Effect.Ignore
@@ -3260,7 +3339,12 @@ let execute_host session captured action ~exit =
            Planned_run.reset session.host.planned_run ~scope:(plan_scope session project)
          in
          let planned_run, ticket = Planned_run.begin_plan planned_run selection in
-         session.host <- { session.host with planned_run };
+         session.host
+         <- { session.host with
+              planned_run
+            ; stage_preparation = None
+            ; stage_generation = session.host.stage_generation + 1
+            };
          async
            ~on_rejected:(fun () ->
              session.host
@@ -3414,7 +3498,8 @@ let execute_host session captured action ~exit =
       Effect.Ignore
     | Launch_asic (preview, view) ->
       let ready () =
-        Planned_run.launchable session.host.planned_run preview
+        Option.is_none session.host.stage_preparation
+        && Planned_run.launchable session.host.planned_run preview
         && Option.value_map session.asic ~default:false ~f:(fun asic ->
           Option.equal Asic.Preview.equal asic.preview (Some preview))
       in
@@ -3780,21 +3865,23 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
                    ~asic:session.asic
                    ~run
                in
-               Host.stage_cursor (Host.local session.host tile.id) ~run ~stages)))
+               Host.stage_cursor (Host.local session.host tile.id) ~run ~stages
+               |> Option.map ~f:(fun stage -> stage, run))))
        in
-       (match Host.stage_plan selected, captured with
-        | Ok operation, Some capture ->
+       (match selected, captured with
+        | Some (stage, run), Some capture ->
           session.host
           <- { session.host with
                notice =
                  "Preparing NEW run; when preview ready: Space c c → Launch / Launch and \
                   view"
              };
-          Some (execute_host session capture (Asic operation) ~exit)
-        | Error reason, _ ->
-          session.host <- { session.host with notice = reason };
+          Some (execute_host session capture (Prepare_stage (stage, run)) ~exit)
+        | None, _ ->
+          session.host
+          <- { session.host with notice = "No explicit stage observation selected" };
           Some Effect.Ignore
-        | Ok _, None ->
+        | Some _, None ->
           session.host
           <- { session.host with
                notice = "Stage action unavailable: workspace not loaded"

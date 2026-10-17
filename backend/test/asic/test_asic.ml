@@ -1534,6 +1534,9 @@ let main () =
       let state_dir = Filename.concat root "cache" in
       let fixture = Filename.concat root "fixture.py" in
       Out_channel.write_all fixture ~data:(In_channel.read_all "fake_provider.py");
+      Out_channel.write_all
+        (Filename.concat root "production_flow_list.json")
+        ~data:(In_channel.read_all "production_flow_list.json");
       Core_unix.chmod fixture ~perm:0o700;
       let config : Config.t =
         { schema_version = 1
@@ -1632,6 +1635,41 @@ let main () =
       let service = create () in
       let%bind discovered = settled service root Discover in
       require (List.length discovered.flows = 1) "Public discovery failed";
+      require
+        (List.equal
+           String.equal
+           (List.hd_exn discovered.flows).fresh_stage_endpoints
+           Public.canonical_stages
+         && Option.equal
+              Asic.Flow_default.equal
+              discovered.catalog_default
+              (Some { flow = "standard"; profile = "balanced" }))
+        "Discovery did not publish exact capabilities/default together";
+      let%bind () =
+        Deferred.List.iter
+          [ "fail-discovery"; "invalid-discovery" ]
+          ~how:`Sequential
+          ~f:(fun marker ->
+            let path = Filename.concat root marker in
+            let%bind () = In_thread.run (fun () -> Out_channel.write_all path ~data:"") in
+            let%bind pending = handle service root Discover in
+            require
+              (List.is_empty pending.flows && Option.is_none pending.catalog_default)
+              "Pending discovery retained ready mapping";
+            let%bind () = Service.completion service in
+            let%bind failed = handle service root Get in
+            require
+              (List.is_empty failed.flows
+               && Option.is_none failed.catalog_default
+               && List.exists failed.operations ~f:(fun p ->
+                 String.equal p.kind "discover" && Option.is_some p.error))
+              "Failed discovery retained ready mapping or lost error";
+            let%bind () = In_thread.run (fun () -> Core_unix.unlink path) in
+            let%map recovered = settled service root Discover in
+            require
+              (List.length recovered.flows = 1 && Option.is_some recovered.catalog_default)
+              "Discovery did not recover coherently after failure")
+      in
       let launch profile key =
         let%bind planned = settled service root (Plan (selection profile)) in
         let preview = Option.value_exn planned.preview in
@@ -1709,6 +1747,13 @@ let main () =
       let%bind () = Service.shutdown service in
       let restarted = create () in
       let%bind restored = settled restarted root (Load_summary r1) in
+      require
+        (List.is_empty restored.flows && Option.is_none restored.catalog_default)
+        "Restart implicitly restored/discovered catalog capabilities";
+      let%bind rediscovered = settled restarted root Discover in
+      require
+        (List.length rediscovered.flows = 1 && Option.is_some rediscovered.catalog_default)
+        "Explicit discovery after restart failed";
       require
         (List.equal Asic.Launch.equal second.launches restored.launches)
         "Restart changed exact durable launch attribution/order";

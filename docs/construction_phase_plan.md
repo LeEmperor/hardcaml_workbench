@@ -261,6 +261,47 @@ with immediate local input/completion redraw after the Escape-latency followup.
 
 ## M4 — Rich evidence and live acceptance (FS1/FS2)
 
+### Real checklist preparation/launch followup — 2026-10-17
+
+[Workflow and evidence](checklist_launch_workflow.md),
+[shared plan](checklist_launch_workflow_plan.md).
+
+- [x] Normalize declared fresh-prefix endpoints and actual catalog default pair;
+  unknown providers retain explicit Plan/Run without guessed stage actions.
+- [x] Checklist j/k/r captures inputs and performs bounded capability discovery
+  when needed, then normal Plan; profile/assignments and exact target are preserved.
+- [x] Launch/Launch-and-view remain visible disabled with reasons until a current
+  exact preview is ready. Failed/superseded preparation cannot launch an old plan.
+- [x] Actual cold-daemon real Routing preparation and negative target/capability
+  cases; synthetic-only full launch/allocation. Final normal acceptance61 assertions
+  at `/tmp/opencode/checklist-workflow-7dbc9ab8d388/`; full checks passed at2.
+
+Persistent binaries were refreshed without changing live user sessions. No real
+EDA, canonical-result edits or Git staging/commits were performed. This resolves
+the stage-action gap noted in the earlier consistency/adoption records below.
+
+### Real launch/checklist consistency followup — 2026-10-17
+
+Fixed after owner real synthesis launches exposed retained-plan and stage-contract
+gaps. [Semantics, evidence and restart instructions](launch_stage_consistency.md),
+[shared implementation plan](launch_stage_consistency_plan.md).
+
+- [x] Separate preview readiness from exact durable launch reservation/allocation and
+  producer lifecycle; no false “no job allocated” statement after submission.
+- [x] Normalize supported public schema3 recipes and exact stage occurrences when
+  the optional stage-plan extension is absent; preserve cursor/identity fences.
+- [x] Verify both owner synthesis streams as synthesis completed/other five not
+  requested, and retained signoff as six explicit completions; canonical files unchanged.
+- [x] Full normal format/lint/tests/build at2; final native acceptance27 checks at
+  `/tmp/opencode/launch-stage-consistency-a2201a488574/`, lifecycle/regression tests,
+  and refreshed persistent demo copies with actual-project acceptance.
+- [x] Subsequent checklist workflow resolves fresh actions from explicit project
+  capability declarations, not stage status. No implicit resume/launch behavior.
+
+No EDA rerun, provider installation or live user-session mutation was needed.
+Earlier “not reported because stage_plan is absent” notes describe the previous
+adapter; explicit structured occurrence normalization is now supported.
+
 **FS1 adopted-evidence functional scope delivered: synthesis, aggregate and rich inspection.
 FS2 substantial project-scoped simulation delivered.** Exact commands/results are
 in [FS1 acceptance](fs1_acceptance.md) and [FS2 acceptance](fs2_acceptance.md).
@@ -533,8 +574,9 @@ Delivered from owner feedback. [Shared plan](real_example_polish_plan.md),
   through normal APIs; actual native Overview/Timing/all-domain detail verified.
 - [x] Persistent demo binary refresh with receipts/rollback tests; final copies
   match normal build. Full format/lint/tests/build passed serially at2.
-- [ ] Provider optional live stage-plan envelope remains absent; checklist states
-  stay not reported. No new real stage actions or execution are claimed by adoption.
+- [ ] Provider optional live stage-action envelope remains absent. The subsequent
+  consistency fix now reads checklist status from public structured occurrences;
+  no new real stage actions or execution are claimed by adoption.
 
 Final actual evidence: example `.dev/workbench-real-demo/receipts/acceptance-b72a4a8afe9441e698eda6a6da24e7a5/`,
 673 cells, setup11.6755ns, hold0.125029ns, retained acceptancepass,1020 timing paths

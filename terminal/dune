@@ -5,6 +5,7 @@
   fs0_fixture
   appearance
   planned_run
+  stage_action
   tile_presentation
   panel
   evidence_style

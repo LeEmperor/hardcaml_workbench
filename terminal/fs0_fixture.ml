@@ -46,6 +46,7 @@ let summary run cell_count cells : Asic.Summary.t =
 let snapshot : Asic.Snapshot.t =
   { configured = true
   ; flows = []
+  ; catalog_default = None
   ; description_json = None
   ; preview = None
   ; runs = [ run run_a; run run_b ]

@@ -48,5 +48,10 @@ let%test_unit "preferences retain exact inputs, reject other project contexts, a
     not
       (available
          selection
-         [ { id = "fixture"; profiles = [ "default" ]; default_profile = "default" } ]))
+         [ { id = "fixture"
+           ; profiles = [ "default" ]
+           ; default_profile = "default"
+           ; fresh_stage_endpoints = []
+           }
+         ]))
 ;;

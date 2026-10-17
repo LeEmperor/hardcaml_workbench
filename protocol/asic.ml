@@ -43,6 +43,15 @@ module Flow = struct
     { id : string
     ; profiles : string list
     ; default_profile : string
+    ; fresh_stage_endpoints : string list [@sexp.default []]
+    }
+  [@@deriving bin_io, compare, equal, sexp]
+end
+
+module Flow_default = struct
+  type t =
+    { flow : string
+    ; profile : string
     }
   [@@deriving bin_io, compare, equal, sexp]
 end
@@ -214,6 +223,7 @@ module Snapshot = struct
   type t =
     { configured : bool
     ; flows : Flow.t list
+    ; catalog_default : Flow_default.t option [@sexp.default None]
     ; description_json : string option
     ; preview : Preview.t option
     ; runs : Run.t list
