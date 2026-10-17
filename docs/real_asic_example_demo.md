@@ -75,11 +75,13 @@ metadata-only or synthetic project.
 ### Honest availability limits
 
 The installed provider does not emit the optional Workbench `stage_plan` envelope.
-The checklist therefore displays **not reported**, independently of the validated
-six-stage execution/finalization facts. Do not infer per-stage status/action from
-overall completion. Use the explicit Plan palette commands for real planning;
-the synthetic provider remains useful for demonstrating advertised checklist `r`
-actions and live stage transitions.
+Workbench now also normalizes its existing public schema3 recipe and exact stage
+occurrences. After read-only Refresh, the checklist shows recorded completed stages
+and not-requested stages rather than requiring that optional envelope. This does
+not infer stage success from aggregate completion. Fresh stage actions are still
+not advertised: use the explicit Plan palette commands for real planning. See
+[launch/checklist consistency and restart instructions](launch_stage_consistency.md).
+The synthetic provider remains useful for demonstrating advertised checklist `r` actions.
 
 The current Timing UI counter says `1021 paths`, but it counts all index rows;
 the precise evidence is 1,020 `timing_path` rows and one `input_references` row.

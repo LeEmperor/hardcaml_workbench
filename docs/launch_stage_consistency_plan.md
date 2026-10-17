@@ -85,8 +85,15 @@ plus historical full-run stages from explicit evidence. No EDA needed.
 
 ## Status
 
-Implementation pending; handoffs chronological. Coordinator records final semantics
-and verified instructions after integration.
+**Implemented and verified.** Final normal format/lint/full tests/build passed at2.
+Final native acceptance27 checks passed at
+`/tmp/opencode/launch-stage-consistency-a2201a488574/`; exact public observations
+from both owner synthesis runs show completed synthesis/other stages not requested,
+and historical signoff shows six explicit completions. Canonical hashes unchanged.
+Persistent Workbench copies are refreshed and actual-project rich-inspection
+acceptance passed again. [Current semantics and restart/Refresh instructions](launch_stage_consistency.md).
+Handoffs below retain chronological implementation details; transient findings are
+superseded by final checks. No EDA or live user-state changes were performed.
 
 ### A API handoff (implemented; focused checks passed)
 

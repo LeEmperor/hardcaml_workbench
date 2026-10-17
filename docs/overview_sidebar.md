@@ -122,6 +122,11 @@ tile never derives its identity from the historical run currently selected in
 Overview. Changing that selection does not retarget the plan. There is no second
 scheduler; rendering, scrolling, scheme changes and metadata inspection are read-only.
 
+The subsequent [launch consistency fix](launch_stage_consistency.md) adds exact
+durable submission/allocation tracking alongside this readiness. After Launch, the
+tile reports its last matching producer lifecycle and run identity instead of
+claiming no job was allocated. A retained plan may still be explicitly reusable.
+
 States are **empty, pending, failed, stale and ready**. A new Plan immediately
 invalidates local ready status, even for a retry of the same selection. Confirmation
 requires a poll issued after the accepted Plan receipt. Late prior receipts/polls,

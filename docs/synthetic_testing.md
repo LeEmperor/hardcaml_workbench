@@ -124,8 +124,10 @@ Each demo uses its own automatically chosen port/state, so they can be open side
 side. The real root is `hardcaml_asic_example`, with673 genuine synthesis cells,
 retained signoff/acceptance and rich Timing inspection. This pass does not inject
 synthetic FS2 cases into that root or claim a real FIFO structured-test adapter.
-The real provider still lacks the optional stage-checklist envelope; those rows can
-say not reported. See [real evidence and limitations](real_asic_example_demo.md).
+The real provider's structured recipe/occurrences now populate checklist status on
+Refresh, while per-stage `r` actions remain unavailable without an explicit action
+contract. See [real evidence and limitations](real_asic_example_demo.md) and
+[the consistency fix](launch_stage_consistency.md).
 
 For future builds refresh the persistent real-demo copies explicitly:
 
