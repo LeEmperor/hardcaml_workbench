@@ -11,7 +11,7 @@ let command =
     ~summary:"Initialize Hardcaml Workbench in an existing Dune directory"
     ~readme:(fun () ->
       "Creates only hardcaml-workbench.sexp, without replacing existing files.\n\
-       ROOT must contain dune-project or dune; relative roots use the current directory.\n\
+       ROOT must directly contain dune-project; relative roots use the current directory.\n\
        The project name defaults to ROOT's directory name. No ancestor discovery,\n\
        build, git, driver or provider execution is performed. Driver and aliases\n\
        are saved references; their targets do not need to exist yet.")

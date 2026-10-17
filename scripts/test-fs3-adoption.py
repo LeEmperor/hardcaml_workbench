@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import signal
 import struct
@@ -31,8 +32,52 @@ sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location('fs0', Path(__file__).with_name('test-fs0.py'))
 fs0 = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fs0)
-parse, sexp, field, require = fs0.parse, fs0.sexp, fs0.field, fs0.require
+sexp, field, require = fs0.sexp, fs0.field, fs0.require
 REPO = Path(__file__).resolve().parents[1]
+
+
+def parse(text):
+    """Decode Sexplib decimal escapes without feeding raw control bytes to JSON."""
+    tokens = iter(re.findall(r'\(|\)|"(?:\\.|[^"\\])*"|[^\s()"]+', text))
+
+    def value(token):
+        if token == '(':
+            result = []
+            for child in tokens:
+                if child == ')':
+                    return result
+                result.append(value(child))
+            raise AssertionError('Unclosed S-expression')
+        require(token != ')', 'Unexpected closing S-expression')
+        if token.startswith('"'):
+            token = re.sub(r'\\(?:[0-9]{3}|.)',
+                           lambda m: json.dumps(chr(int(m[0][1:])))[1:-1]
+                           if m[0][1:].isdigit() else m[0], token)
+            return json.loads(token)
+        return token
+
+    result = value(next(tokens))
+    require(next(tokens, None) is None, 'Trailing protocol data')
+    return result
+
+
+def optional_field(value, name, default=None):
+    return next((entry[1] for entry in value if entry[0] == name), default)
+
+
+def replace_field(value, name, content):
+    result = copy.deepcopy(value)
+    for entry in result:
+        if entry[0] == name:
+            entry[1] = content
+            return result
+    raise AssertionError('Missing field: ' + name)
+
+
+def portable(value, name=None):
+    """Canonical output schema, including an explicit absent preset for legacy files."""
+    return [['version', field(value, 'version')], ['name', name or field(value, 'name')],
+            ['preset', optional_field(value, 'preset', [])], ['views', field(value, 'views')]]
 
 
 def stop(process):
@@ -209,7 +254,9 @@ class Acceptance:
                    and field(workspace, 'context') == field(after, 'main_context')
                    and field(workspace, 'zoomed_tile') == []
                    and field(after, 'contexts') == field(before, 'contexts'),
-                   label + ': correct destination/name, Main-linked, no copied context or zoom')
+                    label + ': correct destination/name, Main-linked, no copied context or zoom')
+        self.check(field(workspace, 'preset') == optional_field(template, 'preset', []),
+                   label + ': optional preset identity preserved independently of name')
         tiles = [t for t in field(after, 'tiles') if field(t, 'workspace') == created]
         actual = [[['kind', field(t, 'kind')], ['hidden', field(t, 'hidden')],
                    ['geometry', field(t, 'requested_geometry')]] for t in tiles]
@@ -271,12 +318,12 @@ class Terminal:
     def palette(self, title, dispatch=True):
         for key in (b' ', b'c', b'c'):
             self.key(key)
-        self.wait('palette', ['COMMAND PALETTE - Esc closes'])
+        self.wait('palette', ['COMMAND PALETTE'])
         self.key(title.encode())
-        self.wait('query-' + str(time.time_ns()), [title])
+        self.wait('query-' + str(time.time_ns()), ['COMMAND PALETTE', title[:40], title[-60:]])
         if dispatch:
             self.key(b'\r')
-            self.wait('dispatched', absent=['COMMAND PALETTE - Esc closes'])
+            self.wait('dispatched', absent=['COMMAND PALETTE'])
 
     def close(self):
         stop(self.process)
@@ -284,6 +331,161 @@ class Terminal:
         (self.test.evidence / (self.label + '.ansi')).write_bytes(self.data)
         self.test.result.setdefault('terminals', []).append(
             dict(label=self.label, pid=self.process.pid, stopped=self.process.poll() is not None))
+
+
+def manifest_reload(test, manifest):
+    original = manifest.read_text()
+    changed = original.replace('FS3 acceptance', 'FS3 reloaded manifest')
+    require(changed != original, 'Manifest fixture must contain its display name')
+    calls = (test.evidence / 'metadata-calls.jsonl').read_bytes()
+    manifest.write_text(changed)
+    response = test.raw('refresh-integration', [['instance_id', test.instance], ['project', test.project]])
+    test.check(response[0] == 'Ok' and field(response[1], 'job') == [],
+               'Explicit manifest-only HTTP reload succeeds with no discovery job')
+    snapshot = test.raw('snapshot', [['instance_id', test.instance]])
+    project = next(p for p in field(snapshot[1], 'projects') if field(p, 'id') == test.project)
+    test.check(field(project, 'name') == 'FS3 reloaded manifest' and field(snapshot[1], 'jobs') == []
+               and (test.evidence / 'metadata-calls.jsonl').read_bytes() == calls,
+               'Manifest-only reload applies edited name without metadata probes or tool execution')
+    manifest.write_text(original)
+    response = test.raw('refresh-integration', [['instance_id', test.instance], ['project', test.project]])
+    test.check(response[0] == 'Ok' and field(response[1], 'job') == [],
+               'Repeated manifest-only reload remains successful and job-free')
+
+
+def terminal_integration(test, before, starters, header_id):
+    require(field(before, 'defaults_initialized') == 'false', 'First TUI must see a pending bootstrap')
+    terminals = []
+    try:
+        # Both processes race from the same pending persisted registry. The service must
+        # serialize initialize-once independently of all preceding import revisions.
+        terminals.append(Terminal(test, 'first-tui'))
+        terminals.append(Terminal(test, 'concurrent-tui'))
+        deadline = time.monotonic() + 25
+        observations = [before]
+        while True:
+            current = test.workspace()
+            observations.append(current)
+            if field(current, 'defaults_initialized') == 'true':
+                break
+            require(current == before, 'Bootstrap exposed partial registry before completion')
+            require(time.monotonic() < deadline, 'First TUI bootstrap deadline')
+            for terminal in terminals:
+                terminal.drain(.03)
+        (test.evidence / 'bootstrap-observations.json').write_text(json.dumps(observations, indent=2))
+        test.check(int(field(current, 'revision')) == int(field(before, 'revision')) + 1,
+                   'Import-before-first-TUI and concurrent startup commit exactly one bootstrap revision')
+        test.check(field(current, 'workspaces') == field(before, 'workspaces')
+                   and field(current, 'contexts') == field(before, 'contexts'),
+                   'Atomic bootstrap retains all arrangement/context identities, names and bindings')
+        initial_ids = {field(w, 'id') for w in field(before, 'workspaces')[:2]}
+        test.check([t for t in field(current, 'tiles') if field(t, 'workspace') not in initial_ids] ==
+                   [t for t in field(before, 'tiles') if field(t, 'workspace') not in initial_ids],
+                   'Bootstrap leaves every imported tile intact, including sparse preset membership')
+        for workspace in field(current, 'workspaces')[:2]:
+            preset = field(workspace, 'preset')[0]
+            actual = [t for t in field(current, 'tiles') if field(t, 'workspace') == field(workspace, 'id')]
+            expected = field(starters[preset], 'views')
+            test.check(len(actual) == len(expected) and
+                       sorted(sexp([field(t, 'kind'), field(t, 'requested_geometry')]) for t in actual) ==
+                       sorted(sexp([field(v, 'kind'), field(v, 'geometry')]) for v in expected)
+                       and all(field(t, 'hidden') == 'false' for t in actual),
+                       'Initial ' + preset + ' defaults match the shared OCaml starter definitions')
+        for terminal in terminals:
+            terminal.wait('ready', ['Space c c commands'], ['Loading workspace...'], ready=True)
+        test.check(test.workspace() == current, 'Second concurrent client performs no bootstrap rewrite')
+        test.check(any(field(parse(path.read_text()), 'snapshot') == current
+                       for path in test.state.glob('workspace-*.sexp')),
+                   'Completed bootstrap marker and complete defaults are persisted in one registry snapshot')
+        # A later startup must preserve a deliberately sparse/resized initial arrangement,
+        # rather than merely reapplying identical defaults invisibly.
+        selector = next(t for t in field(current, 'tiles') if field(t, 'workspace') in initial_ids
+                        and field(t, 'kind') == 'run-selector')
+        current = test.mutate(current, ['Resize_tile', ['tile', field(selector, 'id')],
+            ['geometry', [['x', '11'], ['y', '13'], ['width', '37'], ['height', '9']]]])
+        current = test.mutate(current, ['Set_tile_hidden', ['tile', field(selector, 'id')], ['hidden', 'true']])
+        (test.evidence / 'post-bootstrap-user-layout.sexp').write_text(sexp(current) + '\n')
+        terminals.pop().close()
+        terminal = terminals[0]
+        appearance = 'Appearance: C - Minimal'
+        terminal.palette(appearance)
+
+        def preferences(label, headers):
+            deadline = time.monotonic() + 10
+            while True:
+                files = list((test.evidence / 'client-state').rglob('presentation-*.sexp'))
+                stored = parse(files[0].read_text()) if len(files) == 1 else None
+                if stored is not None and field(stored, 'tile_headers') == headers:
+                    break
+                require(time.monotonic() < deadline, label + ': preference save deadline')
+                terminal.drain(.1)
+            test.check(field(field(stored, 'appearance'), 'preset') == 'Minimal'
+                       and field(stored, 'session') == [field(current, 'session_id')]
+                       and files[0].stat().st_mode & 0o077 == 0,
+                       label + ': private stored appearance/session and exact sparse header preferences')
+            (test.evidence / (label + '-preferences.sexp')).write_text(sexp(stored) + '\n')
+            return files[0], stored
+
+        # First create stored preferences, then mutate header intent. This catches stale
+        # replay of an earlier on-disk preference snapshot during ordinary polling.
+        preferences('appearance-first', [])
+        terminal.palette('Switch to Header acceptance')
+        terminal.wait('inherited-header', ['project-tests', 'Project tests (not ASIC-run scoped)'])
+        header_tile = next(t for t in field(current, 'tiles') if field(t, 'workspace') == header_id)
+        override = [[['tile', field(header_tile, 'id')], ['workspace', header_id],
+                     ['kind', 'project-tests'], ['headers', 'false']]]
+        terminal.palette('Toggle focused tile header')
+        terminal.wait('header-hidden', ['Project tests (not ASIC-run scoped)'], ['project-tests'])
+        pref_file, stored = preferences('header-toggle', override)
+        # Force both elapsed polling and a server-side registry transition without changing
+        # the tile. The client's older appearance-first snapshot must not restore its header.
+        current = test.mutate(current, ['Rename_workspace', ['workspace', header_id],
+                                        ['name', 'Header acceptance polled']])
+        terminal.drain(2.5)
+        terminal.wait('header-hidden-after-poll', ['Header acceptance polled',
+                      'Project tests (not ASIC-run scoped)'], ['project-tests'])
+        test.check(parse(pref_file.read_text()) == stored,
+                   'Polling preserves explicit header toggle after an existing preference load')
+        terminal.close()
+        terminals.clear()
+
+        # Restart both daemon and client; registry bootstrap and saved header must survive.
+        test.close()
+        test.start()
+        test.check(test.workspace() == current, 'Daemon restart retains completed bootstrap without layout rewrite')
+        terminal = Terminal(test, 'header-restart')
+        terminals.append(terminal)
+        terminal.wait('ready', ['Space c c commands'], ['Loading workspace...'], ready=True)
+        terminal.palette(appearance, dispatch=False)
+        terminal.wait('appearance-restored', [appearance + ' [active]'])
+        terminal.key(b'\x1b')
+        terminal.palette('Switch to Header acceptance polled')
+        terminal.wait('header-restored-hidden', ['Project tests (not ASIC-run scoped)'], ['project-tests'])
+        preferences('restart-toggle', override)
+        terminal.palette('Reset presentation overrides (inherit)')
+        terminal.wait('header-reset', ['project-tests', 'Project tests (not ASIC-run scoped)'])
+        pref_file, reset = preferences('header-reset', [])
+        current = test.mutate(current, ['Rename_workspace', ['workspace', header_id],
+                                        ['name', 'Header acceptance reset']])
+        terminal.drain(2.5)
+        terminal.wait('header-reset-after-poll', ['Header acceptance reset', 'project-tests'])
+        test.check(parse(pref_file.read_text()) == reset,
+                   'Actual palette reset persists inheritance and survives subsequent polling')
+        terminal.close()
+        terminals.clear()
+
+        terminal = Terminal(test, 'reset-restart')
+        terminals.append(terminal)
+        terminal.wait('ready', ['Space c c commands'], ['Loading workspace...'], ready=True)
+        terminal.palette('Switch to Header acceptance reset')
+        terminal.wait('reset-restored', ['project-tests', 'Project tests (not ASIC-run scoped)'])
+        preferences('restart-reset', [])
+        test.check(test.workspace() == current,
+                   'Subsequent fresh clients restore reset intent without rewriting bootstrapped registry')
+        return current
+    finally:
+        for terminal in reversed(terminals):
+            terminal.close()
 
 
 def exercise(test):
@@ -305,27 +507,53 @@ def exercise(test):
     test.check(manifest.read_text() == dry, 'Repeated initialization preserves existing manifest')
     child = root / 'nested'
     child.mkdir()
-    test.command(test.args.setup, ['--root', child], 'initialize-no-ancestor', error='must contain')
+    test.command(test.args.setup, ['--root', child], 'initialize-no-ancestor',
+                 error='must directly contain a regular dune-project file')
     test.check(list(child.iterdir()) == [], 'Initializer does not discover ancestor Dune markers')
     test.start()
+    manifest_reload(test, manifest)
     initial = test.workspace()
+    test.check(field(initial, 'defaults_initialized') == 'false',
+               'New registry explicitly awaits shared-definition bootstrap')
     current = initial
-    for kind, count in [('generic', 4), ('asic', 9)]:
+    starters = {}
+    for kind, count in [('generic', 4), ('asic', 9), ('overview', 11), ('timing', 6), ('testing', 7)]:
         text = test.command(test.args.workspace_cli, ['starter', kind], 'starter-' + kind)
         template = parse(text)
+        starters[kind] = template
         test.check(field(template, 'version') == '1' and len(field(template, 'views')) == count,
                    kind + ' offline starter has expected version and view count')
         path = test.evidence / (kind + '.sexp')
         path.write_text(text)
         current, created = test.imported(current, template, path, kind + ' imported', 'import-' + kind)
         exported = test.cli('export', [created], 'export-' + kind)
-        expected = copy.deepcopy(template)
-        for entry in expected:
-            if entry[0] == 'name':
-                entry[1] = kind + ' imported'
+        expected = portable(template, kind + ' imported')
         test.check(parse(exported) == expected, kind + ' export contains exactly portable layout fields')
+        if kind in ('overview', 'timing', 'testing'):
+            current = test.mutate(current, ['Rename_workspace', ['workspace', created], ['name', kind + ' renamed']])
+            renamed = parse(test.cli('export', [created], 'export-renamed-' + kind))
+            test.check(renamed == portable(template, kind + ' renamed') and field(renamed, 'preset') == [kind],
+                       kind + ' shared preset identity and exact composition survive an authoritative rename')
+            renamed_path = test.evidence / (kind + '-renamed.sexp')
+            renamed_path.write_text(sexp(renamed))
+            current, _ = test.imported(current, renamed, renamed_path, kind + ' renamed roundtrip',
+                                       'roundtrip-renamed-' + kind)
         if kind == 'generic':
             generic_id = created
+    legacy = [entry for entry in portable(starters['generic'], 'Legacy custom') if entry[0] != 'preset']
+    unknown = replace_field(portable(starters['generic'], 'Unknown preset'), 'preset', ['future-fs3-preset'])
+    sparse = replace_field(portable(starters['overview'], 'Sparse preset'), 'views', [])
+    for label, template in [('legacy', legacy), ('unknown-preset', unknown), ('sparse-preset', sparse)]:
+        path = test.evidence / (label + '.sexp')
+        path.write_text(sexp(template))
+        current, created = test.imported(current, template, path, field(template, 'name'), 'import-' + label)
+        test.check(parse(test.cli('export', [created], 'export-' + label)) == portable(template),
+                   label + ' roundtrip preserves optional/unknown identity and sparse membership honestly')
+    header = replace_field(portable(starters['generic'], 'Header acceptance'), 'views',
+                           [v for v in field(starters['generic'], 'views') if field(v, 'kind') == 'project-tests'])
+    header_path = test.evidence / 'header-acceptance.sexp'
+    header_path.write_text(sexp(header))
+    current, header_id = test.imported(current, header, header_path, 'Header acceptance', 'import-header')
     listing = test.cli('list', [], 'list-workspaces')
     test.check(all(field(w, 'id') in listing and field(w, 'name') in listing
                    for w in field(current, 'workspaces'))
@@ -343,10 +571,10 @@ def exercise(test):
     current = test.mutate(current, ['Set_zoom', ['workspace', generic_id], ['tile', [field(visible, 'id')]]])
     current = test.mutate(current, ['Create_tile', ['workspace', generic_id], ['kind', 'future-fs3-view'],
         ['geometry', [['x', '2'], ['y', '3'], ['width', '17'], ['height', '13']]]])
-    portable = test.cli('export', [generic_id], 'export-customized')
-    template = parse(portable)
+    portable_text = test.cli('export', [generic_id], 'export-customized')
+    template = parse(portable_text)
     custom = test.evidence / 'customized.sexp'
-    custom.write_text(portable)
+    custom.write_text(portable_text)
     test.check(any(field(v, 'hidden') == 'true' for v in field(template, 'views'))
                and any(field(v, 'kind') == 'future-fs3-view' for v in field(template, 'views')),
                'Export preserves hidden and extensible unknown views')
@@ -366,7 +594,7 @@ def exercise(test):
                and test.workspace() == current,
                'Actual HTTP daemon independently rejects invalid template geometry atomically')
     for label, text, diagnostic in [
-        ('version', portable.replace('(version 1)', '(version 99)'), 'Unsupported workspace template version'),
+        ('version', portable_text.replace('(version 1)', '(version 99)'), 'Unsupported workspace template version'),
         ('geometry', sexp(bad_geometry), 'geometry'),
         ('oversized', ' ' * (1024 * 1024 + 1), 'exceeds 1 MiB'),
         ('malformed', '(', '')]:
@@ -388,28 +616,12 @@ def exercise(test):
     (test.evidence / 'registry-after-restart.sexp').write_text(sexp(test.workspace()) + '\n')
     for workspace, name in [(clone_id, 'cloned custom'), (imported_id, 'roundtrip custom')]:
         test.check(parse(test.cli('export', [workspace], 'export-after-restart-' + workspace)) ==
-                   [['version', '1'], ['name', name], ['views', field(template, 'views')]],
-                   'CLI exports restored ' + name + ' after daemon restart')
+                   portable(template, name),
+                    'CLI exports restored ' + name + ' after daemon restart')
     if not test.args.skip_pty:
-        title = 'Appearance: C - Minimal'
-        for index in (1, 2):
-            terminal = Terminal(test, 'terminal-' + str(index))
-            try:
-                terminal.wait('ready', ['Space c c commands', ' | run '], ['Loading workspace...'], ready=True)
-                if index == 1:
-                    terminal.palette(title)
-                terminal.palette(title, dispatch=False)
-                terminal.wait('active', [title + ' [active]'])
-                terminal.key(b'\x1b')
-            finally:
-                terminal.close()
-            if index == 1:
-                files = list((test.evidence / 'client-state').rglob('presentation-*.sexp'))
-                test.check(len(files) == 1 and field(field(parse(files[0].read_text()), 'appearance'), 'preset') == 'Minimal'
-                           and files[0].stat().st_mode & 0o077 == 0,
-                           'Real PTY palette persists chosen appearance in a private preference file')
-        test.check(test.workspace() == current,
-                   'Fresh terminal process restores active appearance without changing authoritative registry')
+        current = terminal_integration(test, current, starters, header_id)
+    else:
+        test.result['skipped'] = ['PTY bootstrap/startup concurrency and header toggle/reset/restart']
     test.quiet()
     test.result['status'] = 'passed'
 

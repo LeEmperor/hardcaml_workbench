@@ -46,11 +46,10 @@ let prepare ~root ?project_name ?driver ?build_alias ?test_alias () =
       let root = Filename_unix.realpath root in
       match (Core_unix.stat root).st_kind with
       | S_DIR ->
-        if not
-             (List.exists [ "dune-project"; "dune" ] ~f:(fun name ->
-                regular_file (Filename.concat root name)))
+        if not (regular_file (Filename.concat root "dune-project"))
         then
-          Error (sprintf "root: %s must contain a regular dune-project or dune file" root)
+          Error
+            (sprintf "root: %s must directly contain a regular dune-project file" root)
         else (
           let path = Filename.concat root Manifest.filename in
           if exists path

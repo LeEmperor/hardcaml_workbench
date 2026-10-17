@@ -37,3 +37,11 @@ run-row setting can increase actual selector height when the viewport permits.
 Its optional `gutter` defaults to zero (adjacent, disjoint frame rectangles); use
 one for a blank cell between tiles. Insufficient dimensions use the existing grid
 or focused-tile fallback without changing saved geometry or membership.
+
+FS3 portable templates carry the stable preset ID alongside exact membership and
+requested geometry. `Definition.template` supplies the same definitions to CLI
+`starter overview|timing|testing`; imports do not fill/reset sparse arrangements.
+`Presets.bootstrap` initializes fresh Overview/Timing through a single idempotent
+daemon operation, even after a CLI import has advanced registry revision. Legacy
+saved arrangements are never mistaken for incomplete bootstrap. Custom layouts
+honor generic Fit as well as requested-size mode. See [FS3 adoption](../../docs/fs3_adoption.md).

@@ -3,11 +3,11 @@ open! Core
 (** A validated initialization plan. Preparing one only reads filesystem metadata. *)
 type t
 
-(** [root] must explicitly name an existing directory containing a regular [dune] or
-    [dune-project] file. Relative roots are resolved against the current directory; there
-    is no ancestor search. The default project name is the root's basename. Options use
-    the existing manifest parser's validation rules. Any existing entry at the manifest
-    path, including a dangling symlink, is an error. *)
+(** [root] must explicitly name an existing directory directly containing a regular
+    [dune-project] file, matching the project opener. Relative roots are resolved against
+    the current directory; there is no ancestor search. The default project name is the
+    root's basename. Options use the existing manifest parser's validation rules. Any
+    existing entry at the manifest path, including a dangling symlink, is an error. *)
 val prepare
   :  root:string
   -> ?project_name:string

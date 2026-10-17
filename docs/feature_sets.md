@@ -84,8 +84,9 @@ launch-and-view/reconnect/cancellation coverage remains a followup.
 **Delivered:** named workspace/context/pin/geometry state autosaves and restores;
 bounded L2 summaries reopen after restart as `Cached_unverified`, preserving exact
 real report identity and original observation time. Fixture report calls stay 2→2
-through warm switching and restart. No template export/clone or persisted local
-chrome/header preferences exists; shelf geometry is not freeform placement.
+through warm switching and restart. FS3 subsequently adds preset-preserving template
+export/import/clone and selected persistent presentation preferences; shelf geometry
+is not freeform placement.
 Cold/L1/L2 performance/size measurements remain open.
 
 **Exit scope:** Demos A–C in the active plan, including a real bounded synthesis path and
@@ -163,7 +164,10 @@ They and adoption/performance improvements are tracked in
 
 **First adoption slice delivered:** existing-project initializer using the current
 manifest, portable CLI workspace templates (export/import/clone and starters), and
-persistent local presentation choices. See [guide and verification](fs3_adoption.md).
+persistent local presentation choices. The 2026-10-17 integration preserves preset
+identity in templates, initializes defaults atomically, restores sparse preferences
+without poll replay, and supports successful driverless manifest reload. See
+[guide and verification](fs3_adoption.md).
 Multi-monitor acceptance and configuration-location migration remain later work.
 
 Multiple attached windows, shared/independent contexts across them, preset/layout

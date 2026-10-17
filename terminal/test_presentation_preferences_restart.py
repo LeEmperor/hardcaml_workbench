@@ -30,6 +30,12 @@ def main():
         assert files[0].read_bytes() == original
         assert len(list(state.iterdir())) == 1, "temporary file leaked"
 
+        run("reset")  # Actual catalog reset, poll, save, then a fresh process.
+        run("read-reset")
+        assert b"not-persistent" not in files[0].read_bytes()
+        run("write")
+        run("read")
+
         unknown_version = original.replace(b"(schema_version 1)", b"(schema_version 99)")
         assert unknown_version != original
         for malformed in (b"(", unknown_version, b" " * 65537):

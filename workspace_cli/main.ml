@@ -144,24 +144,28 @@ let clone =
      fun () ->
        let open Deferred.Let_syntax in
        let%bind snapshot, request = connect connection in
-       let template =
-         W.export_template snapshot (W.Workspace_id.of_string source) |> protocol_ok
-       in
        let window, name = destination in
+       let template =
+         W.export_template ?name snapshot (W.Workspace_id.of_string source) |> protocol_ok
+       in
        instantiate snapshot request ~window ~name template)
 ;;
 
 let starter =
   Command.async
-    ~summary:"Write a generic or asic starter template to stdout (offline)"
+    ~summary:"Write a generic, asic, overview, timing or testing starter (offline)"
     (let open Command.Let_syntax in
-     let%map_open kind = anon ("generic|asic" %: string) in
+     let%map_open kind = anon ("PRESET" %: string) in
      fun () ->
        emit
          (match kind with
           | "generic" -> T.generic
           | "asic" -> T.asic
-          | _ -> failwith "Expected generic or asic");
+          | id ->
+            Hardcaml_workbench_workspaces.Presets.find id
+            |> Option.value_exn
+                 ~message:"Expected generic, asic, overview, timing or testing"
+            |> Hardcaml_workbench_workspaces.Definition.template);
        Deferred.unit)
 ;;
 

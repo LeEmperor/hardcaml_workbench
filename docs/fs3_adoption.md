@@ -1,14 +1,19 @@
 # FS3 — Existing-project setup and reusable workspaces
 
-Implemented on the FS3 worktree, 2026-10-15. This slice delivers an existing-project
+Integrated with current `oxcaml`, 2026-10-17. This slice delivers an existing-project
 initializer, portable workspace templates and persistent client presentation choices.
 Multi-monitor UX, configuration-location migration and new-project creation remain
 later scope.
 
+The [post-merge integration plan and evidence](fs3_integration_plan.md) supersede
+the original worktree verification. Templates retain preset composition, bootstrap
+is atomic, header controls persist through their actual palette actions, and
+same-session reconnect preserves local investigation while fencing old responses.
+
 ## Build
 
 ```sh
-scripts/with-switch.sh dune build -j 10
+scripts/with-switch.sh dune build -j 20
 ```
 
 Installed executable names are `hardcaml-workbench-init` and
@@ -21,7 +26,8 @@ _build/default/setup/main.exe --root /absolute/path/to/project --dry-run
 _build/default/setup/main.exe --root /absolute/path/to/project
 ```
 
-The explicit root must contain a regular `dune-project` or `dune` file. The project
+The explicit root must directly contain a regular `dune-project` file, matching
+the ordinary project opener. A subdirectory with only `dune` is rejected. The project
 name defaults to its directory name. Optional flags are `--project-name NAME`,
 `--driver ./path/to/driver.exe`, `--build-alias @all` and `--test-alias @runtest`.
 Driver and alias syntax is validated through the existing manifest parser; targets
@@ -37,13 +43,36 @@ Open the initialized root with the ordinary terminal `--project-root` and
 `--environment` flags. This slice does not change root discovery, manifest
 precedence or configuration storage location.
 
+If the project is already open, opening it again reuses the daemon session. Use
+explicit integration refresh to reload the manifest:
+
+```sh
+_build/default/terminal/main.exe --plain --project-root /absolute/path/to/project \
+  --environment inherited --refresh-integration --wait
+```
+
+A valid driverless manifest reload succeeds with `Refresh_integration.Payload.job
+= None`; no job is invented. With a declared driver, `Some job` identifies the
+normal supervised discovery operation. Refreshing the generic manifest does not
+claim to reload ASIC or simulation provider configuration through a unified API.
+
 ## Workspace templates
 
-Templates contain a version, workspace name and ordered views with kind, hidden
-state and requested geometry. They exclude run selections, pins, session/context/
+Templates contain a version, workspace name, optional stable preset ID and ordered
+views with kind, hidden state and requested geometry. They exclude run selections, pins, session/context/
 tile IDs, zoom and appearance. Import and clone create fresh view identities in a
 new workspace linked to Main; every tile follows that context. A clone copies the
 layout, not the source investigation's selected run or independent context.
+
+Preset identity preserves the registered composition and presentation policy even
+after renaming the workspace. It is not a frozen copy of the compiled layout tree.
+Unknown IDs remain unknown; older version-1 templates without `preset` are custom.
+Import never reapplies a preset to fill missing tiles or reset geometry. Custom and
+unknown-preset workspaces support generic Fit; Requested tile sizes remains the
+separate shelf mode. The portable envelope is narrower than arbitrary live state:
+names/kinds are at most 256 bytes, geometry is bounded and there are at most 1000
+views. Invalid exports fail rather than truncate; clone `-name` is validated after
+the override replaces the source name.
 
 Start Workbench and open the project first. Use its daemon endpoint and project ID
 (shown by the plain client/project snapshot), then list registry IDs:
@@ -69,20 +98,34 @@ _build/default/workspace_cli/main.exe clone \
 views. Both are offline operations. Imported workspaces become available through
 the terminal's existing workspace-switch palette after refresh.
 
+`starter overview`, `starter timing` and `starter testing` export the same OCaml
+definitions used by the client and synthetic demo, including preset identity.
+Testing includes the structured simulation tile; importing it does not discover or
+run a simulation provider.
+
 Import/clone each use one atomic compare-and-swap registry mutation. Conflicts are
 reported rather than retried against a changed context. Invalid templates cannot
 leave a partially created workspace. Input is bounded to 1 MiB and 1000 views;
 unknown view kinds remain portable identifiers, not executable extensions.
 Requested geometry still uses the existing shelf/Fit renderer, not free placement.
 
+Fresh registries explicitly mark defaults as uninitialized. The first interactive
+refresh submits one atomic, idempotent bootstrap operation for Overview/Timing;
+CLI imports may safely happen first. Concurrent clients cannot partially populate
+the defaults or repeat the bootstrap. The daemon persists completion with the
+tiles. Legacy saved snapshots without the marker are treated as initialized,
+including sparse revision-zero user arrangements. Bootstrap leaves imports and
+explicit changes to existing tile geometry, hidden state and bindings intact.
+
 Templates can be checked into a project's chosen location; personal session state
 remains in the daemon store. No automatic template discovery or TUI file picker is
 introduced. Rebuild daemon and clients together to use the new template mutation;
-the stored workspace snapshot format is unchanged.
+legacy stored workspace snapshots remain readable. Upgrade daemon, terminal and
+workspace CLI together: live protocol records and operations have changed.
 
 ## Persistent presentation preferences
 
-The existing palette's appearance preset, color, icon, density, layout-mode,
+The existing palette's appearance preset, color scheme/intensity, icon, density, layout-mode,
 chrome and tile-header actions now save their explicit choices. Normal terminal
 exit waits for queued writes. Preferences use a separate versioned
 `presentation-<digest>.sexp` under
@@ -96,10 +139,54 @@ Malformed or oversized files fall back to defaults with a visible notice and are
 left untouched until a later explicit preference change saves a replacement.
 Concurrent clients use last-writer-wins files; preferences do not synchronize live.
 
-## Verification
+Only explicit tile-header overrides persist among the per-tile presentation fields.
+Reset removes that override and restores inheritance; title/badge/padding/row-count
+overrides remain transient. Initial restoration is consumed once, so polling never
+replays an old saved choice over a new toggle/reset. Same-daemon/project reconnect
+retains local browsing state while advancing request fences. Replaced sessions and
+removed/moved/retyped tile identities discard stale local state; these navigation
+values are still not persisted across client process restart.
 
-The full build, `@lint`, changed-file OCaml formatting and `dune runtest -j 10`
-pass. Repository-wide `@fmt` still reports inherited formatting differences in
+## Current verification — 2026-10-17
+
+Normal full build, repository-wide format/lint and full tests passed using
+`scripts/with-switch.sh` serially at `-j 20`. This is a shared pool, not a per-agent
+allowance: implementation used three separate build directories at six jobs each.
+
+- FS3 native HTTP/CLI/PTY: **140 checks**, including concurrent bootstrap after
+  pre-TUI imports, renamed-preset roundtrips, actual header toggle/reset through
+  polling and restart, and manifest-only reload without jobs/tools.
+  `/tmp/opencode/fs3-adoption-n5sxf42_/result.json`
+- Installed initializer/client handoff from an unrelated directory, private prefix
+  and HOME/XDG state: `/tmp/opencode/fs3-installed-setup-evidence-20261017/`.
+- Checklist launch: **61 checks**, `/tmp/opencode/checklist-workflow-371b032839a6/`.
+- Launch/stage lifecycle: **27 checks**, `/tmp/opencode/launch-stage-consistency-3b465919425f/`.
+- FS2 real Cyclesim/native HTTP/PTY: `/tmp/opencode/fs2-native-rbxswj1k/`.
+- Interrupt/restoration: **5/5**, `/tmp/opencode/workbench-terminal-interrupt-w_h5134h/`.
+
+Reconnect identity and delayed-response fences have reducer coverage; the native
+FS3 script proves process restart, not an exhaustive network-disconnection matrix.
+ASIC regression producer execution is synthetic; real evidence reads and planning
+are read-only. No real EDA, live daemon restarts or canonical evidence edits occurred.
+
+```sh
+scripts/with-switch.sh dune build -j 20 @fmt @lint
+scripts/with-switch.sh dune runtest -j 20
+scripts/with-switch.sh dune build -j 20
+python3 -B scripts/test-fs3-adoption.py
+```
+
+The native script accepts explicit `--daemon`, `--terminal`, `--setup` and
+`--workspace-cli` paths and performs no builds. Allow 600 seconds for PTY work.
+
+Normal binaries and persistent real-demo copies have been refreshed. Restart the
+matching daemon/client after active jobs finish; no reseed is necessary. The binary
+receipt is recorded in the integration plan. Live processes were left running.
+
+## Historical worktree verification — 2026-10-15
+
+The original full build, `@lint`, changed-file formatting and `dune runtest -j 10`
+passed. Its repository-wide `@fmt` reported inherited formatting differences in
 `backend/asic_evidence_file.ml{,i}`, `backend/asic_public.ml`,
 `backend/asic_service.ml`, `backend/test/asic/test_asic.ml`,
 `terminal/synthesis_view.ml{,i}` and `terminal/terminal_result_view.ml`.

@@ -6,6 +6,10 @@ and [acceptance](../fs0_acceptance.md). Requirements below remain normative: cur
 geometry is shelf-based and multi-monitor adoption acceptance remains later.
 FS3 now provides CLI template export/import/clone and persistent local chrome/header
 preferences; see [adoption guide](../fs3_adoption.md).
+The post-merge integration retains stable preset identity through template
+roundtrips, uses one atomic bootstrap for fresh registries, and preserves client
+browsing across same-session reconnect while fencing stale responses. Generic Fit
+also applies to custom/unknown-preset workspaces; free placement remains later.
 
 ## User outcome
 

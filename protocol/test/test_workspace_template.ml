@@ -19,6 +19,130 @@ let error kind = function
 
 let initial () = W.initial ~session_id:(W.Session_id.of_string "private-session")
 
+let without_field sexp name =
+  match sexp with
+  | Sexp.List fields ->
+    Sexp.List
+      (List.filter fields ~f:(function
+        | Sexp.List (Sexp.Atom field :: _) -> not (String.equal field name)
+        | _ -> true))
+  | _ -> assert false
+;;
+
+let%test_unit "legacy templates are custom; explicit unknown preset identities roundtrip" =
+  let legacy = T.sexp_of_t T.generic |> fun s -> without_field s "preset" in
+  let decoded = T.decode (Sexp.to_string legacy) |> Or_error.ok_exn in
+  assert (Option.is_none decoded.preset);
+  let s = initial () in
+  List.iter [ None; Some "overview"; Some "future/preset-v2" ] ~f:(fun preset ->
+    let template =
+      { decoded with
+        name = "Renamed desk"
+      ; preset
+      ; views = List.rev_map decoded.views ~f:(fun view -> { view with hidden = true })
+      }
+    in
+    let template = T.encode template |> Or_error.ok_exn |> T.decode |> Or_error.ok_exn in
+    let next =
+      mutate s (Instantiate_template { window = (List.hd_exn s.windows).id; template })
+    in
+    let w = List.last_exn next.workspaces in
+    assert (Option.equal String.equal w.preset preset);
+    assert (T.equal template (W.export_template next w.id |> ok)))
+;;
+
+let%test_unit "clone override precedes portable name validation" =
+  let s = initial () in
+  let w = List.hd_exn s.workspaces in
+  let s = mutate s (Rename_workspace { workspace = w.id; name = "Nonportable\nname" }) in
+  assert (Result.is_error (W.export_template s w.id));
+  let template = W.export_template ~name:"Valid clone" s w.id |> ok in
+  let next = mutate s (Instantiate_template { window = w.window; template }) in
+  let clone = List.last_exn next.workspaces in
+  assert (String.equal clone.name "Valid clone");
+  assert (Option.equal String.equal clone.preset w.preset);
+  assert (not (W.Workspace_id.equal clone.id w.id));
+  assert (Result.is_error (W.export_template ~name:"" s w.id))
+;;
+
+let bootstrap_templates =
+  [ { T.generic with name = "Overview"; preset = Some "overview" }
+  ; { T.asic with name = "Timing"; preset = Some "timing" }
+  ]
+;;
+
+let%test_unit "legacy saved snapshots at any revision are conservatively initialized" =
+  List.iter [ 0; 17 ] ~f:(fun revision ->
+    let s = { (initial ()) with revision } in
+    let sexp = without_field (W.Snapshot.sexp_of_t s) "defaults_initialized" in
+    let legacy = W.Snapshot.t_of_sexp sexp in
+    assert legacy.defaults_initialized;
+    assert (W.Snapshot.equal legacy (W.apply legacy (Bootstrap bootstrap_templates) |> ok)))
+;;
+
+let%test_unit "bootstrap is atomic and idempotent independently of revision and restart" =
+  let s = initial () in
+  assert (not s.defaults_initialized);
+  let window = (List.hd_exn s.windows).id in
+  let imported = mutate s (Instantiate_template { window; template = T.generic }) in
+  let custom = List.last_exn imported.workspaces in
+  let original = List.hd_exn s.workspaces in
+  let imported =
+    mutate imported (Rename_workspace { workspace = original.id; name = "Renamed" })
+  in
+  let reloaded = W.Snapshot.t_of_sexp (W.Snapshot.sexp_of_t imported) in
+  assert (not reloaded.defaults_initialized);
+  (* Missing/invalid definitions cannot persist partial defaults or the marker. *)
+  W.apply reloaded (Bootstrap [ List.hd_exn bootstrap_templates ]) |> error Not_found;
+  W.apply reloaded (Bootstrap ({ T.generic with version = 999 } :: bootstrap_templates))
+  |> error Invalid_request;
+  let exhausted = { reloaded with next_id = Int.max_value - 1 } in
+  W.apply exhausted (Bootstrap bootstrap_templates) |> error Invalid_request;
+  assert (not exhausted.defaults_initialized);
+  assert (List.equal W.Tile.equal exhausted.tiles reloaded.tiles);
+  assert (not reloaded.defaults_initialized);
+  let next = W.apply reloaded (Bootstrap bootstrap_templates) |> ok in
+  assert next.defaults_initialized;
+  assert (next.revision = reloaded.revision + 1);
+  assert (String.equal (W.workspace next original.id).name "Renamed");
+  assert (
+    W.Arrangement.equal (W.workspace reloaded custom.id) (W.workspace next custom.id));
+  assert (T.equal T.generic (W.export_template next custom.id |> ok));
+  let restarted = W.Snapshot.t_of_sexp (W.Snapshot.sexp_of_t next) in
+  (* A concurrent second startup, even with no definitions, is a strict no-op. *)
+  assert (W.Snapshot.equal next (W.apply restarted (Bootstrap []) |> ok));
+  let operation = W.Operation.Bootstrap bootstrap_templates in
+  assert (
+    W.Operation.equal
+      operation
+      (V1.Codec.encode W.Operation.sexp_of_t operation
+       |> V1.Codec.decode W.Operation.t_of_sexp
+       |> ok));
+  W.apply
+    next
+    (Mutate
+       { expected_revision = reloaded.revision
+       ; mutation = Create_window { name = "stale" }
+       })
+  |> error Conflict;
+  let before_import = W.apply s (Bootstrap bootstrap_templates) |> ok in
+  let after_import =
+    mutate before_import (Instantiate_template { window; template = T.generic })
+  in
+  assert (
+    W.Snapshot.equal
+      after_import
+      (W.apply after_import (Bootstrap bootstrap_templates) |> ok));
+  List.iter [ next; after_import ] ~f:(fun s ->
+    List.iter s.workspaces ~f:(fun w ->
+      if Option.is_some w.preset
+      then
+        assert (
+          List.length
+            (List.filter s.tiles ~f:(fun t -> W.Workspace_id.equal t.workspace w.id))
+          > 1)))
+;;
+
 let%test_unit "generic starter is project-scoped; ASIC starter includes supported \
                evidence views"
   =

@@ -21,6 +21,20 @@ let prepare_exn root =
   | Error message -> failwith message
 ;;
 
+let%test_unit "only direct project roots accepted by the opener can be initialized" =
+  with_project (fun root ->
+    let nested = Filename.concat root "nested" in
+    Core_unix.mkdir nested;
+    Exn.protect
+      ~f:(fun () ->
+        Out_channel.write_all (Filename.concat nested "dune") ~data:"";
+        assert (Result.is_error (Initialization.prepare ~root:nested ()));
+        assert (Result.is_ok (Initialization.prepare ~root ())))
+      ~finally:(fun () ->
+        Core_unix.unlink (Filename.concat nested "dune");
+        Core_unix.rmdir nested))
+;;
+
 let%test_unit "publication refuses a file or dangling symlink created after preparation" =
   List.iter [ `File; `Symlink ] ~f:(fun occupant ->
     with_project (fun root ->

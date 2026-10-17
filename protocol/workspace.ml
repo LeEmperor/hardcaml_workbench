@@ -130,6 +130,10 @@ module Snapshot = struct
     ; windows : Window.t list
     ; workspaces : Arrangement.t list
     ; tiles : Tile.t list
+        (* Missing on legacy disk snapshots means initialized, including sparse
+           revision-zero arrangements. Only [initial] explicitly opts into caller-supplied
+           defaults. *)
+    ; defaults_initialized : bool [@sexp.default true]
     }
   [@@deriving bin_io, compare, equal, sexp]
 end
@@ -213,9 +217,13 @@ end
 
 module Operation = struct
   (** Every mutation is compare-and-swap against the complete snapshot. A conflict
-      requires [Get] and deliberate retry; it must not silently retarget selection. *)
+      requires [Get] and deliberate retry; it must not silently retarget selection.
+      [Bootstrap] is instead an atomic initialize-once operation: it needs no captured
+      revision, advances revision once on completion, and subsequent calls are no-ops.
+      Callers supply portable definitions; this protocol has no renderer dependency. *)
   type t =
     | Get
+    | Bootstrap of Workspace_template.t list
     | Mutate of
         { expected_revision : int
         ; mutation : Mutation.t
@@ -363,6 +371,7 @@ let initial ~session_id : Snapshot.t =
   { schema_version
   ; session_id
   ; revision = 0
+  ; defaults_initialized = false
   ; next_id = 7
   ; main_context
   ; contexts =
@@ -417,13 +426,14 @@ let allocate (s : Snapshot.t) prefix =
 
 (** Export only the ordered layout. Pins, selections, context identities and zoom never
     cross this boundary. Import always creates a new Main-linked workspace. *)
-let export_template (s : Snapshot.t) id =
+let export_template ?name (s : Snapshot.t) id =
   Result.bind (validate s) ~f:(fun () ->
     protect (fun () ->
       let w = workspace s id in
       let template : Workspace_template.t =
         { version = Workspace_template.version
-        ; name = w.name
+        ; name = Option.value name ~default:w.name
+        ; preset = w.preset
         ; views =
             List.filter_map s.tiles ~f:(fun t ->
               if not (Workspace_id.equal t.workspace id)
@@ -585,7 +595,7 @@ let apply_mutation (s : Snapshot.t) (mutation : Mutation.t) =
               ; context = s.main_context
               ; binding_revision = s.revision
               ; zoomed_tile = None
-              ; preset = None
+              ; preset = template.preset
               }
             ]
       }
@@ -662,6 +672,77 @@ let apply (s : Snapshot.t) (operation : Operation.t) : Response.t =
     protect (fun () ->
       match operation with
       | Get -> s
+      | Bootstrap _ when s.defaults_initialized -> s
+      | Bootstrap templates ->
+        (* Only the two original arrangements are bootstrap targets. Imports and other
+           mutations may already have advanced revision; their state is never a target.
+           Legacy disk snapshots default the marker to true, even at revision zero. *)
+        let prototypes = initial ~session_id:s.session_id in
+        List.iter templates ~f:valid_template;
+        let defaults =
+          List.map prototypes.workspaces ~f:(fun original ->
+            let template =
+              find
+                templates
+                ~f:(fun t ->
+                  Option.equal String.equal t.Workspace_template.preset original.preset)
+                "bootstrap preset definition"
+            in
+            original, template)
+        in
+        require (s.revision < Int.max_value) "Snapshot revision exhausted";
+        let next = { s with revision = s.revision + 1; defaults_initialized = true } in
+        let next =
+          List.fold defaults ~init:next ~f:(fun s (original, template) ->
+            match
+              List.find s.workspaces ~f:(fun w -> Workspace_id.equal w.id original.id)
+            with
+            | None -> s
+            | Some w when not (Option.equal String.equal w.preset original.preset) -> s
+            | Some w ->
+              (* Normalize only untouched protocol placeholders. Explicit user geometry,
+                 hidden state, bindings and order survive startup in either order. *)
+              let s =
+                List.fold
+                  (List.filter prototypes.tiles ~f:(fun t ->
+                     Workspace_id.equal t.workspace w.id))
+                  ~init:s
+                  ~f:(fun s prototype ->
+                    match List.find s.tiles ~f:(Tile.equal prototype) with
+                    | None -> s
+                    | Some tile ->
+                      (match
+                         List.find template.views ~f:(fun v ->
+                           String.equal v.kind tile.kind)
+                       with
+                       | None -> s
+                       | Some view ->
+                         let g = view.geometry in
+                         update_tile s tile.id ~f:(fun t ->
+                           { t with
+                             requested_geometry =
+                               { x = g.x; y = g.y; width = g.width; height = g.height }
+                           })))
+              in
+              apply_mutation
+                s
+                (Apply_preset
+                   { workspace = w.id
+                   ; preset = Option.value_exn template.preset
+                   ; tiles =
+                       List.map template.views ~f:(fun view ->
+                         let g = view.geometry in
+                         ( view.kind
+                         , { Geometry.x = g.x
+                           ; y = g.y
+                           ; width = g.width
+                           ; height = g.height
+                           } ))
+                   }))
+        in
+        (match validate next with
+         | Ok () -> next
+         | Error error -> raise (Invalid_state error))
       | Mutate { expected_revision; mutation } ->
         if expected_revision <> s.revision
         then reject Conflict "Stale workspace snapshot revision";

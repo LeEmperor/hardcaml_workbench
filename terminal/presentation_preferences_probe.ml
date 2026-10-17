@@ -4,6 +4,16 @@ module P = Terminal_presentation.Presentation_preferences
 module Host = Terminal_presentation.Workspace_host
 module W = Workspace
 
+let choose host id =
+  let command =
+    Host.catalog host ~project:None ~jobs:[]
+    |> List.find_exn ~f:(fun command -> String.equal command.id id)
+  in
+  match command.action with
+  | Set_presentation (tile, overrides) -> Host.set_presentation host tile overrides
+  | _ -> failwith "Expected catalog presentation action"
+;;
+
 (* Invoked in separate processes by the restart test; uses the production store,
    serializer and host restoration rather than a second preference implementation. *)
 let () =
@@ -27,14 +37,10 @@ let () =
     ; chrome = false
     }
     |> fun host ->
-    Host.set_local
-      host
-      tile.id
-      { Host.default_local with
-        presentation = { Host.default_local.presentation with header = Some false }
-      ; filter = "not-persistent"
-      ; scroll = 23
-      }
+    let host, save = choose host "tile.headers" in
+    assert save;
+    let local = Host.local host tile.id in
+    Host.set_local host tile.id { local with filter = "not-persistent"; scroll = 23 }
   in
   match mode with
   | "write" -> P.save ~state_directory (P.capture ~project_key expected)
@@ -48,7 +54,7 @@ let () =
       Option.equal
         Bool.equal
         (Host.local restored tile.id).presentation.header
-        (Some false));
+        (Host.local expected tile.id).presentation.header);
     assert (String.is_empty (Host.local restored tile.id).filter);
     assert ((Host.local restored tile.id).scroll = 0);
     assert (Option.equal W.Snapshot.equal restored.registry (Some registry));
@@ -60,6 +66,31 @@ let () =
     assert (not replaced.chrome);
     assert (
       Option.is_none (P.load ~state_directory ~project_key:"other-project/inherited"))
+  | "reset" ->
+    let preferences = Option.value_exn (P.load ~state_directory ~project_key) in
+    let restored, pending =
+      P.receive (Some preferences) (P.apply preferences host) registry
+    in
+    let restored, save = choose restored "tile.presentation.title" in
+    assert (not save);
+    let reset, save = choose restored "tile.presentation.reset" in
+    assert save;
+    let polled, pending =
+      P.receive pending reset { registry with revision = registry.revision + 1 }
+    in
+    assert (Option.is_none pending);
+    assert (Option.is_none (Host.local polled tile.id).presentation.header);
+    P.save ~state_directory (P.capture ~project_key polled)
+  | "read-reset" ->
+    let preferences = Option.value_exn (P.load ~state_directory ~project_key) in
+    assert (List.is_empty preferences.tile_headers);
+    let restored = P.apply preferences host in
+    assert (Option.is_none (Host.local restored tile.id).presentation.header);
+    assert (Option.is_none (Host.local restored tile.id).presentation.title);
+    let inherited = { host with appearance = expected.appearance } in
+    assert (
+      Bool.equal (Host.policy restored tile).header (Host.policy inherited tile).header);
+    assert (Terminal_presentation.Appearance.equal restored.appearance expected.appearance)
   | "missing" -> assert (Option.is_none (P.load ~state_directory ~project_key))
   | "malformed" ->
     let path = P.path ~state_directory ~project_key in
@@ -72,5 +103,5 @@ let () =
       Result.is_error
         (Or_error.try_with (fun () ->
            P.save ~state_directory (P.capture ~project_key expected))))
-  | _ -> failwith "Expected write, read, missing, malformed or save-error"
+  | _ -> failwith "Unknown preference probe mode"
 ;;

@@ -174,8 +174,9 @@ Existing saved arrangements are preserved. **Apply preset** adds missing default
 **Reset arrangement** also restores requested sizes, but neither deletes or hides
 old tiles. Thus an older Timing workspace may retain its summary/checklist extras.
 Hide unwanted extras explicitly or use a fresh demo for the intended default layout.
-Runtime appearance overrides remain client-local; this slice does not add persisted
-presentation preferences or freeform drag-and-drop layout editing.
+The subsequent [FS3 integration](fs3_adoption.md) persists global appearance,
+layout mode, chrome and explicit tile headers. Other tile overrides remain
+transient; freeform drag-and-drop layout editing remains later scope.
 
 ## Verification
 

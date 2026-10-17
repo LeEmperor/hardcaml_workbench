@@ -323,6 +323,62 @@ let%test_unit "stable identity selects definitions after rename" =
   assert (Option.is_none (Presets.for_arrangement custom))
 ;;
 
+let%test_unit "portable current starters come directly from the shared definitions" =
+  List.iter Presets.all ~f:(fun d ->
+    let template = Definition.template d in
+    Workspace_template.validate template |> Or_error.ok_exn;
+    assert (Option.equal String.equal template.preset (Some d.id));
+    assert (
+      List.equal String.equal (List.map template.views ~f:(fun v -> v.kind)) (kinds d));
+    List.iter2_exn template.views d.tiles ~f:(fun view tile ->
+      let g = view.geometry
+      and h = tile.Common.geometry in
+      assert (g.x = h.x && g.y = h.y && g.width = h.width && g.height = h.height)))
+;;
+
+let%test_unit "shared bootstrap completes after import and protects explicit user edits" =
+  let ok = function
+    | Ok s -> s
+    | Error e -> raise_s [%sexp (e : V1.Error.t)]
+  in
+  let s = Workspace.initial ~session_id:(Workspace.Session_id.of_string "bootstrap") in
+  let mutate (s : Workspace.Snapshot.t) mutation =
+    Workspace.apply s (Mutate { expected_revision = s.revision; mutation }) |> ok
+  in
+  let first = List.hd_exn s.tiles in
+  let geometry : Workspace.Geometry.t = { x = 3; y = 5; width = 33; height = 11 } in
+  let s = mutate s (Resize_tile { tile = first.id; geometry }) in
+  let s = mutate s (Set_tile_hidden { tile = first.id; hidden = true }) in
+  let template =
+    { (Definition.template Overview.definition) with
+      name = "Sparse imported overview"
+    ; views = []
+    }
+  in
+  let s =
+    mutate s (Instantiate_template { window = (List.hd_exn s.windows).id; template })
+  in
+  let imported = List.last_exn s.workspaces in
+  let next = Workspace.apply s Presets.bootstrap |> ok in
+  assert next.defaults_initialized;
+  assert (Workspace.Tile.equal (Workspace.tile s first.id) (Workspace.tile next first.id));
+  assert (
+    Workspace_template.equal template (Workspace.export_template next imported.id |> ok));
+  List.iter (List.take next.workspaces 2) ~f:(fun w ->
+    let d = Presets.for_arrangement w |> Option.value_exn in
+    let tiles =
+      List.filter next.tiles ~f:(fun t -> Workspace.Workspace_id.equal t.workspace w.id)
+    in
+    assert (List.length tiles = List.length d.tiles);
+    List.iter d.tiles ~f:(fun expected ->
+      let tile =
+        List.find_exn tiles ~f:(fun t -> String.equal t.kind expected.Common.kind)
+      in
+      if not (Workspace.Tile_id.equal tile.id first.id)
+      then assert (Workspace.Geometry.equal tile.requested_geometry expected.geometry)));
+  assert (Workspace.Snapshot.equal next (Workspace.apply next Presets.bootstrap |> ok))
+;;
+
 let%test_unit "unknown preset IDs never select a known definition by display name" =
   let s = Workspace.initial ~session_id:(Workspace.Session_id.of_string "unknown") in
   let w =

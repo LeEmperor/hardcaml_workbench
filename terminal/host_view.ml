@@ -1786,7 +1786,7 @@ let tile_layout host ({ Dimensions.width; height } : Dimensions.t) =
       Option.is_some w.zoomed_tile)
   in
   let definition = Option.bind (H.active host) ~f:H.definition in
-  let layout_mode = if Option.is_none definition then H.Preferred else host.layout_mode in
+  let layout_mode = host.layout_mode in
   let fit =
     match definition with
     | Some definition ->
@@ -4812,4 +4812,60 @@ let%test_unit "warm synthesis run switch renders 73 while pinned reference retai
         Summary));
   let host = select host Fs0_fixture.run_a in
   assert (has (frame host 32 8) "Reported cells (agg.): 50")
+;;
+
+let%test_unit "custom and unknown presets honor generic Fit without rewriting geometry" =
+  let ok = function
+    | Ok value -> value
+    | Error error -> raise_s [%sexp (error : V1.Error.t)]
+  in
+  List.iter [ None; Some "future-preset" ] ~f:(fun preset ->
+    let initial = W.initial ~session_id:(W.Session_id.of_string "custom-fit") in
+    let template =
+      { Workspace_template.generic with
+        preset
+      ; views =
+          List.mapi Workspace_template.generic.views ~f:(fun i view ->
+            { view with
+              hidden = i = 1
+            ; geometry = { x = i * 100; y = 300; width = 400; height = 200 }
+            })
+      }
+    in
+    let registry =
+      W.apply
+        initial
+        (Mutate
+           { expected_revision = initial.revision
+           ; mutation =
+               Instantiate_template
+                 { window = (List.hd_exn initial.windows).id; template }
+           })
+      |> ok
+    in
+    let workspace = List.last_exn registry.workspaces in
+    let host = H.switch (H.receive H.empty registry) workspace.id in
+    let host = { host with layout_mode = H.Fit; chrome = false } in
+    assert (Option.is_none (H.definition workspace));
+    List.iter
+      [ 90, 28; 120, 40; 25, 6; 1, 1 ]
+      ~f:(fun (width, height) ->
+        let _, compact, cells = tile_layout host { Dimensions.width; height } in
+        assert (List.length cells = if compact then 1 else 3);
+        assert (Bool.equal compact (width = 1 || width = 25));
+        List.iteri cells ~f:(fun i (tile, (g : W.Geometry.t)) ->
+          assert (not tile.W.Tile.hidden);
+          assert (g.x >= 0 && g.y >= 0 && g.width > 0 && g.height > 0);
+          assert (g.x + g.width <= width && g.y + g.height <= height);
+          List.iter
+            (List.drop cells (i + 1))
+            ~f:(fun (_, (other : W.Geometry.t)) ->
+              assert (
+                g.x + g.width <= other.x
+                || other.x + other.width <= g.x
+                || g.y + g.height <= other.y
+                || other.y + other.height <= g.y))));
+    assert (W.Snapshot.equal registry (Option.value_exn host.registry));
+    assert (
+      Workspace_template.equal template (W.export_template registry workspace.id |> ok)))
 ;;

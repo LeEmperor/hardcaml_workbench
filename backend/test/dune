@@ -8,6 +8,7 @@
   core_unix.command_unix
   hardcaml_workbench_adapters
   hardcaml_workbench_backend
+  hardcaml_workbench_setup
   hardcaml_workbench_protocol)
  (preprocess
   (pps ppx_jane))

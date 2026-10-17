@@ -1,5 +1,13 @@
 # Real ASIC example demo and black-theme polish
 
+**Latest binary refresh, 2026-10-17:** the integrated FS3 daemon/client/exporter
+copies are prepared. Receipt: `receipts/refresh-binaries-14357dcbbedb43c6855fbfbf1c429988/`.
+Once active jobs finish, restart the matching daemon/client pair to adopt them;
+existing processes and state were preserved. Daemon/client alone reopen saved
+state—do not repeat `seed` for this upgrade. See [FS3 integration](fs3_adoption.md)
+for persistent appearance/header controls and template semantics. The historical
+real-evidence measurements below are unchanged; this refresh did not rerun EDA.
+
 Implemented and verified 2026-10-16. The next demo opens the actual
 `/home/wayne/devel/jane/hardcaml_asic_example` project using retained genuine named
 signoff evidence. It is separate from the synthetic UI fixture. No new synthesis,
@@ -107,7 +115,8 @@ invented zeros, unsupported passes or source mappings.
   Full references remain available through Session inspection and unchanged actions.
 - **Carbon is the default**, with black ground and bright white headers. Focused
   borders, semantic statuses and metric colors remain distinct. Slate/Crimson/Neon
-  remain available through **Color scheme: ...**. Scheme choices are still client-local.
+  remain available through **Color scheme: ...**. FS3 now retains scheme choices
+  across restart in project/environment-scoped client preferences.
 
 Source layout policy is in `terminal/workspaces/overview.ml`: checklist and planned
 run have separate named 10-row minima and equal weights. Token styling/labels are

@@ -25,6 +25,7 @@ end
 type t =
   { version : int
   ; name : string
+  ; preset : string option [@sexp.default None]
   ; views : View.t list
   }
 [@@deriving bin_io, compare, equal, sexp]
@@ -59,6 +60,8 @@ let validate t =
       "Template name must contain 1-256 bytes without control characters"
   else if List.length t.views > max_views
   then Or_error.error_string "Workspace template exceeds 1000 views"
+  else if Option.exists t.preset ~f:(fun preset -> not (valid_label preset))
+  then Or_error.error_string "Invalid template preset identity"
   else if List.exists t.views ~f:(fun v -> not (valid_label v.kind))
   then Or_error.error_string "Invalid template view kind"
   else if List.exists t.views ~f:(fun v -> not (valid_geometry v.geometry))
@@ -83,6 +86,7 @@ let encode t =
 let starter name kinds =
   { version
   ; name
+  ; preset = None
   ; views =
       List.mapi kinds ~f:(fun i kind ->
         { View.kind

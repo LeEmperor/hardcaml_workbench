@@ -33,6 +33,7 @@
    cohttp-async
    cryptokit
    yojson
+   (conf-python-3 :with-test)
    ; Repository development tools.
   (ppx_js_style :with-dev-setup)
   (ocamlformat :with-dev-setup)

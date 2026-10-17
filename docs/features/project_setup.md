@@ -4,6 +4,10 @@ Status: bounded existing-project initializer delivered; current root manifest re
 supported. See [FS3 adoption](../fs3_adoption.md) for the initializer, portable
 starter templates and persistent presentation preferences. Configuration-directory
 migration, upward discovery and new-project creation remain requested.
+The initializer requires a direct `dune-project`, matching the opener. An already
+open project adopts its manifest through explicit refresh; a driverless reload
+succeeds without scheduling a job. Installed initializer/client handoff is covered
+by the 2026-10-17 integration evidence.
 
 ## Requirements
 

@@ -3,6 +3,9 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 switch="${OPAM_SWITCH:-5.2.0+ox}"
+build_dir="${HCW_BUILD_DIR:-$repo_root/_build}"
+build_jobs="${HCW_BUILD_JOBS:-6}"
+umask 077
 work_root="$(mktemp -d "${TMPDIR:-/tmp}/hardcaml-workbench-native.XXXXXX")"
 prefix="$work_root/prefix"
 outside="$work_root/outside"
@@ -11,12 +14,15 @@ integrated_fixture="$work_root/integrated-fixture"
 manifest_fixture="$work_root/manifest-fixture"
 missing_driver_fixture="$work_root/missing-driver-fixture"
 invalid_manifest_fixture="$work_root/invalid-manifest-fixture"
+initialized_fixture="$work_root/initialized-fixture"
 runtime="$work_root/runtime"
 explicit_runtime="$work_root/explicit-runtime"
 mkdir -p \
   "$prefix" "$outside" "$fixture" "$integrated_fixture" "$manifest_fixture" \
-  "$missing_driver_fixture" "$invalid_manifest_fixture" \
+  "$missing_driver_fixture" "$invalid_manifest_fixture" "$initialized_fixture" \
   "$runtime" "$explicit_runtime"
+mkdir -p "$work_root/home" "$work_root/config" "$work_root/state" \
+  "$work_root/data" "$work_root/cache" "$work_root/tmp"
 
 cp -R "$repo_root/test/fixtures/example_project/." "$fixture/"
 cp -R "$repo_root/test/fixtures/example_project/." "$integrated_fixture/"
@@ -44,6 +50,10 @@ cat >"$invalid_manifest_fixture/hardcaml-workbench.sexp" <<'EOF'
 (lang hardcaml-workbench 99)
 (project (name invalid-manifest-fixture))
 (dune)
+EOF
+cat >"$initialized_fixture/dune-project" <<'EOF'
+(lang dune 3.22)
+(name installed_init_fixture)
 EOF
 
 metadata_path="$runtime/hardcaml-workbench/daemon.sexp"
@@ -81,14 +91,78 @@ trap cleanup EXIT
 
 (
   cd "$repo_root"
-  opam exec --switch="$switch" -- dune build -j20 -p hardcaml_workbench @install
-  opam exec --switch="$switch" -- dune install -j20 --prefix "$prefix" hardcaml_workbench
+  "$repo_root/scripts/with-switch.sh" dune build --build-dir "$build_dir" \
+    -j"$build_jobs" -p hardcaml_workbench @install
+  "$repo_root/scripts/with-switch.sh" dune install --build-dir "$build_dir" \
+    -j"$build_jobs" --prefix "$prefix" hardcaml_workbench
 )
 
+# Keep toolchain lookup available to the broader checks, while installed application
+# preferences, registry state, fallback paths and diagnostics are entirely private.
+export OPAMROOT="${OPAMROOT:-$HOME/.opam}"
+export HOME="$work_root/home"
+export XDG_CONFIG_HOME="$work_root/config"
+export XDG_STATE_HOME="$work_root/state"
+export XDG_DATA_HOME="$work_root/data"
+export XDG_CACHE_HOME="$work_root/cache"
+export XDG_RUNTIME_DIR="$runtime"
+export TMPDIR="$work_root/tmp"
+unset HARDCAML_WORKBENCH_DIAGNOSTICS
+cd "$outside"
+
+# Installed initializer -> existing daemon session -> explicit client reload. This
+# minimal fixture declares saved references only; no build or driver is requested.
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$initialized_fixture" \
+  --environment inherited >"$work_root/before-init.txt"
+grep -Fq "Integration: Generic_dune" "$work_root/before-init.txt"
+grep -Fq "Jobs: 0" "$work_root/before-init.txt"
+"$prefix/bin/hardcaml-workbench-init" --root "$initialized_fixture" \
+  --project-name installed-initialized --build-alias @saved-build --test-alias @saved-test \
+  >"$work_root/initialize.txt"
+cp "$initialized_fixture/hardcaml-workbench.sexp" "$work_root/initialized-manifest.sexp"
+if "$prefix/bin/hardcaml-workbench-init" --root "$initialized_fixture" \
+  >"$work_root/reinitialize.txt" 2>&1; then
+  echo "error: installed initializer unexpectedly clobbered a manifest" >&2
+  exit 1
+fi
+cmp "$initialized_fixture/hardcaml-workbench.sexp" "$work_root/initialized-manifest.sexp"
+grep -Fq '(build_alias @saved-build)' "$initialized_fixture/hardcaml-workbench.sexp"
+grep -Fq '(test_alias @saved-test)' "$initialized_fixture/hardcaml-workbench.sexp"
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$initialized_fixture" \
+  --environment inherited >"$work_root/initialized-before-reload.txt"
+grep -Fq "Integration: Generic_dune" "$work_root/initialized-before-reload.txt"
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$initialized_fixture" \
+  --environment inherited --refresh-integration --wait >"$work_root/init-reload.txt"
+XDG_RUNTIME_DIR="$runtime" "$client" --plain --project-root "$initialized_fixture" \
+  --environment inherited >"$work_root/after-init.txt"
+grep -Fq "Project: installed-initialized" "$work_root/after-init.txt"
+grep -Fq "Integration: Manifest" "$work_root/after-init.txt"
+grep -Fq "driver=absent" "$work_root/after-init.txt"
+grep -Fq "Jobs: 0" "$work_root/after-init.txt"
+if [[ -n "${HCW_NATIVE_EVIDENCE_DIR:-}" ]]; then
+  # A new absolute destination is required, so existing evidence is never replaced.
+  [[ "$HCW_NATIVE_EVIDENCE_DIR" = /* ]]
+  mkdir "$HCW_NATIVE_EVIDENCE_DIR"
+  cp "$work_root/before-init.txt" "$work_root/initialize.txt" \
+    "$work_root/reinitialize.txt" "$work_root/initialized-before-reload.txt" \
+    "$work_root/init-reload.txt" "$work_root/after-init.txt" \
+    "$work_root/initialized-manifest.sexp" "$HCW_NATIVE_EVIDENCE_DIR/"
+  sha256sum "$client" "$prefix/bin/hardcaml-workbench-init" \
+    "$prefix/bin/hardcaml-workbench-daemon" >"$HCW_NATIVE_EVIDENCE_DIR/binaries.sha256"
+  printf 'result=PASS\ncheck=installed-setup-handoff\ncwd=%s\nbuild_dir=%s\nbuild_jobs=%s\nHOME=%s\nXDG_CONFIG_HOME=%s\nXDG_STATE_HOME=%s\nXDG_DATA_HOME=%s\nXDG_CACHE_HOME=%s\nXDG_RUNTIME_DIR=%s\nassertions=generic-open,initialize,no-clobber,saved-aliases,no-implicit-reload,explicit-reload,manifest-name,no-driver,zero-jobs\n' \
+    "$PWD" "$build_dir" "$build_jobs" "$HOME" "$XDG_CONFIG_HOME" \
+    "$XDG_STATE_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" \
+    >"$HCW_NATIVE_EVIDENCE_DIR/receipt.txt"
+fi
+if [[ "${HCW_NATIVE_SETUP_ONLY:-0}" == 1 ]]; then
+  printf 'Installed initializer/client handoff and no-clobber checks: passed\n'
+  exit 0
+fi
+
 # The copied project remains a normal external Dune workspace.
-opam exec --switch="$switch" -- dune build -j20 --root "$fixture"
-opam exec --switch="$switch" -- dune runtest -j20 --root "$fixture"
-opam exec --switch="$switch" -- dune clean --root "$fixture"
+"$repo_root/scripts/with-switch.sh" dune build -j"$build_jobs" --root "$fixture"
+"$repo_root/scripts/with-switch.sh" dune runtest -j"$build_jobs" --root "$fixture"
+"$repo_root/scripts/with-switch.sh" dune clean --root "$fixture"
 
 (
   cd "$outside"

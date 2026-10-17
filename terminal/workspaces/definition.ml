@@ -11,6 +11,20 @@ type t =
 
 let specs t = List.map t.tiles ~f:(fun tile -> tile.Common.kind, tile.geometry)
 
+let template t : Workspace_template.t =
+  { version = Workspace_template.version
+  ; name = t.name
+  ; preset = Some t.id
+  ; views =
+      List.map t.tiles ~f:(fun tile ->
+        let g = tile.Common.geometry in
+        { Workspace_template.View.kind = tile.kind
+        ; hidden = false
+        ; geometry = { x = g.x; y = g.y; width = g.width; height = g.height }
+        })
+  }
+;;
+
 let apply t ~workspace =
   Workspace.Mutation.Apply_preset { workspace; preset = t.id; tiles = specs t }
 ;;

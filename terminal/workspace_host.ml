@@ -7,7 +7,9 @@ module T = Tile_presentation
 (** Only presentation state lives here. Registry writes are effects returned to the
     transport owner; a keypress never optimistically mutates the registry. *)
 type local =
-  { cursor : string option
+  { (* Lifetime token: numeric request counters may restart after removal/retyping. *)
+    identity : unit ref
+  ; cursor : string option
   ; stage_run : Run_ref.t option
   ; filter : string
   ; scroll : int
@@ -148,7 +150,8 @@ let empty =
 ;;
 
 let default_local =
-  { cursor = None
+  { identity = ref ()
+  ; cursor = None
   ; stage_run = None
   ; filter = ""
   ; scroll = 0
@@ -168,13 +171,26 @@ let default_local =
 
 let local t id =
   List.Assoc.find t.locals (W.Tile_id.to_string id) ~equal:String.equal
-  |> Option.value ~default:default_local
+  |> Option.value_or_thunk ~default:(fun () -> { default_local with identity = ref () })
 ;;
 
 let set_local t id value =
   { t with
     locals = List.Assoc.add t.locals ~equal:String.equal (W.Tile_id.to_string id) value
   }
+;;
+
+(** The catalog captures sparse overrides. Only a changed header is durable; the other
+    fields remain local even when they travel in the same action. *)
+let set_presentation t id presentation =
+  if not
+       (Option.exists t.registry ~f:(fun registry ->
+          List.exists registry.tiles ~f:(fun tile -> W.Tile_id.equal tile.id id)))
+  then t, false
+  else (
+    let previous = local t id in
+    ( set_local t id { previous with presentation; scroll = 0 }
+    , not (Option.equal Bool.equal previous.presentation.header presentation.header) ))
 ;;
 
 let timing_epoch registry workspace =
@@ -186,6 +202,8 @@ let timing_epoch registry workspace =
       && Option.is_some (Timing_workspace.pane tile.kind))
     |> List.map ~f:(fun tile ->
       W.Tile_id.to_string tile.id
+      ^ ":"
+      ^ tile.kind
       ^ ":"
       ^ Sexp.to_string_mach (W.Binding.sexp_of_t tile.binding))
     |> List.sort ~compare:String.compare
@@ -437,7 +455,9 @@ let receive t (s : W.Snapshot.t) =
           List.exists s.tiles ~f:(fun tile ->
             String.equal id (W.Tile_id.to_string tile.id)
             && List.exists previous.tiles ~f:(fun old ->
-              W.Tile_id.equal old.id tile.id && String.equal old.kind tile.kind)))
+              W.Tile_id.equal old.id tile.id
+              && W.Workspace_id.equal old.workspace tile.workspace
+              && String.equal old.kind tile.kind)))
       | _ -> []
     in
     let notice =
@@ -475,7 +495,36 @@ let receive t (s : W.Snapshot.t) =
           in
           id, view))
     in
-    let t = { t with registry = Some s; active; locals; notice; timing } in
+    let workspace_exists id =
+      List.exists s.workspaces ~f:(fun workspace ->
+        String.equal id (W.Workspace_id.to_string workspace.id))
+    in
+    let workspace_focus =
+      List.filter_map t.workspace_focus ~f:(fun (workspace, focus) ->
+        if not (workspace_exists workspace)
+        then None
+        else
+          Some
+            ( workspace
+            , Option.filter focus ~f:(fun id ->
+                List.exists s.tiles ~f:(fun tile ->
+                  W.Tile_id.equal tile.id id
+                  && String.equal workspace (W.Workspace_id.to_string tile.workspace))) ))
+    in
+    let workspace_presentation =
+      List.filter t.workspace_presentation ~f:(fun (id, _) -> workspace_exists id)
+    in
+    let t =
+      { t with
+        registry = Some s
+      ; active
+      ; locals
+      ; notice
+      ; timing
+      ; workspace_focus
+      ; workspace_presentation
+      }
+    in
     let focus =
       Option.filter t.focus ~f:(fun id ->
         List.exists (tiles t) ~f:(fun tile -> W.Tile_id.equal tile.id id))
@@ -483,6 +532,66 @@ let receive t (s : W.Snapshot.t) =
       Option.first_some selected (Option.map (List.hd (tiles t)) ~f:(fun tile -> tile.id))
     in
     { t with focus }
+;;
+
+(** A new transport invalidates receipts even if the daemon/session survives. Retain
+    registry identity until [receive] can validate the next snapshot. *)
+let reconnect t ~replacement =
+  let invalidate_inspection (view : Inspection_view.t) =
+    { view with
+      generation = view.generation + 1
+    ; requested = None
+    ; operation_key = None
+    ; pending_error = None
+    ; detail_cache = None
+    }
+  in
+  let t =
+    { t with
+      palette = None
+    ; prefix = 0
+    ; paste = false
+    ; inspection_paste = None
+    ; editing_filter = false
+    ; stage_generation = t.stage_generation + 1
+    ; stage_preparation = None
+    ; planned_run = Planned_run.reset t.planned_run ~scope:""
+    ; timing = List.map t.timing ~f:(fun (id, view) -> id, invalidate_inspection view)
+    ; locals =
+        List.map t.locals ~f:(fun (id, local) ->
+          ( id
+          , { local with
+              artifact_generation = local.artifact_generation + 1
+            ; artifacts =
+                Option.map local.artifacts ~f:(fun view ->
+                  { view with
+                    generation = view.generation + 1
+                  ; acknowledged = false
+                  ; transport_error = None
+                  })
+            ; inspection_generation = local.inspection_generation + 1
+            ; inspection = Option.map local.inspection ~f:invalidate_inspection
+            ; simulation =
+                { local.simulation with
+                  snapshot = None
+                ; busy = false
+                ; request = local.simulation.request + 1
+                }
+            } ))
+    }
+  in
+  if replacement
+  then
+    { t with
+      registry = None
+    ; active = None
+    ; focus = None
+    ; locals = []
+    ; workspace_focus = []
+    ; workspace_presentation = []
+    ; timing = []
+    }
+  else t
 ;;
 
 let capture t =
@@ -524,7 +633,163 @@ let%test_unit "local tile state survives refresh but not replacement identities"
           List.map registry.tiles ~f:(fun tile -> { tile with kind = "different-kind" })
       }
   in
-  assert (Option.is_none (local retyped tile.id).presentation.header)
+  assert (Option.is_none (local retyped tile.id).presentation.header);
+  let moved =
+    receive
+      host
+      { registry with
+        tiles =
+          List.map registry.tiles ~f:(fun tile ->
+            { tile with workspace = (List.last_exn registry.workspaces).id })
+      }
+  in
+  assert (String.is_empty (local moved tile.id).filter);
+  assert (not (phys_equal (local moved tile.id).identity (local host tile.id).identity));
+  let readded = receive removed { registry with revision = registry.revision + 1 } in
+  assert (String.is_empty (local readded tile.id).filter);
+  assert (not (phys_equal (local readded tile.id).identity (local host tile.id).identity))
+;;
+
+let%test_unit "same-session reconnect retains browsing and rejects old response tickets" =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "reconnect-browsing") in
+  let tile = List.hd_exn registry.tiles in
+  let host = receive empty registry in
+  let view =
+    { (Inspection_view.create
+         ~generation:7
+         ~run:Fs0_fixture.run_a
+         ~domain:"timing"
+         ~stage:"signoff"
+         ())
+      with
+      filter = "endpoint/Q"
+    ; selected = Some "row"
+    ; scroll = 12
+    }
+  in
+  let inspection_ticket = Inspection_view.capture view (Inspection_view.operation view) in
+  let artifacts = Artifact_view.create ~generation:4 Fs0_fixture.run_a in
+  let instance_id = V1.Daemon_instance_id.of_string "reconnect-instance" in
+  let project = Project_id.of_string "reconnect-project" in
+  let artifact_ticket =
+    Artifact_view.capture
+      artifacts
+      ~instance_id
+      ~project
+      (List_artifacts Fs0_fixture.run_a)
+    |> Option.value_exn
+  in
+  let simulation =
+    Simulation_view.select Simulation_view.empty "historical-attempt"
+    |> Simulation_view.begin_request
+    |> fun (view : Simulation_view.t) ->
+    { view with case_id = Some "case"; older = true; logs = true }
+  in
+  let selection : Asic.Selection.t =
+    { flow = "flow"; profile = "profile"; endpoint = "signoff"; assignments = [] }
+  in
+  let planned_run, plan_ticket =
+    Planned_run.begin_plan
+      (Planned_run.reset host.planned_run ~scope:"daemon/project")
+      selection
+  in
+  let preview : Asic.Preview.t =
+    { selection; plan_identity = "plan"; plan_json = "{}" }
+  in
+  let planned_run, launch_ticket =
+    Planned_run.begin_launch planned_run ~key:"launch" preview
+  in
+  let host =
+    set_local
+      host
+      tile.id
+      { (local host tile.id) with
+        filter = "local browsing"
+      ; scroll = 23
+      ; presentation = { T.inherit_ with header = Some false }
+      ; artifacts = Some artifacts
+      ; artifact_generation = artifacts.generation
+      ; inspection = Some view
+      ; inspection_generation = view.generation
+      ; simulation
+      }
+    |> fun host ->
+    { host with
+      planned_run
+    ; timing = [ W.Workspace_id.to_string tile.workspace, view ]
+    ; stage_generation = 9
+    ; stage_preparation = Some "Preparing"
+    }
+  in
+  let reconnected = reconnect host ~replacement:false in
+  assert (Option.equal W.Snapshot.equal host.registry reconnected.registry);
+  assert (Option.equal W.Tile_id.equal host.focus reconnected.focus);
+  assert (Option.equal W.Workspace_id.equal host.active reconnected.active);
+  let current = local reconnected tile.id in
+  assert (String.equal current.filter "local browsing" && current.scroll = 23);
+  assert (Option.equal Bool.equal current.presentation.header (Some false));
+  assert (Option.equal String.equal current.simulation.attempt (Some "historical-attempt"));
+  assert (Option.equal String.equal current.simulation.case_id (Some "case"));
+  assert (
+    current.simulation.older && current.simulation.logs && not current.simulation.busy);
+  let late =
+    Simulation_view.receive
+      current.simulation
+      ~ticket:simulation.request
+      ~selected:simulation.attempt
+      (Observe "historical-attempt")
+      (Error "stale transport")
+  in
+  assert (Option.is_none late.error);
+  let inspected = Option.value_exn current.inspection in
+  assert (String.equal inspected.filter view.filter && inspected.scroll = 12);
+  assert (Option.equal String.equal inspected.selected view.selected);
+  assert (
+    Option.is_none
+      (Inspection_view.apply_response inspected inspection_ticket (Error "late")).error);
+  let timing =
+    List.Assoc.find_exn
+      reconnected.timing
+      ~equal:String.equal
+      (W.Workspace_id.to_string tile.workspace)
+  in
+  assert (String.equal timing.filter view.filter && timing.generation > view.generation);
+  assert (
+    Option.is_none
+      (Inspection_view.apply_response timing inspection_ticket (Error "late")).error);
+  let artifacts = Option.value_exn current.artifacts in
+  assert (
+    Option.is_none
+      (Artifact_view.apply_response
+         artifacts
+         artifact_ticket
+         ~instance_id
+         ~project
+         (Error "late"))
+        .error);
+  assert (not (Planned_run.current_ticket reconnected.planned_run plan_ticket));
+  let late_launch =
+    Planned_run.launch_receipt
+      reconnected.planned_run
+      launch_ticket
+      ~floor:1
+      (Error "late launch")
+  in
+  assert (Option.is_none (Planned_run.model late_launch).launch.key);
+  assert (reconnected.stage_generation > host.stage_generation);
+  assert (Option.is_none reconnected.stage_preparation);
+  let refreshed =
+    receive reconnected { registry with revision = registry.revision + 1 }
+  in
+  assert (String.equal (local refreshed tile.id).filter "local browsing");
+  let replaced =
+    receive
+      reconnected
+      { registry with session_id = W.Session_id.of_string "replacement-session" }
+  in
+  assert (List.is_empty replaced.locals && List.is_empty replaced.timing);
+  let new_daemon = reconnect host ~replacement:true in
+  assert (Option.is_none new_daemon.registry && List.is_empty new_daemon.locals)
 ;;
 
 let switch t id =
@@ -580,6 +845,76 @@ let%test_unit "workspace roundtrip cannot revive a pending stage preparation" =
     String.is_substring
       (Option.value_exn restored.stage_preparation)
       ~substring:"context changed")
+;;
+
+let%test_unit "Timing reconnect keeps investigation until pane or session identity \
+               changes"
+  =
+  let apply snapshot mutation =
+    W.apply
+      snapshot
+      (Mutate { expected_revision = snapshot.W.Snapshot.revision; mutation })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let registry = W.initial ~session_id:(W.Session_id.of_string "timing-reconnect") in
+  let workspace = List.last_exn registry.workspaces in
+  let context = W.context registry workspace.context in
+  let registry =
+    apply
+      registry
+      (Select_run
+         { workspace = workspace.id
+         ; context = context.id
+         ; expected_selection_revision = context.selection_revision
+         ; run = Some Fs0_fixture.run_a
+         })
+    |> fun registry ->
+    apply registry (P.Definition.apply P.Timing.definition ~workspace:workspace.id)
+  in
+  let tile =
+    List.find_exn registry.tiles ~f:(fun tile ->
+      W.Workspace_id.equal tile.workspace workspace.id
+      && String.equal tile.kind "timing-paths")
+  in
+  let host = switch (receive empty registry) workspace.id in
+  let view =
+    { (Timing_workspace.create ~generation:5 ~run:Fs0_fixture.run_a ~stage:"signoff") with
+      filter = "critical endpoint"
+    ; selected = Some "chosen-row"
+    ; scroll = 7
+    }
+  in
+  let host = set_timing host tile view in
+  let reconnected = reconnect host ~replacement:false in
+  let refreshed =
+    receive reconnected { registry with revision = registry.revision + 1 }
+  in
+  let view = Option.value_exn (timing refreshed tile) in
+  assert (String.equal view.filter "critical endpoint" && view.scroll = 7);
+  assert (Option.equal String.equal view.selected (Some "chosen-row"));
+  assert (view.generation > 5);
+  let retyped =
+    receive
+      refreshed
+      { registry with
+        revision = registry.revision + 2
+      ; tiles =
+          List.map registry.tiles ~f:(fun candidate ->
+            if W.Tile_id.equal candidate.id tile.id
+            then { candidate with kind = "timing-detail" }
+            else candidate)
+      }
+  in
+  let invalidated =
+    List.Assoc.find_exn
+      retyped.timing
+      ~equal:String.equal
+      (W.Workspace_id.to_string workspace.id)
+  in
+  assert (invalidated.generation > view.generation);
+  assert (
+    Option.is_none invalidated.selected && Option.is_none invalidated.workspace_epoch)
 ;;
 
 (** Cursor identity is a registry ID, never a display name or an ordinal. An unset or

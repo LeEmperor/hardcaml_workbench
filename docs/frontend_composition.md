@@ -142,10 +142,13 @@ Focus a tile, open the palette, and use:
 - **Run selector: More visible rows (+1) / Fewer visible rows (-1)**.
 - **Reset presentation overrides (inherit)**.
 
-These are client-local overrides keyed by exact tile identity. They survive
-polling/workspace switches but are not persisted across client restart. A replacement
-workspace session clears tile/workspace overrides. Layouts and semantic bindings
-remain in the daemon-owned persisted registry.
+These are client-local overrides keyed by exact tile identity. FS3 now persists
+explicit header overrides, global appearance (including scheme), layout mode and
+chrome across restart. Other tile overrides remain transient. Reset removes the
+explicit header choice rather than freezing the resolved default; polling cannot
+replay old choices. A replacement workspace session clears tile/workspace overrides.
+Layouts and semantic bindings remain in the daemon-owned persisted registry. See
+[current persistence and template semantics](fs3_adoption.md).
 
 Precedence is:
 

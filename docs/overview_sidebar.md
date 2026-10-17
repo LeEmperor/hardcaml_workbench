@@ -97,7 +97,8 @@ and simulation views. Status roles remain distinguishable; original text and
 semantic evidence are unchanged. Swapping schemes does not mutate the registry,
 move tiles, select runs, change pins or invoke providers.
 
-Schemes are currently client-local until restart. Slate is the default and the
+Scheme changes affect the current client immediately; FS3 now saves them for
+restart, scoped by project/environment. Carbon is the current default and the
 fallback when loading an older appearance value without a scheme field. Crimson
 was adapted from the read-only Ches `ui/theme.ml` palette; Workbench does not add a
 runtime dependency on the Ches checkout. The palette/roles are implemented in

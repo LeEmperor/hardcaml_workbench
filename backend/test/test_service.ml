@@ -182,6 +182,68 @@ let test_project_opening ~root ~log_dir =
         "directory without dune-project was accepted")
 ;;
 
+let test_initialize_after_open ~root ~log_dir =
+  let module Initialization = Hardcaml_workbench_setup.Initialization in
+  let%bind created = Service.create ~instance_id ~log_dir () in
+  let service = Or_error.ok_exn created in
+  Monitor.protect
+    ~finally:(fun () -> Service.shutdown service)
+    (fun () ->
+      let request : V1.Open_project.Request.t =
+        { instance_id; root; environment = Inherit_daemon }
+      in
+      let%bind opened = Service.open_project_with_discovery service request in
+      let project = (ok opened).project in
+      require
+        (Project_integration.Level.equal project.integration.level Generic_dune)
+        "fixture did not open generically";
+      let plan =
+        Initialization.prepare
+          ~root
+          ~project_name:"initialized-after-open"
+          ~build_alias:"@controlled-build"
+          ~test_alias:"@controlled-test"
+          ()
+        |> Result.ok_or_failwith
+      in
+      Initialization.publish plan |> Result.ok_or_failwith;
+      require
+        (Result.is_error (Initialization.publish plan))
+        "initialization clobbered an existing manifest";
+      let%bind repeated = Service.open_project_with_discovery service request in
+      require
+        (Project_integration.Level.equal
+           (ok repeated).project.integration.level
+           Generic_dune)
+        "repeat-open implicitly reloaded integration";
+      let%bind refreshed =
+        Service.refresh_integration service { instance_id; project = project.id }
+      in
+      require (Option.is_none (ok refreshed).job) "manifest-only reload created a job";
+      let session = Hashtbl.find_exn service.projects project.id in
+      require
+        (String.equal session.project.name "initialized-after-open"
+         && String.equal session.build_alias "@controlled-build"
+         && String.equal session.test_alias "@controlled-test")
+        "reload did not apply the initialized name and aliases";
+      require
+        (Project_integration.Level.equal session.project.integration.level Manifest
+         && List.is_empty (snapshot service).jobs)
+        "manifest-only reload performed tool work";
+      let%bind fresh_created =
+        Service.create ~instance_id ~log_dir:(log_dir ^ "-fresh") ()
+      in
+      let fresh = Or_error.ok_exn fresh_created in
+      Monitor.protect
+        ~finally:(fun () -> Service.shutdown fresh)
+        (fun () ->
+          let%map opened = Service.open_project_with_discovery fresh request in
+          require
+            (String.equal (ok opened).project.name "initialized-after-open"
+             && List.is_empty (snapshot fresh).jobs)
+            "initialized root did not open without driver jobs"))
+;;
+
 let test_live_output_and_events ~root ~log_dir =
   let events = ref [] in
   let invocation ~root ~environment:_ _ =
@@ -1001,7 +1063,7 @@ let test_rtl_generation_and_artifacts ~root ~log_dir =
       let%bind refreshed =
         Service.refresh_integration service { instance_id; project = project.id }
       in
-      let refreshed = ok refreshed in
+      let refreshed = Option.value_exn (ok refreshed).job in
       Out_channel.write_all release_generation ~data:"release\n";
       let%bind refresh_race = wait_terminal service refresh_race.job.id in
       require
@@ -1020,7 +1082,7 @@ let test_rtl_generation_and_artifacts ~root ~log_dir =
            (ok refresh_race_hierarchy).hierarchy.generating_job
            refresh_race.id)
         "in-flight generation lost its pinned hierarchy capability";
-      let%bind refreshed = wait_terminal service refreshed.job.id in
+      let%bind refreshed = wait_terminal service refreshed.id in
       require (Job.State.equal refreshed.state Complete) "RTL-only driver refresh failed";
       mode := `Valid;
       let%bind rtl_only = submit_generation "rtl-only-hierarchy" in
@@ -1128,12 +1190,12 @@ let test_source_provenance ~root ~log_dir:_ =
 ;;
 
 let test_driver_discovery ~root ~log_dir =
-  Out_channel.write_all
-    (Filename.concat root Integration.Manifest.filename)
-    ~data:
-      "(lang hardcaml-workbench 1)\n\
-       (project (name discovery-test))\n\
-       (dune (driver ./driver.exe))\n";
+  let module Initialization = Hardcaml_workbench_setup.Initialization in
+  let plan =
+    Initialization.prepare ~root ~project_name:"discovery-test" ~driver:"./driver.exe" ()
+    |> Result.ok_or_failwith
+  in
+  Initialization.publish plan |> Result.ok_or_failwith;
   require
     (Poly.equal
        (Sys_unix.file_exists (Filename.concat root Integration.Manifest.filename))
@@ -1148,7 +1210,8 @@ let test_driver_discovery ~root ~log_dir =
   let mode = ref `Valid in
   let observed_environment = ref None in
   let events = ref [] in
-  let driver_invocation ~root ~environment ~driver:_ =
+  let driver_invocation ~root ~environment ~driver =
+    require (String.equal driver "./driver.exe") "initialized driver reference changed";
     observed_environment := Some environment;
     match !mode with
     | `Valid ->
@@ -1243,10 +1306,11 @@ let test_driver_discovery ~root ~log_dir =
         (List.length (snapshot service).jobs = 1)
         "repeat-open unexpectedly repeated discovery";
       let refresh () =
-        Service.refresh_integration service { instance_id; project = project.id } >>| ok
+        Service.refresh_integration service { instance_id; project = project.id }
+        >>| fun result -> Option.value_exn (ok result).job
       in
       let%bind refreshed = refresh () in
-      let%bind refreshed = wait_terminal service refreshed.job.id in
+      let%bind refreshed = wait_terminal service refreshed.id in
       require (Job.State.equal refreshed.state Complete) "valid refresh failed";
       require_project_result_before_terminal refreshed.id;
       let refreshed_project =
@@ -1263,7 +1327,7 @@ let test_driver_discovery ~root ~log_dir =
         "discovery identities changed across refresh";
       mode := `No_generate;
       let%bind unsupported_refresh = refresh () in
-      let%bind unsupported_refresh = wait_terminal service unsupported_refresh.job.id in
+      let%bind unsupported_refresh = wait_terminal service unsupported_refresh.id in
       require
         (Job.State.equal unsupported_refresh.state Complete)
         "describe without generation capability failed";
@@ -1283,7 +1347,7 @@ let test_driver_discovery ~root ~log_dir =
         "missing generation capability was accepted";
       mode := `Valid;
       let%bind restored = refresh () in
-      let%bind restored = wait_terminal service restored.job.id in
+      let%bind restored = wait_terminal service restored.id in
       require
         (Job.State.equal restored.state Complete)
         "generation capability did not restore";
@@ -1308,7 +1372,7 @@ let test_driver_discovery ~root ~log_dir =
            (dune (driver ./driver.exe))\n";
       mode := `Valid;
       let%bind repaired = refresh () in
-      let%bind repaired = wait_terminal service repaired.job.id in
+      let%bind repaired = wait_terminal service repaired.id in
       require
         (Job.State.equal repaired.state Complete)
         "repaired manifest did not recover";
@@ -1319,7 +1383,7 @@ let test_driver_discovery ~root ~log_dir =
           ~f:(fun next_mode ->
             mode := next_mode;
             let%bind failed = refresh () in
-            let%map failed = wait_terminal service failed.job.id in
+            let%map failed = wait_terminal service failed.id in
             require (Job.State.equal failed.state Failed) "invalid discovery did not fail";
             require_project_result_before_terminal failed.id;
             let current =
@@ -1340,11 +1404,9 @@ let test_driver_discovery ~root ~log_dir =
       mode := `Slow;
       let%bind slow = refresh () in
       let%bind (_ : Job.t) =
-        wait_for_job service slow.job.id (fun job -> Job.State.equal job.state Running)
+        wait_for_job service slow.id (fun job -> Job.State.equal job.state Running)
       in
-      let%bind cancelled =
-        Service.cancel_job service { instance_id; job = slow.job.id }
-      in
+      let%bind cancelled = Service.cancel_job service { instance_id; job = slow.id } in
       require
         (Job.State.equal (ok cancelled).job.state Cancelled)
         "driver discovery cancellation failed";
@@ -1361,23 +1423,30 @@ let test_driver_discovery ~root ~log_dir =
         "driver did not use the selected project environment")
 ;;
 
-let run () =
-  with_temp_tree (fun ~root ~log_dir ->
-    let tests =
-      [ "project opening and repeat identity", test_project_opening
-      ; "live output and event consistency", test_live_output_and_events
-      ; "failure modes", test_failure_modes
-      ; "cancellation and descendant cleanup", test_cancellation_and_descendants
-      ; "shutdown cleanup", test_shutdown_cleanup
-      ; "FIFO and submission keys", test_fifo_and_submission_keys
-      ; "file-backed log paging", test_log_paging
-      ; "driver discovery, refresh, failures, and cancellation", test_driver_discovery
-      ; ( "RTL generation, artifacts, provenance, and retrieval"
-        , test_rtl_generation_and_artifacts )
-      ; "clean, dirty, and non-Git source provenance", test_source_provenance
-      ]
-    in
-    Deferred.List.iter tests ~how:`Sequential ~f:(fun (name, test) ->
+let run only () =
+  let tests =
+    [ "project opening and repeat identity", test_project_opening
+    ; "initialize after open", test_initialize_after_open
+    ; "live output and event consistency", test_live_output_and_events
+    ; "failure modes", test_failure_modes
+    ; "cancellation and descendant cleanup", test_cancellation_and_descendants
+    ; "shutdown cleanup", test_shutdown_cleanup
+    ; "FIFO and submission keys", test_fifo_and_submission_keys
+    ; "file-backed log paging", test_log_paging
+    ; "driver discovery, refresh, failures, and cancellation", test_driver_discovery
+    ; ( "RTL generation, artifacts, provenance, and retrieval"
+      , test_rtl_generation_and_artifacts )
+    ; "clean, dirty, and non-Git source provenance", test_source_provenance
+    ]
+  in
+  let tests =
+    match only with
+    | None -> tests
+    | Some name ->
+      [ List.find_exn tests ~f:(fun (candidate, _) -> String.equal name candidate) ]
+  in
+  Deferred.List.iter tests ~how:`Sequential ~f:(fun (name, test) ->
+    with_temp_tree (fun ~root ~log_dir ->
       let test_log_dir =
         Filename.concat log_dir (String.tr name ~target:' ' ~replacement:'-')
       in
@@ -1386,7 +1455,12 @@ let run () =
 ;;
 
 let command =
-  Command.async ~summary:"Test backend process supervision" (Command.Param.return run)
+  Command.async
+    ~summary:"Test backend process supervision"
+    (let%map_open.Command only =
+       flag "--only" (optional string) ~doc:"NAME run one test"
+     in
+     run only)
 ;;
 
 let () = Command_unix.run command

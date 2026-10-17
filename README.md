@@ -70,6 +70,12 @@ embedded waveforms and real gate-level adapters remain later integrations.
 
 ## Development
 
+Build concurrency is one **shared pool of 20 jobs**, including nested builds and
+provider helpers. One worker may use `-j20`; two may use `-j10` each; three must
+divide the pool (for example 6/6/6 with 2 reserved). Parent verification may use all 20
+only after other builds stop. Always pass an explicit job limit. This supersedes
+the earlier conservative two-job guidance in historical acceptance records.
+
 Use `scripts/with-switch.sh` for Workbench commands. It selects the existing
 `5.2.0+ox` opam switch by default; `OPAM_SWITCH=my-switch` overrides it. The wrapper
 does not create a switch or install dependencies. Inspect dependency requirements:

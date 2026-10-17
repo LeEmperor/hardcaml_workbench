@@ -527,6 +527,19 @@ Synthesis area/check counters are now projected into the current summary.
 
 **First adoption slice delivered; full multi-monitor acceptance pending.**
 
+**Post-merge integration completed 2026-10-17:**
+[shared plan and evidence](fs3_integration_plan.md).
+
+- [x] Real header-toggle/reset actions persist sparse intent; polling no longer
+  reapplies stale saved preferences. Same-session reconnect preserves browsing and
+  invalidates outstanding responses; replacement identities clear local state.
+- [x] Templates retain optional preset identity and share current preset starters
+  with the terminal definitions. Custom layouts honor generic Fit.
+- [x] Explicit atomic/idempotent bootstrap handles import-before-TUI and concurrent
+  startup, while legacy sparse saved arrangements are protected.
+- [x] Initializer roots match the opener; explicit manifest-only reload succeeds
+  without a fake discovery job. Installed initializer/client handoff verified.
+
 - [ ] Two attached monitor surfaces, convergence/local navigation and cross-window
   workspace/tile movement acceptance.
 - [x] Existing-project initializer with validated current-format manifest and atomic
@@ -544,13 +557,12 @@ Synthesis area/check counters are now projected into the current summary.
 - [ ] Final adopted-scope checks and deliberate provider-version adoption.
 
 See [FS3 adoption](fs3_adoption.md) for commands, boundaries and verification.
-Parent build and repository tests pass at `-j 10`; the metadata-fixture integration
-exercises actual executables/HTTP/PTY without ASIC tools. It is not full multi-monitor
-or installed-package acceptance.
-Final evidence: `/tmp/opencode/fs3-adoption-ry427qxc/result.json`; five-mode Ctrl-C
-regression: `/tmp/opencode/workbench-terminal-interrupt-sfrzonk0/`. Lint and changed
-OCaml file formatting pass; repository-wide formatting still reports inherited
-FS1 differences listed in the adoption guide.
+Current normal build, full tests and repository-wide format/lint pass serially at
+`-j 20`, within one shared aggregate pool of 20. FS3 native acceptance passes 140
+checks at `/tmp/opencode/fs3-adoption-n5sxf42_/result.json`; installed handoff evidence
+is `/tmp/opencode/fs3-installed-setup-evidence-20261017/`. Checklist 61, lifecycle 27,
+FS2 native Cyclesim and all five interrupt regressions pass. Exact evidence is in
+the integration plan. This does not claim full multi-monitor acceptance.
 
 ## V1 — Independent appearance gallery (FS5)
 

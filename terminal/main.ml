@@ -85,6 +85,7 @@ type session =
   ; mutable remembered_selection : Asic.Selection.t option
   ; mutable preferences_loaded : bool
   ; mutable presentation_preferences_loaded : string option
+      (* Pending first-registry restoration only; consumed before ordinary polling. *)
   ; mutable presentation_preferences : Presentation_preferences.t option
   ; mutable presentation_preference_notice : string option
   ; mutable preference_saves : unit Deferred.t
@@ -541,7 +542,8 @@ let load_presentation_preferences session =
         in
         match result with
         | Ok preferences ->
-          session.presentation_preferences <- preferences;
+          session.presentation_preferences
+          <- (if Option.is_none session.host.registry then preferences else None);
           Option.iter preferences ~f:(fun preferences ->
             session.host <- Presentation_preferences.apply preferences session.host)
         | Error error ->
@@ -560,7 +562,7 @@ let save_presentation_preferences session =
     return ()
   | Ok (project_key, state_directory) ->
     let preferences = Presentation_preferences.capture ~project_key session.host in
-    session.presentation_preferences <- Some preferences;
+    session.presentation_preferences <- None;
     let previous = session.preference_saves in
     let finished = Ivar.create () in
     session.preference_saves <- Ivar.read finished;
@@ -822,13 +824,13 @@ let workspace_request session operation =
   | None -> return ()
   | Some project ->
     let instance_id = session.hello.instance_id in
+    let client = session.client in
     let%map response =
       request session.diagnostics_file (fun () ->
-        Http.Client.workspace
-          session.client
-          { instance_id; project = project.id; operation })
+        Http.Client.workspace client { instance_id; project = project.id; operation })
     in
-    if V1.Daemon_instance_id.equal instance_id session.hello.instance_id
+    if phys_equal client session.client
+       && V1.Daemon_instance_id.equal instance_id session.hello.instance_id
        && Option.value_map (current_project session) ~default:false ~f:(fun p ->
          Project_id.equal p.id project.id)
     then (
@@ -836,9 +838,14 @@ let workspace_request session operation =
       | Error message ->
         session.host <- { session.host with notice = "Workspace: " ^ message }
       | Ok snapshot ->
-        session.host <- Host.receive session.host snapshot;
-        Option.iter session.presentation_preferences ~f:(fun preferences ->
-          session.host <- Presentation_preferences.apply preferences session.host);
+        let host, pending =
+          Presentation_preferences.receive
+            session.presentation_preferences
+            session.host
+            snapshot
+        in
+        session.host <- host;
+        session.presentation_preferences <- pending;
         reconcile_synthesis session)
 ;;
 
@@ -886,6 +893,14 @@ let asic_request ?artifact_request ?inspection_request ?plan_request session ope
   | Some project ->
     let instance_id = session.hello.instance_id in
     let client = session.client in
+    let artifact_identity =
+      Option.map artifact_request ~f:(fun (id, _) ->
+        (Host.local session.host id).identity)
+    in
+    let inspection_identity =
+      Option.map inspection_request ~f:(fun (id, _) ->
+        (Host.local session.host id).identity)
+    in
     session.asic_request_id <- session.asic_request_id + 1;
     let request_id = session.asic_request_id in
     let scope = plan_scope session project in
@@ -968,29 +983,38 @@ let asic_request ?artifact_request ?inspection_request ?plan_request session ope
       Option.iter artifact_request ~f:(fun (tile_id, ticket) ->
         reconcile_synthesis session;
         let local = Host.local session.host tile_id in
-        Option.iter local.artifacts ~f:(fun view ->
-          let artifacts =
-            Artifact_view.apply_response
-              view
-              ticket
-              ~instance_id:session.hello.instance_id
-              ~project:project.id
-              (Result.map response ~f:(fun _ -> ()))
-          in
-          session.host
-          <- Host.set_local session.host tile_id { local with artifacts = Some artifacts }));
+        if Option.exists artifact_identity ~f:(phys_equal local.identity)
+        then
+          Option.iter local.artifacts ~f:(fun view ->
+            let artifacts =
+              Artifact_view.apply_response
+                view
+                ticket
+                ~instance_id:session.hello.instance_id
+                ~project:project.id
+                (Result.map response ~f:(fun _ -> ()))
+            in
+            session.host
+            <- Host.set_local
+                 session.host
+                 tile_id
+                 { local with artifacts = Some artifacts }));
     if current
     then
       Option.iter inspection_request ~f:(fun (tile_id, ticket) ->
         reconcile_synthesis session;
-        Option.iter (Host.inspection session.host tile_id) ~f:(fun view ->
-          let inspection =
-            Inspection_view.apply_response
-              view
-              ticket
-              (Result.map response ~f:(fun _ -> ()))
-          in
-          session.host <- Host.set_inspection session.host tile_id (Some inspection)));
+        if Option.exists
+             inspection_identity
+             ~f:(phys_equal (Host.local session.host tile_id).identity)
+        then
+          Option.iter (Host.inspection session.host tile_id) ~f:(fun view ->
+            let inspection =
+              Inspection_view.apply_response
+                view
+                ticket
+                (Result.map response ~f:(fun _ -> ()))
+            in
+            session.host <- Host.set_inspection session.host tile_id (Some inspection)));
     if request_id >= session.asic_applied_id && current
     then (
       match response with
@@ -1272,30 +1296,8 @@ let add_default_tiles session (registry : Workspace.Snapshot.t) workspace =
 
 let initialize_host_layout session =
   match session.host.registry with
-  | Some registry when registry.revision = 0 ->
-    Deferred.List.iter registry.workspaces ~how:`Sequential ~f:(fun workspace ->
-      (* Revision zero contains only protocol bootstrap prototypes, not saved user
-         arrangements. Normalize those from the same definitions as new tiles; subsequent
-         additive Apply never rewrites requested geometry. *)
-      let%bind () =
-        match Host.definition workspace with
-        | None -> return ()
-        | Some definition ->
-          Deferred.List.iter registry.tiles ~how:`Sequential ~f:(fun tile ->
-            if not (Workspace.Workspace_id.equal tile.workspace workspace.id)
-            then return ()
-            else (
-              match
-                List.Assoc.find
-                  (Hardcaml_workbench_workspaces.Definition.specs definition)
-                  tile.kind
-                  ~equal:String.equal
-              with
-              | None -> return ()
-              | Some geometry ->
-                mutate_workspace session (Resize_tile { tile = tile.id; geometry })))
-      in
-      add_default_tiles session registry workspace)
+  | Some registry when not registry.defaults_initialized ->
+    workspace_request session Hardcaml_workbench_workspaces.Presets.bootstrap
   | _ -> return ()
 ;;
 
@@ -1313,6 +1315,7 @@ let simulation_request session tile_id operation =
         Http.Client.simulation client { instance_id; project = project.id; operation })
     in
     if phys_equal client session.client
+       && phys_equal local.identity (Host.local session.host tile_id).identity
        && V1.Daemon_instance_id.equal instance_id session.hello.instance_id
        && Option.value_map (current_project session) ~default:false ~f:(fun p ->
          Project_id.equal p.id project.id)
@@ -1513,46 +1516,27 @@ and reconnect session =
            (V1.Daemon_instance_id.to_string session.hello.instance_id)
            (V1.Daemon_instance_id.to_string hello.instance_id))
     in
+    let project_changed =
+      not
+        (Option.equal
+           Project_id.equal
+           (Option.map session.opened ~f:(fun opened -> opened.project.id))
+           (Option.map opened ~f:(fun opened -> opened.project.id)))
+    in
     session.client <- client;
     session.hello <- hello;
     session.opened <- opened;
     session.snapshot <- snapshot;
     session.host
-    <- { session.host with
-         registry = None
-       ; timing = []
-       ; palette = None
-       ; prefix = 0
-       ; editing_filter = false
-       ; planned_run = Planned_run.reset session.host.planned_run ~scope:""
-       };
-    session.asic <- None;
-    session.host
-    <- { session.host with
-         locals =
-           List.map session.host.locals ~f:(fun (id, local) ->
-             ( id
-             , { local with
-                 simulation =
-                   { local.simulation with
-                     snapshot = None
-                   ; busy = false
-                   ; request = local.simulation.request + 1
-                   }
-               } ))
-       };
-    if instance_changed
+    <- Host.reconnect session.host ~replacement:(instance_changed || project_changed);
+    (* The same project's authoritative evidence remains valid while the first new
+       transport poll is pending; dropping it would reset stage/result browsing. *)
+    if instance_changed || project_changed then session.asic <- None;
+    if instance_changed || project_changed
     then (
-      session.host
-      <- { session.host with
-           active = None
-         ; focus = None
-         ; locals = []
-         ; workspace_focus = []
-         };
       session.view_on_allocation <- None;
       session.asic_reads <- Asic_intents.empty);
-    if instance_changed
+    if instance_changed || project_changed
     then (
       session.hierarchy_view <- None;
       Hashtbl.clear session.hierarchy_errors);
@@ -1616,19 +1600,27 @@ let refresh_integration session =
     return ()
   | Some project ->
     session.status <- "requesting integration refresh...";
-    let%map response =
+    let%bind response =
       request session.diagnostics_file (fun () ->
         Http.Client.refresh_integration
           session.client
           { instance_id = session.hello.instance_id; project = project.id })
     in
     (match response with
-     | Error message -> session.status <- "integration refresh failed: " ^ message
-     | Ok payload ->
-       session.snapshot <- State.add_job_if_absent session.snapshot payload.job;
-       session.selected <- 0;
+     | Error message ->
+       session.status <- "integration refresh failed: " ^ message;
+       return ()
+     | Ok { job = None } ->
+       let%map result = resync session ~instance_id:session.hello.instance_id in
        session.status
-       <- "integration refresh queued as " ^ Job_id.to_string payload.job.id)
+       <- (match result with
+           | Ok () -> "integration manifest reloaded (no driver declared)"
+           | Error message -> "integration refresh resync failed: " ^ message)
+     | Ok { job = Some job } ->
+       session.snapshot <- State.add_job_if_absent session.snapshot job;
+       session.selected <- 0;
+       session.status <- "integration refresh queued as " ^ Job_id.to_string job.id;
+       return ())
 ;;
 
 let next_after values current ~equal =
@@ -3659,15 +3651,15 @@ let execute_host session captured action ~exit =
                 session.view_on_allocation <- Some (key, target));
             asic_request session (Run { key; preview }))))
     | Set_presentation (id, presentation) ->
-      let local = Host.local session.host id in
-      session.host
-      <- Host.set_local session.host id { local with presentation; scroll = 0 };
+      let host, save = Host.set_presentation session.host id presentation in
+      session.host <- host;
       session.host
       <- { session.host with
-           notice =
-             "Presentation override: client-local until restart; reset inherits defaults"
+           notice = "Presentation override: headers retained; reset inherits defaults"
          };
-      Effect.Ignore
+      if save
+      then Effect.of_deferred_thunk (fun () -> save_presentation_preferences session)
+      else Effect.Ignore
     | Local_headers | Resume_log ->
       Option.iter session.host.focus ~f:(fun id ->
         let local = Host.local session.host id in
@@ -4968,13 +4960,21 @@ let run_plain_refresh session ~wait =
     in
     (match refreshed with
      | Error message -> return (Or_error.error_string message)
-     | Ok payload ->
-       session.snapshot <- State.add_job_if_absent session.snapshot payload.job;
-       printf "Submitted integration refresh job %s\n%!" (Job_id.to_string payload.job.id);
+     | Ok { job = None } ->
+       let%map result = resync session ~instance_id:session.hello.instance_id in
+       (match result with
+        | Error message -> Or_error.error_string message
+        | Ok () ->
+          printf "Integration manifest reloaded (no driver declared)\n%!";
+          List.iter (integration_lines session) ~f:print_endline;
+          Ok ())
+     | Ok { job = Some job } ->
+       session.snapshot <- State.add_job_if_absent session.snapshot job;
+       printf "Submitted integration refresh job %s\n%!" (Job_id.to_string job.id);
        if not wait
        then return (Ok ())
        else (
-         let%map finished = wait_for_job session payload.job in
+         let%map finished = wait_for_job session job in
          match finished with
          | Error message -> Or_error.error_string message
          | Ok job ->

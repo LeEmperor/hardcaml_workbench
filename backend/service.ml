@@ -1665,8 +1665,7 @@ let refresh_integration t ({ instance_id; project } : V1.Refresh_integration.Req
            | None, _ ->
              return
                (error Unsupported_operation "project has no valid Workbench manifest")
-           | Some _, None ->
-             return (error Unsupported_operation "manifest does not declare a driver")
+           | Some _, None -> return (Ok { V1.Refresh_integration.Payload.job = None })
            | Some _, Some _ ->
              let id = mint_job_id t in
              let job =
@@ -1732,7 +1731,7 @@ let refresh_integration t ({ instance_id; project } : V1.Refresh_integration.Req
                 then (
                   Hash_set.add t.running_roots session.root;
                   run_next t session.root);
-                Ok { V1.Refresh_integration.Payload.job }))))
+                Ok { V1.Refresh_integration.Payload.job = Some job }))))
 ;;
 
 let open_project_with_discovery t request =

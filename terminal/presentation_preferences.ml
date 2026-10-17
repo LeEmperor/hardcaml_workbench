@@ -64,14 +64,7 @@ let decode ~project_key content =
 
 let encode t = Sexp.to_string_hum (sexp_of_t t) ^ "\n"
 
-let apply t (host : Host.t) =
-  let host =
-    { host with
-      appearance = t.appearance
-    ; layout_mode = t.layout_mode
-    ; chrome = t.chrome
-    }
-  in
+let apply_headers t (host : Host.t) =
   match host.registry with
   | None -> host
   | Some registry ->
@@ -91,6 +84,24 @@ let apply t (host : Host.t) =
         host
         tile.id
         { local with presentation = { local.presentation with header } })
+;;
+
+let apply t (host : Host.t) =
+  apply_headers
+    t
+    { host with
+      appearance = t.appearance
+    ; layout_mode = t.layout_mode
+    ; chrome = t.chrome
+    }
+;;
+
+(** Restoration is a one-shot handoff, not a policy replayed on every poll. Consume even a
+    mismatching/empty registry: removed identities must not regain old preferences if
+    their IDs are subsequently reused. *)
+let receive pending host snapshot =
+  let host = Host.receive host snapshot in
+  Option.value_map pending ~default:host ~f:(fun saved -> apply_headers saved host), None
 ;;
 
 (* Reads and writes run on the caller's I/O worker. Rename is in the same directory:
@@ -249,4 +260,65 @@ let%test_unit "strict schema validation and isolated identities" =
       (String.equal
          (path ~state_directory:"state" ~project_key:"root/env")
          (Launch_preferences.path ~state_directory:"state" ~project_key:"root/env")))
+;;
+
+let%test_unit "catalog header/reset intent survives polling without replaying sparse \
+               overrides"
+  =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "catalog-preferences") in
+  let tile = List.hd_exn registry.tiles in
+  let choose host id =
+    let command =
+      Host.catalog host ~project:None ~jobs:[]
+      |> List.find_exn ~f:(fun command -> String.equal command.id id)
+    in
+    match command.action with
+    | Set_presentation (id, overrides) -> Host.set_presentation host id overrides
+    | _ -> assert false
+  in
+  let host = Host.receive Host.empty registry in
+  let inherited = (Host.policy host tile).header in
+  let toggled, save = choose host "tile.headers" in
+  assert save;
+  assert (Bool.equal (Host.policy toggled tile).header (not inherited));
+  let titled, save = choose toggled "tile.presentation.title" in
+  assert (not save);
+  let saved = capture ~project_key:"catalog" titled in
+  assert (List.length saved.tile_headers = 1);
+  let starting = apply saved Host.empty in
+  let restored, pending = receive (Some saved) starting registry in
+  assert (Option.is_none pending);
+  assert (Bool.equal (Host.policy restored tile).header (not inherited));
+  assert (Option.is_none (Host.local restored tile.id).presentation.title);
+  let titled, _ = choose restored "tile.presentation.title" in
+  let reset, save = choose titled "tile.presentation.reset" in
+  assert save;
+  assert (Bool.equal (Host.policy reset tile).header inherited);
+  (* A newer appearance and reset must survive polling even before the save worker
+     completes; the initially loaded snapshot has already been consumed. *)
+  let reset = { reset with chrome = false; layout_mode = Preferred } in
+  let polled, pending =
+    receive pending reset { registry with revision = registry.revision + 1 }
+  in
+  assert (Option.is_none pending);
+  assert ((not polled.chrome) && Host.equal_layout_mode polled.layout_mode Preferred);
+  assert (Option.is_none (Host.local polled tile.id).presentation.header);
+  assert (Option.is_none (Host.local polled tile.id).presentation.title);
+  let saved_reset = capture ~project_key:"catalog" polled in
+  assert (List.is_empty saved_reset.tile_headers);
+  let restarted = apply saved_reset (Host.receive Host.empty registry) in
+  assert (Bool.equal (Host.policy restarted tile).header inherited);
+  (* Consuming a missing identity is final, even if an ID is later reused. *)
+  let absent, pending = receive (Some saved) starting { registry with tiles = [] } in
+  let readded, _ =
+    receive pending absent { registry with revision = registry.revision + 2 }
+  in
+  assert (Option.is_none (Host.local readded tile.id).presentation.header);
+  let ignored, save =
+    Host.set_presentation
+      absent
+      tile.id
+      { Tile_presentation.inherit_ with header = Some true }
+  in
+  assert ((not save) && List.is_empty ignored.locals)
 ;;

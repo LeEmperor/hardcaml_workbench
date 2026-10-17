@@ -162,7 +162,10 @@ module Refresh_integration = struct
   end
 
   module Payload = struct
-    type t = { job : Job.t } [@@deriving bin_io, compare, equal, sexp]
+    (** The manifest has been reloaded on success. [None] means that the valid manifest
+        declares no driver, so no discovery job or tool work is needed. [Some job] is the
+        queued discovery of the declared driver. *)
+    type t = { job : Job.t option } [@@deriving bin_io, compare, equal, sexp]
   end
 
   module Response = struct
