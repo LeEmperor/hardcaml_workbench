@@ -1635,7 +1635,11 @@ let main () =
       let launch profile key =
         let%bind planned = settled service root (Plan (selection profile)) in
         let preview = Option.value_exn planned.preview in
-        let%bind (_ : Asic.Snapshot.t) = handle service root (Run { key; preview }) in
+        let%bind reserved = handle service root (Run { key; preview }) in
+        require
+          (List.exists reserved.launches ~f:(fun l ->
+             String.equal l.key key && Asic.Preview.equal l.preview preview))
+          "Acknowledged launch lost exact durable preview/key";
         let%bind (_ : Asic.Snapshot.t) = handle service root (Run { key; preview }) in
         let rec allocation tries =
           require (tries > 0) "Early allocation not delivered";
@@ -1653,6 +1657,12 @@ let main () =
             String.equal r.Asic.Run.run.id ("stream-" ^ profile))
         in
         require (Option.is_none r.execution_file) "Allocation was not early";
+        require
+          (List.exists early.launches ~f:(fun l ->
+             String.equal l.key key
+             && Asic.Preview.equal l.preview preview
+             && Option.equal String.equal l.run_id (Some r.run.id)))
+          "Early allocation lost durable launch/run association";
         let%bind () = Service.completion service in
         handle service root Get
       in
@@ -1667,6 +1677,12 @@ let main () =
          && List.is_empty (summary first "stream-balanced").timing)
         "Metrics invented acceptance/timing";
       let%bind second = launch "synth_delay" "two" in
+      require
+        (List.equal
+           String.equal
+           (List.map second.launches ~f:(fun l -> l.key))
+           [ "two"; "one" ])
+        "Launch projection is not newest reservation order";
       require
         (Option.equal
            Int.equal
@@ -1693,6 +1709,9 @@ let main () =
       let%bind () = Service.shutdown service in
       let restarted = create () in
       let%bind restored = settled restarted root (Load_summary r1) in
+      require
+        (List.equal Asic.Launch.equal second.launches restored.launches)
+        "Restart changed exact durable launch attribution/order";
       require
         (Asic.Summary.Freshness.equal
            (summary restored r1.id).freshness

@@ -83,6 +83,7 @@ let%test_unit "inspection wire codecs preserve unknown values and provenance" =
     ; preview = None
     ; runs = []
     ; operations = []
+    ; launches = []
     ; summaries = []
     ; finalizations = []
     ; artifacts = []

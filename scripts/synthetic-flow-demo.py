@@ -2,7 +2,7 @@
 """Prepare/seed an isolated SYNTHETIC no-EDA project. Never builds a binary.
 
 prepare prints commands; daemon/client explicitly exec an already built binary.
-seed uses real daemon HTTP, including registration, summaries, FS1 and layouts.
+seed uses real daemon HTTP, including registration, summaries, FS1, FS2 and layouts.
 """
 import argparse
 import hashlib
@@ -251,6 +251,7 @@ def seed_simulation(base, client):
 
 def seed(base, url, preset_export=None):
     manifest = install_simulation(base)
+    print('SYNTHETIC seed: owned FS2 files/config verified; importing retained ASIC evidence.', flush=True)
     presets = workspace_presets(preset_export)
     # Explicit selection also works with an externally started daemon whose PATH
     # lacks Dune. The terminal must use the same selection/project-session key.
@@ -259,6 +260,7 @@ def seed(base, url, preset_export=None):
     client.rpc('(Describe synthetic)')
     registered = []
     for reference in manifest['runs']:
+        print('SYNTHETIC importing: ' + reference['stream_id'], flush=True)
         ref = [['attempt', reference['attempt']], ['stream_id', reference['stream_id']]]
         snapshot = client.rpc('(Register %s)' % sexp(ref))
         run = next(field(r, 'run') for r in field(snapshot, 'runs')
@@ -282,8 +284,9 @@ def seed(base, url, preset_export=None):
     workspace = field(overview, 'id')
     context_id = field(overview, 'context')
     context = next(c for c in field(ws, 'contexts') if field(c, 'id') == context_id)
-    ws = client.mutate(ws, '(Select_run (workspace %s) (context %s) (expected_selection_revision %s) (run (%s)))' %
-        (workspace, context_id, field(context, 'selection_revision'), sexp(registered[0])))
+    if not field(context, 'selected_run') and not (base / 'seeded.json').exists():
+        ws = client.mutate(ws, '(Select_run (workspace %s) (context %s) (expected_selection_revision %s) (run (%s)))' %
+            (workspace, context_id, field(context, 'selection_revision'), sexp(registered[0])))
     ws = apply_workspace_presets(client, ws, presets)
     seed_simulation(base, client)
     provider.save(base / 'workspace-presets.json', presets)

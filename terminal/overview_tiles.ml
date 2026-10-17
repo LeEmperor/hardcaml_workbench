@@ -908,6 +908,7 @@ let%test_unit "process completion is not stage evidence; mismatched and duplicat
           }
         ]
     ; operations = []
+    ; launches = []
     ; summaries = []
     ; finalizations = []
     ; artifacts = []

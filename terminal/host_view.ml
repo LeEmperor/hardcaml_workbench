@@ -887,7 +887,38 @@ let planned_rows host tile ~width =
           }
         ])
     in
-    List.take rows 1 @ selection
+    let state =
+      String.lowercase (Sexp.to_string (Planned_run.sexp_of_status model.status))
+    in
+    let launch =
+      String.lowercase
+        (Sexp.to_string (Planned_run.sexp_of_launch_status model.launch.state))
+    in
+    let headline =
+      List.map (List.take rows 1) ~f:(fun row ->
+        { row with
+          Planned_run.text =
+            state
+            ^ ": plan / "
+            ^ (if Option.is_none model.preview
+               then "separate launch: "
+               else if Planned_run.equal_status model.status Ready
+               then "last launch: "
+               else "retained preview launch: ")
+            ^ launch
+        })
+    in
+    headline
+    @ List.take selection 1
+    @ [ { Planned_run.role = Fact
+        ; text = Planned_run.launch_label model ^ ": " ^ model.launch.message
+        }
+      ]
+    @ Option.value_map model.launch.run_id ~default:[] ~f:(fun id ->
+      [ { Planned_run.role = Fact; text = "exact allocated run: " ^ id } ])
+    @ Option.value_map model.launch.key ~default:[] ~f:(fun key ->
+      [ { Planned_run.role = Fact; text = "submission key: " ^ key } ])
+    @ List.drop selection 1
     |> List.map ~f:(fun row ->
       { row with
         Planned_run.text =
@@ -2519,7 +2550,31 @@ let%test_unit "shallow plan always shows readiness and endpoint; detail retains 
     ; selection.flow
     ; List.hd_exn selection.assignments
     ]
-    ~f:(fun substring -> assert (String.is_substring full ~substring))
+    ~f:(fun substring -> assert (String.is_substring full ~substring));
+  let launched_snapshot =
+    { snapshot with
+      launches =
+        [ { key = "rendered-launch"; preview; run_id = Some Fs0_fixture.run_b.id } ]
+    ; runs = [ Fs0_fixture.run Fs0_fixture.run_b ]
+    }
+  in
+  let launched_host =
+    { host with
+      planned_run = Planned_run.receive host.planned_run ~revision:2 launched_snapshot
+    }
+  in
+  let launched_text =
+    tile_view
+      launched_host
+      { data with asic = Some launched_snapshot }
+      tile
+      ~width:80
+      ~height:10
+    |> plain_text
+  in
+  List.iter
+    [ "last launch: completed"; "exact allocated run: fixture-B"; "rendered-launch" ]
+    ~f:(fun substring -> assert (String.is_substring launched_text ~substring))
 ;;
 
 let%test_unit "live schemes change semantic paint without geometry registry or queries" =

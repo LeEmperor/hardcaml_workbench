@@ -50,6 +50,7 @@ let snapshot : Asic.Snapshot.t =
   ; preview = None
   ; runs = [ run run_a; run run_b ]
   ; operations = []
+  ; launches = []
   ; summaries =
       [ summary run_a 50 [ "NAND2", 35; "DFF", 15 ]
       ; summary run_b 73 [ "NAND2", 50; "DFF", 23 ]

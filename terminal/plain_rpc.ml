@@ -280,6 +280,7 @@ let%test_unit "Observe waits for its read, independently of a long execution" =
   in
   let snapshot : Asic.Snapshot.t =
     { configured = true
+    ; launches = []
     ; flows = []
     ; description_json = None
     ; preview = None
@@ -369,6 +370,7 @@ let%test_unit "Observe does not await the lifetime of a coalesced automatic obse
     ; preview = None
     ; runs = []
     ; operations = [ observer ]
+    ; launches = []
     ; summaries = []
     ; cache_error = None
     ; finalizations = []
@@ -404,6 +406,7 @@ let%test_unit "a targeted operation failure fails without treating historical fa
     ; preview = None
     ; runs = []
     ; operations = [ failed ]
+    ; launches = []
     ; summaries = []
     ; cache_error = None
     ; finalizations = []

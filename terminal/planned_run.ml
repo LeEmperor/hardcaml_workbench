@@ -16,7 +16,27 @@ type model =
   ; requested : Asic.Selection.t option
   ; operation_key : string option
   ; message : string
+  ; launch : launch
+  ; launch_preview : Asic.Preview.t option
   }
+
+and launch =
+  { key : string option
+  ; run_id : string option
+  ; state : launch_status
+  ; message : string
+  }
+
+and launch_status =
+  | Submitting
+  | Allocated
+  | Running
+  | Completed
+  | Launch_failed
+  | Cancelled
+  | Detached
+  | Unavailable
+[@@deriving equal, sexp]
 
 type role =
   | Fact
@@ -50,14 +70,65 @@ type t =
   ; revision : int
   ; intent : intent option
   ; snapshot : Asic.Snapshot.t option
+  ; launch_generation : int
+  ; launch_intent : launch_intent option
   }
 
-let empty = { scope = ""; generation = 0; revision = -1; intent = None; snapshot = None }
+and launch_intent =
+  { preview : Asic.Preview.t
+  ; key : string
+  ; acknowledged : bool
+  ; floor : int
+  ; error : string option
+  }
+
+type launch_ticket =
+  { launch_scope : string
+  ; launch_generation : int
+  }
+
+let empty =
+  { scope = ""
+  ; generation = 0
+  ; revision = -1
+  ; intent = None
+  ; snapshot = None
+  ; launch_generation = 0
+  ; launch_intent = None
+  }
+;;
 
 let reset t ~scope =
   if String.equal scope t.scope
   then t
-  else { empty with scope; generation = t.generation + 1 }
+  else
+    { empty with
+      scope
+    ; generation = t.generation + 1
+    ; launch_generation = t.launch_generation + 1
+    }
+;;
+
+let begin_launch (t : t) ~key preview =
+  let launch_generation = t.launch_generation + 1 in
+  ( { t with
+      launch_generation
+    ; launch_intent =
+        Some { preview; key; acknowledged = false; floor = Int.max_value; error = None }
+    }
+  , { launch_scope = t.scope; launch_generation } )
+;;
+
+let launch_receipt (t : t) ticket ~floor result =
+  if (not (String.equal t.scope ticket.launch_scope))
+     || t.launch_generation <> ticket.launch_generation
+  then t
+  else
+    { t with
+      launch_intent =
+        Option.map t.launch_intent ~f:(fun i ->
+          { i with acknowledged = true; floor; error = Result.error result })
+    }
 ;;
 
 let key selection = List.hd_exn (Plain_rpc.keys (Plan selection) Fs0_fixture.snapshot)
@@ -113,11 +184,120 @@ let receive t ~revision snapshot =
                 (List.exists snapshot.operations ~f:(fun op ->
                    String.equal op.kind "plan" && Plain_rpc.active op))))
     in
-    { t with revision; snapshot = Some snapshot; intent })
+    let launch_intent =
+      Option.filter t.launch_intent ~f:(fun i ->
+        not
+          (i.acknowledged
+           && revision >= i.floor
+           && List.exists snapshot.launches ~f:(fun l ->
+             String.equal l.key i.key && Asic.Preview.equal l.preview i.preview)))
+    in
+    { t with revision; snapshot = Some snapshot; intent; launch_intent })
+;;
+
+let launch_active (op : Asic.Pending.t) =
+  Plain_rpc.active op || String.equal op.state "reserving"
+;;
+
+let launch_model t preview =
+  let make ?key ?run_id state message = { key; run_id; state; message } in
+  match
+    Option.filter t.launch_intent ~f:(fun i ->
+      Option.exists preview ~f:(Asic.Preview.equal i.preview))
+  with
+  | Some i ->
+    let op =
+      Option.bind t.snapshot ~f:(fun s ->
+        if (not i.acknowledged) || t.revision < i.floor
+        then None
+        else List.find s.operations ~f:(fun op -> String.equal op.key ("run:" ^ i.key)))
+    in
+    (match op with
+     | Some op when String.equal op.state "failed" ->
+       make
+         ~key:i.key
+         ?run_id:(Option.map op.run ~f:(fun run -> run.id))
+         Launch_failed
+         ("Launch operation failed; allocation "
+          ^ (if Option.is_none op.run then "not observed: " else "observed: ")
+          ^ Option.value op.error ~default:"unavailable")
+     | Some op when String.equal op.state "cancelled" ->
+       make
+         ~key:i.key
+         ?run_id:(Option.map op.run ~f:(fun run -> run.id))
+         Cancelled
+         "Launch operation cancelled; inspect exact allocation when available"
+     | _ ->
+       make
+         ~key:i.key
+         (if Option.is_none i.error then Submitting else Unavailable)
+         (match i.error with
+          | Some error ->
+            "Launch request failed/unconfirmed; allocation unknown: " ^ error
+          | None -> "Submitting; waiting for exact launch receipt/observation"))
+  | None ->
+    let reference =
+      Option.bind t.snapshot ~f:(fun s ->
+        List.find s.launches ~f:(fun l ->
+          Option.exists preview ~f:(Asic.Preview.equal l.preview)))
+    in
+    (match reference with
+     | None ->
+       make Unavailable "Launch association unavailable; allocation not established"
+     | Some l ->
+       let snapshot = Option.value_exn t.snapshot in
+       let op =
+         List.find snapshot.operations ~f:(fun op -> String.equal op.key ("run:" ^ l.key))
+       in
+       let run =
+         Option.bind l.run_id ~f:(fun id ->
+           List.find snapshot.runs ~f:(fun r -> String.equal r.run.id id))
+       in
+       let owned = Option.exists op ~f:launch_active in
+       let state, message =
+         match run with
+         | Some r when String.equal r.status "completed" ->
+           Completed, "Producer completed"
+         | Some r when String.equal r.status "failed" -> Launch_failed, "Producer failed"
+         | Some r
+           when List.mem [ "cancelled"; "interrupted" ] r.status ~equal:String.equal ->
+           Cancelled, "Producer cancelled/interrupted"
+         | _ ->
+           (match op with
+            | Some op when String.equal op.state "failed" ->
+              ( Launch_failed
+              , "Launch operation failed: " ^ Option.value op.error ~default:"unavailable"
+              )
+            | Some op when String.equal op.state "cancelled" ->
+              Cancelled, "Launch operation cancelled"
+            | _ when not owned ->
+              Detached, "Producer ownership detached; current execution state unavailable"
+            | _ ->
+              (match run, l.run_id with
+               | Some r, _ when String.equal r.status "observing" ->
+                 Running, "Producer running (observed)"
+               | _, Some _ -> Allocated, "Run allocated; awaiting producer observation"
+               | _ -> Submitting, "Submission reserved; allocation not yet observed"))
+       in
+       let message =
+         message
+         ^ if owned then "; launch operation active" else "; no active launch owner"
+       in
+       make ~key:l.key ?run_id:l.run_id state message)
 ;;
 
 let model t =
   let preview = Option.bind t.snapshot ~f:(fun s -> s.preview) in
+  let launch_preview =
+    match preview with
+    | Some _ -> preview
+    | None ->
+      (match t.launch_intent with
+       | Some i -> Some i.preview
+       | None ->
+         Option.bind t.snapshot ~f:(fun s ->
+           Option.map (List.hd s.launches) ~f:(fun l -> l.preview)))
+  in
   let plans =
     Option.value_map t.snapshot ~default:[] ~f:(fun s ->
       List.filter s.operations ~f:(fun op -> String.equal op.kind "plan"))
@@ -125,7 +305,15 @@ let model t =
   let operation key = List.find plans ~f:(fun op -> String.equal op.key key) in
   let active = List.exists plans ~f:Plain_rpc.active in
   let make ?selection ?requested ?operation_key status message =
-    { status; selection; requested; operation_key; preview; message }
+    { status
+    ; selection
+    ; requested
+    ; operation_key
+    ; preview
+    ; message
+    ; launch = launch_model t launch_preview
+    ; launch_preview
+    }
   in
   let shared () =
     match preview with
@@ -137,7 +325,7 @@ let model t =
         else (
           match operation operation_key with
           | Some op when String.equal op.state "completed" ->
-            Ready, "Plan ready; launch explicitly (no job allocated)"
+            Ready, "Plan ready for explicit reuse; producer lifecycle shown separately"
           | Some op when String.equal op.state "failed" ->
             Failed, Option.value op.error ~default:"Plan failed"
           | _ -> Stale, "Preview retained; exact completed plan operation unavailable")
@@ -206,7 +394,46 @@ let model t =
 
 let launchable t preview =
   let m = model t in
-  equal_status m.status Ready && Option.equal Asic.Preview.equal m.preview (Some preview)
+  equal_status m.status Ready
+  && Option.equal Asic.Preview.equal m.preview (Some preview)
+  && (not
+        (Option.exists t.snapshot ~f:(fun s ->
+           List.exists s.launches ~f:(fun l ->
+             Asic.Preview.equal l.preview preview
+             && List.exists s.operations ~f:(fun op ->
+               String.equal op.key ("run:" ^ l.key) && launch_active op)))))
+  && (not
+        (Option.exists t.launch_intent ~f:(fun i ->
+           let l = launch_model t (Some i.preview) in
+           not
+             (List.mem
+                [ Launch_failed; Cancelled; Completed ]
+                l.state
+                ~equal:equal_launch_status))))
+  && (not
+        (List.mem
+           [ Submitting; Allocated; Running; Detached ]
+           m.launch.state
+           ~equal:equal_launch_status))
+  && not
+       (List.mem [ Launch_failed; Cancelled ] m.launch.state ~equal:equal_launch_status
+        && Option.is_some m.launch.run_id
+        && not
+             (Option.exists t.snapshot ~f:(fun s ->
+                List.exists s.runs ~f:(fun r ->
+                  Option.equal String.equal (Some r.run.id) m.launch.run_id
+                  && List.mem
+                       [ "completed"; "failed"; "cancelled"; "interrupted" ]
+                       r.status
+                       ~equal:String.equal))))
+;;
+
+let launch_label (m : model) =
+  if Option.is_none m.preview
+  then "last launch reference (no current plan)"
+  else if equal_status m.status Ready
+  then "last launch using this plan"
+  else "last launch using retained shared preview"
 ;;
 
 let rows m ~detail =
@@ -239,12 +466,27 @@ let rows m ~detail =
     ]
   in
   [ { role; text = state ^ ": " ^ m.message } ]
+  @ [ { role = Fact; text = launch_label m ^ ": " ^ m.launch.message } ]
+  @ Option.value_map m.launch.key ~default:[] ~f:(fun key ->
+    [ { role = Fact; text = "submission key: " ^ key } ])
+  @ Option.value_map m.launch.run_id ~default:[] ~f:(fun id ->
+    [ { role = Fact; text = "exact allocated run: " ^ id } ])
   @ Option.value_map m.selection ~default:[] ~f:facts
   @
   if not detail
   then []
   else
-    Option.value_map m.operation_key ~default:[] ~f:(fun key ->
+    (if Option.is_none m.preview
+     then
+       Option.value_map m.launch_preview ~default:[] ~f:(fun p ->
+         [ { role = Muted
+           ; text = "Separate launch preview; not a current reusable plan:"
+           }
+         ; { role = Fact; text = "exact launch plan identity: " ^ p.plan_identity }
+         ]
+         @ facts p.selection)
+     else [])
+    @ Option.value_map m.operation_key ~default:[] ~f:(fun key ->
       [ { role = Muted; text = "plan operation: " ^ key } ])
     @ Option.value_map m.requested ~default:[] ~f:(fun selection ->
       { role = Muted; text = "local requested selection (not a producer association):" }
@@ -265,13 +507,210 @@ let rows m ~detail =
       @ [ { role = Muted; text = "exact plan metadata (JSON):" } ]
       @ List.map (String.split_lines p.plan_json) ~f:(fun text -> { role = Fact; text }))
     @ [ { role = Muted
-        ; text =
-            "Plan only; no queued job, allocated run or historical producer association."
+        ; text = "Plan reuse readiness is separate from launch/producer lifecycle."
         }
       ]
 ;;
 
 let max_scroll m ~detail = Int.max 0 (List.length (rows m ~detail) - 1)
+
+let%test_unit "launch lifecycle uses exact durable reservations, local receipt fences, \
+               and independent plan reuse"
+  =
+  let selection : Asic.Selection.t =
+    { flow = "flow"; profile = "profile"; endpoint = "synthesis"; assignments = [] }
+  in
+  let preview : Asic.Preview.t =
+    { selection; plan_identity = "exact"; plan_json = "full raw preview" }
+  in
+  let other =
+    { preview with plan_json = "different exact preview, same identity/selection" }
+  in
+  let plan : Asic.Pending.t =
+    { key = key selection; kind = "plan"; state = "completed"; run = None; error = None }
+  in
+  let operation ?run state : Asic.Pending.t =
+    { key = "run:new"; kind = "run"; state; run; error = None }
+  in
+  let reference ?(key = "new") ?run_id preview : Asic.Launch.t =
+    { key; preview; run_id }
+  in
+  let snapshot ?(preview = preview) ?(launches = []) ?(ops = []) ?(runs = []) () =
+    { Fs0_fixture.snapshot with
+      preview = Some preview
+    ; launches
+    ; operations = plan :: ops
+    ; runs
+    }
+  in
+  let ready = receive (reset empty ~scope:"owner") ~revision:1 (snapshot ()) in
+  assert (launchable ready preview);
+  assert (equal_launch_status (model ready).launch.state Unavailable);
+  assert (
+    not
+      (List.exists
+         (rows (model ready) ~detail:true)
+         ~f:(fun row -> String.is_substring row.text ~substring:"no job allocated")));
+  let local, ticket = begin_launch ready ~key:"new" preview in
+  assert (equal_launch_status (model local).launch.state Submitting);
+  assert (not (launchable local preview));
+  let replanning, _ = begin_plan local { selection with endpoint = "signoff" } in
+  assert (equal_status (model replanning).status Pending);
+  assert (Option.is_some replanning.launch_intent);
+  assert (
+    List.exists
+      (rows (model replanning) ~detail:true)
+      ~f:(fun row ->
+        String.is_prefix row.text ~prefix:"last launch using retained shared preview:"));
+  let replanning =
+    launch_receipt replanning ticket ~floor:2 (Error "late launch transport")
+  in
+  assert (equal_status (model replanning).status Pending);
+  assert (equal_launch_status (model replanning).launch.state Unavailable);
+  let reserved =
+    snapshot ~launches:[ reference preview ] ~ops:[ operation "pending" ] ()
+  in
+  let before_receipt = receive local ~revision:8 reserved in
+  assert (not (launchable before_receipt preview));
+  let confirmed = launch_receipt before_receipt ticket ~floor:10 (Ok ()) in
+  let confirmed = receive confirmed ~revision:9 reserved in
+  assert (Option.is_some confirmed.launch_intent);
+  let confirmed = receive confirmed ~revision:10 reserved in
+  assert (Option.is_none confirmed.launch_intent);
+  assert (equal_launch_status (model confirmed).launch.state Submitting);
+  assert (Option.is_none (model confirmed).launch.run_id);
+  let reserving =
+    receive
+      confirmed
+      ~revision:11
+      { reserved with operations = [ plan; operation "reserving" ] }
+  in
+  assert (equal_launch_status (model reserving).launch.state Submitting);
+  assert (not (launchable reserving preview));
+  let run = Fs0_fixture.run_a in
+  let allocated =
+    snapshot
+      ~launches:[ reference ~run_id:run.id preview ]
+      ~ops:[ operation ~run "executing" ]
+      ~runs:[ { (Fs0_fixture.run run) with status = "allocated" } ]
+      ()
+  in
+  let allocated_model = receive confirmed ~revision:11 allocated |> model in
+  assert (equal_launch_status allocated_model.launch.state Allocated);
+  assert (Option.equal String.equal allocated_model.launch.run_id (Some run.id));
+  let observe status =
+    { allocated with runs = [ { (Fs0_fixture.run run) with status } ] }
+  in
+  let running = receive confirmed ~revision:12 (observe "observing") in
+  assert (equal_launch_status (model running).launch.state Running);
+  assert (not (launchable running preview));
+  let terminal_owner_active = receive running ~revision:13 (observe "completed") in
+  assert (not (launchable terminal_owner_active preview));
+  let failed_owner_live =
+    receive
+      running
+      ~revision:13
+      { (observe "observing") with operations = [ plan; operation ~run "failed" ] }
+  in
+  assert (not (launchable failed_owner_live preview));
+  List.iter
+    [ "completed", Completed; "failed", Launch_failed; "interrupted", Cancelled ]
+    ~f:(fun (status, expected) ->
+      let terminal =
+        receive running ~revision:13 { (observe status) with operations = [ plan ] }
+      in
+      assert (equal_status (model terminal).status Ready);
+      assert (equal_launch_status (model terminal).launch.state expected);
+      assert (launchable terminal preview));
+  let detached =
+    receive running ~revision:13 { allocated with operations = [ plan ]; runs = [] }
+  in
+  assert (equal_launch_status (model detached).launch.state Detached);
+  assert (not (launchable detached preview));
+  assert (Option.equal String.equal (model detached).launch.run_id (Some run.id));
+  let failed =
+    receive
+      confirmed
+      ~revision:14
+      (snapshot ~launches:[ reference preview ] ~ops:[ operation "failed" ] ())
+  in
+  assert (equal_launch_status (model failed).launch.state Launch_failed);
+  assert (Option.is_none (model failed).launch.run_id && launchable failed preview);
+  let next, next_ticket = begin_launch failed ~key:"next" preview in
+  let late = launch_receipt next ticket ~floor:15 (Error "delayed previous receipt") in
+  assert (equal_launch_status (model late).launch.state Submitting);
+  let unknown = launch_receipt late next_ticket ~floor:16 (Error "transport timeout") in
+  assert (equal_launch_status (model unknown).launch.state Unavailable);
+  assert (not (launchable unknown preview));
+  let unknown = receive unknown ~revision:16 (snapshot ()) in
+  assert (not (launchable unknown preview));
+  let next_launch = reference ~key:"next" ~run_id:Fs0_fixture.run_b.id preview in
+  let recovered =
+    receive
+      unknown
+      ~revision:17
+      { (observe "completed") with
+        launches = [ next_launch; reference preview ]
+      ; operations = [ plan ]
+      ; runs =
+          [ { (Fs0_fixture.run run) with status = "observing" }
+          ; Fs0_fixture.run Fs0_fixture.run_b
+          ]
+      }
+  in
+  assert (launchable recovered preview);
+  assert (Option.equal String.equal (model recovered).launch.key (Some "next"));
+  assert (
+    Option.equal String.equal (model recovered).launch.run_id (Some Fs0_fixture.run_b.id));
+  let recovered = launch_receipt recovered next_ticket ~floor:18 (Error "late failure") in
+  assert (launchable recovered preview);
+  (* Newest reservation wins among exact matches only, not newer mismatched preview. *)
+  let shared =
+    snapshot
+      ~launches:[ reference ~key:"foreign-other" other; next_launch; reference preview ]
+      ~runs:
+        [ { (Fs0_fixture.run run) with status = "failed" }
+        ; Fs0_fixture.run Fs0_fixture.run_b
+        ]
+      ()
+  in
+  List.iter
+    [ recovered; reset empty ~scope:"another-client" ]
+    ~f:(fun client ->
+      let client = receive client ~revision:18 shared in
+      assert (Option.equal String.equal (model client).launch.key (Some "next")));
+  let restarted =
+    receive
+      (reset empty ~scope:"restarted-daemon")
+      ~revision:1
+      { shared with
+        preview = None
+      ; launches = [ next_launch; reference preview ]
+      ; operations = []
+      }
+  in
+  assert (equal_status (model restarted).status Empty);
+  assert (Option.is_none (model restarted).preview);
+  assert (Option.equal String.equal (model restarted).launch.key (Some "next"));
+  assert (equal_launch_status (model restarted).launch.state Completed);
+  assert (
+    String.equal
+      (launch_label (model restarted))
+      "last launch reference (no current plan)");
+  assert (not (launchable restarted preview));
+  let replan = receive recovered ~revision:19 { shared with preview = Some other } in
+  assert (Option.equal String.equal (model replan).launch.key (Some "foreign-other"));
+  let no_match =
+    receive
+      replan
+      ~revision:20
+      { shared with preview = Some { other with plan_identity = "new" } }
+  in
+  assert (equal_launch_status (model no_match).launch.state Unavailable);
+  let new_owner = reset next ~scope:"replacement" in
+  let new_owner = launch_receipt new_owner next_ticket ~floor:21 (Error "old owner") in
+  assert (Option.is_none new_owner.launch_intent)
+;;
 
 let%test_unit "old ready to local pending, transport failure, retry and new ready" =
   let a : Asic.Selection.t =

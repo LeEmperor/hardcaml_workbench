@@ -7,6 +7,12 @@ All data and operations are **SYNTHETIC**. This is a stdlib-only CLI4 provider
 behind the existing ASIC adapter, with small retained evidence files. It requires
 no PDK, EDA executable, full-flow tools or downloaded Python packages.
 
+The demo also includes a standalone FS2 provider, `simulation_provider.py`, with
+adjacent `simulation_wire.py`. Prepare copies both into the demo project and writes
+the companion simulation configuration. Explicit seed creates the Testing workspace
+and representative pass/failure attempts; ordinary startup/viewing never runs tests.
+[Controls, upgrade and evidence](../../docs/synthetic_testing.md).
+
 ## Prepare and open
 
 From the repository root, using already-built daemon/client binaries:
@@ -18,7 +24,7 @@ python3 scripts/synthetic-flow-demo.py daemon --dir /tmp/opencode/my-synthetic-d
 
 `prepare` requires a **new directory** with an existing parent. Omit `--dir` for
 a unique directory under `/tmp/opencode`. It prints the concrete next commands.
-The provider/scenario files are copied into the project, so that prepared demo
+The ASIC and simulation provider/scenario files are copied into the project, so that prepared demo
 does not depend on repository test fixtures or old temporary evidence.
 `daemon` explicitly execs the existing binary in the foreground; Ctrl-C stops it.
 Preparation never starts a daemon or builds anything.
@@ -48,6 +54,10 @@ after seeding. This uses the existing installed switch; nothing is installed.
 observation, summary/finalization adoption, four FS1 index reads per run, artifact
 catalog reads and authoritative workspace selection/layout mutations. The complete
 HTTP transcript is saved as `seed-http.json`; `seeded.json` retains exact run refs.
+FS2 discovery/Launch/Observe use the same native transport, with stable submission
+keys and exact payload/attempt receipts in `simulation-seed.json`. Waiting prints
+progress. Two deliberately synthetic attempts yield reports and byte-exact binary
+traces; invalid requests remain process failures rather than fabricated case results.
 The normal project-open operation uses Workbench's existing Dune workspace
 discovery; no project build or test target is requested by this demo.
 
@@ -55,14 +65,15 @@ The selected reference has all six explicit completed stages. The failed candida
 has completed synthesis/floorplan/placement/CTS, failed routing and skipped
 signoff. Checklist labels are Synthesis, Floorplan, Placement, CTS, Routing and
 Signoff; session/run/evidence and stage reasons retain synthetic provenance.
-Select either in the normal run selector. Overview and Timing use the shared
+Select either in the normal run selector. Overview, Timing and Testing use the shared
 OCaml presets under `terminal/workspaces/`; the exported definitions are retained
-as `workspace-presets.json` with the demo evidence. Both follow the selected Main
-run. Timing/checks show imported live
+as `workspace-presets.json` with the demo evidence. Their ASIC selectors follow Main;
+structured simulation remains project-scoped. Timing/checks show imported live
 aggregate evidence; FS1 timing/clocks/physical/routing inspection is available
 through the normal Space-c-c inspection commands. Their default stage indexes
 are preloaded (timing/clocks signoff, physical placement, routing routing).
-Seeding applies defaults additively before the first terminal opens; reseeding
+Seeding creates missing preset workspaces without duplicate instances after rename.
+It applies defaults additively before the first terminal opens; reseeding
 preserves existing geometry, pins, hidden tiles, custom/duplicate tiles, context
 and arrangement names. Stable preset metadata selects definitions after rename.
 Use the terminal's explicit Reset arrangement action to restore preset geometry.

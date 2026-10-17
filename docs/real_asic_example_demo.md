@@ -5,6 +5,13 @@ Implemented and verified 2026-10-16. The next demo opens the actual
 signoff evidence. It is separate from the synthetic UI fixture. No new synthesis,
 physical implementation or acceptance execution was needed.
 
+**2026-10-17 layout follow-on:** Timing/Testing Session regions are now roomier and
+the persistent demo binaries were refreshed and reverified. Final refresh receipt:
+`receipts/refresh-binaries-ba3b02607ee446e88a67058d0d746203/`; actual HTTP/PTY
+acceptance: `receipts/acceptance-f3248de97eac43cfb4cc65862aebb98e/`, both under the
+demo base below. Seed now prints progress. For side-by-side hand-validation with
+the populated synthetic Testing workspace, see [both launch pairs](synthetic_testing.md).
+
 ## Start the prepared real demo
 
 Preparation, provider installation and binary validation have already completed on

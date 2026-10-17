@@ -2607,6 +2607,7 @@ let%test_unit "actual catalog and palette can cancel an allocated owned launch b
   in
   let snapshot : Asic.Snapshot.t =
     { configured = true
+    ; launches = []
     ; flows = []
     ; description_json = None
     ; preview = None

@@ -171,6 +171,17 @@ module Preview = struct
   [@@deriving bin_io, compare, equal, sexp]
 end
 
+module Launch = struct
+  (** Durable reservation order, exact preview, and allocation identity. This is not
+      evidence of current producer ownership or of a terminal producer outcome. *)
+  type t =
+    { key : string
+    ; preview : Preview.t
+    ; run_id : string option
+    }
+  [@@deriving bin_io, compare, equal, sexp]
+end
+
 module Acceptance = struct
   type t =
     { support_tools : string
@@ -207,6 +218,7 @@ module Snapshot = struct
     ; preview : Preview.t option
     ; runs : Run.t list
     ; operations : Pending.t list
+    ; launches : Launch.t list [@sexp.default []]
     ; summaries : Summary.t list
     ; finalizations : Finalization.t list [@sexp.default []]
     ; artifacts : Asic_artifact.Reference.t list [@sexp.default []]

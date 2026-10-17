@@ -788,6 +788,13 @@ let asic_request ?artifact_request ?inspection_request ?plan_request session ope
         planned_run, Some ticket
       | _ -> planned_run, None
     in
+    let planned_run, launch_ticket =
+      match operation with
+      | Asic.Operation.Run { key; preview } ->
+        let planned_run, ticket = Planned_run.begin_launch planned_run ~key preview in
+        planned_run, Some ticket
+      | _ -> planned_run, None
+    in
     session.host <- { session.host with planned_run };
     let%map response =
       request session.diagnostics_file (fun () ->
@@ -803,6 +810,18 @@ let asic_request ?artifact_request ?inspection_request ?plan_request session ope
       Option.value_map plan_ticket ~default:true ~f:(fun ticket ->
         Planned_run.current_ticket session.host.planned_run ticket)
     in
+    if current
+    then
+      Option.iter launch_ticket ~f:(fun ticket ->
+        session.host
+        <- { session.host with
+             planned_run =
+               Planned_run.launch_receipt
+                 session.host.planned_run
+                 ticket
+                 ~floor:(session.asic_request_id + 1)
+                 (Result.map response ~f:(fun _ -> ()))
+           });
     if current
     then
       Option.iter plan_ticket ~f:(fun ticket ->
@@ -2686,6 +2705,13 @@ let host_catalog session =
       let plan_unavailable =
         if Planned_run.launchable session.host.planned_run preview
         then None
+        else if Planned_run.equal_status
+                  (Planned_run.model session.host.planned_run).status
+                  Ready
+        then
+          Some
+            "Exact launch pending, active, detached or unconfirmed; Refresh/Observe \
+             before another launch"
         else
           Some
             "Current plan is pending, failed, stale or unconfirmed; prepare again \
@@ -3395,7 +3421,9 @@ let execute_host session captured action ~exit =
       let invalidated () =
         session.host
         <- { session.host with
-             notice = "ASIC preview invalidated; prepare the plan again"
+             notice =
+               "ASIC preview unavailable or launch unresolved; inspect plan/launch state \
+                before retrying explicitly"
            }
       in
       if not (ready ())

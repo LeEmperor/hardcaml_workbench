@@ -495,6 +495,27 @@ Synthesis area/check counters are now projected into the current summary.
 
 ## V1 — Independent appearance gallery (FS5)
 
+### Synthetic Testing and wider Session panels — 2026-10-17
+
+[Shared plan](synthetic_testing_plan.md), [controls, evidence and both demo launch pairs](synthetic_testing.md).
+
+- [x] Synthetic seeding creates Overview/Timing/Testing from stable exported presets;
+  repeats/renames preserve one default per preset and existing custom state.
+- [x] Self-contained copied FS2 provider/config; explicit seed submits retained
+  pass/failure cases, parameters/seeds, live progress, logs, reports and synthetic
+  trace bytes through normal supervision. No hardware/ASIC association is fabricated.
+- [x] Idempotent submissions and additive old-demo upgrade with ownership checks;
+  no test launches on ordinary viewing/navigation/client restart.
+- [x] Timing Session and Testing sidebar are one-third width at normal viewports;
+  Testing allocates more height to FS2, Timing investigation topology is retained.
+- [x] Normal format/lint/full tests/build at2, actual synthetic HTTP/PTY and real
+  ASIC example adoption; persistent real-demo binaries refreshed without EDA.
+
+Final synthetic evidence: `/tmp/opencode/synthetic-flow-kkw_d303/`. Matching actual
+example evidence: `.dev/workbench-real-demo/receipts/acceptance-f3248de97eac43cfb4cc65862aebb98e/`.
+Both launch pairs are ready for scoped owner hand-validation; data provenance
+remains distinct. Existing user sessions/state and Git index/history were preserved.
+
 ### Black/status polish and actual ASIC example adoption — 2026-10-16
 
 Delivered from owner feedback. [Shared plan](real_example_polish_plan.md),

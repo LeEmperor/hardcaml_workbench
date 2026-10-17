@@ -241,6 +241,7 @@ def prepare(args, base):
 
 
 def seed(base, url, receipt_dir=None):
+    print('REAL ASIC seed: verifying pinned binaries, configuration and retained evidence.', flush=True)
     manifest = json.loads((base / 'manifest.json').read_text())
     verify_binaries(base, manifest)
     root = Path(manifest['project_root'])
@@ -251,17 +252,22 @@ def seed(base, url, receipt_dir=None):
         require(digest(reference['path']) == reference['sha256'], 'Evidence changed: ' + reference['path'])
     receipts = receipt_dir or base / 'receipts' / ('seed-' + uuid.uuid4().hex)
     receipts.mkdir(parents=True, exist_ok=True)
+    print('REAL ASIC seed: opening ' + str(root) + ' at ' + url, flush=True)
     client = Client(url, root, switch=os.environ.get('OPAM_SWITCH', '5.2.0+ox'))
     try:
+        print('REAL ASIC seed: discovering supported flows (no EDA launch).', flush=True)
         client.rpc('Discover')
         client.rpc('(Describe standard)')
         reference = [[key, manifest['allocation'][key]] for key in ('attempt', 'stream_id')]
+        print('REAL ASIC seed: registering the exact retained observation.', flush=True)
         snap = client.rpc('(Register %s)' % sexp(reference))
         run = next(field(r, 'run') for r in field(snap, 'runs') if field(r, 'reference') == reference)
         client.rpc('(Observe %s)' % sexp(run))
+        print('REAL ASIC seed: loading synthesis and retained finalization evidence.', flush=True)
         client.rpc('(Load_summary %s)' % sexp(run))
         snap = client.rpc('(Inspect_finalization (run %s) (attempt %s))' % (sexp(run), sexp(manifest['finalization'])))
         for domain, stage in DOMAINS:
+            print('REAL ASIC seed: loading ' + domain + ' / ' + stage + ' inspection.', flush=True)
             snap = client.rpc('(Inspect (run %s) (domain %s) (stage %s) (refresh true))' % (sexp(run), domain, stage))
         summary = next(s for s in field(snap, 'summaries') if field(s, 'run') == run)
         require(field(summary, 'cell_count') == ['673'] and field(summary, 'freshness') == 'Validated',
@@ -283,8 +289,9 @@ def seed(base, url, receipt_dir=None):
                                    (sexp(field(arrangement, 'id')), sexp(field(context, 'id')),
                                     field(context, 'selection_revision'), sexp(run)))
         save(receipts / 'adoption.json', dict(synthetic=False, project_root=str(root), run=run,
-                                            allocation=manifest['allocation'], finalization=manifest['finalization'],
-                                            snapshot=snap, workspace=ws))
+                                             allocation=manifest['allocation'], finalization=manifest['finalization'],
+                                             snapshot=snap, workspace=ws))
+        print('REAL ASIC seed: evidence loaded; start the client. Receipts: ' + str(receipts), flush=True)
         return client, run
     finally:
         save(receipts / 'http.json', client.history)

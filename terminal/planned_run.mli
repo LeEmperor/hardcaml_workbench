@@ -21,7 +21,27 @@ type model =
   ; requested : Asic.Selection.t option
   ; operation_key : string option
   ; message : string
+  ; launch : launch
+  ; launch_preview : Asic.Preview.t option
   }
+
+and launch =
+  { key : string option
+  ; run_id : string option
+  ; state : launch_status
+  ; message : string
+  }
+
+and launch_status =
+  | Submitting
+  | Allocated
+  | Running
+  | Completed
+  | Launch_failed
+  | Cancelled
+  | Detached
+  | Unavailable
+[@@deriving equal, sexp]
 
 type role =
   | Fact
@@ -47,8 +67,16 @@ val current_ticket : t -> ticket -> bool
     same-selection completion even if its response arrives after the receipt. *)
 val receipt : t -> ticket -> floor:int -> (unit, string) Result.t -> t
 
+type launch_ticket
+
+(** A separate local launch fence, unaffected by replanning. An unconfirmed transport
+    outcome blocks another launch until exact authoritative evidence reconciles it. *)
+val begin_launch : t -> key:string -> Asic.Preview.t -> t * launch_ticket
+
+val launch_receipt : t -> launch_ticket -> floor:int -> (unit, string) Result.t -> t
 val receive : t -> revision:int -> Asic.Snapshot.t -> t
 val model : t -> model
 val launchable : t -> Asic.Preview.t -> bool
 val rows : model -> detail:bool -> row list
+val launch_label : model -> string
 val max_scroll : model -> detail:bool -> int

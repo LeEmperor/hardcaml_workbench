@@ -202,9 +202,123 @@ let validate_stages (stages : Asic.Stage.t list) =
     "Normalized stage-plan exceeds byte budget"
 ;;
 
+let canonical_stages =
+  [ "synthesis"; "floorplan"; "placement"; "cts"; "routing"; "signoff" ]
+;;
+
+(* CLI4 observation state is a provider-validated journal prefix, not a report or a
+   checkpoint inventory. Only schema-3 explicit recipes are interpreted here. *)
+let observation_stages j =
+  let supplied name = function
+    | `Assoc fields -> List.Assoc.mem fields name ~equal:String.equal
+    | _ -> false
+  in
+  let state = field "state" j in
+  let plan = field "plan" state in
+  if not (Poly.equal (field "schema_version" plan) (`Int 3))
+  then []
+  else (
+    let stream = text (field "stream_id" j) in
+    require
+      (String.equal (text (field "attempt_id" state)) stream)
+      "Stage observation attempt identity mismatch";
+    let stage value =
+      let s = text value in
+      require (List.mem canonical_stages s ~equal:String.equal) "Unknown physical stage";
+      s
+    in
+    let requested = List.map (list (field "stages" plan)) ~f:stage in
+    require (supplied "initial_boundary" plan) "Missing recipe initial boundary";
+    let initial =
+      match field "initial_boundary" plan with
+      | `Null -> None
+      | value -> Some (stage value)
+    in
+    let remaining =
+      Option.value_map initial ~default:canonical_stages ~f:(fun source ->
+        List.tl_exn
+          (List.drop_while canonical_stages ~f:(fun s -> not (String.equal s source))))
+    in
+    require
+      ((not (List.is_empty requested))
+       && List.equal String.equal requested (List.take remaining (List.length requested))
+      )
+      "Invalid explicit stage recipe";
+    let occurrences = list (field "occurrences" state) in
+    require (List.length occurrences <= 6) "Stage occurrence budget exceeded";
+    let seen = String.Hash_set.create () in
+    let occurrences =
+      List.map occurrences ~f:(fun occurrence ->
+        let key = text (field "action_key" occurrence) in
+        let id =
+          List.find_exn canonical_stages ~f:(fun s ->
+            String.equal key ("implementation." ^ s))
+        in
+        require
+          (String.equal (text (field "occurrence_id" occurrence)) (stream ^ "/" ^ key)
+           && not (Hash_set.mem seen id))
+          "Invalid/duplicate stage occurrence identity";
+        Hash_set.add seen id;
+        require (supplied "exit_code" occurrence) "Missing occurrence exit code";
+        require
+          (Poly.equal (field "best_effort" occurrence) (`Bool false)
+           && supplied "verdict" occurrence
+           && Poly.equal (field "verdict" occurrence) `Null)
+          "Unsupported physical occurrence contract";
+        let status = text (field "status" occurrence) in
+        let exit = field "exit_code" occurrence in
+        let status : Asic.Stage.Status.t =
+          match status, exit with
+          | "unreached", `Null -> Pending
+          | "running", `Null -> Running
+          | "completed", `Int 0 -> Completed
+          | "failed", `Int n when n <> 0 -> Failed
+          | "interrupted", `Int n when n <> 0 -> Cancelled
+          | _ -> Unknown "invalid_or_unknown_occurrence_state"
+        in
+        id, status)
+    in
+    let stages =
+      List.map canonical_stages ~f:(fun id ->
+        let requested = List.mem requested id ~equal:String.equal in
+        let occurrence = List.Assoc.find occurrences id ~equal:String.equal in
+        let status, reason =
+          match requested, occurrence with
+          | true, Some Cancelled ->
+            ( Asic.Stage.Status.Cancelled
+            , "Explicit interrupted stage occurrence; not evidence of user cancellation" )
+          | true, Some status -> status, "Explicit stage occurrence"
+          | true, None ->
+            Unknown "missing_occurrence", "Requested stage occurrence missing"
+          | false, Some Completed ->
+            ( Completed
+            , "Carried forward: explicit completed occurrence; not requested in this \
+               recipe" )
+          | false, Some _ ->
+            ( Unknown "unrequested_occurrence"
+            , "Unrequested stage has non-completed occurrence" )
+          | false, None when Option.equal String.equal initial (Some id) ->
+            Not_requested, "Resume input boundary; not newly measured by this recipe"
+          | false, None -> Not_requested, "Not requested in this recipe"
+        in
+        { Asic.Stage.id
+        ; name =
+            (if (not requested) && Asic.Stage.Status.equal status Completed
+             then id ^ " (carried forward)"
+             else id)
+        ; status
+        ; requested
+        ; reason = Some reason
+        ; action = None (* No fresh-selection capability is advertised by state. *)
+        })
+    in
+    validate_stages stages;
+    stages)
+;;
+
 let stage_plan j =
   match field "stage_plan" j with
-  | `Null -> []
+  | `Null -> observation_stages j
   | `Assoc _ as plan ->
     (* Optional extensions of another contract/version are deliberately opaque. *)
     let contract = text (field "contract" plan) in

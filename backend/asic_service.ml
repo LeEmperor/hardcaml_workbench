@@ -866,6 +866,9 @@ let snapshot p : Asic.Snapshot.t =
   ; description_json = p.description
   ; preview = p.preview
   ; runs = p.runs
+  ; launches =
+      List.map p.submissions ~f:(fun (key, preview, run_id) ->
+        { Asic.Launch.key; preview; run_id })
   ; operations =
       (Hashtbl.data p.tasks |> List.map ~f:(fun t -> t.pending))
       @ (Hashtbl.keys p.reservations

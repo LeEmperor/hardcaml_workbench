@@ -60,6 +60,7 @@ embedded waveforms and real gate-level adapters remain later integrations.
 - [Current Overview sidebar and schemes](docs/overview_sidebar.md) — tightly packed vertical sidebar/right summaries, live Carbon/Slate/Crimson/Neon schemes and exact planned-run preview.
 - [Real ASIC example demo and current polish](docs/real_asic_example_demo.md) — black default, value-only status colors, split checklist/planned-run sidebar and verified actual-example launch commands.
 - [Interactive synthetic flow](docs/synthetic_flow.md) — populated Overview/Timing, live checklist, simulated launches and FS1 inspection without EDA tools.
+- [Synthetic Testing and both demo launch pairs](docs/synthetic_testing.md) — Overview/Timing/Testing defaults, synthetic FS2 pass/failure evidence, wider Session panels and actual-example hand-validation.
 - [Formatting guide](docs/formatting_guide.md) — retained source conventions.
 - [Backlog](docs/backlog/README.md) — explicitly deferred ideas and reactivation triggers.
 - [Archive](docs/archive/README.md) — earlier designs, plans and completion evidence.

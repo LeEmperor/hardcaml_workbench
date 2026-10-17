@@ -685,6 +685,21 @@ let%expect_test "ASIC metrics round-trip and old summary sexps have no metrics" 
     ; preview = None
     ; runs = []
     ; operations = []
+    ; launches =
+        [ { key = "exact-launch"
+          ; preview =
+              { selection =
+                  { flow = "flow"
+                  ; profile = "profile"
+                  ; endpoint = "synthesis"
+                  ; assignments = [ "x=1"; "x=1" ]
+                  }
+              ; plan_identity = "exact-preview"
+              ; plan_json = "opaque exact bytes"
+              }
+          ; run_id = Some summary.run.id
+          }
+        ]
     ; summaries = [ summary ]
     ; finalizations = [ finalization ]
     ; artifacts = []
@@ -711,7 +726,8 @@ let%expect_test "ASIC metrics round-trip and old summary sexps have no metrics" 
         (List.filter fields ~f:(function
           | Sexp.List
               (Sexp.Atom
-                 ( "finalizations"
+                 ( "launches"
+                 | "finalizations"
                  | "artifacts"
                  | "artifact_pages"
                  | "artifact_byte_pages"
@@ -724,7 +740,12 @@ let%expect_test "ASIC metrics round-trip and old summary sexps have no metrics" 
   assert (
     Asic.Snapshot.equal
       (Asic.Snapshot.t_of_sexp legacy_snapshot)
-      { snapshot with finalizations = []; artifacts = []; artifact_pages = [] });
+      { snapshot with
+        launches = []
+      ; finalizations = []
+      ; artifacts = []
+      ; artifact_pages = []
+      });
   show "legacy metrics" [%sexp (decoded.metrics : Asic.Metric.t list)];
   show "legacy cell count" [%sexp (decoded.cell_count : int option)];
   [%expect {|

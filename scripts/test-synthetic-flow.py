@@ -191,6 +191,10 @@ def pty_check(base, client_path, http):
     context_before = next(c for c in field(ws, 'contexts') if field(c, 'id') == context_id)
     before_runs = field(http.rpc(), 'runs')
     before_ids = {field(field(r, 'run'), 'id') for r in before_runs}
+    def supervised_jobs():
+        snapshot = http.raw('/api/v1/snapshot', [['instance_id', http.instance]])
+        return {field(job, 'id') for job in field(snapshot, 'jobs')}
+    jobs_before = supervised_jobs()
     def calls():
         return [json.loads(line)['argv'] for line in (base / 'project/provider-calls.jsonl').read_text().splitlines()]
     def launches():
@@ -247,6 +251,7 @@ def pty_check(base, client_path, http):
         keys(b'\x1b[A' * 100)
         keys(b'\r')
     def no_launch(label, allow_planning=False):
+        require(supervised_jobs() == jobs_before, label + ' created an unsolicited supervisor job')
         require(producers() == producers_before, label + ' dispatched a producer command')
         if not allow_planning:
             require(planners() == planners_before, label + ' dispatched an unsolicited planning command')
@@ -444,6 +449,17 @@ def integration(base, args):
         require(daemon.poll() is None, 'Daemon exited; see daemon.log')
         url = field(parse(metadata.read_text()), 'endpoint')
         http, runs = demo.seed(base, url, args.preset_export)
+        # Explicit seed now schedules FS2 through the normal supervisor. Account
+        # for those exact jobs; unrelated Dune/build/discovery jobs remain errors.
+        jobs = field(http.raw('/api/v1/snapshot', [['instance_id', http.instance]]), 'jobs')
+        require(len(jobs) == 3 and all(field(field(j, 'kind'), 'namespace') == 'simulation' for j in jobs) and
+                sorted(field(field(j, 'kind'), 'name') for j in jobs) == ['discover', 'run', 'run'] and
+                all(field(j, 'state') == 'Complete' for j in jobs),
+                'Fresh seed must create only one FS2 discovery and two completed synthetic process jobs')
+        simulation = http.rpc(domain='simulation', wait=False)
+        require(len(field(simulation, 'attempts')) == 2 and
+                {field(a, 'outcome') for a in field(simulation, 'attempts')} == {'Passed', 'Failed'},
+                'Fresh seed FS2 pass/failure attempts')
         presets = demo.workspace_presets(args.preset_export)
         layout = http.rpc(domain='workspace')
         for arrangement in field(layout, 'workspaces'):

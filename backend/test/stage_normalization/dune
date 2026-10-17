@@ -1,0 +1,11 @@
+(test
+ (name test_stage_normalization)
+ (libraries
+  core
+  hardcaml_workbench_backend
+  hardcaml_workbench_protocol
+  yojson)
+ (preprocess
+  (pps ppx_jane))
+ (lint
+  (pps ppx_js_style)))

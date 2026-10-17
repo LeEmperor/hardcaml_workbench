@@ -159,7 +159,7 @@ def acceptance(t, check, http, runs, presets):
     identity = field(ready_preview, 'plan_identity')
     t.capture('sidebar-plan-exact-identity', ['exact plan identity: ' + identity, 'exact plan metadata (JSON)'])
     t.key(b'j' * 200)
-    t.capture('sidebar-plan-metadata-scroll', ['Plan only; no queued job'])
+    t.capture('sidebar-plan-metadata-scroll', ['Plan reuse readiness is separate from launch/producer lifecycle'])
     t.key(b'\x1b'); t.command('Unzoom workspace')
     select(runs[1])
     t.capture('sidebar-plan-historical-selection-independent', ['ready:', 'endpoint: placement'])
@@ -214,7 +214,11 @@ def acceptance(t, check, http, runs, presets):
     wait(lambda: [op for op in field(http.rpc(wait=False), 'operations')
                   if field(op, 'key') == field(active_run, 'key') and field(op, 'state') == 'failed'],
          'owned synthetic producer cancellation')
-    t.capture('sidebar-final-plan-not-job', ['planned-run', 'ready:'])
+    t.capture('sidebar-final-plan-and-launch', ['planned-run', 'ready:'], ['no job allocated', 'no queued job'])
+    launch = next(l for l in field(http.rpc(wait=False), 'launches')
+                  if field(l, 'run_id') == [field(run, 'id')])
+    check(field(launch, 'preview') == retry and field(launch, 'key') == field(active_run, 'key').removeprefix('run:'),
+          'Retained ready plan has its exact submitted preview/key/allocation ledger identity after cancellation')
     (t.base / 'provider-calls-final.json').write_text(json.dumps(calls(), indent=2))
     return 'Overview'
 

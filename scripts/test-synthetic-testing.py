@@ -146,7 +146,7 @@ class Terminal:
                 if data:
                     self.data.extend(data)
         require(self.process.poll() is None, 'native PTY client remains running')
-        return flow.fs0_screen.terminal_screen(bytes(self.data), rows=self.height, cols=self.width)
+        return flow.fs0_screen.terminal_screen(bytes(self.data), width=self.width, height=self.height)
 
     def key(self, value):
         os.write(self.master, value)
@@ -175,6 +175,20 @@ class Terminal:
         self.key(title.encode())
         self.capture('palette', ['COMMAND PALETTE', title[:35], title[-60:]])
         self.key(b'\r')
+
+    def focus_simulation(self):
+        # Commands are intentionally scoped to the focused tile. Discover the
+        # simulation focus through the real palette rather than fixed tab counts.
+        for _ in range(8):
+            for key in (b' ', b'c', b'c'):
+                self.key(key)
+            self.key(b'Simulation: Discover suites explicitly')
+            text = self.drain()
+            self.key(b'\x1b')
+            if 'No matching commands' not in text and 'Simulation: Discover' in text:
+                return
+            self.key(b'\t')
+        raise AssertionError('Could not focus the native simulation tile')
 
     def close(self):
         if self.process.poll() is None:
@@ -224,10 +238,11 @@ def native(base, args):
         result['checks'].append(label)
 
     def start():
+        metadata = discovery / 'daemon.sexp'
+        metadata.unlink(missing_ok=True)
         process = subprocess.Popen(demo.switch_command([
             args.daemon, '--port', '0', '--discovery-dir', discovery, '--state-dir', base / 'state']),
             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        metadata = discovery / 'daemon.sexp'
         wait_for(lambda: metadata.exists() or process.poll() is not None, 'daemon startup')
         require(process.poll() is None, 'daemon startup; see daemon.log')
         return process, field(parse(metadata.read_text()), 'endpoint')
@@ -245,6 +260,8 @@ def native(base, args):
     try:
         daemon, url = start()
         client = Client(url, base / 'project', switch=demo.switch_name())
+        check(field(client.raw('/api/v1/snapshot', [('instance_id', client.instance)]), 'jobs') == [],
+              'daemon/project startup launches no jobs before explicit seed')
         # Capture a reservation while active, then emulate an interrupted explicit
         # seed. Retry exact recorded payload after BOTH config and catalog revisions.
         original_poll = demo.simulation_poll
@@ -262,11 +279,22 @@ def native(base, args):
         retry = field(client.rpc(receipt['operation'], domain='simulation', wait=False), 'detail')[0]
         check(field(first, 'id') == field(retry, 'id') and field(first, 'job') == field(retry, 'job') and
               field(first, 'lifecycle') in ('Queued', 'Running'), 'active stable-key retry retains exact reservation/job')
+        live = demo.simulation_poll(client, '(Observe %s)' % sexp(receipt['attempt_id']),
+            lambda s: any(field(c, 'progress') for c in field(field(s, 'detail')[0], 'cases')),
+            'live structured progress')
+        check(field(field(live, 'detail')[0], 'lifecycle') == 'Running',
+              'flushed structured case progress visible while provider is running')
         config = base / 'project/hardcaml-workbench-simulation.sexp'
         source = base / 'project/synthetic-provider/simulation_provider.py'
         saved_config, saved_source = config.read_bytes(), source.read_bytes()
         config.write_text(config.read_text().replace('"20"', '"19"'))
-        source.write_text(source.read_text().replace('SYNTHETIC FS2 demo -', 'SYNTHETIC FS2 revised demo -'))
+        source.write_text(source.read_text().replace("('label', LABEL)", "('label', LABEL + ' revised catalog')"))
+        pending = provider.load(base / 'simulation-seed.json')
+        pending['submissions']['synthetic-fs2-v1-failure'] = dict(
+            label='SYNTHETIC unreserved stale receipt', operation=
+            '(Launch (submission_key synthetic-fs2-v1-failure) (discovery_digest %s) (selection %s))' %
+            (sexp('0' * 64), sexp(simulation.selection(True))))
+        provider.save(base / 'simulation-seed.json', pending)
         demo.seed_simulation(base, client)
         check(len(attempts(client)) == 2 and len(runs()) == 2, 'config/catalog revision retries retained keys without duplication')
         config.write_bytes(saved_config)
@@ -282,6 +310,19 @@ def native(base, args):
                      if field(t, 'workspace') == field(workspaces[0], 'id')]
             check(sorted(kinds) == sorted(field(t, 'kind') for t in field(presets[identity], 'tiles')),
                   identity + ' populated from exported OCaml definition')
+        legacy = Client(url, base / 'legacy-upgrade/project', switch=demo.switch_name())
+        legacy_layout = legacy.rpc(domain='workspace')
+        legacy_layout = legacy.mutate(legacy_layout,
+            '(Create_workspace (window %s) (name Testing) (context %s))' % (
+                sexp(field(field(legacy_layout, 'windows')[0], 'id')),
+                sexp(field(legacy_layout, 'main_context'))))
+        collision = field(legacy_layout, 'workspaces')[-1]
+        legacy_layout = demo.ensure_workspaces(legacy, legacy_layout, presets)
+        legacy_layout = demo.apply_workspace_presets(legacy, legacy_layout, presets)
+        check(next(w for w in field(legacy_layout, 'workspaces') if field(w, 'id') == field(collision, 'id')) == collision and
+              len([w for w in field(legacy_layout, 'workspaces') if field(w, 'preset') == ['testing']]) == 1 and
+              field(next(w for w in field(legacy_layout, 'workspaces') if field(w, 'preset') == ['testing']), 'name') != 'Testing',
+              'missing Testing installed without adopting/overwriting custom name collision')
         receipts = provider.load(base / 'simulation-seed.json')['submissions']
         pass_id = receipts['synthetic-fs2-v1-pass']['attempt_id']
         fail_id = receipts['synthetic-fs2-v1-failure']['attempt_id']
@@ -324,6 +365,11 @@ def native(base, args):
         run = field(field(asic, 'runs')[0], 'run')
         layout = mutate('(Set_tile_binding (tile %s) (binding (Pin_run %s)))' % (sexp(extra), sexp(run)))
         preserved = next(t for t in field(layout, 'tiles') if field(t, 'id') == extra)
+        context_id = field(testing, 'context')
+        context = next(c for c in field(layout, 'contexts') if field(c, 'id') == context_id)
+        layout = mutate('(Select_run (workspace %s) (context %s) (expected_selection_revision %s) (run (%s)))' % (
+            sexp(wid), sexp(context_id), field(context, 'selection_revision'), sexp(run)))
+        saved_context = next(c for c in field(layout, 'contexts') if field(c, 'id') == context_id)
         layout = mutate('(Create_workspace (window %s) (name Testing) (context %s))' %
                         (sexp(field(testing, 'window')), sexp(field(layout, 'main_context'))))
         custom = field(field(layout, 'workspaces')[-1], 'id')
@@ -336,8 +382,17 @@ def native(base, args):
         check(next(t for t in field(after, 'tiles') if field(t, 'id') == extra) == preserved and
               field(next(w for w in field(after, 'workspaces') if field(w, 'id') == custom), 'preset') == [],
               'reseed preserves custom-name workspace and exact extra tile geometry/pin')
+        check(next(c for c in field(after, 'contexts') if field(c, 'id') == context_id) == saved_context,
+              'reseed preserves retained user context/selection revision')
         check({field(a, 'id') for a in attempts(client)} == before_ids,
               'repeated full seed creates no duplicate attempts')
+        cleared = mutate('(Select_run (workspace %s) (context %s) (expected_selection_revision %s) (run ()))' % (
+            sexp(wid), sexp(context_id), field(saved_context, 'selection_revision')))
+        cleared_context = next(c for c in field(cleared, 'contexts') if field(c, 'id') == context_id)
+        demo.seed(base, url, args.preset_export)
+        cleared_after = client.rpc(domain='workspace')
+        check(next(c for c in field(cleared_after, 'contexts') if field(c, 'id') == context_id) == cleared_context,
+              'reseed preserves an explicitly cleared user selection')
         before_calls = calls()
         for _ in range(3):
             attempts(client)
@@ -382,12 +437,16 @@ def terminal_checks(base, args, client, pass_id, fail_id, check):
         terminal.palette('Switch to Timing')
         terminal.capture('timing', ['Timing', 'Session', 'Timing · Paths', 'Timing · Provenance'])
         terminal.palette('Switch to Testing')
-        terminal.capture('testing', ['Testing', 'Session', 'Structured simulation', 'synthetic-checks'])
+        terminal.capture('testing', ['Testing', 'Session', 'Structured simulation', 'seed=314159', 'seed=42'])
+        terminal.focus_simulation()
         terminal.palette('Simulation: Reopen ' + fail_id + ' synthetic-checks')
         terminal.capture('failure', ['Failed', 'SYNTHETIC', '314159'])
         terminal.palette('Simulation: Reopen ' + pass_id + ' synthetic-checks')
         terminal.palette('Simulation: Select case seeded-pattern')
         terminal.capture('selected-case', ['> seeded-pattern: Passed'])
+        terminal.palette('Appearance: C - Minimal')
+        terminal.capture('theme', ['> seeded-pattern: Passed', 'Session'])
+        terminal.palette('Zoom focused tile')
         terminal.palette('Simulation: Toggle stream-labelled job logs')
         terminal.capture('logs', ['JOB LOG'])
         terminal.palette('Simulation: Toggle stream-labelled job logs')
@@ -407,6 +466,8 @@ def terminal_checks(base, args, client, pass_id, fail_id, check):
               field(child, 'outcome') == 'Passed', 'PTY targeted rerun creates new job/attempt with exact original seed/parameters')
         terminal.capture('rerun', ['Rerun of', 'Passed'])
         provider.save(base / 'pty-rerun.json', child)
+        terminal.palette('Unzoom workspace')
+        terminal.capture('testing-rerun-full', ['Session', 'Structured simulation', 'seed: 42', 'Passed'])
     finally:
         terminal.close()
     terminal = Terminal(base, args, client, width=180, height=55)
@@ -416,6 +477,7 @@ def terminal_checks(base, args, client, pass_id, fail_id, check):
         terminal.capture('timing-large', ['Session', 'Timing · Paths', 'Timing · Provenance'])
         terminal.palette('Switch to Testing')
         terminal.capture('testing-large', ['Session', 'Structured simulation', 'synthetic-checks'])
+        terminal.focus_simulation()
         terminal.palette('Simulation: Reopen ' + fail_id + ' synthetic-checks')
         terminal.capture('failure-large', ['314159', 'Failed', 'injected-mismatch', 'SYNTHETIC'])
     finally:

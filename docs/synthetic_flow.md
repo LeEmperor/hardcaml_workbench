@@ -5,6 +5,11 @@ development/demo provider behind the **normal daemon, adapter and terminal**.
 It supplies explicitly synthetic data; it runs no synthesis, physical-design or
 acceptance tools. No PDK or retained real-run directories are required.
 
+**Testing is now included:** explicit seed creates Overview, Timing and Testing,
+and runs two bounded synthetic FS2 examples (pass and intentional failure) through
+the normal supervisor. Timing/Testing Session panels are wider. See
+[Testing controls, upgrade instructions and both synthetic/real launch pairs](synthetic_testing.md).
+
 ## Launch in two terminals
 
 The commands below use `$HOME/.local/state/hardcaml-workbench/synthetic-composition`
@@ -45,15 +50,17 @@ python3 -B scripts/synthetic-flow-demo.py client \
 ```
 
 Both commands discover this demo's exact daemon endpoint. Start with a terminal
-at least **120 columns × 40 rows**. Overview and Timing already have useful tile
+at least **120 columns × 40 rows**. Overview, Timing and Testing already have useful tile
 arrangements from the same `terminal/workspaces/` definitions used by ordinary
 Workbench; no Apply default layout action is required. The exporter is required at
 seed time. `--preset-export PATH` selects a matching non-default build.
 
 For later sessions, repeat only `daemon` and `client`. `seed` reimports reference
-evidence, selects the reference and adds missing preset tiles. It preserves extra
-tiles, pins, hidden state and requested geometry; explicit **Reset arrangement**
-restores preset requested sizes. Use seed deliberately because it changes selection.
+evidence, selects the initial reference on a new demo, adds missing preset tiles
+and explicitly discovers/submits the synthetic tests. Stable keys reuse retained
+attempts on repetition. Existing selected or deliberately cleared contexts, extra
+tiles, pins, hidden state and requested geometry are preserved; explicit **Reset
+arrangement** restores preset requested sizes.
 
 Prepared demos contain copied provider code and retained evidence. Create a fresh
 directory to see updated production-like stage labels; old evidence is not silently
@@ -75,6 +82,15 @@ daemon. `--url` permits explicitly connecting to another endpoint; `--daemon` an
 `--client` override binary paths. No setup command builds binaries automatically.
 
 ## What to try
+
+### Testing workspace
+
+Choose **3 Testing** and focus **simulation**. It contains `synthetic-checks` pass
+and intentional-failure attempts with declared cases/seeds/parameters, logs, JSON
+reports and synthetic binary traces. Use j/k to select attempts, n/p for cases,
+`l` for logs, or palette **Simulation: Reopen … / Rerun case …**. Zoom for longer
+details. These are project-scoped illustrative tests, not actual hardware evidence
+or ASIC-run acceptance. See [full Testing guide](synthetic_testing.md).
 
 ### Run a simulated prefix from the checklist
 
@@ -164,8 +180,9 @@ Other providers that do not supply it continue to show unreported stage state;
 this feature does not claim new real-provider stage-action support. Existing
 Plan/Run operations are reused, rather than a demo-only execution path.
 
-This first slice does not generate RTL hierarchy, binary layouts, real simulator
-cases, waveforms or FS2 suite data. Some compact labels clip at 120×40; zoom and
+The original ASIC demo slice does not generate RTL hierarchy, binary layouts or
+real simulator waveforms. The subsequent FS2 provider now supplies explicitly
+synthetic cases, reports and binary traces. Some compact labels clip at 120×40; zoom and
 inspection expose full context. Routing's aggregate tile still reports unavailable
 detail where appropriate; its FS1 routing inspector has populated synthetic rows.
 Provider acceptance remains `not_evaluated`; illustrative check passes are not EDA
