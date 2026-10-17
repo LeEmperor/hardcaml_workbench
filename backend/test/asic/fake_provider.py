@@ -55,10 +55,14 @@ elif args[:1] in [['lifecycle-wait'], ['lifecycle-output'], ['lifecycle-malforme
 elif args == ['--version', '--json']:
     emit(dict(cli_contract=dict(version=4, capabilities=dict(namedflow1=True))))
 elif args[:2] == ['flow', 'list']:
-    emit(envelope('flow-list', declaration=envelope('flow-catalog', entries=[
-        dict(methodology=dict(id='standard'), default_profile='balanced',
-             profiles=[dict(id='balanced'), dict(id='synth_delay')])],
-        default=dict(flow='standard', profile='balanced'))))
+    if os.path.exists('fail-discovery'):
+        sys.exit(1)
+    time.sleep(0.1)
+    with open(os.path.join(os.path.dirname(__file__), 'production_flow_list.json')) as src:
+        value = json.load(src)
+    if os.path.exists('invalid-discovery'):
+        value['declaration']['default']['profile'] = 'missing'
+    emit(value)
 elif args[:2] == ['flow', 'describe']:
     emit(envelope('flow-describe', entry=dict(
         methodology=dict(id=option('--flow'), endpoints=['synthesis', 'signoff']),
@@ -86,10 +90,20 @@ elif args[:2] == ['flow', 'run']:
     emit(envelope('stage-observation', event='observation_terminal',
                   execution_file=os.path.join(attempt, 'execution.json')))
 elif args[:2] == ['observation', 'read-updates']:
+    stage_fixture = os.path.join(args[2], 'observation.json')
+    cursor = 0
+    if os.path.exists(stage_fixture):
+        with open(stage_fixture) as src:
+            cursor = json.load(src)['cursor']
     emit(envelope('stage-observation', 2, stream_id=option('--stream-id'),
-                  after=int(option('--after')), cursor=0, events=[]))
+                  after=int(option('--after')), cursor=cursor, events=[]))
 elif args[:2] == ['observation', 'inspect']:
     attempt = args[2]
+    stage_fixture = os.path.join(attempt, 'observation.json')
+    if os.path.exists(stage_fixture):
+        with open(stage_fixture) as src:
+            emit(json.load(src))
+        sys.exit(0)
     stream = 'stream-' + os.path.basename(attempt).removeprefix('attempt-')
     done = os.path.exists(os.path.join(attempt, 'done'))
     missing = os.path.exists('missing')
@@ -113,8 +127,9 @@ elif args[:1] == ['report']:
     reference = dict(path=attempt, boundary=boundary, identity=str(count))
     references = [reference]
     if profile == 'terminal':
-        references = [dict(path=os.path.join(attempt, 'synthesis'),
-                           boundary='synthesis', identity=str(count)), reference]
+        references = [dict(path=os.path.join(attempt, stage) if stage != 'signoff' else attempt,
+                           boundary=stage, identity=str(count))
+                      for stage in ['synthesis', 'floorplan', 'placement', 'cts', 'routing', 'signoff']]
     methodology_reference = dict(attempt_id=stream)
     if profile == 'terminal':
         snapshot_path = os.path.join(attempt, 'methodology-plan.json')
@@ -129,7 +144,15 @@ elif args[:1] == ['report']:
                                      plan_identity='a' * 64, bundle_identity='b' * 64)
     execution = dict(attempt_id=stream, status='completed', artifacts=references,
                      occurrences=[dict(action_key='implementation.' + boundary,
-                                       status='completed', exit_code=0)])
+                                        status='completed', exit_code=0)])
+    if profile == 'terminal':
+        stages = [ref['boundary'] for ref in references]
+        execution.update(exit_code=0, plan=dict(schema_version=3, initial_boundary=None, stages=stages),
+                         occurrences=[dict(action_key='implementation.' + stage,
+                                           occurrence_id=stream + '/implementation.' + stage,
+                                           status='completed', exit_code=0) for stage in stages])
+        if os.path.exists('finalize-resumed'):
+            execution['plan']['initial_boundary'] = 'synthesis'
     with open(args[1], 'w') as out:
         json.dump(execution, out)
     emit(envelope('report', execution=execution,
@@ -153,7 +176,70 @@ elif args[:1] == ['report']:
                                for checkpoint_reference, checkpoint_count in
                                [(ref, count if ref['boundary'] == 'synthesis' else count + 1000)
                                 for ref in references]]))
+elif args[:1] == ['finalize']:
+    if os.path.exists('finalize-no-allocation'):
+        print('fixture allocation failure', file=sys.stderr)
+        sys.exit(2)
+    if os.path.exists('finalize-late'):
+        time.sleep(0.4)
+    store = option('--operation-store')
+    attempt = os.path.join(store, 'operation-' + str(time.time_ns()))
+    os.makedirs(attempt)
+    operation_id = os.path.basename(attempt)
+    execution_file = args[1]
+    with open(execution_file, 'rb') as src:
+        execution_bytes = src.read()
+    execution = json.loads(execution_bytes)
+    request = dict(execution=execution_file, accept='--accept' in args)
+    for name in ['support_tools', 'precheck_python', 'testbench', 'testbench_top', 'replay_trace']:
+        request[name] = option('--' + name.replace('_', '-'))
+    receipt = envelope('segment-finalization', attempt_id=operation_id, status='running',
+                       phase='validation', ended_at=None, exit_code=None, request=request,
+                       acceptance='not_evaluated', external_postcheck='not_evaluated', results=None,
+                       execution=dict(path=execution_file, sha256=hashlib.sha256(execution_bytes).hexdigest(),
+                                      attempt_id=execution['attempt_id']),
+                       selected_checkpoints=execution['artifacts'],
+                       evidence_context=dict(build_identity='b' * 64))
+
+    def save_receipt():
+        temporary = os.path.join(attempt, 'operation.tmp')
+        with open(temporary, 'w') as out:
+            json.dump(receipt, out)
+        os.replace(temporary, os.path.join(attempt, 'operation.json'))
+
+    def stop_finalization(_signal, _frame):
+        receipt.update(status='interrupted', ended_at='recorded', exit_code=143)
+        save_receipt()
+        with open(os.path.join(attempt, 'terminated'), 'w') as out:
+            out.write('owned finalize received SIGTERM')
+        sys.exit(143)
+
+    signal.signal(signal.SIGTERM, stop_finalization)
+    save_receipt()
+    emit(envelope('segment-finalization', event='allocated', attempt=attempt, attempt_id=operation_id))
+    receipt['phase'] = 'external_postcheck' if request['accept'] else 'collection'
+    save_receipt()
+    time.sleep(30 if os.path.exists('finalize-hold') else 0.3)
+    failed = request['accept']
+    results = dict(schema_version=1, run_id=operation_id, build_identity='b' * 64,
+                   provenance=dict(contract='hardcaml-asic.segment-finalization',
+                                   operation=os.path.join(attempt, 'operation.json')),
+                   metrics={}, checks={}, timing_goal='unknown')
+    results_bytes = json.dumps(results).encode()
+    results_file = os.path.join(attempt, 'results.json')
+    with open(results_file, 'wb') as out:
+        out.write(results_bytes)
+    receipt.update(status='failed' if failed else 'completed', ended_at='recorded',
+                   exit_code=1 if failed else 0, acceptance='fail' if failed else 'not_evaluated',
+                   external_postcheck='failed' if failed else 'not_evaluated',
+                   results=dict(path=results_file, sha256=hashlib.sha256(results_bytes).hexdigest()))
+    save_receipt()
+    emit(dict(receipt, attempt=attempt))
+    sys.exit(receipt['exit_code'])
 elif args[:1] == ['finalization-inspect']:
+    if os.path.exists('finalize-inspect-fail'):
+        print('fixture finalization inspection unavailable', file=sys.stderr)
+        sys.exit(2)
     with open(os.path.join(args[1], 'operation.json')) as src:
         emit(json.load(src))
 else:

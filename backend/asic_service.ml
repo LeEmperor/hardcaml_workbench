@@ -1,9 +1,40 @@
 open! Core
 open! Async
+module Inspection = Asic_inspection
 open Hardcaml_workbench_protocol
+module Inspection_wire = Hardcaml_workbench_protocol.Asic_inspection
 module Config = Hardcaml_workbench_project_integration.Asic_config
 module Adapter = Hardcaml_workbench_adapters.Asic_adapter
 module Public = Asic_public
+
+module Finalization_stored = struct
+  type t =
+    { value : Asic.Finalization.t
+    ; acceptance : Asic.Acceptance.t option
+    ; execution_hash : string option
+    ; operation_id : string option
+    ; producer_error : string option [@sexp.default None]
+    ; observation_error : string option [@sexp.default None]
+    }
+  [@@deriving sexp]
+end
+
+let with_finalization_errors
+  (f : Finalization_stored.t)
+  ~producer_error
+  ~observation_error
+  =
+  let error =
+    match producer_error, observation_error with
+    | None, error | error, None -> error
+    | Some producer, Some observation ->
+      Some
+        (if String.equal producer observation
+         then producer
+         else producer ^ "; " ^ observation)
+  in
+  { f with producer_error; observation_error; value = { f.value with error } }
+;;
 
 module Stored = struct
   type t =
@@ -13,6 +44,7 @@ module Stored = struct
     ; submissions : (string * Asic.Preview.t * string option) list
     ; index : (string * string) list
     ; terminal_attempts : (string * string) list [@sexp.default []]
+    ; finalizations : Finalization_stored.t list [@sexp.default []]
     }
   [@@deriving sexp]
 end
@@ -108,11 +140,19 @@ type project =
   ; mutable submissions : (string * Asic.Preview.t * string option) list
   ; mutable index : (string * string) list
   ; mutable terminal_attempts : (string * string) list
+  ; mutable finalizations : Finalization_stored.t list
+  ; mutable artifacts : Asic_artifact.Reference.t list
+  ; mutable artifact_pages : Asic_artifact.Page.t list
+  ; mutable artifact_byte_pages : Asic_artifact.Byte_page.t list
+  ; mutable inspections : Inspection_wire.Index.t list
+  ; mutable inspection_details : Inspection_wire.Detail.t list
+  ; inspection_refreshes : bool ref String.Table.t
   ; hot : Asic.Summary.t String.Table.t
   ; mutable recency : string list
   ; tasks : task String.Table.t
   ; reservations : reservation String.Table.t
   ; mutable flows : Asic.Flow.t list
+  ; mutable catalog_default : Asic.Flow_default.t option
   ; mutable description : string option
   ; mutable preview : Asic.Preview.t option
   ; mutable desired_plan : Asic.Selection.t option
@@ -204,9 +244,13 @@ let save_registry ?reservation t p =
         ; submissions
         ; index = p.index
         ; terminal_attempts = p.terminal_attempts
+        ; finalizations = p.finalizations
         }
       in
       let data = Sexp.to_string (Stored.sexp_of_t stored) in
+      Public.require
+        (String.length data <= 4 * 1024 * 1024)
+        "ASIC registry exceeds byte budget";
       let%map () = In_thread.run (fun () -> atomic_write t (registry_path t p) data) in
       (* No uncommitted key is ever visible to another save or Run. Commit without
          yielding after successful rename, preserving concurrent run-reference edits. *)
@@ -278,11 +322,19 @@ let load_project t ~root ~environment =
     ; submissions = []
     ; index = []
     ; terminal_attempts = []
+    ; finalizations = []
+    ; artifacts = []
+    ; artifact_pages = []
+    ; artifact_byte_pages = []
+    ; inspections = []
+    ; inspection_details = []
+    ; inspection_refreshes = String.Table.create ()
     ; hot = String.Table.create ()
     ; recency = []
     ; tasks = String.Table.create ()
     ; reservations = String.Table.create ()
     ; flows = []
+    ; catalog_default = None
     ; description = None
     ; preview = None
     ; desired_plan = None
@@ -300,9 +352,12 @@ let load_project t ~root ~environment =
         let filename = registry_path t p in
         if Poly.equal (Sys_unix.file_exists filename) `No
         then None
-        else
-          Some
-            (Stored.t_of_sexp (Sexp.of_string (read_bounded filename (4 * 1024 * 1024))))))
+        else (
+          let stored =
+            Stored.t_of_sexp (Sexp.of_string (read_bounded filename (4 * 1024 * 1024)))
+          in
+          List.iter stored.runs ~f:(fun run -> Public.validate_stages run.stages);
+          Some stored)))
   in
   (match loaded with
    | Error exn ->
@@ -316,6 +371,12 @@ let load_project t ~root ~environment =
         || List.length s.index > 128
         || List.length s.submissions > 256
         || List.length s.terminal_attempts > 256
+        || List.length s.finalizations > 256
+        || List.length s.finalizations
+           <> List.length
+                (List.dedup_and_sort
+                   (List.map s.finalizations ~f:(fun f -> f.value.key))
+                   ~compare:String.compare)
      then (
        p.registry_writable <- false;
        p.cache_error <- Some "Incompatible ASIC registry")
@@ -323,7 +384,29 @@ let load_project t ~root ~environment =
        p.runs <- s.runs;
        p.submissions <- s.submissions;
        p.index <- s.index;
-       p.terminal_attempts <- s.terminal_attempts));
+       p.terminal_attempts <- s.terminal_attempts;
+       p.finalizations
+       <- List.map s.finalizations ~f:(fun f ->
+            (* Older records have only an undifferentiated error. Preserve it as a stable
+               baseline rather than silently erasing a possible producer failure. *)
+            let f =
+              if Option.is_none f.producer_error && Option.is_none f.observation_error
+              then { f with producer_error = f.value.error }
+              else f
+            in
+            { f with
+              value =
+                { f.value with
+                  owned = false
+                ; state =
+                    (if List.mem
+                          [ "pending"; "executing" ]
+                          f.value.state
+                          ~equal:String.equal
+                     then "unknown"
+                     else f.value.state)
+                }
+            })));
   (* This is our explicitly configured, single-writer derived cache directory, never a
      provider directory. Recover only our own namespace's orphan blobs. *)
   let retained =
@@ -349,9 +432,10 @@ let load_project t ~root ~environment =
 let config p = Option.value_exn p.config ~message:"Project has no ASIC configuration"
 let invoke p f = f (config p) ~root:p.root ~environment:p.environment
 
-let query t _p cancel invocation =
+let query ?(max_bytes = 16 * 1024 * 1024) ?(before = fun () -> ()) t _p cancel invocation =
   Throttle.enqueue t.queries (fun () ->
     Public.require (not (Deferred.is_determined cancel)) "ASIC query cancelled";
+    before ();
     let%map output =
       Asic_process.run
         ~seconds:30.
@@ -360,6 +444,9 @@ let query t _p cancel invocation =
         ~on_line:(fun _ -> Deferred.unit)
         invocation
     in
+    Public.require
+      (String.length output <= max_bytes)
+      "ASIC query response exceeds budget";
     Public.decode output)
 ;;
 
@@ -421,6 +508,7 @@ let register t (p : project) ?selection (reference : Asic.Reference.t) =
       ; status = "allocated"
       ; execution_file = None
       ; error = None
+      ; stages = []
       }
     in
     replace_run p r;
@@ -430,12 +518,50 @@ let register t (p : project) ?selection (reference : Asic.Reference.t) =
 
 let hot p (summary : Asic.Summary.t) =
   let id = summary.run.id in
+  if not
+       (Option.value_map (Hashtbl.find p.hot id) ~default:false ~f:(fun old ->
+          String.equal old.source_digest summary.source_digest))
+  then (
+    p.artifacts
+    <- List.filter p.artifacts ~f:(fun r ->
+         not (Run_ref.equal r.Asic_artifact.Reference.run summary.run));
+    p.artifact_pages
+    <- List.filter p.artifact_pages ~f:(fun page ->
+         not (Run_ref.equal page.Asic_artifact.Page.run summary.run));
+    p.artifact_byte_pages
+    <- List.filter p.artifact_byte_pages ~f:(fun page ->
+         not (Run_ref.equal page.Asic_artifact.Byte_page.run summary.run)));
   Hashtbl.set p.hot ~key:id ~data:summary;
   p.recency <- id :: List.filter p.recency ~f:(fun key -> not (String.equal id key));
   let retained = List.take p.recency 32
   and evicted = List.drop p.recency 32 in
   List.iter evicted ~f:(Hashtbl.remove p.hot);
+  p.artifacts
+  <- List.filter p.artifacts ~f:(fun r ->
+       Hashtbl.mem p.hot r.Asic_artifact.Reference.run.id);
+  p.artifact_pages
+  <- List.filter p.artifact_pages ~f:(fun page ->
+       List.exists p.artifacts ~f:(fun r ->
+         Run_ref.equal r.run page.Asic_artifact.Page.run
+         && String.equal r.id page.artifact_id));
+  p.artifact_byte_pages
+  <- List.filter p.artifact_byte_pages ~f:(fun page ->
+       List.exists p.artifacts ~f:(fun r ->
+         Run_ref.equal r.run page.Asic_artifact.Byte_page.run
+         && String.equal r.id page.artifact_id
+         && String.equal r.terminal_attempt page.terminal_attempt
+         && String.equal r.sha256 page.sha256));
   p.recency <- retained
+;;
+
+let prune_byte_pages p =
+  p.artifact_byte_pages
+  <- List.filter p.artifact_byte_pages ~f:(fun page ->
+       List.exists p.artifacts ~f:(fun r ->
+         Run_ref.equal r.Asic_artifact.Reference.run page.Asic_artifact.Byte_page.run
+         && String.equal r.id page.artifact_id
+         && String.equal r.terminal_attempt page.terminal_attempt
+         && String.equal r.sha256 page.sha256))
 ;;
 
 let expected_plan p (run : Run_ref.t) =
@@ -525,6 +651,26 @@ let observe_unlocked t p cancel (run : Run_ref.t) =
   if current.cursor <= next.cursor
   then (
     replace_run p next;
+    if not (Option.equal String.equal current.execution_file next.execution_file)
+    then
+      p.inspections
+      <- List.filter p.inspections ~f:(fun index ->
+           not (Run_ref.equal index.Inspection_wire.Index.run run))
+    else if current.cursor < next.cursor
+    then
+      (* A public execution path can be reused by a newer source generation. Retain
+         offline index evidence, but do not present it or its old details as current. *)
+      p.inspections
+      <- List.map p.inspections ~f:(fun index ->
+           if Run_ref.equal index.Inspection_wire.Index.run run
+           then { index with cached_unverified = true }
+           else index);
+    if current.cursor < next.cursor
+       || not (Option.equal String.equal current.execution_file next.execution_file)
+    then
+      p.inspection_details
+      <- List.filter p.inspection_details ~f:(fun detail ->
+           not (Run_ref.equal detail.Inspection_wire.Detail.run run));
     if current.cursor < next.cursor
        || not (Option.equal String.equal current.execution_file next.execution_file)
     then
@@ -719,9 +865,13 @@ let load_summary t p cancel (run : Run_ref.t) =
 let snapshot p : Asic.Snapshot.t =
   { configured = Option.is_some p.config
   ; flows = p.flows
+  ; catalog_default = p.catalog_default
   ; description_json = p.description
   ; preview = p.preview
   ; runs = p.runs
+  ; launches =
+      List.map p.submissions ~f:(fun (key, preview, run_id) ->
+        { Asic.Launch.key; preview; run_id })
   ; operations =
       (Hashtbl.data p.tasks |> List.map ~f:(fun t -> t.pending))
       @ (Hashtbl.keys p.reservations
@@ -753,7 +903,25 @@ let snapshot p : Asic.Snapshot.t =
                   "Submission reserved; execution ownership unavailable. Observe \
                    registered reference; never relaunch implicitly."
             })
+      @ List.filter_map p.finalizations ~f:(fun f ->
+        let key = "finalize:" ^ f.value.key in
+        if Hashtbl.mem p.tasks key
+        then None
+        else
+          Some
+            { Asic.Pending.key
+            ; kind = "finalize"
+            ; state = f.value.state
+            ; run = Some f.value.run
+            ; error = f.value.error
+            })
   ; summaries = Hashtbl.data p.hot
+  ; finalizations = List.map p.finalizations ~f:(fun f -> f.value)
+  ; artifacts = p.artifacts
+  ; artifact_pages = p.artifact_pages
+  ; artifact_byte_pages = p.artifact_byte_pages
+  ; inspections = p.inspections
+  ; inspection_details = p.inspection_details
   ; cache_error = p.cache_error
   }
 ;;
@@ -779,7 +947,7 @@ let schedule t p ~key ~kind ~execution f =
     in
     Hashtbl.set p.tasks ~key ~data:task;
     let work () =
-      let%map result =
+      let%bind result =
         Monitor.try_with (fun () ->
           Public.require (not (Ivar.is_full task.cancel)) "ASIC operation cancelled";
           task.pending <- { task.pending with state = "executing" };
@@ -789,7 +957,40 @@ let schedule t p ~key ~kind ~execution f =
       <- (match result with
           | Ok () -> { task.pending with state = "completed" }
           | Error exn ->
-            { task.pending with state = "failed"; error = Some (Exn.to_string exn) })
+            { task.pending with state = "failed"; error = Some (Exn.to_string exn) });
+      if String.equal kind "finalize"
+      then (
+        p.finalizations
+        <- List.map p.finalizations ~f:(fun f ->
+             if String.equal ("finalize:" ^ f.value.key) key
+             then (
+               let f =
+                 match result with
+                 | Error exn
+                   when Option.is_none f.producer_error
+                        && Option.is_none f.observation_error ->
+                   with_finalization_errors
+                     f
+                     ~producer_error:(Some (Exn.to_string exn))
+                     ~observation_error:None
+                 | Ok () | Error _ -> f
+               in
+               { f with
+                 value =
+                   { f.value with
+                     owned = false
+                   ; state =
+                       (if List.mem
+                             [ "pending"; "executing" ]
+                             f.value.state
+                             ~equal:String.equal
+                        then if Ivar.is_full task.cancel then "interrupted" else "failed"
+                        else f.value.state)
+                   }
+               })
+             else f);
+        persist t p)
+      else Deferred.unit
     in
     let completion = if execution then Throttle.enqueue t.executions work else work () in
     task.completion <- completion;
@@ -843,6 +1044,700 @@ let reserve_and_schedule t p ~key ~preview launch =
        await result)
 ;;
 
+let find_finalization p key =
+  List.find_exn p.finalizations ~f:(fun f -> String.equal f.value.key key)
+;;
+
+let update_finalization p key f =
+  p.finalizations
+  <- List.map p.finalizations ~f:(fun old ->
+       if String.equal old.value.key key then f old else old)
+;;
+
+let save_required t p =
+  save_registry t p
+  >>| function
+  | Ok () -> ()
+  | Error exn -> raise exn
+;;
+
+let validate_finalization_input ~key ~execution_file ~acceptance =
+  Public.require
+    ((not (String.is_empty key)) && String.length key <= 256)
+    "Invalid finalization key";
+  ignore (Public.absolute execution_file : string);
+  Public.require (String.length execution_file <= 4096) "Execution path exceeds budget";
+  Option.iter acceptance ~f:(fun (a : Asic.Acceptance.t) ->
+    List.iter
+      [ a.support_tools; a.precheck_python; a.testbench; a.replay_trace ]
+      ~f:(fun path ->
+        ignore (Public.absolute path : string);
+        Public.require (String.length path <= 4096) "Acceptance path exceeds budget");
+    Public.require
+      ((not (String.is_empty (String.strip a.testbench_top)))
+       && String.length a.testbench_top <= 4096)
+      "Explicit acceptance testbench top required")
+;;
+
+let finalization_eligibility t p cancel (f : Finalization_stored.t) =
+  let v = f.value in
+  let r = find_run p v.run in
+  Public.require
+    (Option.equal String.equal r.execution_file (Some v.execution_file))
+    "Finalize requires the exact registered execution_file; Observe first";
+  let%bind () = check_provider t p cancel in
+  let%bind report =
+    query
+      t
+      p
+      cancel
+      (invoke p (fun c ~root ~environment ->
+         Adapter.report c ~root ~environment v.execution_file))
+  in
+  ignore
+    (Public.summary
+       r
+       ~expected_plan:(expected_plan p v.run)
+       ~execution_file:v.execution_file
+       report
+     : Asic.Summary.t);
+  Option.iter (expected_bundle p v.run) ~f:(fun bundle ->
+    Public.require
+      (Poly.equal
+         (Public.field "bundle_identity" (Public.field "methodology" report))
+         (`String bundle))
+      "Report bundle identity mismatch");
+  let%map hash =
+    In_thread.run (fun () ->
+      Public.require
+        (String.equal (Filename_unix.realpath v.execution_file) v.execution_file)
+        "Finalize requires the exact canonical execution path";
+      let bytes = read_public_bounded v.execution_file (8 * 1024 * 1024) in
+      let execution = Public.decode bytes in
+      let field = Public.field in
+      let stages =
+        [ "synthesis"; "floorplan"; "placement"; "cts"; "routing"; "signoff" ]
+      in
+      Public.require
+        (Poly.equal
+           (Public.canonical_json execution)
+           (Public.canonical_json (field "execution" report))
+         && Poly.equal (field "physical" (field "completion" report)) (`String "full")
+         && Poly.equal (field "status" execution) (`String "completed")
+         && Poly.equal (field "exit_code" execution) (`Int 0)
+         && Poly.equal (field "initial_boundary" (field "plan" execution)) `Null
+         && Poly.equal (field "schema_version" (field "plan" execution)) (`Int 3)
+         && Poly.equal
+              (field "stages" (field "plan" execution))
+              (`List (List.map stages ~f:(fun s -> `String s))))
+        "Finalize requires an exact completed fresh six-stage physical execution";
+      let occurrences = Public.list (field "occurrences" execution) in
+      let artifacts = Public.list (field "artifacts" execution) in
+      let checkpoints = Public.list (field "checkpoints" report) in
+      Public.require
+        (List.length occurrences = 6
+         && List.length artifacts = 6
+         && List.length checkpoints = 6)
+        "Finalize requires all six selected stage publications";
+      List.iteri stages ~f:(fun i stage ->
+        let occurrence = List.nth_exn occurrences i in
+        let artifact = List.nth_exn artifacts i in
+        let reference = field "reference" (List.nth_exn checkpoints i) in
+        Public.require
+          (Poly.equal
+             (field "action_key" occurrence)
+             (`String ("implementation." ^ stage))
+           && Poly.equal
+                (field "occurrence_id" occurrence)
+                (`String (r.reference.stream_id ^ "/implementation." ^ stage))
+           && Poly.equal (field "status" occurrence) (`String "completed")
+           && Poly.equal (field "exit_code" occurrence) (`Int 0)
+           && Poly.equal (field "boundary" artifact) (`String stage)
+           && List.for_all [ "path"; "identity"; "boundary" ] ~f:(fun key ->
+             Poly.equal (field key artifact) (field key reference)))
+          "Incomplete or mismatched selected physical evidence");
+      Public.digest bytes)
+  in
+  Public.require
+    (Option.equal String.equal (find_run p v.run).execution_file (Some v.execution_file))
+    "Execution reference changed during finalization validation";
+  hash
+;;
+
+(* Reads only the reference delivered by the owned producer. A restarted service never
+   reconstructs an attempt from an operation store, PID, newest directory, or run ID. *)
+let inspect_owned_finalization t p cancel key =
+  serialized p ("finalize-inspect:" ^ key) (fun () ->
+    let f = find_finalization p key in
+    match f.value.attempt with
+    | None -> failwith "No finalization allocation reference was retained; never relaunch"
+    | Some attempt ->
+      let%bind receipt =
+        query
+          t
+          p
+          cancel
+          (invoke p (fun c ~root ~environment ->
+             Adapter.inspect_finalization c ~root ~environment attempt))
+      in
+      let receipt = Public.envelope receipt "hardcaml-asic.segment-finalization" 1 in
+      let field = Public.field in
+      let request = field "request" receipt in
+      Public.require
+        (Poly.equal (field "execution" request) (`String f.value.execution_file)
+         && Poly.equal (field "accept" request) (`Bool f.value.acceptance_requested)
+         && Option.value_map f.operation_id ~default:false ~f:(fun id ->
+           Poly.equal (field "attempt_id" receipt) (`String id)))
+        "Finalization receipt request/operation mismatch";
+      List.iter
+        [ ( "support_tools"
+          , Option.map f.acceptance ~f:(fun a -> a.Asic.Acceptance.support_tools) )
+        ; "precheck_python", Option.map f.acceptance ~f:(fun a -> a.precheck_python)
+        ; "testbench", Option.map f.acceptance ~f:(fun a -> a.testbench)
+        ; "testbench_top", Option.map f.acceptance ~f:(fun a -> a.testbench_top)
+        ; "replay_trace", Option.map f.acceptance ~f:(fun a -> a.replay_trace)
+        ]
+        ~f:(fun (name, expected) ->
+          Public.require
+            (Poly.equal
+               (field name request)
+               (Option.value_map expected ~default:`Null ~f:(fun s -> `String s)))
+            "Finalization acceptance inputs differ from reservation");
+      let execution = field "execution" receipt in
+      if not (Poly.equal execution `Null)
+      then
+        Public.require
+          (Poly.equal (field "path" execution) (`String f.value.execution_file)
+           && Poly.equal
+                (field "attempt_id" execution)
+                (`String (find_run p f.value.run).reference.stream_id)
+           && Option.value_map f.execution_hash ~default:false ~f:(fun hash ->
+             Poly.equal (field "sha256" execution) (`String hash)))
+          "Finalization receipt differs from captured execution hash";
+      let status = Public.text (field "status" receipt) in
+      Public.require
+        (List.mem
+           [ "running"; "completed"; "failed"; "interrupted" ]
+           status
+           ~equal:String.equal)
+        "Invalid finalization status";
+      let terminal = not (String.equal status "running") in
+      let acceptance = Public.text (field "acceptance" receipt) in
+      Public.require
+        (List.mem [ "not_evaluated"; "pass"; "fail" ] acceptance ~equal:String.equal
+         && (String.equal acceptance "not_evaluated" || f.value.acceptance_requested)
+         && ((not (String.equal acceptance "pass"))
+             || (String.equal status "completed"
+                 && Poly.equal (field "external_postcheck" receipt) (`String "completed")
+                )))
+        "Invalid or unearned finalization acceptance";
+      if String.equal status "completed"
+      then
+        Public.require
+          ((not (Poly.equal execution `Null))
+           && not (Poly.equal (field "results" receipt) `Null))
+          "Completed finalization lacks execution/results references";
+      if terminal
+      then (
+        Public.require
+          (not (Poly.equal (field "ended_at" receipt) `Null))
+          "Terminal finalization has no end time";
+        Public.require
+          (Bool.equal
+             (String.equal status "completed")
+             (Public.integer (field "exit_code" receipt) = 0))
+          "Finalization status/exit mismatch");
+      update_finalization p key (fun current ->
+        { current with
+          value =
+            { current.value with
+              state =
+                (if terminal
+                 then status
+                 else if current.value.owned
+                 then "executing"
+                 else "unknown")
+            ; phase =
+                Option.map
+                  (Public.supplied_string (field "phase" receipt))
+                  ~f:(fun s -> String.prefix s 4096)
+            ; operation_status = Some status
+            ; acceptance =
+                (if terminal && not (Poly.equal (field "results" receipt) `Null)
+                 then current.value.acceptance
+                 else Some acceptance)
+            }
+        });
+      let%bind () = save_required t p in
+      let%bind () =
+        if terminal && not (Poly.equal (field "results" receipt) `Null)
+        then (
+          let%bind hash =
+            In_thread.run (fun () ->
+              Public.digest (read_public_bounded f.value.execution_file (8 * 1024 * 1024)))
+          in
+          Public.require
+            (Option.equal String.equal f.execution_hash (Some hash))
+            "Captured execution bytes changed before terminal import";
+          materialize ~attempt t p cancel f.value.run)
+        else Deferred.unit
+      in
+      update_finalization p key (fun current ->
+        let producer_error =
+          Option.first_some
+            current.producer_error
+            (Option.map
+               (Public.supplied_string (field "error" receipt))
+               ~f:(fun s -> String.prefix s 4096))
+        in
+        let current =
+          with_finalization_errors current ~producer_error ~observation_error:None
+        in
+        { current with value = { current.value with acceptance = Some acceptance } });
+      let%map () = save_required t p in
+      terminal)
+;;
+
+let launch_finalization t p key task =
+  task.pending <- { task.pending with run = Some (find_finalization p key).value.run };
+  let deadline = Clock.after (Time_float.Span.of_sec 1800.) in
+  let stop = Ivar.create () in
+  let cancel = Deferred.any [ Ivar.read task.cancel; Ivar.read stop; deadline ] in
+  let finished = Ivar.create () in
+  let polling = ref Deferred.unit in
+  let polling_error = ref None in
+  let result =
+    Monitor.try_with (fun () ->
+      let f = find_finalization p key in
+      let%bind hash = finalization_eligibility t p cancel f in
+      update_finalization p key (fun f ->
+        { f with
+          execution_hash = Some hash
+        ; value = { f.value with state = "executing"; owned = true }
+        });
+      let%bind () = save_required t p in
+      let on_line line =
+        let j =
+          Public.envelope (Public.decode line) "hardcaml-asic.segment-finalization" 1
+        in
+        match Public.field "event" j with
+        | `String "allocated" ->
+          let current = find_finalization p key in
+          Public.require
+            (Option.is_none current.value.attempt)
+            "Duplicate finalization allocation";
+          let attempt = Public.absolute (Public.text (Public.field "attempt" j)) in
+          let operation_id = Public.text (Public.field "attempt_id" j) in
+          Public.require
+            (String.length attempt <= 4096
+             && (not (String.is_empty operation_id))
+             && String.length operation_id <= 256)
+            "Invalid finalization allocation";
+          update_finalization p key (fun f ->
+            { f with
+              operation_id = Some operation_id
+            ; value = { f.value with attempt = Some attempt }
+            });
+          let%map () = save_required t p in
+          let rec poll remaining =
+            if Ivar.is_full finished || Deferred.is_determined cancel
+            then Deferred.unit
+            else (
+              Public.require (remaining > 0) "Finalization observation budget exhausted";
+              let%bind terminal = inspect_owned_finalization t p cancel key in
+              if terminal
+              then Deferred.unit
+              else (
+                let%bind () =
+                  Deferred.any
+                    [ Clock.after (Time_float.Span.of_sec 1.)
+                    ; Ivar.read finished
+                    ; cancel
+                    ]
+                in
+                poll (remaining - 1)))
+          in
+          (polling
+           := Monitor.try_with (fun () -> poll 1800)
+              >>| function
+              | Ok () -> ()
+              | Error exn ->
+                if (not (Ivar.is_full finished)) && not (Deferred.is_determined cancel)
+                then (
+                  polling_error := Some exn;
+                  Ivar.fill_if_empty stop ()));
+          don't_wait_for !polling
+        | `Null ->
+          Public.require
+            (Option.is_some (find_finalization p key).value.attempt)
+            "Finalization terminal output before allocation";
+          Deferred.unit
+        | _ -> failwith "Unexpected finalization producer event"
+      in
+      let%bind (_ : string) =
+        Asic_process.run
+          ~stop_grace_seconds:15.
+          ~seconds:1800.
+          ~cancel
+          ~on_process:ignore
+          ~on_line
+          (invoke p (fun c ~root ~environment ->
+             Adapter.finalize
+               c
+               ~root
+               ~environment
+               ~execution_file:f.value.execution_file
+               ~acceptance:f.acceptance))
+      in
+      Public.require
+        (Option.is_some (find_finalization p key).value.attempt)
+        "Finalization producer exited without allocation";
+      Deferred.unit)
+  in
+  let%bind result in
+  Ivar.fill_if_empty finished ();
+  let%bind polling_result = Monitor.try_with (fun () -> !polling) in
+  update_finalization p key (fun f -> { f with value = { f.value with owned = false } });
+  (* Nonzero acceptance still publishes a valid receipt/results. Process outcome is kept
+     in error/pending independently of the receipt's status and acceptance verdict. *)
+  let%bind inspection =
+    Monitor.try_with (fun () ->
+      if Option.is_some (find_finalization p key).value.attempt
+      then
+        inspect_owned_finalization t p deadline key
+        >>| fun terminal ->
+        Public.require terminal "Producer exited with nonterminal finalization receipt"
+      else Deferred.unit)
+  in
+  let poll_outcome =
+    match !polling_error with
+    | None -> polling_result
+    | Some exn -> Error exn
+  in
+  let errors =
+    List.filter_map [ result; poll_outcome; inspection ] ~f:(function
+      | Ok () -> None
+      | Error exn -> Some (Exn.to_string exn))
+  in
+  update_finalization p key (fun f ->
+    let producer_errors =
+      List.filter_map [ result; poll_outcome ] ~f:(function
+        | Ok () -> None
+        | Error exn -> Some (Exn.to_string exn))
+    in
+    let producer_error =
+      if List.is_empty producer_errors
+      then f.producer_error
+      else Some (String.concat ~sep:"; " producer_errors)
+    in
+    let observation_error =
+      match inspection with
+      | Ok () -> None
+      | Error exn -> Some (Exn.to_string exn)
+    in
+    let f = with_finalization_errors f ~producer_error ~observation_error in
+    { f with
+      value =
+        { f.value with
+          state =
+            (if List.mem
+                  [ "pending"; "executing"; "unknown" ]
+                  f.value.state
+                  ~equal:String.equal
+             then
+               if Ivar.is_full task.cancel
+               then "interrupted"
+               else if Option.is_none f.value.attempt
+               then "failed"
+               else "unknown"
+             else f.value.state)
+        }
+    });
+  let%bind () = save_required t p in
+  if not (List.is_empty errors) then failwith (String.concat ~sep:"; " errors);
+  let v = (find_finalization p key).value in
+  Public.require (String.equal v.state "completed") ("Finalization operation " ^ v.state);
+  Deferred.unit
+;;
+
+let reserve_finalization t p ~key ~run ~execution_file ~acceptance =
+  validate_finalization_input ~key ~execution_file ~acceptance;
+  ignore (find_run p run : Asic.Run.t);
+  serialized p "finalization-reservations" (fun () ->
+    match List.find p.finalizations ~f:(fun f -> String.equal f.value.key key) with
+    | Some f ->
+      Public.require
+        (Run_ref.equal f.value.run run
+         && String.equal f.value.execution_file execution_file
+         && Option.equal Asic.Acceptance.equal f.acceptance acceptance)
+        "Finalization key reused with different inputs";
+      Deferred.unit
+    | None ->
+      Public.require
+        p.registry_writable
+        "ASIC registry unavailable; cannot reserve finalization";
+      Public.require (not t.closing) "ASIC service shutting down";
+      Public.require
+        (List.length p.finalizations < 256)
+        "Finalization reservation budget exhausted";
+      let f : Finalization_stored.t =
+        { value =
+            { key
+            ; run
+            ; execution_file
+            ; acceptance_requested = Option.is_some acceptance
+            ; attempt = None
+            ; state = "pending"
+            ; phase = None
+            ; operation_status = None
+            ; acceptance = None
+            ; error = None
+            ; owned = true
+            }
+        ; acceptance
+        ; execution_hash = None
+        ; operation_id = None
+        ; producer_error = None
+        ; observation_error = None
+        }
+      in
+      Public.require
+        (String.length
+           (Sexp.to_string_mach
+              ([%sexp_of: Finalization_stored.t list] (f :: p.finalizations)))
+         <= 512 * 1024)
+        "Finalization retained input budget exhausted";
+      p.finalizations <- f :: p.finalizations;
+      let%bind result =
+        Monitor.try_with (fun () ->
+          let%map () = save_required t p in
+          schedule
+            t
+            p
+            ~key:("finalize:" ^ key)
+            ~kind:"finalize"
+            ~execution:true
+            (launch_finalization t p key))
+      in
+      (match result with
+       | Ok () -> Deferred.unit
+       | Error exn ->
+         update_finalization p key (fun f ->
+           let f =
+             with_finalization_errors
+               f
+               ~producer_error:(Some (Exn.to_string exn))
+               ~observation_error:None
+           in
+           { f with value = { f.value with state = "failed"; owned = false } });
+         let%bind () = persist t p in
+         raise exn))
+;;
+
+let inspection_matches (index : Inspection_wire.Index.t) ~run ~domain ~stage =
+  Run_ref.equal index.run run
+  && String.equal index.domain domain
+  && String.equal index.stage stage
+;;
+
+let publish_inspection p (index : Inspection_wire.Index.t) =
+  p.inspections
+  <- List.take
+       (index
+        :: List.filter p.inspections ~f:(fun old ->
+          not
+            (inspection_matches
+               old
+               ~run:index.run
+               ~domain:index.domain
+               ~stage:index.stage)))
+       8;
+  p.inspection_details
+  <- List.filter p.inspection_details ~f:(fun detail ->
+       List.exists p.inspections ~f:(fun current ->
+         inspection_matches
+           current
+           ~run:detail.Inspection_wire.Detail.run
+           ~domain:detail.domain
+           ~stage:detail.stage
+         && String.equal current.source_digest detail.source_digest))
+;;
+
+let check_inspection_current p cancel (registered : Asic.Run.t) =
+  Public.require (not (Deferred.is_determined cancel)) "Inspection read cancelled";
+  let current = find_run p registered.run in
+  (* [registered] is the immutable pre-read snapshot. Path equality alone cannot fence an
+     observation that advances the generation at the same public execution path. *)
+  Public.require
+    (Asic.Reference.equal current.reference registered.reference
+     && current.cursor = registered.cursor
+     && Option.equal String.equal current.execution_file registered.execution_file)
+    "Registered execution changed during inspection; request again"
+;;
+
+let inspection_hash t p cancel registered execution_file =
+  Throttle.enqueue t.queries (fun () ->
+    check_inspection_current p cancel registered;
+    In_thread.run (fun () -> Inspection.execution_hash ~registered ~execution_file))
+;;
+
+let load_inspection t p cancel ~run ~domain ~stage ~refresh =
+  serialized p "inspection-publication" (fun () ->
+    let registered = find_run p run in
+    let execution_file =
+      Option.value_exn
+        registered.execution_file
+        ~message:"No registered execution_file; Observe first"
+    in
+    let fetch () =
+      p.inspections
+      <- List.map p.inspections ~f:(fun index ->
+           if inspection_matches index ~run ~domain ~stage
+           then { index with cached_unverified = true }
+           else index);
+      let%bind () = check_provider t p cancel in
+      let%bind execution_sha256 = inspection_hash t p cancel registered execution_file in
+      let%bind response =
+        query
+          ~max_bytes:Inspection.index_limit
+          ~before:(fun () -> check_inspection_current p cancel registered)
+          t
+          p
+          cancel
+          (invoke p (fun c ~root ~environment ->
+             Adapter.inspection
+               c
+               ~root
+               ~environment
+               ~execution_file
+               ~domain
+               ~stage
+               ~detail:None))
+      in
+      let index =
+        Inspection.parse_index
+          ~registered
+          ~execution_file
+          ~execution_sha256
+          ~domain
+          ~stage
+          response
+      in
+      let%bind after = inspection_hash t p cancel registered execution_file in
+      Public.require
+        (String.equal after execution_sha256)
+        "Execution bytes changed during inspection";
+      let%map () =
+        Throttle.enqueue t.queries (fun () ->
+          check_inspection_current p cancel registered;
+          In_thread.run (fun () ->
+            Inspection.save
+              ~rebuild_invalid:true
+              ~state_dir:t.state_dir
+              ~identity:p.identity
+              index))
+      in
+      index
+    in
+    let started_refresh = !refresh in
+    let cached () =
+      match
+        List.find p.inspections ~f:(fun index ->
+          inspection_matches index ~run ~domain ~stage)
+      with
+      | Some index ->
+        Public.require
+          (String.equal index.execution_file execution_file)
+          "Stale inspection execution";
+        return index
+      | None ->
+        Throttle.enqueue t.queries (fun () ->
+          check_inspection_current p cancel registered;
+          In_thread.run (fun () ->
+            Inspection.load
+              ~state_dir:t.state_dir
+              ~identity:p.identity
+              ~run
+              ~execution_file
+              ~domain
+              ~stage))
+    in
+    let%bind initial =
+      Monitor.try_with (fun () -> if started_refresh then fetch () else cached ())
+    in
+    (* Inspect is an explicit user read. Warm ordinary loads stay offline, while a
+       missing/invalid cache falls back to the same bounded read-only query as Refresh.
+       Rendering/Get never enters this path. A refresh also upgrades an in-flight cache
+       lookup under the same wait key without issuing a duplicate fetch. *)
+    let%bind index =
+      if !refresh && not started_refresh
+      then fetch ()
+      else (
+        match initial with
+        | Ok index -> return index
+        | Error _ when not started_refresh -> fetch ()
+        | Error exn -> raise exn)
+    in
+    check_inspection_current p cancel registered;
+    publish_inspection p index;
+    Deferred.unit)
+;;
+
+let load_inspection_detail t p cancel ~run ~domain ~stage ~source_digest ~row_id =
+  serialized p "inspection-publication" (fun () ->
+    let registered = find_run p run in
+    let index =
+      List.find p.inspections ~f:(fun index ->
+        inspection_matches index ~run ~domain ~stage)
+      |> Option.value_exn ~message:"Load inspection index before requesting detail"
+    in
+    Public.require
+      (String.equal index.source_digest source_digest
+       && List.exists index.rows ~f:(fun row -> String.equal row.id row_id))
+      "Stale inspection digest or unknown row";
+    let%bind () = check_provider t p cancel in
+    let%bind hash = inspection_hash t p cancel registered index.execution_file in
+    Public.require
+      (String.equal hash index.execution_sha256)
+      "Inspection execution bytes changed";
+    let%bind response =
+      query
+        ~max_bytes:(512 * 1024)
+        ~before:(fun () -> check_inspection_current p cancel registered)
+        t
+        p
+        cancel
+        (invoke p (fun c ~root ~environment ->
+           Adapter.inspection
+             c
+             ~root
+             ~environment
+             ~execution_file:index.execution_file
+             ~domain
+             ~stage
+             ~detail:(Some (row_id, source_digest))))
+    in
+    let detail = Inspection.parse_detail ~registered ~index ~row_id response in
+    let%map after = inspection_hash t p cancel registered index.execution_file in
+    Public.require (String.equal after hash) "Execution bytes changed during detail read";
+    check_inspection_current p cancel registered;
+    p.inspection_details
+    <- List.take
+         (detail
+          :: List.filter p.inspection_details ~f:(fun old ->
+            not
+              (String.equal
+                 (Inspection_wire.detail_key
+                    ~run:old.run
+                    ~domain:old.domain
+                    ~stage:old.stage
+                    ~source_digest:old.source_digest
+                    ~row_id:old.row_id)
+                 (Inspection_wire.detail_key ~run ~domain ~stage ~source_digest ~row_id)))
+         )
+         8)
+;;
+
 let handle_operation t p operation =
   let enqueue ~key ~kind f =
     schedule t p ~key ~kind ~execution:false (fun task -> f (Ivar.read task.cancel))
@@ -855,21 +1750,272 @@ let handle_operation t p operation =
   in
   match operation with
   | Asic.Operation.Get -> Deferred.unit
+  | Inspect { run; domain; stage; refresh } ->
+    ignore (find_run p run : Asic.Run.t);
+    Inspection.validate_selection ~domain ~stage;
+    let key = Inspection_wire.index_key ~run ~domain ~stage in
+    (match Hashtbl.find p.inspection_refreshes key with
+     | Some requested -> if refresh then requested := true
+     | None ->
+       let requested = ref refresh in
+       Hashtbl.set p.inspection_refreshes ~key ~data:requested;
+       (try
+          schedule t p ~key ~kind:"inspection" ~execution:false (fun task ->
+            task.pending <- { task.pending with run = Some run };
+            Monitor.protect
+              ~finally:(fun () ->
+                Hashtbl.remove p.inspection_refreshes key;
+                Deferred.unit)
+              (fun () ->
+                load_inspection
+                  t
+                  p
+                  (Ivar.read task.cancel)
+                  ~run
+                  ~domain
+                  ~stage
+                  ~refresh:requested))
+        with
+        | exn ->
+          Hashtbl.remove p.inspection_refreshes key;
+          raise exn));
+    Deferred.unit
+  | Inspect_detail { run; domain; stage; source_digest; row_id } ->
+    ignore (find_run p run : Asic.Run.t);
+    Inspection.validate_selection ~domain ~stage;
+    Inspection.validate_digest source_digest;
+    Inspection.validate_row_id row_id;
+    schedule
+      t
+      p
+      ~key:(Inspection_wire.detail_key ~run ~domain ~stage ~source_digest ~row_id)
+      ~kind:"inspection-detail"
+      ~execution:false
+      (fun task ->
+         task.pending <- { task.pending with run = Some run };
+         let cancel = Ivar.read task.cancel in
+         let%bind result =
+           Monitor.try_with (fun () ->
+             load_inspection_detail t p cancel ~run ~domain ~stage ~source_digest ~row_id)
+         in
+         match result with
+         | Ok () -> Deferred.unit
+         | Error exn ->
+           let detail : Inspection_wire.Detail.t =
+             { run
+             ; domain
+             ; stage
+             ; source_digest
+             ; row_id
+             ; text = ""
+             ; error = Some (Exn.to_string exn)
+             }
+           in
+           let key d =
+             Inspection_wire.detail_key
+               ~run:d.Inspection_wire.Detail.run
+               ~domain:d.domain
+               ~stage:d.stage
+               ~source_digest:d.source_digest
+               ~row_id:d.row_id
+           in
+           p.inspection_details
+           <- List.take
+                (detail
+                 :: List.filter p.inspection_details ~f:(fun old ->
+                   not (String.equal (key old) (key detail))))
+                8;
+           raise exn);
+    Deferred.unit
+  | Finalize { key; run; execution_file; acceptance } ->
+    reserve_finalization t p ~key ~run ~execution_file ~acceptance
+  | Observe_finalization key ->
+    let f = find_finalization p key in
+    enqueue ~key:("finalize-observe:" ^ key) ~kind:"finalize-observe" (fun cancel ->
+      let%bind result =
+        Monitor.try_with (fun () ->
+          let%bind () = check_provider t p cancel in
+          inspect_owned_finalization t p cancel key >>| fun _ -> ())
+      in
+      match result with
+      | Ok () -> Deferred.unit
+      | Error exn ->
+        update_finalization p key (fun current ->
+          with_finalization_errors
+            current
+            ~producer_error:current.producer_error
+            ~observation_error:(Some (Exn.to_string exn)));
+        let%bind () = persist t p in
+        raise exn);
+    ignore (f : Finalization_stored.t);
+    Deferred.unit
+  | List_artifacts run ->
+    ignore (find_run p run : Asic.Run.t);
+    enqueue ~key:("artifacts:" ^ run.id) ~kind:"artifacts" (fun cancel ->
+      Public.require (not (Deferred.is_determined cancel)) "Artifact listing cancelled";
+      let summary = Hashtbl.find_exn p.hot run.id in
+      Public.require
+        (Run_ref.equal summary.run run && Option.is_some summary.terminal)
+        "Artifacts require an adopted validated terminal summary; load it first";
+      let%map references =
+        Throttle.enqueue t.queries (fun () ->
+          Public.require
+            (not (Deferred.is_determined cancel))
+            "Artifact listing cancelled";
+          In_thread.run (fun () -> Asic_artifacts.list ~summary))
+      in
+      Public.require (not (Deferred.is_determined cancel)) "Artifact listing cancelled";
+      Public.require
+        (String.equal (Hashtbl.find_exn p.hot run.id).source_digest summary.source_digest)
+        "Terminal summary changed while listing artifacts";
+      p.artifacts
+      <- List.take references 32
+         @ List.filter p.artifacts ~f:(fun r ->
+           not (Run_ref.equal r.Asic_artifact.Reference.run run));
+      (* At most 32 catalogs (the hot-summary bound), each containing at most 32 refs. *)
+      p.artifacts <- List.filter p.artifacts ~f:(fun r -> Hashtbl.mem p.hot r.run.id);
+      p.artifact_pages
+      <- List.filter p.artifact_pages ~f:(fun page ->
+           not (Run_ref.equal page.Asic_artifact.Page.run run));
+      p.artifact_byte_pages
+      <- List.filter p.artifact_byte_pages ~f:(fun page ->
+           not (Run_ref.equal page.Asic_artifact.Byte_page.run run));
+      prune_byte_pages p);
+    Deferred.unit
+  | Read_artifact_bytes { run; artifact_id; offset; limit } ->
+    ignore (find_run p run : Asic.Run.t);
+    Public.require (String.length artifact_id <= 256) "Artifact ID exceeds budget";
+    Public.require
+      (offset >= 0 && limit > 0 && limit <= 64 * 1024)
+      "Artifact byte page requires nonnegative offset and limit 1..65536";
+    enqueue
+      ~key:(Asic_artifact.byte_read_key ~run ~artifact_id ~offset ~limit)
+      ~kind:"artifact-byte-read"
+      (fun cancel ->
+         Public.require
+           (not (Deferred.is_determined cancel))
+           "Artifact byte read cancelled";
+         let summary = Hashtbl.find_exn p.hot run.id in
+         Public.require (Run_ref.equal summary.run run) "Wrong artifact summary run";
+         let terminal = Option.value_exn summary.terminal in
+         let reference =
+           List.find_exn p.artifacts ~f:(fun reference ->
+             Run_ref.equal reference.Asic_artifact.Reference.run run
+             && String.equal reference.id artifact_id
+             && String.equal reference.terminal_attempt terminal.attempt)
+         in
+         let%map page =
+           Throttle.enqueue t.queries (fun () ->
+             Public.require
+               (not (Deferred.is_determined cancel))
+               "Artifact byte read cancelled";
+             In_thread.run (fun () -> Asic_artifacts.read_bytes ~reference ~offset ~limit))
+         in
+         Public.require
+           (not (Deferred.is_determined cancel))
+           "Artifact byte read cancelled";
+         let current = Hashtbl.find_exn p.hot run.id in
+         Public.require
+           (Run_ref.equal current.run run
+            && String.equal current.source_digest summary.source_digest
+            && Option.value_map current.terminal ~default:false ~f:(fun terminal ->
+              String.equal terminal.attempt reference.terminal_attempt)
+            && List.mem p.artifacts reference ~equal:Asic_artifact.Reference.equal
+            && Run_ref.equal page.Asic_artifact.Byte_page.run run
+            && String.equal page.artifact_id artifact_id
+            && String.equal page.terminal_attempt reference.terminal_attempt
+            && String.equal page.sha256 reference.sha256
+            && page.offset = offset
+            && page.limit = limit)
+           "Artifact byte reference is stale; list current adopted artifacts";
+         prune_byte_pages p;
+         p.artifact_byte_pages
+         <- List.take
+              (page
+               :: List.filter p.artifact_byte_pages ~f:(fun old ->
+                 not
+                   (Run_ref.equal old.run run
+                    && String.equal old.artifact_id artifact_id
+                    && old.offset = offset
+                    && old.limit = limit)))
+              8);
+    Deferred.unit
+  | Read_artifact { run; artifact_id; offset; limit } ->
+    ignore (find_run p run : Asic.Run.t);
+    Public.require (String.length artifact_id <= 256) "Artifact ID exceeds budget";
+    Public.require
+      (offset >= 0 && limit > 0 && limit <= 64 * 1024)
+      "Artifact page requires nonnegative offset and limit 1..65536";
+    enqueue
+      ~key:(Asic_artifact.read_key ~run ~artifact_id ~offset ~limit)
+      ~kind:"artifact-read"
+      (fun cancel ->
+         Public.require (not (Deferred.is_determined cancel)) "Artifact read cancelled";
+         let summary = Hashtbl.find_exn p.hot run.id in
+         let terminal = Option.value_exn summary.terminal in
+         let reference =
+           List.find_exn p.artifacts ~f:(fun r ->
+             Run_ref.equal r.Asic_artifact.Reference.run run
+             && String.equal r.id artifact_id
+             && String.equal r.terminal_attempt terminal.attempt)
+         in
+         let%map page =
+           Throttle.enqueue t.queries (fun () ->
+             Public.require
+               (not (Deferred.is_determined cancel))
+               "Artifact read cancelled";
+             In_thread.run (fun () -> Asic_artifacts.read ~reference ~offset ~limit))
+         in
+         Public.require (not (Deferred.is_determined cancel)) "Artifact read cancelled";
+         Public.require
+           (String.equal
+              (Hashtbl.find_exn p.hot run.id).source_digest
+              summary.source_digest
+            && List.mem p.artifacts reference ~equal:Asic_artifact.Reference.equal)
+           "Artifact reference is stale; list current adopted artifacts";
+         p.artifact_pages
+         <- List.take
+              (page
+               :: List.filter p.artifact_pages ~f:(fun old ->
+                 not
+                   (Run_ref.equal old.run page.run
+                    && String.equal old.artifact_id page.artifact_id
+                    && String.equal old.terminal_attempt page.terminal_attempt
+                    && String.equal old.sha256 page.sha256
+                    && old.offset = page.offset
+                    && old.limit = page.limit)))
+              8);
+    Deferred.unit
   | Cancel key ->
     let task =
       match Hashtbl.find p.tasks key with
       | Some task -> task
-      | None -> Hashtbl.find_exn p.tasks ("run:" ^ key)
+      | None ->
+        (match Hashtbl.find p.tasks ("finalize:" ^ key) with
+         | Some task -> task
+         | None -> Hashtbl.find_exn p.tasks ("run:" ^ key))
     in
     Ivar.fill_if_empty task.cancel ();
-    Option.iter task.pending.run ~f:(fun run ->
-      Option.iter
-        (Hashtbl.find p.tasks (observation_key run))
-        ~f:(fun observer -> Ivar.fill_if_empty observer.cancel ()));
+    if String.equal task.pending.kind "run"
+    then
+      Option.iter task.pending.run ~f:(fun run ->
+        Option.iter
+          (Hashtbl.find p.tasks (observation_key run))
+          ~f:(fun observer -> Ivar.fill_if_empty observer.cancel ()));
     Deferred.unit
   | Discover ->
-    public_query ~key:"discover" ~kind:"discover" (invoke p Adapter.discover) (fun j ->
-      p.flows <- Public.flows j);
+    (* Retire the previous mapping immediately, including on refresh failure. The
+       invocation and publication belong to this immutable captured project config. *)
+    p.flows <- [];
+    p.catalog_default <- None;
+    let invocation = invoke p Adapter.discover in
+    enqueue ~key:"discover" ~kind:"discover" (fun cancel ->
+      let%bind () = check_provider t p cancel in
+      let%map j = query ~max_bytes:(1024 * 1024) t p cancel invocation in
+      Public.require (not (Deferred.is_determined cancel)) "ASIC discovery cancelled";
+      let flows, catalog_default = Public.flow_catalog j in
+      p.flows <- flows;
+      p.catalog_default <- catalog_default);
     Deferred.unit
   | Describe flow ->
     p.desired_description <- Some flow;
@@ -1080,12 +2226,12 @@ let handle_operation t p operation =
         in
         let%bind result =
           Monitor.try_with (fun () ->
-             Asic_process.run
-               (* The adopted producer needs its child termination grace, five-second
-                  container cleanup window, and terminal receipt publication before
-                  escalation. Queries retain the shorter default grace. *)
-               ~stop_grace_seconds:15.
-               ~seconds:1800.
+            Asic_process.run
+            (* The adopted producer needs its child termination grace, five-second
+               container cleanup window, and terminal receipt publication before
+               escalation. Queries retain the shorter default grace. *)
+              ~stop_grace_seconds:15.
+              ~seconds:1800.
               ~cancel
               ~on_process:ignore
               ~on_line
@@ -1141,6 +2287,17 @@ let handle t ~root ~environment operation : Asic.Response.t Deferred.t =
   >>| function
   | Ok snapshot -> Ok snapshot
   | Error exn -> Error (V1.Error.create Invalid_request (Exn.to_string exn))
+;;
+
+let peek_snapshot t ~root ~environment =
+  let key =
+    Sexp.to_string_mach
+      [%sexp (root : string), (environment : V1.Environment_selection.t)]
+  in
+  Option.bind (Hashtbl.find t.projects key) ~f:(fun loaded ->
+    match Deferred.peek loaded with
+    | Some (Ok project) -> Some (snapshot project)
+    | Some (Error _) | None -> None)
 ;;
 
 (** Client detach does not call this. Daemon shutdown cancels/reaps owned launchers and

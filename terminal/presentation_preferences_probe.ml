@@ -17,7 +17,12 @@ let () =
   let expected =
     { host with
       appearance =
-        { preset = Minimal; color = Vivid; icons = None_; density = Comfortable }
+        { preset = Minimal
+        ; color = Vivid
+        ; scheme = Slate
+        ; icons = None_
+        ; density = Comfortable
+        }
     ; layout_mode = Preferred
     ; chrome = false
     }
@@ -25,7 +30,11 @@ let () =
     Host.set_local
       host
       tile.id
-      { Host.default_local with headers = false; filter = "not-persistent"; scroll = 23 }
+      { Host.default_local with
+        presentation = { Host.default_local.presentation with header = Some false }
+      ; filter = "not-persistent"
+      ; scroll = 23
+      }
   in
   match mode with
   | "write" -> P.save ~state_directory (P.capture ~project_key expected)
@@ -35,7 +44,11 @@ let () =
     assert (Terminal_presentation.Appearance.equal restored.appearance expected.appearance);
     assert (Host.equal_layout_mode restored.layout_mode expected.layout_mode);
     assert (not restored.chrome);
-    assert (not (Host.local restored tile.id).headers);
+    assert (
+      Option.equal
+        Bool.equal
+        (Host.local restored tile.id).presentation.header
+        (Some false));
     assert (String.is_empty (Host.local restored tile.id).filter);
     assert ((Host.local restored tile.id).scroll = 0);
     assert (Option.equal W.Snapshot.equal restored.registry (Some registry));
@@ -43,7 +56,7 @@ let () =
       { registry with session_id = W.Session_id.of_string "new-session" }
     in
     let replaced = P.apply preferences (Host.receive Host.empty replacement) in
-    assert (Host.local replaced tile.id).headers;
+    assert (Option.is_none (Host.local replaced tile.id).presentation.header);
     assert (not replaced.chrome);
     assert (
       Option.is_none (P.load ~state_directory ~project_key:"other-project/inherited"))

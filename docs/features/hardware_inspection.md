@@ -1,17 +1,32 @@
 # F06 — Hardware and stage evidence inspection
 
-Status (2026-10-15): RTL/artifact/provenance, elaborated hierarchy and **FS0 synthesis
+Status (2026-10-16): RTL/artifact/provenance, elaborated hierarchy and **FS0 synthesis
 cell count/breakdown with evidence context delivered**. [Acceptance](../fs0_acceptance.md)
 records real 673/685 counts, completed execution and `not_evaluated` acceptance.
-Timing is unsupported (`[]`), not zero slack. Requirements below remain normative;
-rich timing/check/physical/clock views (FS1) are not implemented.
+The original synthesis-only stage summary has no timing (`[]`), not zero slack.
+Later FS1 terminal-result import supplies aggregate timing with full provenance;
+requirements below remain normative where not covered by the delivered slices.
 
 **FS1/F06 synthesis inspection slice delivered:** sortable/filterable cell table,
 stable row selection, count/share detail and full evidence inspection over existing
 cached summaries. Normal views use concise provenance; full producer records/paths
 are inspectable. Actual PTY cached-run isolation and switching tests passed; see
-[controls and acceptance](../synthesis_inspection.md). This does not add timing,
-area/latch diagnosis or new provider extraction.
+[controls and acceptance](../synthesis_inspection.md).
+
+**Subsequent FS1 slices delivered:** synthesis area/lint/latch/check counters,
+explicit read-only finalization-reference import, signed aggregate setup/hold,
+final area/utilization, reported DRC/LVS/antenna verdicts, verified declared-clock
+configuration and full evidence drilldown. Real physical completion, separate
+acceptance pass/fail imports, cache reopening and active-container cancellation
+are verified in [FS1 acceptance](../fs1_acceptance.md). The followup
+[finalization lifecycle and artifact browser](../fs1_lifecycle_and_artifacts.md)
+adds daemon-owned collection/acceptance, bounded report paging and explicit
+external text opening on the terminal host. The final
+[FS1 investigation slice](../fs1_investigation.md) adds path/corner/group/producer
+exploration, measured clock latency/network/check skew, supplied clock headers and
+relationships, stage-specific physical/routing/congestion tables, and exact binary
+external handoff. Real GDS loading by KLayout is verified headlessly. Embedded
+graphical/editor surfaces and unsupported source mappings remain later extensions.
 
 ## Feature slices
 
@@ -63,9 +78,13 @@ evidence; similar instance names are not sufficient proof of correspondence.
 
 ## First demo / later
 
-First: synthesis resource evidence plus existing RTL/hierarchy/artifact access.
-The generic simulation/test module has its own early slice in F09, independent of
-ASIC report availability. Next: one meaningful timing/check drilldown, then placement/clock slices. Full
-timing explorers and embedded graphical/editor surfaces are later increments.
+The initial synthesis/RTL/hierarchy/artifact slice and the adopted-evidence
+timing, clock, physical, routing, lifecycle and external-viewer slices are delivered.
+The generic simulation/test module has its own delivered F09 baseline, independent
+of ASIC report availability; structured simulation belongs to FS2. Later F06
+extensions include embedded graphical/editor surfaces, reliable source mapping
+where supplied, and additional provider formats/coverage. Inspector breadcrumbs,
+contextual help and concise provenance are presentation followups; the owner has
+confirmed the Escape-responsiveness fix.
 
 Dependencies: F01 provider evidence; F02 shared modules; F05 scoped results.

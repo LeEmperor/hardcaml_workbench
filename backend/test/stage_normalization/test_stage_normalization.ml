@@ -1,0 +1,277 @@
+open! Core
+open Hardcaml_workbench_protocol
+module Public = Hardcaml_workbench_backend.Asic_public
+
+let require b message = if not b then failwith message
+let stream = "6c006def1f794542a1c4cf481e8eba2f"
+
+let set j key value =
+  match j with
+  | `Assoc fields ->
+    `Assoc ((key, value) :: List.Assoc.remove fields key ~equal:String.equal)
+  | _ -> assert false
+;;
+
+let occurrence ?(stage = "synthesis") status exit =
+  `Assoc
+    [ "occurrence_id", `String (stream ^ "/implementation." ^ stage)
+    ; "action_key", `String ("implementation." ^ stage)
+    ; "status", `String status
+    ; "exit_code", exit
+    ; "duration_seconds", `Int 0
+    ; "best_effort", `Bool false
+    ; "error", `Null
+    ; "verdict", `Null
+    ]
+;;
+
+let recipe ?(initial = `Null) stages =
+  `Assoc
+    [ "schema_version", `Int 3
+    ; "stages", `List (List.map stages ~f:(fun s -> `String s))
+    ; "initial_boundary", initial
+    ]
+;;
+
+let observation ?(plan = recipe [ "synthesis" ]) occurrences =
+  `Assoc
+    [ "contract", `String "hardcaml-asic.stage-observation"
+    ; "schema_version", `Int 2
+    ; "stream_id", `String stream
+    ; "cursor", `Int 4
+    ; "writer_active", `Bool true
+    ; "observation_status", `String "live"
+    ; "execution_file", `Null
+    ; ( "state"
+      , `Assoc
+          [ "attempt_id", `String stream
+          ; "plan", plan
+          ; "occurrences", `List occurrences
+          ; "outcome", `Null
+          ; "artifacts", `List [ `Assoc [ "boundary", `String "synthesis" ] ]
+          ] )
+    ]
+;;
+
+let run : Asic.Run.t =
+  { run =
+      { backend = Backend_id.of_string "asic"; id = stream; build = None; label = None }
+  ; reference = { attempt = "/public/attempt"; stream_id = stream }
+  ; selection = None
+  ; cursor = 0
+  ; status = "allocated"
+  ; execution_file = None
+  ; error = None
+  ; stages = []
+  }
+;;
+
+let stages j =
+  let r, _ = Public.inspection run ~cursor:4 j in
+  r.stages
+;;
+
+let synthesis j = List.hd_exn (stages j)
+
+let rejected f =
+  require (Result.is_error (Or_error.try_with f)) "Invalid stage evidence accepted"
+;;
+
+let unknown (s : Asic.Stage.t) =
+  match s.status with
+  | Unknown _ -> ()
+  | _ -> failwith "Unknown stage evidence acquired a known status"
+;;
+
+let fixtures () =
+  List.iter
+    [ "unreached", `Null, Asic.Stage.Status.Pending
+    ; "running", `Null, Running
+    ; "completed", `Int 0, Completed
+    ; "failed", `Int 1, Failed
+    ; "interrupted", `Int 130, Cancelled
+    ]
+    ~f:(fun (status, exit, expected) ->
+      let j = observation [ occurrence status exit ] in
+      let all = stages j in
+      let first = List.hd_exn all in
+      require
+        (Asic.Stage.Status.equal first.status expected && first.requested)
+        "Occurrence status lost";
+      require (List.length all = 6) "Canonical stage list missing";
+      List.iter (List.tl_exn all) ~f:(fun s ->
+        require
+          ((not s.requested) && Asic.Stage.Status.equal s.status Not_requested)
+          "Synthesis-only requested physical stages");
+      List.iter all ~f:(fun s ->
+        require (Option.is_none s.action) "Invented fresh selection");
+      (* A publication never completes a running occurrence. Outer failure does not
+         overwrite an independently completed earlier stage either. *)
+      List.iter [ "completed"; "failed"; "interrupted" ] ~f:(fun outer ->
+        let state =
+          Public.field "state" j
+          |> fun state ->
+          set state "outcome" (`Assoc [ "status", `String outer; "exit_code", `Int 1 ])
+        in
+        require
+          (Asic.Stage.Status.equal (synthesis (set j "state" state)).status expected)
+          "Aggregate outcome reinterpreted occurrence";
+        let terminal =
+          set
+            (set (set j "state" state) "writer_active" (`Bool false))
+            "observation_status"
+            (`String "final")
+        in
+        let terminal_run, final = Public.inspection run ~cursor:4 terminal in
+        require
+          (final
+           && String.equal terminal_run.status outer
+           && Asic.Stage.Status.equal (List.hd_exn terminal_run.stages).status expected)
+          "Terminal outcome reinterpreted stage occurrence");
+      let detached =
+        set
+          (set j "writer_active" (`Bool false))
+          "observation_status"
+          (`String "writer_lost_or_unknown")
+      in
+      require
+        (Asic.Stage.Status.equal (synthesis detached).status expected)
+        "Writer loss inferred occurrence completion");
+  List.iter
+    [ occurrence "future" (`Int 0)
+    ; occurrence "completed" (`Int 1)
+    ; occurrence "running" (`Int 0)
+    ; occurrence "failed" (`Int 0)
+    ; occurrence "interrupted" (`Int 0)
+    ; occurrence "failed" `Null
+    ; occurrence "completed" (`String "0")
+    ]
+    ~f:(fun o -> unknown (synthesis (observation [ o ])));
+  unknown (synthesis (observation []));
+  let completed = occurrence "completed" (`Int 0) in
+  List.iter
+    [ observation [ completed; completed ]
+    ; observation
+        [ set completed "occurrence_id" (`String "other/implementation.synthesis") ]
+    ; observation [ set completed "action_key" (`String "implementation.librelane") ]
+    ; observation ~plan:(recipe [ "synthesis"; "synthesis" ]) [ completed ]
+    ; observation ~plan:(recipe [ "floorplan" ]) [ completed ]
+    ; observation ~plan:(recipe [ "future_stage" ]) [ completed ]
+    ; observation [ `Assoc [ "status", `String "completed" ] ]
+    ; observation [ set completed "best_effort" (`Bool true) ]
+    ; observation [ set completed "verdict" (`String "pass") ]
+    ]
+    ~f:(fun j -> rejected (fun () -> stages j));
+  let j = observation [ completed ] in
+  let state = Public.field "state" j in
+  rejected (fun () -> stages (set j "state" (set state "attempt_id" (`String "other"))));
+  let resumed =
+    observation
+      ~plan:(recipe ~initial:(`String "synthesis") [ "floorplan" ])
+      [ occurrence ~stage:"floorplan" "running" `Null ]
+  in
+  let input = synthesis resumed in
+  require
+    ((not input.requested)
+     && Asic.Stage.Status.equal input.status Not_requested
+     && String.is_substring
+          (Option.value_exn input.reason)
+          ~substring:"not newly measured")
+    "Resume boundary became measured completion";
+  let carried =
+    set
+      resumed
+      "state"
+      (set
+         (Public.field "state" resumed)
+         "occurrences"
+         (`List [ completed; occurrence ~stage:"floorplan" "running" `Null ]))
+    |> synthesis
+  in
+  require
+    ((not carried.requested)
+     && Asic.Stage.Status.equal carried.status Completed
+     && String.is_substring carried.name ~substring:"carried forward")
+    "Carry-forward evidence conflated with requested measurement";
+  let unrequested_failure =
+    set
+      resumed
+      "state"
+      (set
+         (Public.field "state" resumed)
+         "occurrences"
+         (`List
+           [ occurrence "failed" (`Int 1); occurrence ~stage:"floorplan" "running" `Null ]))
+  in
+  unknown (synthesis unrequested_failure);
+  let full =
+    stages
+      (observation
+         ~plan:(recipe Public.canonical_stages)
+         (List.map Public.canonical_stages ~f:(fun stage ->
+            occurrence ~stage "completed" (`Int 0))))
+  in
+  require
+    (List.for_all full ~f:(fun s ->
+       s.requested && Asic.Stage.Status.equal s.status Completed))
+    "Full-run explicit evidence lost";
+  let next, _ = Public.inspection run ~cursor:3 j in
+  require
+    (List.is_empty next.stages && next.cursor = 3)
+    "Ahead inspection escaped cursor fence";
+  let caught_up, _ = Public.inspection next ~cursor:4 j in
+  require (List.length caught_up.stages = 6) "Caught-up inspection lost stages";
+  rejected (fun () -> Public.inspection caught_up ~cursor:3 j);
+  rejected (fun () -> Public.inspection run ~cursor:5 j);
+  rejected (fun () ->
+    Public.inspection run ~cursor:4 (set j "stream_id" (`String "other")));
+  List.iter
+    [ `Null
+    ; `Assoc [ "schema_version", `Int 2 ]
+    ; (recipe [] |> fun p -> set p "schema_version" (`Int 99))
+    ]
+    ~f:(fun plan ->
+      require
+        (List.is_empty (stages (observation ~plan [])))
+        "Unknown/legacy plan inferred stages");
+  let extension version =
+    `Assoc
+      [ "contract", `String "hardcaml-asic.stage-plan"
+      ; "schema_version", `Int version
+      ; ( "stages"
+        , `List
+            [ `Assoc
+                [ "id", `String "override"
+                ; "name", `String "Override"
+                ; "status", `String "pending"
+                ; "requested", `Bool true
+                ]
+            ] )
+      ]
+  in
+  require
+    (String.equal (List.hd_exn (stages (set j "stage_plan" (extension 1)))).id "override")
+    "Supported extension lost precedence";
+  require
+    (List.is_empty (stages (set j "stage_plan" (extension 2))))
+    "Unsupported extension reinterpreted via fallback";
+  require
+    (List.length (stages (set j "stage_plan" `Null)) = 6)
+    "Null extension blocked structured state";
+  print_endline "structured stage normalization fixtures passed"
+;;
+
+let () =
+  fixtures ();
+  (* Optional read-only proof against a captured public inspect response. *)
+  Array.iter
+    (Array.sub (Sys.get_argv ()) ~pos:1 ~len:(Array.length (Sys.get_argv ()) - 1))
+    ~f:(fun path ->
+      let j = Public.decode (In_channel.read_all path) in
+      let stream_id = Public.text (Public.field "stream_id" j) in
+      let r = { run with reference = { run.reference with stream_id } } in
+      let cursor = Public.integer (Public.field "cursor" j) in
+      let r, _ = Public.inspection r ~cursor j in
+      require (List.length r.stages = 6) "Retained observation lacks normalized stages";
+      print_s [%sexp (path : string), (r.stages : Asic.Stage.t list)])
+;;

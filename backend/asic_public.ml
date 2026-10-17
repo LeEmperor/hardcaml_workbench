@@ -69,16 +69,118 @@ let metadata j =
     "Installed provider requires exact CLI4 + namedflow1=true"
 ;;
 
-let flows j =
+let canonical_stages =
+  [ "synthesis"; "floorplan"; "placement"; "cts"; "routing"; "signoff" ]
+;;
+
+let catalog_identity j =
+  let s = text j in
+  require
+    (String.length s > 0
+     && String.length s <= 256
+     && String.for_all s ~f:(function
+       | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' | '.' -> true
+       | _ -> false))
+    "Invalid catalog identity/text budget";
+  s
+;;
+
+let catalog_list ~limit j =
+  let xs = list j in
+  require (List.length xs <= limit) "Catalog entry budget exceeded";
+  xs
+;;
+
+let catalog_unique xs =
+  require
+    (List.length xs = List.length (List.dedup_and_sort xs ~compare:String.compare))
+    "Duplicate catalog identity"
+;;
+
+(* Only this explicit public fresh-prefix contract authorizes checklist mapping.
+   Legacy/other provider catalogs remain useful for ordinary explicit Plan/Run. *)
+let flow_catalog j =
+  require
+    (String.length (Yojson.Safe.to_string j) <= 1024 * 1024)
+    "Catalog byte budget exceeded";
   let j = envelope j "hardcaml-asic.flow-list" 1 in
   let catalog = envelope (field "declaration" j) "hardcaml-asic.flow-catalog" 1 in
-  list (field "entries" catalog)
-  |> List.map ~f:(fun e ->
-    { Asic.Flow.id = text (field "id" (field "methodology" e))
-    ; profiles = List.map (list (field "profiles" e)) ~f:(fun p -> text (field "id" p))
-    ; default_profile = text (field "default_profile" e)
-    })
+  let capabilities = field "capabilities" j in
+  let matches j key value = Poly.equal (field key j) (`String value) in
+  let supported =
+    matches capabilities "backend_recipe" "librelane.classic.v1"
+    && matches capabilities "input" "fresh"
+    && matches capabilities "stage_selection" "complete-prefix-through-declared-endpoint"
+    && Poly.equal (field "continuation" capabilities) (`Bool false)
+  in
+  List.iter [ "backend_recipe"; "input"; "stage_selection" ] ~f:(fun key ->
+    match field key capabilities with
+    | `Null -> ()
+    | value -> ignore (catalog_identity value : string));
+  let flows =
+    catalog_list ~limit:128 (field "entries" catalog)
+    |> List.map ~f:(fun e ->
+      let methodology = field "methodology" e in
+      List.iter [ "backend_recipe"; "input" ] ~f:(fun key ->
+        match field key methodology with
+        | `Null -> ()
+        | value -> ignore (catalog_identity value : string));
+      let id = catalog_identity (field "id" methodology) in
+      let profiles =
+        catalog_list ~limit:64 (field "profiles" e)
+        |> List.map ~f:(fun p -> catalog_identity (field "id" p))
+      in
+      catalog_unique profiles;
+      let default_profile = catalog_identity (field "default_profile" e) in
+      require
+        (List.mem profiles default_profile ~equal:String.equal)
+        "Unknown catalog entry default profile";
+      let fresh_stage_endpoints =
+        if supported
+           && matches methodology "backend_recipe" "librelane.classic.v1"
+           && matches methodology "input" "fresh"
+        then (
+          let endpoints =
+            catalog_list ~limit:6 (field "endpoints" methodology)
+            |> List.map ~f:catalog_identity
+          in
+          catalog_unique endpoints;
+          require
+            (List.for_all endpoints ~f:(fun endpoint ->
+               List.mem canonical_stages endpoint ~equal:String.equal))
+            "Unknown fresh-prefix endpoint";
+          endpoints)
+        else []
+      in
+      { Asic.Flow.id; profiles; default_profile; fresh_stage_endpoints })
+  in
+  catalog_unique (List.map flows ~f:(fun f -> f.Asic.Flow.id));
+  let catalog_default =
+    match field "default" catalog with
+    | `Null ->
+      require (not supported) "Fresh-prefix catalog requires an explicit default pair";
+      (* An absent legacy extension is not an invented default. A supplied null is
+         malformed rather than a declaration of an actual pair. *)
+      (match catalog with
+       | `Assoc fields ->
+         require
+           (not (List.Assoc.mem fields "default" ~equal:String.equal))
+           "Catalog default must be an explicit pair"
+       | _ -> ());
+      None
+    | value ->
+      let flow = catalog_identity (field "flow" value) in
+      let profile = catalog_identity (field "profile" value) in
+      require
+        (List.exists flows ~f:(fun f ->
+           String.equal f.id flow && List.mem f.profiles profile ~equal:String.equal))
+        "Unknown catalog default flow/profile pair";
+      Some { Asic.Flow_default.flow; profile }
+  in
+  flows, catalog_default
 ;;
+
+let flows j = fst (flow_catalog j)
 
 let preview selection j : Asic.Preview.t =
   let j = envelope j "hardcaml-asic.methodology-plan" 1 in
@@ -158,10 +260,220 @@ let updates (r : Asic.Run.t) j =
   cursor
 ;;
 
+let stage_text ~limit s =
+  require
+    (String.length s <= limit
+     && String.for_all s ~f:(fun c -> Char.to_int c >= 32 && not (Char.equal c '\127')))
+    "Invalid stage-plan text/budget"
+;;
+
+let stage_identity s =
+  stage_text ~limit:256 s;
+  require
+    ((not (String.is_empty s))
+     && String.for_all s ~f:(function
+       | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' | '.' -> true
+       | _ -> false))
+    "Invalid stage-plan identity"
+;;
+
+let validate_stages (stages : Asic.Stage.t list) =
+  require (List.length stages <= 128) "Stage-plan entry budget exceeded";
+  let identities = String.Hash_set.create () in
+  List.iter stages ~f:(fun stage ->
+    stage_identity stage.id;
+    require (not (Hash_set.mem identities stage.id)) "Duplicate stage-plan identity";
+    Hash_set.add identities stage.id;
+    stage_text ~limit:1024 stage.name;
+    require (not (String.is_empty (String.strip stage.name))) "Empty stage name";
+    (match stage.status with
+     | Unknown s ->
+       stage_text ~limit:256 s;
+       require (not (String.is_empty s)) "Empty stage status"
+     | _ -> ());
+    Option.iter stage.reason ~f:(stage_text ~limit:4096);
+    Option.iter stage.action ~f:(fun action ->
+      List.iter [ action.flow; action.profile; action.endpoint ] ~f:stage_identity;
+      require (List.length action.assignments <= 64) "Stage action assignment budget";
+      List.iter action.assignments ~f:(fun s ->
+        stage_text ~limit:4096 s;
+        require (not (String.is_empty s)) "Empty stage action assignment")));
+  require
+    (String.length (Sexp.to_string_mach ([%sexp_of: Asic.Stage.t list] stages))
+     <= 256 * 1024)
+    "Normalized stage-plan exceeds byte budget"
+;;
+
+(* CLI4 observation state is a provider-validated journal prefix, not a report or a
+   checkpoint inventory. Only schema-3 explicit recipes are interpreted here. *)
+let observation_stages j =
+  let supplied name = function
+    | `Assoc fields -> List.Assoc.mem fields name ~equal:String.equal
+    | _ -> false
+  in
+  let state = field "state" j in
+  let plan = field "plan" state in
+  if not (Poly.equal (field "schema_version" plan) (`Int 3))
+  then []
+  else (
+    let stream = text (field "stream_id" j) in
+    require
+      (String.equal (text (field "attempt_id" state)) stream)
+      "Stage observation attempt identity mismatch";
+    let stage value =
+      let s = text value in
+      require (List.mem canonical_stages s ~equal:String.equal) "Unknown physical stage";
+      s
+    in
+    let requested = List.map (list (field "stages" plan)) ~f:stage in
+    require (supplied "initial_boundary" plan) "Missing recipe initial boundary";
+    let initial =
+      match field "initial_boundary" plan with
+      | `Null -> None
+      | value -> Some (stage value)
+    in
+    let remaining =
+      Option.value_map initial ~default:canonical_stages ~f:(fun source ->
+        List.tl_exn
+          (List.drop_while canonical_stages ~f:(fun s -> not (String.equal s source))))
+    in
+    require
+      ((not (List.is_empty requested))
+       && List.equal String.equal requested (List.take remaining (List.length requested))
+      )
+      "Invalid explicit stage recipe";
+    let occurrences = list (field "occurrences" state) in
+    require (List.length occurrences <= 6) "Stage occurrence budget exceeded";
+    let seen = String.Hash_set.create () in
+    let occurrences =
+      List.map occurrences ~f:(fun occurrence ->
+        let key = text (field "action_key" occurrence) in
+        let id =
+          List.find_exn canonical_stages ~f:(fun s ->
+            String.equal key ("implementation." ^ s))
+        in
+        require
+          (String.equal (text (field "occurrence_id" occurrence)) (stream ^ "/" ^ key)
+           && not (Hash_set.mem seen id))
+          "Invalid/duplicate stage occurrence identity";
+        Hash_set.add seen id;
+        require (supplied "exit_code" occurrence) "Missing occurrence exit code";
+        require
+          (Poly.equal (field "best_effort" occurrence) (`Bool false)
+           && supplied "verdict" occurrence
+           && Poly.equal (field "verdict" occurrence) `Null)
+          "Unsupported physical occurrence contract";
+        let status = text (field "status" occurrence) in
+        let exit = field "exit_code" occurrence in
+        let status : Asic.Stage.Status.t =
+          match status, exit with
+          | "unreached", `Null -> Pending
+          | "running", `Null -> Running
+          | "completed", `Int 0 -> Completed
+          | "failed", `Int n when n <> 0 -> Failed
+          | "interrupted", `Int n when n <> 0 -> Cancelled
+          | _ -> Unknown "invalid_or_unknown_occurrence_state"
+        in
+        id, status)
+    in
+    let stages =
+      List.map canonical_stages ~f:(fun id ->
+        let requested = List.mem requested id ~equal:String.equal in
+        let occurrence = List.Assoc.find occurrences id ~equal:String.equal in
+        let status, reason =
+          match requested, occurrence with
+          | true, Some Cancelled ->
+            ( Asic.Stage.Status.Cancelled
+            , "Explicit interrupted stage occurrence; not evidence of user cancellation" )
+          | true, Some status -> status, "Explicit stage occurrence"
+          | true, None ->
+            Unknown "missing_occurrence", "Requested stage occurrence missing"
+          | false, Some Completed ->
+            ( Completed
+            , "Carried forward: explicit completed occurrence; not requested in this \
+               recipe" )
+          | false, Some _ ->
+            ( Unknown "unrequested_occurrence"
+            , "Unrequested stage has non-completed occurrence" )
+          | false, None when Option.equal String.equal initial (Some id) ->
+            Not_requested, "Resume input boundary; not newly measured by this recipe"
+          | false, None -> Not_requested, "Not requested in this recipe"
+        in
+        { Asic.Stage.id
+        ; name =
+            (if (not requested) && Asic.Stage.Status.equal status Completed
+             then id ^ " (carried forward)"
+             else id)
+        ; status
+        ; requested
+        ; reason = Some reason
+        ; action = None (* No fresh-selection capability is advertised by state. *)
+        })
+    in
+    validate_stages stages;
+    stages)
+;;
+
+let stage_plan j =
+  match field "stage_plan" j with
+  | `Null -> observation_stages j
+  | `Assoc _ as plan ->
+    (* Optional extensions of another contract/version are deliberately opaque. *)
+    let contract = text (field "contract" plan) in
+    let version = integer (field "schema_version" plan) in
+    if not (String.equal contract "hardcaml-asic.stage-plan" && version = 1)
+    then []
+    else (
+      let entries = list (field "stages" plan) in
+      require (List.length entries <= 128) "Stage-plan entry budget exceeded";
+      let stages =
+        List.map entries ~f:(fun entry ->
+          let status : Asic.Stage.Status.t =
+            match text (field "status" entry) with
+            | "pending" -> Pending
+            | "running" -> Running
+            | "completed" -> Completed
+            | "failed" -> Failed
+            | "skipped" -> Skipped
+            | "cancelled" -> Cancelled
+            | "not_requested" -> Not_requested
+            | "unsupported" -> Unsupported
+            | s -> Unknown s
+          in
+          let requested =
+            match field "requested" entry with
+            | `Bool b -> b
+            | _ -> failwith "Expected stage requested boolean"
+          in
+          let action =
+            match field "action" entry with
+            | `Null -> None
+            | action ->
+              Some
+                { Asic.Selection.flow = text (field "flow" action)
+                ; profile = text (field "profile" action)
+                ; endpoint = text (field "endpoint" action)
+                ; assignments = List.map (list (field "assignments" action)) ~f:text
+                }
+          in
+          { Asic.Stage.id = text (field "id" entry)
+          ; name = text (field "name" entry)
+          ; status
+          ; requested
+          ; reason = optional_text (field "reason" entry)
+          ; action
+          })
+      in
+      validate_stages stages;
+      stages)
+  | _ -> failwith "Expected stage-plan object"
+;;
+
 let inspection (r : Asic.Run.t) ~cursor j =
   let j = envelope j "hardcaml-asic.stage-observation" 2 in
   require
-    (String.equal (text (field "stream_id" j)) r.reference.stream_id
+    (cursor >= r.cursor
+     && String.equal (text (field "stream_id" j)) r.reference.stream_id
      && integer (field "cursor" j) >= cursor)
     "Inspection identity/cursor mismatch";
   let writer_active =
@@ -180,7 +492,11 @@ let inspection (r : Asic.Run.t) ~cursor j =
   let execution_file =
     Option.map (optional_text (field "execution_file" j)) ~f:absolute
   in
-  { r with cursor; status; execution_file; error = None }, final
+  let stages = stage_plan j in
+  (* Inspect can race ahead of read-updates. Never attach its stage state to an older
+     cursor, or retain the previous cursor's checklist. The next poll catches up. *)
+  let stages = if integer (field "cursor" j) = cursor then stages else [] in
+  { r with cursor; status; execution_file; stages; error = None }, final
 ;;
 
 let digest text =
@@ -522,7 +838,9 @@ let terminal_result
      && Poly.equal (field "attempt_id" actual_execution) (`String implementation_id))
     "Finalization execution path/hash/identity mismatch";
   require
-    (Poly.equal (canonical_json (field "execution" report)) (canonical_json actual_execution))
+    (Poly.equal
+       (canonical_json (field "execution" report))
+       (canonical_json actual_execution))
     "Stage report execution differs from hashed finalization execution";
   let operation_status = text (field "status" receipt) in
   require

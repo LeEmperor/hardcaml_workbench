@@ -610,6 +610,151 @@ let%expect_test "ASIC metrics round-trip and old summary sexps have no metrics" 
     ~bin_write:Asic.Operation.bin_write_t
     ~bin_read:Asic.Operation.bin_read_t
     inspect;
+  let acceptance : Asic.Acceptance.t =
+    { support_tools = "/tools/support"
+    ; precheck_python = "/tools/python"
+    ; testbench = "/source/replay.v"
+    ; testbench_top = "replay"
+    ; replay_trace = "/source/replay.trace"
+    }
+  in
+  let finalization : Asic.Finalization.t =
+    { key = "accept"
+    ; run = summary.run
+    ; execution_file = summary.execution_file
+    ; acceptance_requested = true
+    ; attempt = Some terminal.attempt
+    ; state = "failed"
+    ; phase = Some "acceptance"
+    ; operation_status = Some "failed"
+    ; acceptance = Some "fail"
+    ; error = Some "process exited 1"
+    ; owned = false
+    }
+  in
+  require_portable_round_trip
+    "ASIC acceptance inputs"
+    ~equal:Asic.Acceptance.equal
+    ~sexp_of:Asic.Acceptance.sexp_of_t
+    ~of_sexp:Asic.Acceptance.t_of_sexp
+    ~bin_size:Asic.Acceptance.bin_size_t
+    ~bin_write:Asic.Acceptance.bin_write_t
+    ~bin_read:Asic.Acceptance.bin_read_t
+    acceptance;
+  require_portable_round_trip
+    "ASIC finalization lifecycle"
+    ~equal:Asic.Finalization.equal
+    ~sexp_of:Asic.Finalization.sexp_of_t
+    ~of_sexp:Asic.Finalization.t_of_sexp
+    ~bin_size:Asic.Finalization.bin_size_t
+    ~bin_write:Asic.Finalization.bin_write_t
+    ~bin_read:Asic.Finalization.bin_read_t
+    finalization;
+  List.iter
+    [ Asic.Operation.Finalize
+        { key = "accept"
+        ; run = summary.run
+        ; execution_file = summary.execution_file
+        ; acceptance = Some acceptance
+        }
+    ; Finalize
+        { key = "collect"
+        ; run = summary.run
+        ; execution_file = summary.execution_file
+        ; acceptance = None
+        }
+    ; Observe_finalization "accept"
+    ; List_artifacts summary.run
+    ; Read_artifact
+        { run = summary.run; artifact_id = "known"; offset = 10; limit = 1024 }
+    ]
+    ~f:(fun operation ->
+      require_portable_round_trip
+        "ASIC finalization/artifact operation"
+        ~equal:Asic.Operation.equal
+        ~sexp_of:Asic.Operation.sexp_of_t
+        ~of_sexp:Asic.Operation.t_of_sexp
+        ~bin_size:Asic.Operation.bin_size_t
+        ~bin_write:Asic.Operation.bin_write_t
+        ~bin_read:Asic.Operation.bin_read_t
+        operation);
+  let snapshot : Asic.Snapshot.t =
+    { configured = true
+    ; flows =
+        [ { id = "standard"
+          ; profiles = [ "balanced" ]
+          ; default_profile = "balanced"
+          ; fresh_stage_endpoints = [ "synthesis"; "routing" ]
+          }
+        ]
+    ; catalog_default = Some { flow = "standard"; profile = "balanced" }
+    ; description_json = None
+    ; preview = None
+    ; runs = []
+    ; operations = []
+    ; launches =
+        [ { key = "exact-launch"
+          ; preview =
+              { selection =
+                  { flow = "flow"
+                  ; profile = "profile"
+                  ; endpoint = "synthesis"
+                  ; assignments = [ "x=1"; "x=1" ]
+                  }
+              ; plan_identity = "exact-preview"
+              ; plan_json = "opaque exact bytes"
+              }
+          ; run_id = Some summary.run.id
+          }
+        ]
+    ; summaries = [ summary ]
+    ; finalizations = [ finalization ]
+    ; artifacts = []
+    ; artifact_pages = []
+    ; artifact_byte_pages = []
+    ; inspections = []
+    ; inspection_details = []
+    ; cache_error = None
+    }
+  in
+  require_portable_round_trip
+    "ASIC lifecycle snapshot"
+    ~equal:Asic.Snapshot.equal
+    ~sexp_of:Asic.Snapshot.sexp_of_t
+    ~of_sexp:Asic.Snapshot.t_of_sexp
+    ~bin_size:Asic.Snapshot.bin_size_t
+    ~bin_write:Asic.Snapshot.bin_write_t
+    ~bin_read:Asic.Snapshot.bin_read_t
+    snapshot;
+  let legacy_snapshot =
+    match Asic.Snapshot.sexp_of_t snapshot with
+    | Sexp.List fields ->
+      Sexp.List
+        (List.filter fields ~f:(function
+          | Sexp.List
+              (Sexp.Atom
+                 ( "catalog_default"
+                 | "launches"
+                 | "finalizations"
+                 | "artifacts"
+                 | "artifact_pages"
+                 | "artifact_byte_pages"
+                 | "inspections"
+                 | "inspection_details" )
+              :: _) -> false
+          | _ -> true))
+    | _ -> assert false
+  in
+  assert (
+    Asic.Snapshot.equal
+      (Asic.Snapshot.t_of_sexp legacy_snapshot)
+      { snapshot with
+        catalog_default = None
+      ; launches = []
+      ; finalizations = []
+      ; artifacts = []
+      ; artifact_pages = []
+      });
   show "legacy metrics" [%sexp (decoded.metrics : Asic.Metric.t list)];
   show "legacy cell count" [%sexp (decoded.cell_count : int option)];
   [%expect {|

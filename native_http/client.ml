@@ -188,3 +188,12 @@ let asic t request =
     ~response_of_sexp:Asic.Response.t_of_sexp
     request
 ;;
+
+let simulation t request =
+  post
+    t
+    ~path:Simulation.rpc_path
+    ~sexp_of_request:Simulation.Request.sexp_of_t
+    ~response_of_sexp:Simulation.Response.t_of_sexp
+    request
+;;

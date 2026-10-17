@@ -1,6 +1,7 @@
 (test
  (name test_asic)
- (deps fake_provider.py)
+ (modules test_asic)
+ (deps fake_provider.py production_flow_list.json)
  (libraries
   async
   core
@@ -10,6 +11,20 @@
   hardcaml_workbench_backend
   hardcaml_workbench_protocol
   hardcaml_workbench_project_integration
+  yojson)
+ (preprocess
+  (pps ppx_jane))
+ (lint
+  (pps ppx_js_style)))
+
+(test
+ (name test_catalog)
+ (modules test_catalog)
+ (deps production_flow_list.json)
+ (libraries
+  core
+  hardcaml_workbench_backend
+  hardcaml_workbench_protocol
   yojson)
  (preprocess
   (pps ppx_jane))

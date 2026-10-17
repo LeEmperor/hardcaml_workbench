@@ -130,6 +130,7 @@ let metric_fixtures () =
     ; status = "completed"
     ; execution_file = Some "/public/execution.json"
     ; error = None
+    ; stages = []
     }
   in
   let checkpoint ?(boundary = "synthesis") n =
@@ -606,19 +607,30 @@ let terminal_fixtures () =
     require (Result.is_error (Or_error.try_with f)) "Invalid terminal evidence accepted"
   in
   let rec reorder_objects = function
-    | `Assoc fields -> `Assoc (List.rev_map fields ~f:(fun (key, value) -> key, reorder_objects value))
+    | `Assoc fields ->
+      `Assoc (List.rev_map fields ~f:(fun (key, value) -> key, reorder_objects value))
     | `List values -> `List (List.map values ~f:reorder_objects)
     | scalar -> scalar
   in
-  ignore (project ~report:(replace "execution" (reorder_objects execution) report) receipt : Asic.Terminal_result.t);
-  rejected (fun () -> project
-    ~report:(replace "execution" (replace "status" (`String "failed") execution) report) receipt);
+  ignore
+    (project ~report:(replace "execution" (reorder_objects execution) report) receipt
+     : Asic.Terminal_result.t);
+  rejected (fun () ->
+    project
+      ~report:(replace "execution" (replace "status" (`String "failed") execution) report)
+      receipt);
   let changed_occurrences =
     Public.list (Public.field "occurrences" execution)
     |> List.map ~f:(fun occurrence -> replace "status" (`String "failed") occurrence)
   in
-  rejected (fun () -> project
-    ~report:(replace "execution" (replace "occurrences" (`List changed_occurrences) execution) report) receipt);
+  rejected (fun () ->
+    project
+      ~report:
+        (replace
+           "execution"
+           (replace "occurrences" (`List changed_occurrences) execution)
+           report)
+      receipt);
   rejected (fun () -> project ~results_bytes:(results_bytes ^ " ") receipt);
   rejected (fun () -> project ~execution_bytes:(execution_bytes ^ " ") receipt);
   rejected (fun () ->
@@ -741,38 +753,763 @@ let terminal_fixtures () =
 ;;
 
 let evidence_file_fixtures () =
-  let%bind directory = In_thread.run (fun () -> Filename_unix.temp_dir "asic-evidence-" "") in
+  let%bind directory =
+    In_thread.run (fun () -> Filename_unix.temp_dir "asic-evidence-" "")
+  in
   let regular = Filename.concat directory "regular" in
   let fifo = Filename.concat directory "fifo" in
   Monitor.protect
-    ~finally:(fun () -> In_thread.run (fun () ->
-      List.iter [ regular; fifo ] ~f:(fun path ->
-        if Poly.equal (Sys_unix.file_exists path) `Yes then Core_unix.unlink path);
-      Core_unix.rmdir directory))
+    ~finally:(fun () ->
+      In_thread.run (fun () ->
+        List.iter [ regular; fifo ] ~f:(fun path ->
+          if Poly.equal (Sys_unix.file_exists path) `Yes then Core_unix.unlink path);
+        Core_unix.rmdir directory))
     (fun () ->
-      let%bind () = In_thread.run (fun () ->
-        Out_channel.write_all regular ~data:"abc\000";
-        require (String.equal (Evidence_file.read_bounded regular 4) "abc\000")
-          "Regular evidence bytes changed";
-        require (Result.is_error (Or_error.try_with (fun () -> Evidence_file.read_bounded regular 3)))
-          "Oversized regular evidence accepted";
-        Core_unix.mkfifo fifo ~perm:0o600) in
-      let read = In_thread.run (fun () -> Or_error.try_with (fun () -> Evidence_file.read_bounded fifo 16)) in
+      let%bind () =
+        In_thread.run (fun () ->
+          Out_channel.write_all regular ~data:"abc\000";
+          require
+            (String.equal (Evidence_file.read_bounded regular 4) "abc\000")
+            "Regular evidence bytes changed";
+          require
+            (Result.is_error
+               (Or_error.try_with (fun () -> Evidence_file.read_bounded regular 3)))
+            "Oversized regular evidence accepted";
+          Core_unix.mkfifo fifo ~perm:0o600)
+      in
+      let read =
+        In_thread.run (fun () ->
+          Or_error.try_with (fun () -> Evidence_file.read_bounded fifo 16))
+      in
       match%bind Clock.with_timeout (Time_float.Span.of_sec 2.) read with
       | `Result result ->
         require
           (match result with
-           | Error error -> String.is_substring (Error.to_string_hum error) ~substring:"not a regular file"
+           | Error error ->
+             String.is_substring
+               (Error.to_string_hum error)
+               ~substring:"not a regular file"
            | Ok _ -> false)
           "Writerless FIFO was not rejected as nonregular";
         Deferred.unit
       | `Timeout ->
-        (* Release a regressed blocking open before failing the fixture, so the test
-           does not leave an owned worker waiting forever for a FIFO peer. *)
-        let%bind () = In_thread.run (fun () ->
-          let peer = Core_unix.openfile fifo ~mode:[ O_RDWR; O_NONBLOCK; O_CLOEXEC ] in
-          Core_unix.close peer) in
+        (* Release a regressed blocking open before failing the fixture, so the test does
+           not leave an owned worker waiting forever for a FIFO peer. *)
+        let%bind () =
+          In_thread.run (fun () ->
+            let peer = Core_unix.openfile fifo ~mode:[ O_RDWR; O_NONBLOCK; O_CLOEXEC ] in
+            Core_unix.close peer)
+        in
         failwith "Evidence FIFO open blocked waiting for a writer")
+;;
+
+let finalization_lifecycle ~root ~state_dir ~reference =
+  let directory = state_dir ^ "-finalize" in
+  let services = ref [] in
+  let create () =
+    let service = Service.create ~state_dir:directory in
+    services := service :: !services;
+    service
+  in
+  let flag name enabled =
+    In_thread.run (fun () ->
+      let path = Filename.concat root name in
+      if enabled then Out_channel.write_all path ~data:"" else Core_unix.unlink path)
+  in
+  let launches () =
+    In_thread.run (fun () ->
+      In_channel.read_lines (Filename.concat root "calls")
+      |> List.count ~f:(fun line -> String.is_prefix line ~prefix:"[\"finalize\""))
+  in
+  let value (snapshot : Asic.Snapshot.t) key =
+    List.find_exn snapshot.finalizations ~f:(fun f ->
+      String.equal f.Asic.Finalization.key key)
+  in
+  let pending (snapshot : Asic.Snapshot.t) key =
+    List.find_exn snapshot.operations ~f:(fun p -> String.equal p.Asic.Pending.key key)
+  in
+  let rec wait service key predicate remaining =
+    require (remaining > 0) ("Finalization state not delivered: " ^ key);
+    let%bind snapshot = handle service root Get in
+    if predicate (value snapshot key)
+    then return snapshot
+    else (
+      let%bind () = Clock.after (Time_float.Span.of_sec 0.02) in
+      wait service key predicate (remaining - 1))
+  in
+  Monitor.protect
+    ~finally:(fun () -> Deferred.List.iter !services ~how:`Sequential ~f:Service.shutdown)
+    (fun () ->
+      let service = create () in
+      let%bind registered = handle service root (Register reference) in
+      let run = (List.hd_exn registered.runs).run in
+      let%bind loaded = settled service root (Load_summary run) in
+      let execution_file = (summary loaded run.id).execution_file in
+      let finalize key acceptance =
+        Asic.Operation.Finalize { key; run; execution_file; acceptance }
+      in
+      let%bind before = launches () in
+      let%bind wrong_path =
+        settled
+          service
+          root
+          (Finalize
+             { key = "wrong-execution"
+             ; run
+             ; execution_file = execution_file ^ ".other"
+             ; acceptance = None
+             })
+      in
+      require
+        (String.equal (pending wrong_path "finalize:wrong-execution").state "failed")
+        "Mismatched selected execution was not a pending-operation failure";
+      let%bind () = flag "finalize-resumed" true in
+      let%bind resumed = settled service root (finalize "resumed" None) in
+      require
+        (String.equal (value resumed "resumed").state "failed"
+         && Option.is_none (value resumed "resumed").attempt)
+        "A resumed physical execution was eligible for finalization";
+      let%bind () = flag "finalize-resumed" false in
+      let%bind rejected_launches = launches () in
+      require (before = rejected_launches) "Ineligible finalization launched a producer";
+      let%bind () = flag "finalize-late" true in
+      let%bind requests =
+        Deferred.all
+          [ handle service root (finalize "collection" None)
+          ; handle service root (finalize "collection" None)
+          ]
+      in
+      List.iter requests ~f:(fun snapshot ->
+        require
+          (Option.is_none (value snapshot "collection").attempt)
+          "Late allocation fixture was not pending");
+      let%bind collected = settled service root Get in
+      let collection = value collected "collection" in
+      require
+        (String.equal collection.state "completed"
+         && (not collection.owned)
+         && Option.is_some collection.attempt)
+        "Collection lifecycle did not complete";
+      require
+        (String.equal
+           (Option.value_exn (summary collected run.id).terminal).attempt
+           (Option.value_exn collection.attempt))
+        "Collection did not auto-adopt matching terminal result";
+      let%bind after = launches () in
+      require (after = before + 1) "Concurrent/late retry duplicated finalization";
+      let%bind () = flag "finalize-late" false in
+      let%bind catalog = settled service root (List_artifacts run) in
+      require
+        (List.length catalog.artifacts = 1)
+        "Adopted terminal artifact catalog missing";
+      let artifact = List.hd_exn catalog.artifacts in
+      let%bind paged =
+        settled
+          service
+          root
+          (Read_artifact { run; artifact_id = artifact.id; offset = 0; limit = 32 })
+      in
+      let page = List.hd_exn paged.artifact_pages in
+      require
+        (String.equal page.artifact_id artifact.id
+         && Option.is_none page.error
+         && (not (String.is_empty page.text))
+         && page.next_offset <= 32)
+        "Server-authorized artifact page missing";
+      (* Distinct clients issue reads before either request is settled. Both offset and
+         limit belong to the scheduling/page identity, including equal-offset reads. *)
+      let read offset limit =
+        Asic.Operation.Read_artifact { run; artifact_id = artifact.id; offset; limit }
+      in
+      let%bind (_ : Asic.Snapshot.t * Asic.Snapshot.t) =
+        Deferred.both (handle service root (read 16 24)) (handle service root (read 0 16))
+      in
+      let%bind concurrent = settled service root Get in
+      let%bind artifact_bytes =
+        In_thread.run (fun () -> In_channel.read_all artifact.path)
+      in
+      List.iter
+        [ 0, 32; 16, 24; 0, 16 ]
+        ~f:(fun (offset, limit) ->
+          let key = Asic_artifact.read_key ~run ~artifact_id:artifact.id ~offset ~limit in
+          require
+            (String.equal (pending concurrent key).state "completed")
+            "Concurrent artifact read was discarded/coalesced with another page";
+          let page =
+            List.find_exn concurrent.artifact_pages ~f:(fun page ->
+              Run_ref.equal page.run run
+              && String.equal page.artifact_id artifact.id
+              && String.equal page.terminal_attempt artifact.terminal_attempt
+              && String.equal page.sha256 artifact.sha256
+              && page.offset = offset
+              && page.limit = limit)
+          in
+          require
+            (Option.is_none page.error
+             && String.equal page.text (String.sub artifact_bytes ~pos:offset ~len:limit)
+            )
+            "Concurrent artifact read delivered the wrong requested bytes");
+      let%bind repeated = settled service root (read 0 16) in
+      require
+        (List.length repeated.artifact_pages = 3)
+        "Repeated artifact read duplicated a complete page identity";
+      let%bind () =
+        Deferred.List.iter (List.init 10 ~f:Fn.id) ~how:`Sequential ~f:(fun offset ->
+          let%map bounded = settled service root (read offset 8) in
+          require
+            (List.length bounded.artifact_pages <= 8)
+            "Artifact page cache exceeded cap")
+      in
+      let%bind bounded = handle service root Get in
+      require
+        (List.length bounded.artifact_pages = 8)
+        "Artifact page cache did not retain its bounded working set";
+      let acceptance : Asic.Acceptance.t =
+        { support_tools = root
+        ; precheck_python = Filename.concat root "python"
+        ; testbench = Filename.concat root "replay.v"
+        ; testbench_top = "replay"
+        ; replay_trace = Filename.concat root "trace"
+        }
+      in
+      let%bind conflict =
+        Service.handle
+          service
+          ~root
+          ~environment
+          (finalize "collection" (Some acceptance))
+      in
+      require (Result.is_error conflict) "Conflicting finalization inputs accepted";
+      let%bind failed = settled service root (finalize "acceptance" (Some acceptance)) in
+      let failed_value = value failed "acceptance" in
+      require
+        (String.equal failed_value.state "failed"
+         && Option.equal String.equal failed_value.acceptance (Some "fail")
+         && Option.is_some failed_value.error
+         && String.equal (pending failed "finalize:acceptance").state "failed")
+        "Nonzero provider exit lost independent failed acceptance/process outcome";
+      let terminal = Option.value_exn (summary failed run.id).terminal in
+      require
+        (String.equal terminal.acceptance "fail"
+         && String.equal terminal.attempt (Option.value_exn failed_value.attempt))
+        "Nonzero acceptance results were not auto-imported";
+      require
+        (List.is_empty failed.artifacts && List.is_empty failed.artifact_pages)
+        "Terminal adoption retained a stale artifact catalog/page";
+      let%bind stale =
+        settled
+          service
+          root
+          (Read_artifact { run; artifact_id = artifact.id; offset = 0; limit = 32 })
+      in
+      require
+        (List.exists stale.operations ~f:(fun p ->
+           String.equal p.Asic.Pending.kind "artifact-read"
+           && String.equal p.state "failed"))
+        "Stale artifact ID was accepted after terminal adoption";
+      let%bind () = flag "finalize-no-allocation" true in
+      let%bind no_allocation =
+        settled service root (finalize "allocation-failure" None)
+      in
+      require
+        (String.equal (value no_allocation "allocation-failure").state "failed"
+         && Option.is_none (value no_allocation "allocation-failure").attempt)
+        "Allocation failure outcome missing";
+      let%bind () = flag "finalize-no-allocation" false in
+      let%bind () = Service.shutdown service in
+      let restarted = create () in
+      let%bind count = launches () in
+      let%bind retry = settled restarted root (finalize "allocation-failure" None) in
+      require (not (value retry "acceptance").owned) "Restart retained process ownership";
+      let%bind (_ : Asic.Snapshot.t) =
+        settled restarted root (finalize "collection" None)
+      in
+      let%bind () = flag "finalize-inspect-fail" true in
+      let%bind unavailable_collection =
+        settled restarted root (Observe_finalization "collection")
+      in
+      require
+        (Option.is_some (value unavailable_collection "collection").error
+         && String.equal
+              (pending unavailable_collection "finalize-observe:collection").state
+              "failed")
+        "Transient observation failure was not surfaced";
+      let%bind unavailable_acceptance =
+        settled restarted root (Observe_finalization "acceptance")
+      in
+      require
+        (String.is_substring
+           (Option.value_exn (value unavailable_acceptance "acceptance").error)
+           ~substring:"fixture finalization inspection unavailable")
+        "Observation failure did not retain its own diagnostic beside producer failure";
+      let%bind () = Service.shutdown restarted in
+      let restarted = create () in
+      let%bind () = flag "finalize-inspect-fail" false in
+      let%bind recovered_collection =
+        settled restarted root (Observe_finalization "collection")
+      in
+      require
+        (String.equal (value recovered_collection "collection").state "completed"
+         && Option.is_none (value recovered_collection "collection").error
+         && String.equal
+              (pending recovered_collection "finalize-observe:collection").state
+              "completed"
+         && String.equal
+              (Option.value_exn (summary recovered_collection run.id).terminal).attempt
+              (Option.value_exn collection.attempt))
+        "Validated reconnect/import retained a transient observation error after restart";
+      let%bind observed = settled restarted root (Observe_finalization "acceptance") in
+      require
+        (String.equal (value observed "acceptance").state "failed"
+         && (not (value observed "acceptance").owned)
+         && Option.equal
+              String.equal
+              (value observed "acceptance").error
+              failed_value.error
+         && String.equal
+              (pending observed "finalize-observe:acceptance").state
+              "completed")
+        "Read-only observation failed to recover exact failed receipt";
+      let%bind missing =
+        settled restarted root (Observe_finalization "allocation-failure")
+      in
+      require
+        (String.equal
+           (pending missing "finalize-observe:allocation-failure").state
+           "failed")
+        "Missing-reference observation failure was not propagated";
+      let%bind unchanged = launches () in
+      require (count = unchanged) "Restart/retry/observation relaunched finalization";
+      let%bind () = flag "finalize-hold" true in
+      let%bind (_ : Asic.Snapshot.t) = handle restarted root (finalize "cancel" None) in
+      let%bind early =
+        wait
+          restarted
+          "cancel"
+          (fun f -> Option.is_some f.attempt && Option.is_some f.phase && f.owned)
+          200
+      in
+      let attempt = Option.value_exn (value early "cancel").attempt in
+      (* A second daemon object models restart: only the persisted reference survives. It
+         must not signal the original service's still-owned producer. *)
+      let detached = create () in
+      let%bind detached_state = handle detached root Get in
+      require
+        ((not (value detached_state "cancel").owned)
+         && String.equal (value detached_state "cancel").state "unknown")
+        "Restart invented ownership or completion";
+      let%bind historical_cancel =
+        Service.handle detached ~root ~environment (Cancel "finalize:cancel")
+      in
+      require (Result.is_error historical_cancel) "Historical task was cancellable";
+      let%bind (_ : Asic.Snapshot.t) =
+        handle restarted root (finalize "queued-cancel" None)
+      in
+      let%bind (_ : Asic.Snapshot.t) =
+        handle restarted root (Cancel "finalize:queued-cancel")
+      in
+      let%bind (_ : Asic.Snapshot.t) = handle restarted root (Cancel "finalize:cancel") in
+      let%bind cancelled = settled restarted root Get in
+      require
+        (String.equal (value cancelled "cancel").state "interrupted"
+         && (not (value cancelled "cancel").owned)
+         && String.equal (value cancelled "queued-cancel").state "interrupted"
+         && String.equal (pending cancelled "finalize:cancel").state "failed")
+        "Owned/queued cancellation outcome missing";
+      let%bind () =
+        In_thread.run (fun () ->
+          require
+            (Poly.equal
+               (Sys_unix.file_exists (Filename.concat attempt "terminated"))
+               `Yes)
+            "Owned finalize process was not terminated")
+      in
+      let%bind recovered = settled detached root (Observe_finalization "cancel") in
+      require
+        (String.equal (value recovered "cancel").state "interrupted"
+         && not (value recovered "cancel").owned)
+        "Detached read-only observation did not reconcile interruption";
+      let%bind () = flag "finalize-hold" false in
+      Deferred.unit)
+;;
+
+let stage_entry ?(status = "pending") ?(action = `Null) id =
+  `Assoc
+    [ "id", `String id
+    ; "name", `String ("Stage " ^ id)
+    ; "status", `String status
+    ; "requested", `Bool true
+    ; "reason", `String "Explicit provider evidence"
+    ; "action", action
+    ]
+;;
+
+let stage_plan entries =
+  `Assoc
+    [ "contract", `String "hardcaml-asic.stage-plan"
+    ; "schema_version", `Int 1
+    ; "stages", `List entries
+    ]
+;;
+
+let stage_observation ?(cursor = 0) ?(stream = "stage-fixture") ?(plan = `Null) () =
+  `Assoc
+    [ "contract", `String "hardcaml-asic.stage-observation"
+    ; "schema_version", `Int 2
+    ; "stream_id", `String stream
+    ; "cursor", `Int cursor
+    ; "writer_active", `Bool true
+    ; "observation_status", `String "active"
+    ; "state", `Assoc [ "outcome", `Null ]
+    ; "execution_file", `Null
+    ; "stage_plan", plan
+    ; ( "methodology"
+      , `Assoc
+          [ "contract", `String "hardcaml-asic.historical-methodology"
+          ; "schema_version", `Int 1
+          ; "state", `String "pending"
+          ; "launch", `Assoc [ "attempt_id", `String stream ]
+          ] )
+    ]
+;;
+
+let replace_field j key value =
+  match j with
+  | `Assoc fields ->
+    `Assoc ((key, value) :: List.Assoc.remove fields key ~equal:String.equal)
+  | _ -> assert false
+;;
+
+let stage_fixtures () =
+  let rejected f =
+    require (Result.is_error (Or_error.try_with f)) "Invalid stage plan accepted"
+  in
+  let action =
+    `Assoc
+      [ "flow", `String "synthetic"
+      ; "profile", `String "success"
+      ; "endpoint", `String "placement"
+      ; "assignments", `List [ `String "CLOCK_PERIOD=10" ]
+      ]
+  in
+  let statuses : (string * Asic.Stage.Status.t) list =
+    [ "pending", Pending
+    ; "running", Running
+    ; "completed", Completed
+    ; "failed", Failed
+    ; "skipped", Skipped
+    ; "cancelled", Cancelled
+    ; "not_requested", Not_requested
+    ; "unsupported", Unsupported
+    ; "future_state", Unknown "future_state"
+    ]
+  in
+  let entries =
+    List.map statuses ~f:(fun (status, _) -> stage_entry ~status ~action status)
+  in
+  let observation = stage_observation ~plan:(stage_plan entries) () in
+  let stages = Public.stage_plan observation in
+  require
+    (List.is_empty (Public.stage_plan (`Assoc [])))
+    "Absent extension fabricated stages";
+  require
+    (List.equal
+       Asic.Stage.Status.equal
+       (List.map stages ~f:(fun s -> s.status))
+       (List.map statuses ~f:snd))
+    "Stage statuses were inferred or lost";
+  List.iter stages ~f:(fun stage ->
+    require
+      (stage.requested
+       && Option.equal String.equal stage.reason (Some "Explicit provider evidence")
+       && Option.equal
+            Asic.Selection.equal
+            stage.action
+            (Some
+               { flow = "synthetic"
+               ; profile = "success"
+               ; endpoint = "placement"
+               ; assignments = [ "CLOCK_PERIOD=10" ]
+               }))
+      "Stage action/metadata lost");
+  let no_action =
+    Public.stage_plan
+      (stage_observation
+         ~plan:
+           (stage_plan
+              [ replace_field (stage_entry "omitted") "requested" (`Bool false) ])
+         ())
+    |> List.hd_exn
+  in
+  require
+    ((not no_action.requested) && Option.is_none no_action.action)
+    "Unrequested stage acquired an action";
+  List.iter
+    [ `Null
+    ; replace_field (stage_plan entries) "schema_version" (`Int 2)
+    ; replace_field (stage_plan entries) "contract" (`String "another.extension")
+    ]
+    ~f:(fun plan ->
+      require
+        (List.is_empty (Public.stage_plan (stage_observation ~plan ())))
+        "Absent/unsupported extension fabricated stages");
+  List.iter
+    [ `String "malformed"
+    ; `Assoc []
+    ; replace_field (stage_plan []) "schema_version" (`String "1")
+    ; replace_field (stage_plan []) "stages" `Null
+    ; stage_plan [ stage_entry "same"; stage_entry "same" ]
+    ; stage_plan [ stage_entry "" ]
+    ; stage_plan [ stage_entry "has space" ]
+    ; stage_plan [ stage_entry "bad\nidentity" ]
+    ; stage_plan [ stage_entry (String.make 257 'x') ]
+    ; stage_plan [ stage_entry ~status:"" "empty-status" ]
+    ; stage_plan [ stage_entry ~status:(String.make 257 'x') "long-status" ]
+    ; stage_plan [ replace_field (stage_entry "a") "requested" (`String "true") ]
+    ; stage_plan [ replace_field (stage_entry "a") "name" (`String "") ]
+    ; stage_plan [ replace_field (stage_entry "a") "reason" (`Int 1) ]
+    ; stage_plan
+        [ replace_field (stage_entry "a") "reason" (`String (String.make 4097 'x')) ]
+    ; stage_plan [ stage_entry ~action:(`Bool false) "a" ]
+    ; stage_plan [ stage_entry ~action:(replace_field action "flow" (`String "")) "a" ]
+    ; stage_plan [ stage_entry ~action:(replace_field action "assignments" `Null) "a" ]
+    ; stage_plan
+        [ stage_entry ~action:(replace_field action "assignments" (`List [ `Int 1 ])) "a"
+        ]
+    ; stage_plan
+        [ stage_entry
+            ~action:
+              (replace_field
+                 action
+                 "assignments"
+                 (`List (List.init 65 ~f:(fun _ -> `String "X=1"))))
+            "a"
+        ]
+    ; stage_plan (List.init 129 ~f:(fun i -> stage_entry (Int.to_string i)))
+    ; stage_plan
+        (List.init 128 ~f:(fun i ->
+           replace_field
+             (stage_entry (Int.to_string i))
+             "reason"
+             (`String (String.make 4096 'x'))))
+    ]
+    ~f:(fun plan -> rejected (fun () -> Public.stage_plan (stage_observation ~plan ())));
+  rejected (fun () ->
+    Public.decode
+      "{\"stage_plan\":{\"contract\":\"hardcaml-asic.stage-plan\",\"schema_version\":1,\"stages\":[{\"id\":\"a\",\"id\":\"b\"}]}}");
+  let run : Asic.Run.t =
+    { run =
+        { backend = Backend_id.of_string "asic"
+        ; id = "stage-fixture"
+        ; build = None
+        ; label = None
+        }
+    ; reference = { attempt = "/public/stage-fixture"; stream_id = "stage-fixture" }
+    ; selection = None
+    ; cursor = 0
+    ; status = "allocated"
+    ; execution_file = None
+    ; error = None
+    ; stages = []
+    }
+  in
+  let next, final = Public.inspection run ~cursor:0 observation in
+  require
+    ((not final) && Option.is_none next.execution_file && List.length next.stages = 9)
+    "Stage publication waited for execution evidence";
+  let ahead, _ =
+    Public.inspection next ~cursor:0 (replace_field observation "cursor" (`Int 1))
+  in
+  require
+    (List.is_empty ahead.stages && ahead.cursor = 0)
+    "Ahead-of-updates stage state attached to old cursor";
+  let caught_up, _ =
+    Public.inspection ahead ~cursor:1 (replace_field observation "cursor" (`Int 1))
+  in
+  require
+    (caught_up.cursor = 1 && List.length caught_up.stages = 9)
+    "Caught-up stages were not published";
+  rejected (fun () -> Public.inspection caught_up ~cursor:0 observation);
+  rejected (fun () -> Public.inspection run ~cursor:1 observation);
+  rejected (fun () ->
+    Public.inspection
+      run
+      ~cursor:0
+      (replace_field observation "stream_id" (`String "other")));
+  let cleared, _ = Public.inspection next ~cursor:0 (stage_observation ()) in
+  require (List.is_empty cleared.stages) "Absent extension retained previous actions";
+  let unsupported, _ =
+    Public.inspection
+      next
+      ~cursor:0
+      (stage_observation
+         ~plan:(replace_field (stage_plan entries) "schema_version" (`Int 2))
+         ())
+  in
+  require
+    (List.is_empty unsupported.stages)
+    "Unsupported extension retained previous actions";
+  let completed =
+    stage_observation ()
+    |> fun j ->
+    replace_field j "writer_active" (`Bool false)
+    |> fun j ->
+    replace_field j "observation_status" (`String "final")
+    |> fun j ->
+    replace_field
+      j
+      "state"
+      (`Assoc [ "outcome", `Assoc [ "status", `String "completed" ] ])
+  in
+  let completed, final = Public.inspection next ~cursor:0 completed in
+  require
+    (final && List.is_empty completed.stages)
+    "Aggregate completion fabricated stage success";
+  let explicit, _ =
+    Public.inspection
+      next
+      ~cursor:0
+      (stage_observation ~plan:(stage_plan [ stage_entry "pending" ]) ()
+       |> fun j ->
+       replace_field j "writer_active" (`Bool false)
+       |> fun j ->
+       replace_field j "observation_status" (`String "final")
+       |> fun j ->
+       replace_field
+         j
+         "state"
+         (`Assoc [ "outcome", `Assoc [ "status", `String "completed" ] ]))
+  in
+  require
+    (Asic.Stage.Status.equal (List.hd_exn explicit.stages).status Pending)
+    "Aggregate completion overwrote explicit stage status"
+;;
+
+let stage_service_fixtures root state_dir =
+  let services = ref [] in
+  let create () =
+    let service = Service.create ~state_dir:(state_dir ^ "-stages") in
+    services := service :: !services;
+    service
+  in
+  let reference stream : Asic.Reference.t =
+    { attempt = Filename.concat root stream; stream_id = stream }
+  in
+  let run stream : Run_ref.t =
+    { backend = Backend_id.of_string "asic"; id = stream; build = None; label = None }
+  in
+  let value (snapshot : Asic.Snapshot.t) stream =
+    List.find_exn snapshot.runs ~f:(fun r -> String.equal r.Asic.Run.run.id stream)
+  in
+  let write stream observation =
+    In_thread.run (fun () ->
+      let attempt = (reference stream).attempt in
+      Core_unix.mkdir_p attempt;
+      Out_channel.write_all
+        (Filename.concat attempt "observation.json")
+        ~data:(Yojson.Safe.to_string observation))
+  in
+  let first = "stage-fixture"
+  and other = "stage-other" in
+  let advertised_action =
+    `Assoc
+      [ "flow", `String "synthetic"
+      ; "profile", `String "success"
+      ; "endpoint", `String "placement"
+      ; "assignments", `List []
+      ]
+  in
+  let observation stream cursor status =
+    stage_observation
+      ~stream
+      ~cursor
+      ~plan:(stage_plan [ stage_entry ~status ~action:advertised_action "placement" ])
+      ()
+  in
+  Monitor.protect
+    ~finally:(fun () -> Deferred.List.iter !services ~how:`Sequential ~f:Service.shutdown)
+    (fun () ->
+      let service = create () in
+      let%bind (_ : Asic.Snapshot.t) =
+        settled service root (Register (reference first))
+      in
+      let%bind (_ : Asic.Snapshot.t) =
+        settled service root (Register (reference other))
+      in
+      let%bind () = write first (observation first 1 "running") in
+      let%bind () = write other (observation other 4 "future_state") in
+      let%bind observed = settled service root (Observe (run first)) in
+      let first_run = value observed first in
+      require
+        (first_run.cursor = 1
+         && Option.is_none first_run.execution_file
+         && String.equal first_run.status "observing"
+         && Asic.Stage.Status.equal (List.hd_exn first_run.stages).status Running
+         && List.is_empty (value observed other).stages
+         && List.is_empty observed.summaries)
+        "Observe did not publish pre-execution stages independently of summaries/runs";
+      let%bind both = settled service root (Observe (run other)) in
+      let other_run = value both other in
+      require
+        (other_run.cursor = 4
+         && Asic.Stage.Status.equal
+              (List.hd_exn other_run.stages).status
+              (Unknown "future_state")
+         && Asic.Run.equal first_run (value both first))
+        "Stage observations leaked between registered runs";
+      let%bind () = write first (observation first 2 "cancelled") in
+      let%bind cancelled = settled service root (Observe (run first)) in
+      let cancelled_run = value cancelled first in
+      require
+        (cancelled_run.cursor = 2
+         && Asic.Stage.Status.equal (List.hd_exn cancelled_run.stages).status Cancelled
+         && Asic.Run.equal other_run (value cancelled other))
+        "Cancelled stage did not replace running stage at its new cursor";
+      let%bind () = Service.shutdown service in
+      let restarted = create () in
+      let%bind restored = handle restarted root Get in
+      require
+        (Asic.Run.equal cancelled_run (value restored first)
+         && Asic.Run.equal other_run (value restored other))
+        "Stage state/actions/cursors did not survive registry reopening";
+      (* Invalid new evidence cannot partially replace a valid persisted observation. *)
+      let malformed =
+        stage_observation
+          ~stream:first
+          ~cursor:3
+          ~plan:(stage_plan [ stage_entry "duplicate"; stage_entry "duplicate" ])
+          ()
+      in
+      let%bind () = write first malformed in
+      let%bind invalid = settled restarted root (Observe (run first)) in
+      require
+        (Asic.Run.equal cancelled_run (value invalid first)
+         && List.exists invalid.operations ~f:(fun op ->
+           String.equal op.Asic.Pending.key ("observe:" ^ first)
+           && String.equal op.state "failed"))
+        "Malformed stage plan partially committed or lacked an observation error";
+      let%bind () = write first (stage_observation ~stream:first ~cursor:3 ()) in
+      let%bind absent = settled restarted root (Observe (run first)) in
+      require
+        ((value absent first).cursor = 3
+         && List.is_empty (value absent first).stages
+         && Asic.Run.equal other_run (value absent other))
+        "Provider without extension retained stale stage actions";
+      (* Stage inspection and reopening never start a named flow. The advertised action is
+         consumed only by an explicit ordinary Plan request. *)
+      let action = Option.value_exn (List.hd_exn cancelled_run.stages).action in
+      let%bind planned = settled restarted root (Plan action) in
+      require
+        (Option.value_map planned.preview ~default:false ~f:(fun preview ->
+           Asic.Selection.equal preview.selection action))
+        "Stage action could not use existing planning";
+      In_thread.run (fun () ->
+        require
+          (not
+             (List.exists
+                (In_channel.read_lines (Filename.concat root "calls"))
+                ~f:(fun line -> String.is_prefix line ~prefix:"[\"flow\", \"run\"")))
+          "Stage observation or planning launched execution"))
 ;;
 
 let main () =
@@ -780,6 +1517,7 @@ let main () =
   declared_clock_fixtures ();
   terminal_fixtures ();
   metric_fixtures ();
+  stage_fixtures ();
   let rejected f message = require (Result.is_error (Or_error.try_with f)) message in
   rejected
     (fun () -> ignore (Public.decode "{\"cursor\":0,\"cursor\":1}" : Yojson.Safe.t))
@@ -796,6 +1534,9 @@ let main () =
       let state_dir = Filename.concat root "cache" in
       let fixture = Filename.concat root "fixture.py" in
       Out_channel.write_all fixture ~data:(In_channel.read_all "fake_provider.py");
+      Out_channel.write_all
+        (Filename.concat root "production_flow_list.json")
+        ~data:(In_channel.read_all "production_flow_list.json");
       Core_unix.chmod fixture ~perm:0o700;
       let config : Config.t =
         { schema_version = 1
@@ -814,6 +1555,7 @@ let main () =
         ~data:(Sexp.to_string (Config.sexp_of_t config));
       root, state_dir)
   in
+  let%bind () = stage_service_fixtures root state_dir in
   (* Reaping and repeated cleanup use the same Async Process ownership record. No raw PID
      signalling or independent waitpid is involved. *)
   let%bind exited =
@@ -893,10 +1635,49 @@ let main () =
       let service = create () in
       let%bind discovered = settled service root Discover in
       require (List.length discovered.flows = 1) "Public discovery failed";
+      require
+        (List.equal
+           String.equal
+           (List.hd_exn discovered.flows).fresh_stage_endpoints
+           Public.canonical_stages
+         && Option.equal
+              Asic.Flow_default.equal
+              discovered.catalog_default
+              (Some { flow = "standard"; profile = "balanced" }))
+        "Discovery did not publish exact capabilities/default together";
+      let%bind () =
+        Deferred.List.iter
+          [ "fail-discovery"; "invalid-discovery" ]
+          ~how:`Sequential
+          ~f:(fun marker ->
+            let path = Filename.concat root marker in
+            let%bind () = In_thread.run (fun () -> Out_channel.write_all path ~data:"") in
+            let%bind pending = handle service root Discover in
+            require
+              (List.is_empty pending.flows && Option.is_none pending.catalog_default)
+              "Pending discovery retained ready mapping";
+            let%bind () = Service.completion service in
+            let%bind failed = handle service root Get in
+            require
+              (List.is_empty failed.flows
+               && Option.is_none failed.catalog_default
+               && List.exists failed.operations ~f:(fun p ->
+                 String.equal p.kind "discover" && Option.is_some p.error))
+              "Failed discovery retained ready mapping or lost error";
+            let%bind () = In_thread.run (fun () -> Core_unix.unlink path) in
+            let%map recovered = settled service root Discover in
+            require
+              (List.length recovered.flows = 1 && Option.is_some recovered.catalog_default)
+              "Discovery did not recover coherently after failure")
+      in
       let launch profile key =
         let%bind planned = settled service root (Plan (selection profile)) in
         let preview = Option.value_exn planned.preview in
-        let%bind (_ : Asic.Snapshot.t) = handle service root (Run { key; preview }) in
+        let%bind reserved = handle service root (Run { key; preview }) in
+        require
+          (List.exists reserved.launches ~f:(fun l ->
+             String.equal l.key key && Asic.Preview.equal l.preview preview))
+          "Acknowledged launch lost exact durable preview/key";
         let%bind (_ : Asic.Snapshot.t) = handle service root (Run { key; preview }) in
         let rec allocation tries =
           require (tries > 0) "Early allocation not delivered";
@@ -914,6 +1695,12 @@ let main () =
             String.equal r.Asic.Run.run.id ("stream-" ^ profile))
         in
         require (Option.is_none r.execution_file) "Allocation was not early";
+        require
+          (List.exists early.launches ~f:(fun l ->
+             String.equal l.key key
+             && Asic.Preview.equal l.preview preview
+             && Option.equal String.equal l.run_id (Some r.run.id)))
+          "Early allocation lost durable launch/run association";
         let%bind () = Service.completion service in
         handle service root Get
       in
@@ -928,6 +1715,12 @@ let main () =
          && List.is_empty (summary first "stream-balanced").timing)
         "Metrics invented acceptance/timing";
       let%bind second = launch "synth_delay" "two" in
+      require
+        (List.equal
+           String.equal
+           (List.map second.launches ~f:(fun l -> l.key))
+           [ "two"; "one" ])
+        "Launch projection is not newest reservation order";
       require
         (Option.equal
            Int.equal
@@ -954,6 +1747,16 @@ let main () =
       let%bind () = Service.shutdown service in
       let restarted = create () in
       let%bind restored = settled restarted root (Load_summary r1) in
+      require
+        (List.is_empty restored.flows && Option.is_none restored.catalog_default)
+        "Restart implicitly restored/discovered catalog capabilities";
+      let%bind rediscovered = settled restarted root Discover in
+      require
+        (List.length rediscovered.flows = 1 && Option.is_some rediscovered.catalog_default)
+        "Explicit discovery after restart failed";
+      require
+        (List.equal Asic.Launch.equal second.launches restored.launches)
+        "Restart changed exact durable launch attribution/order";
       require
         (Asic.Summary.Freshness.equal
            (summary restored r1.id).freshness
@@ -1043,6 +1846,13 @@ let main () =
       in
       let%bind physical = settled v2 root (Load_summary physical_run) in
       let physical = summary physical physical_run.id in
+      let%bind () =
+        finalization_lifecycle
+          ~root
+          ~state_dir
+          ~reference:
+            { Asic.Reference.attempt = physical_attempt; stream_id = "stream-terminal" }
+      in
       require
         (Option.equal Int.equal physical.cell_count (Some 74)
          && Poly.equal

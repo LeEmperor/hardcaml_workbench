@@ -14,7 +14,16 @@ module Plain_rpc = Terminal_presentation.Plain_rpc
 module Launch_preferences = Terminal_presentation.Launch_preferences
 module Presentation_preferences = Terminal_presentation.Presentation_preferences
 module Asic_intents = Terminal_presentation.Asic_intents
+module Artifact_view = Terminal_presentation.Artifact_view
+module Artifact_export = Terminal_presentation.Artifact_export
+module Artifact_binary_export = Terminal_presentation.Artifact_binary_export
+module Inspection_view = Terminal_presentation.Inspection_view
+module Timing_workspace = Terminal_presentation.Timing_workspace
 module Fs0_fixture = Terminal_presentation.Fs0_fixture
+module Simulation_view = Terminal_presentation.Simulation_view
+module Simulation_export = Terminal_presentation.Simulation_export
+module Planned_run = Terminal_presentation.Planned_run
+module Stage_action = Terminal_presentation.Stage_action
 
 let console_limit = 500
 let minimum_width = 68
@@ -80,6 +89,10 @@ type session =
   ; mutable presentation_preference_notice : string option
   ; mutable preference_saves : unit Deferred.t
   ; mutable asic_reads : Asic_intents.t
+  ; mutable remembered_acceptance : string
+  ; mutable artifact_viewer : string option
+  ; mutable artifact_binary_viewer : string option
+  ; mutable artifact_export_busy : bool
   }
 
 let append_diagnostic file message =
@@ -245,6 +258,10 @@ let create_session
       ; presentation_preference_notice = None
       ; preference_saves = Deferred.unit
       ; asic_reads = Asic_intents.empty
+      ; remembered_acceptance = ""
+      ; artifact_viewer = None
+      ; artifact_binary_viewer = None
+      ; artifact_export_busy = false
       }
     in
     session)
@@ -265,6 +282,14 @@ let current_project session =
   State.current_project ~opened:session.opened session.snapshot
 ;;
 
+let plan_scope session (project : Project.t) =
+  Sexp.to_string_mach
+    (Sexp.List
+       [ V1.Daemon_instance_id.sexp_of_t session.hello.instance_id
+       ; Project_id.sexp_of_t project.id
+       ])
+;;
+
 let project_artifacts session =
   match current_project session with
   | None -> []
@@ -278,12 +303,22 @@ let project_artifacts session =
 let reconcile_selection session =
   match current_project session with
   | None ->
+    session.host
+    <- { session.host with
+         planned_run = Planned_run.reset session.host.planned_run ~scope:""
+       };
+    session.asic <- None;
     session.selected_target <- None;
     session.selected_configuration <- None;
     session.selected_artifact <- None;
     session.artifact_view <- None;
     session.hierarchy_view <- None
   | Some project ->
+    let planned_run =
+      Planned_run.reset session.host.planned_run ~scope:(plan_scope session project)
+    in
+    if not (phys_equal planned_run session.host.planned_run) then session.asic <- None;
+    session.host <- { session.host with planned_run };
     let target, configuration =
       State.reconcile_selection
         project
@@ -379,11 +414,11 @@ let log_state session job =
     { next_offset = 0; records = []; fetch = Presentation.Log_fetch.Not_requested })
 ;;
 
-let read_job_log session (job : Job.t option) =
+let read_job_log_id session (job : Job_id.t option) =
   match job with
   | None -> return ()
   | Some job ->
-    let state = log_state session job.id in
+    let state = log_state session job in
     (match state.fetch with
      | Presentation.Log_fetch.Received { eof = true } -> return ()
      | _ ->
@@ -394,7 +429,7 @@ let read_job_log session (job : Job.t option) =
            Http.Client.read_log
              session.client
              { instance_id = session.hello.instance_id
-             ; job = job.id
+             ; job
              ; offset = state.next_offset
              ; max_records = 128
              ; max_bytes = V1.max_log_bytes
@@ -415,6 +450,10 @@ let read_job_log session (job : Job.t option) =
           state.next_offset <- payload.next_offset;
           state.records <- take_end (state.records @ records) console_limit;
           state.fetch <- Presentation.Log_fetch.Received { eof = payload.eof }))
+;;
+
+let read_job_log session job =
+  read_job_log_id session (Option.map job ~f:(fun (j : Job.t) -> j.id))
 ;;
 
 let read_selected_log session = read_job_log session (selected_job session)
@@ -569,7 +608,9 @@ let load_preferences session =
             Some (Launch_preferences.decode ~project_key (Sexp.of_string content))))
     in
     match result with
-    | Ok selection -> session.remembered_selection <- selection
+    | Ok selection ->
+      session.remembered_selection <- selection;
+      session.host <- { session.host with remembered_selection = selection }
     | Error error ->
       append_diagnostic
         session.diagnostics_file
@@ -578,6 +619,7 @@ let load_preferences session =
 
 let save_preferences session selection =
   session.remembered_selection <- Some selection;
+  session.host <- { session.host with remembered_selection = Some selection };
   let previous = session.preference_saves in
   let finished = Ivar.create () in
   session.preference_saves <- Ivar.read finished;
@@ -637,7 +679,78 @@ let terminal_result_context session tile =
 
 let reconcile_synthesis session =
   Option.iter session.host.registry ~f:(fun registry ->
+    let timing =
+      List.filter_map session.host.timing ~f:(fun (id, view) ->
+        let workspace =
+          List.find registry.workspaces ~f:(fun w ->
+            String.equal id (Workspace.Workspace_id.to_string w.id))
+        in
+        Option.bind workspace ~f:(fun workspace ->
+          let context = Workspace.context registry workspace.context in
+          Option.map context.selected_run ~f:(fun run ->
+            let view =
+              if Run_ref.equal run view.Inspection_view.run
+                 && Option.equal
+                      String.equal
+                      view.workspace_epoch
+                      (Some (Host.timing_epoch registry workspace.id))
+              then view
+              else
+                Timing_workspace.create
+                  ~generation:(view.generation + 1)
+                  ~run
+                  ~stage:view.stage
+            in
+            let view =
+              { view with
+                Inspection_view.workspace_epoch =
+                  Some (Host.timing_epoch registry workspace.id)
+              }
+            in
+            ( id
+            , Option.value_map
+                session.asic
+                ~default:view
+                ~f:(Inspection_view.reconcile view) ))))
+    in
+    session.host <- { session.host with timing };
     List.iter registry.tiles ~f:(fun tile ->
+      let local = Host.local session.host tile.id in
+      let artifacts =
+        Option.bind local.artifacts ~f:(fun view ->
+          Workspace.resolve_tile registry tile.id
+          |> Result.ok
+          |> Option.bind ~f:(fun reference ->
+            Artifact_view.reconcile_scope view ~scope:reference.run)
+          |> Option.map ~f:(fun view ->
+            let view =
+              Option.value_map
+                session.asic
+                ~default:view
+                ~f:(Artifact_view.reconcile view)
+            in
+            Option.value_map session.last_dimensions ~default:view ~f:(fun dimensions ->
+              Artifact_view.clamp view ~width:dimensions.width ~height:dimensions.height)))
+      in
+      let inspection =
+        Option.bind local.inspection ~f:(fun view ->
+          Workspace.resolve_tile registry tile.id
+          |> Result.ok
+          |> Option.bind ~f:(fun reference ->
+            Inspection_view.reconcile_scope view ~scope:reference.run)
+          |> Option.map ~f:(fun view ->
+            let view =
+              Option.value_map
+                session.asic
+                ~default:view
+                ~f:(Inspection_view.reconcile view)
+            in
+            Option.value_map session.last_dimensions ~default:view ~f:(fun dimensions ->
+              let width, height = Host_view.inspection_viewport dimensions in
+              Inspection_view.clamp view ~width ~height)))
+      in
+      session.host
+      <- Host.set_local session.host tile.id { local with artifacts; inspection };
       if String.equal tile.kind "synthesis"
       then (
         let local = Host.local session.host tile.id in
@@ -648,6 +761,20 @@ let reconcile_synthesis session =
             ~filter:local.filter
         in
         session.host <- Host.set_local session.host tile.id { local with synthesis })
+      else if String.equal tile.kind "stage-checklist"
+      then (
+        let local = Host.local session.host tile.id in
+        let run =
+          Workspace.resolve_tile registry tile.id
+          |> Result.ok
+          |> Option.bind ~f:(fun reference -> reference.run)
+        in
+        let stages =
+          Option.value_map run ~default:[] ~f:(fun run ->
+            Terminal_presentation.Overview_tiles.observed_stages ~asic:session.asic ~run)
+        in
+        session.host
+        <- Host.set_local session.host tile.id (Host.reconcile_stages local ~run ~stages))
       else if Terminal_result_view.supports tile.kind
       then (
         let local = Host.local session.host tile.id in
@@ -679,7 +806,15 @@ let change_synthesis session f =
     if String.equal tile.kind "synthesis"
     then (
       let local = Host.local session.host tile.id in
-      session.host <- Host.set_local session.host tile.id (f tile local)))
+      let (next : Host.local) = f tile local in
+      let next =
+        if Synthesis_view.Mode.equal
+             (Synthesis_view.State.mode local.synthesis)
+             (Synthesis_view.State.mode next.synthesis)
+        then next
+        else { next with scroll = 0; metrics_scope = None }
+      in
+      session.host <- Host.set_local session.host tile.id next))
 ;;
 
 let workspace_request session operation =
@@ -735,22 +870,85 @@ let mutate_workspace session mutation =
           then session.host <- { session.host with notice }))
 ;;
 
-let asic_request session operation =
+let capture_artifact_request session (tile : Workspace.Tile.t) view operation =
+  Option.bind (current_project session) ~f:(fun project ->
+    Artifact_view.capture
+      view
+      ~instance_id:session.hello.instance_id
+      ~project:project.id
+      operation
+    |> Option.map ~f:(fun ticket -> tile.id, ticket))
+;;
+
+let asic_request ?artifact_request ?inspection_request ?plan_request session operation =
   match current_project session with
   | None -> return ()
   | Some project ->
     let instance_id = session.hello.instance_id in
+    let client = session.client in
     session.asic_request_id <- session.asic_request_id + 1;
     let request_id = session.asic_request_id in
+    let scope = plan_scope session project in
+    let planned_run = Planned_run.reset session.host.planned_run ~scope in
+    let planned_run, plan_ticket =
+      match operation with
+      | Asic.Operation.Plan _ when Option.is_some plan_request ->
+        planned_run, plan_request
+      | Asic.Operation.Plan selection ->
+        let planned_run, ticket = Planned_run.begin_plan planned_run selection in
+        planned_run, Some ticket
+      | _ -> planned_run, None
+    in
+    let planned_run, launch_ticket =
+      match operation with
+      | Asic.Operation.Run { key; preview } ->
+        let planned_run, ticket = Planned_run.begin_launch planned_run ~key preview in
+        planned_run, Some ticket
+      | _ -> planned_run, None
+    in
+    session.host <- { session.host with planned_run };
     let%map response =
       request session.diagnostics_file (fun () ->
-        Http.Client.asic session.client { instance_id; project = project.id; operation })
+        Http.Client.asic client { instance_id; project = project.id; operation })
     in
     let current =
-      V1.Daemon_instance_id.equal instance_id session.hello.instance_id
+      phys_equal client session.client
+      && V1.Daemon_instance_id.equal instance_id session.hello.instance_id
       && Option.value_map (current_project session) ~default:false ~f:(fun p ->
         Project_id.equal p.id project.id)
     in
+    let plan_current =
+      Option.value_map plan_ticket ~default:true ~f:(fun ticket ->
+        Planned_run.current_ticket session.host.planned_run ticket)
+    in
+    if current
+    then
+      Option.iter launch_ticket ~f:(fun ticket ->
+        session.host
+        <- { session.host with
+             planned_run =
+               Planned_run.launch_receipt
+                 session.host.planned_run
+                 ticket
+                 ~floor:(session.asic_request_id + 1)
+                 (Result.map response ~f:(fun _ -> ()))
+           });
+    if current
+    then
+      Option.iter plan_ticket ~f:(fun ticket ->
+        (* IDs order request issuance, not daemon snapshot capture. A higher-ID Get can
+           still have read the old same-selection completed task before Plan reached the
+           daemon. Require a request issued after the receipt. *)
+        let floor = session.asic_request_id + 1 in
+        session.host
+        <- { session.host with
+             planned_run =
+               Planned_run.receipt
+                 session.host.planned_run
+                 ticket
+                 ~floor
+                 (Result.map response ~f:(fun _ -> ()))
+           });
     (* A rejected/timed-out launch must release its pending view even when a newer Get
        snapshot has already arrived. Never retry a potentially accepted launch. *)
     if current
@@ -762,52 +960,397 @@ let asic_request session operation =
         session.host
         <- { session.host with notice = "ASIC launch not confirmed: " ^ message }
       | _ -> ());
+    (* Artifact receipts belong to a tile-local intention, not the newest Get request. A
+       later poll must not suppress a matching transport failure or acknowledge a
+       different retry/reopened inspector. *)
+    if current
+    then
+      Option.iter artifact_request ~f:(fun (tile_id, ticket) ->
+        reconcile_synthesis session;
+        let local = Host.local session.host tile_id in
+        Option.iter local.artifacts ~f:(fun view ->
+          let artifacts =
+            Artifact_view.apply_response
+              view
+              ticket
+              ~instance_id:session.hello.instance_id
+              ~project:project.id
+              (Result.map response ~f:(fun _ -> ()))
+          in
+          session.host
+          <- Host.set_local session.host tile_id { local with artifacts = Some artifacts }));
+    if current
+    then
+      Option.iter inspection_request ~f:(fun (tile_id, ticket) ->
+        reconcile_synthesis session;
+        Option.iter (Host.inspection session.host tile_id) ~f:(fun view ->
+          let inspection =
+            Inspection_view.apply_response
+              view
+              ticket
+              (Result.map response ~f:(fun _ -> ()))
+          in
+          session.host <- Host.set_inspection session.host tile_id (Some inspection)));
     if request_id >= session.asic_applied_id && current
     then (
       match response with
-      | Error message -> session.host <- { session.host with notice = "ASIC: " ^ message }
+      | Error message ->
+        if Option.is_none artifact_request && plan_current
+        then session.host <- { session.host with notice = "ASIC: " ^ message }
       | Ok snapshot ->
         session.asic_applied_id <- request_id;
         session.asic <- Some snapshot;
-        reconcile_synthesis session)
+        session.host
+        <- { session.host with
+             planned_run =
+               Planned_run.receive session.host.planned_run ~revision:request_id snapshot
+           };
+        reconcile_synthesis session);
+    if current && Option.is_some artifact_request then reconcile_synthesis session
+;;
+
+let artifact_export_notice session tile_id message =
+  let message = Artifact_view.safe message in
+  session.host <- { session.host with notice = message };
+  let local = Host.local session.host tile_id in
+  Option.iter local.artifacts ~f:(fun view ->
+    session.host
+    <- Host.set_local
+         session.host
+         tile_id
+         { local with artifacts = Some { view with external_notice = Some message } });
+  append_diagnostic session.diagnostics_file message
+;;
+
+let export_artifact_text session tile_id ~viewer (reference : Asic_artifact.Reference.t) =
+  let target =
+    Host_view.run_label reference.run ^ " / " ^ Artifact_view.safe reference.label
+  in
+  let notice message =
+    artifact_export_notice session tile_id (message ^ " — " ^ target)
+  in
+  if session.artifact_export_busy
+  then (
+    notice "Another external text export is in progress";
+    return ())
+  else (
+    match current_project session with
+    | None ->
+      notice "Export requires an open project";
+      return ()
+    | Some project ->
+      session.artifact_export_busy <- true;
+      let client = session.client in
+      let instance_id = session.hello.instance_id in
+      let project_id = project.id in
+      notice "Exporting sanitized text (≤16 MiB, ≤120 seconds)";
+      Monitor.protect
+        ~finally:(fun () ->
+          session.artifact_export_busy <- false;
+          return ())
+        (fun () ->
+          let call operation =
+            let%map response =
+              request session.diagnostics_file (fun () ->
+                Http.Client.asic client { instance_id; project = project_id; operation })
+            in
+            Result.map_error response ~f:Error.of_string
+          in
+          let fetch ~(reference : Asic_artifact.Reference.t) ~offset ~limit ~check =
+            let key =
+              Asic_artifact.read_key
+                ~run:reference.run
+                ~artifact_id:reference.id
+                ~offset
+                ~limit
+            in
+            let rec poll remaining response =
+              check ();
+              let owner_current =
+                V1.Daemon_instance_id.equal instance_id session.hello.instance_id
+                && Option.value_map (current_project session) ~default:false ~f:(fun p ->
+                  Project_id.equal p.id project_id)
+              in
+              if not owner_current
+              then return (Or_error.error_string "Export daemon/project changed")
+              else (
+                match response with
+                | Error error -> return (Error error)
+                | Ok (snapshot : Asic.Snapshot.t) ->
+                  if not
+                       (List.exists
+                          snapshot.artifacts
+                          ~f:(Artifact_export.same_reference reference))
+                  then
+                    return
+                      (Or_error.error_string
+                         "Export artifact reference changed or expired")
+                  else (
+                    match Plain_rpc.progress ~wait:true [ key ] snapshot with
+                    | Failed error -> return (Or_error.error_string error)
+                    | Complete ->
+                      return
+                        (List.find snapshot.artifact_pages ~f:(fun page ->
+                           Run_ref.equal page.run reference.run
+                           && String.equal page.artifact_id reference.id
+                           && String.equal
+                                page.terminal_attempt
+                                reference.terminal_attempt
+                           && String.equal page.sha256 reference.sha256
+                           && page.offset = offset
+                           && page.limit = limit)
+                         |> Or_error.of_option
+                              ~error:
+                                (Error.of_string
+                                   "Export page expired or identity changed; retry \
+                                    explicitly"))
+                    | Pending ->
+                      if remaining = 0
+                      then
+                        return
+                          (Or_error.error_string
+                             "Export read observation budget exhausted")
+                      else (
+                        let%bind () = Clock.after (Time_float.Span.of_ms 100.) in
+                        check ();
+                        let%bind response = call Get in
+                        poll (remaining - 1) response)))
+            in
+            check ();
+            let%bind response =
+              call
+                (Read_artifact
+                   { run = reference.run; artifact_id = reference.id; offset; limit })
+            in
+            poll 1200 response
+          in
+          let publish payload =
+            let%map result = Artifact_export.publish_private payload in
+            Result.iter result ~f:(fun path ->
+              notice
+                ("Sanitized text saved: " ^ path ^ " (retained; metadata.sexp alongside)"));
+            result
+          in
+          let%map result =
+            Artifact_export.run
+              ~viewer
+              ~reference
+              ~fetch
+              ~publish
+              ~launch:Artifact_export.launch_viewer
+          in
+          match result with
+          | Ok path ->
+            notice ("Sanitized text: " ^ path ^ " (retained; metadata.sexp alongside)")
+          | Error error ->
+            notice
+              ("External text export failed: "
+               ^ Artifact_view.safe (Error.to_string_hum error))))
+;;
+
+let export_artifact_binary session tile_id ~viewer (reference : Asic_artifact.Reference.t)
+  =
+  let notice = artifact_export_notice session tile_id in
+  if session.artifact_export_busy
+  then (
+    notice "Another artifact export is in progress";
+    return ())
+  else (
+    match current_project session with
+    | None ->
+      notice "Binary export requires an open project";
+      return ()
+    | Some project ->
+      session.artifact_export_busy <- true;
+      let instance_id = session.hello.instance_id in
+      let client = session.client in
+      let owner_current () =
+        V1.Daemon_instance_id.equal instance_id session.hello.instance_id
+        && Option.value_map (current_project session) ~default:false ~f:(fun p ->
+          Project_id.equal p.id project.id)
+      in
+      Monitor.protect
+        ~finally:(fun () ->
+          session.artifact_export_busy <- false;
+          return ())
+        (fun () ->
+          let call operation =
+            let%map result =
+              request session.diagnostics_file (fun () ->
+                Http.Client.asic client { instance_id; project = project.id; operation })
+            in
+            Result.map_error result ~f:Error.of_string
+          in
+          let fetch ~(reference : Asic_artifact.Reference.t) ~offset ~limit ~check =
+            let key =
+              Asic_artifact.byte_read_key
+                ~run:reference.run
+                ~artifact_id:reference.id
+                ~offset
+                ~limit
+            in
+            let rec poll remaining response =
+              check ();
+              if not (owner_current ())
+              then return (Or_error.error_string "Binary export owner changed")
+              else (
+                match response with
+                | Error e -> return (Error e)
+                | Ok (snapshot : Asic.Snapshot.t) ->
+                  if not
+                       (List.exists
+                          snapshot.artifacts
+                          ~f:(Artifact_export.same_reference reference))
+                  then
+                    return
+                      (Or_error.error_string "Binary export reference changed or expired")
+                  else (
+                    match Plain_rpc.progress ~wait:true [ key ] snapshot with
+                    | Failed e -> return (Or_error.error_string e)
+                    | Complete ->
+                      return
+                        (List.find snapshot.artifact_byte_pages ~f:(fun p ->
+                           Run_ref.equal p.run reference.run
+                           && String.equal p.artifact_id reference.id
+                           && String.equal p.terminal_attempt reference.terminal_attempt
+                           && String.equal p.sha256 reference.sha256
+                           && p.offset = offset
+                           && p.limit = limit)
+                         |> Or_error.of_option
+                              ~error:
+                                (Error.of_string
+                                   "Exact binary page expired; retry explicitly"))
+                    | Pending ->
+                      if remaining = 0
+                      then
+                        return
+                          (Or_error.error_string
+                             "Binary page observation budget exhausted")
+                      else (
+                        let%bind () = Clock.after (Time_float.Span.of_ms 100.) in
+                        check ();
+                        let%bind response = call Get in
+                        poll (remaining - 1) response)))
+            in
+            check ();
+            let%bind response =
+              call
+                (Read_artifact_bytes
+                   { run = reference.run; artifact_id = reference.id; offset; limit })
+            in
+            poll 1200 response
+          in
+          notice "Exporting exact binary (≤16 MiB); verifying SHA256 before launch";
+          let%map result =
+            Artifact_binary_export.run
+              ~viewer
+              ~reference
+              ~fetch
+              ~publish:Artifact_binary_export.publish_private
+              ~launch:(fun ~prog ~args ->
+                if owner_current ()
+                then Artifact_export.launch_viewer ~prog ~args
+                else
+                  return
+                    (Or_error.error_string "Binary export owner changed before launch"))
+          in
+          match result with
+          | Ok path ->
+            notice ("Verified binary retained: " ^ path ^ " (metadata.sexp alongside)")
+          | Error e -> notice ("Binary export failed: " ^ Error.to_string_hum e)))
 ;;
 
 let add_default_tiles session (registry : Workspace.Snapshot.t) workspace =
-  Deferred.List.iter
-    (Host.missing_default_tiles registry workspace)
-    ~how:`Sequential
-    ~f:(fun mutation ->
-      match mutation, session.host.registry with
-      | Workspace.Mutation.Create_tile { workspace; kind; _ }, Some current ->
-        if List.exists current.tiles ~f:(fun tile ->
-             Workspace.Workspace_id.equal tile.workspace workspace
-             && String.equal tile.kind kind)
-        then return ()
-        else mutate_workspace session mutation
-      | _ -> return ())
+  ignore (registry : Workspace.Snapshot.t);
+  match Host.definition workspace with
+  | None -> return ()
+  | Some definition ->
+    mutate_workspace
+      session
+      (Hardcaml_workbench_workspaces.Definition.apply definition ~workspace:workspace.id)
 ;;
 
 let initialize_host_layout session =
   match session.host.registry with
   | Some registry when registry.revision = 0 ->
     Deferred.List.iter registry.workspaces ~how:`Sequential ~f:(fun workspace ->
+      (* Revision zero contains only protocol bootstrap prototypes, not saved user
+         arrangements. Normalize those from the same definitions as new tiles; subsequent
+         additive Apply never rewrites requested geometry. *)
       let%bind () =
-        match
-          List.find registry.tiles ~f:(fun tile ->
-            Workspace.Workspace_id.equal tile.workspace workspace.id
-            && String.equal tile.kind "run-selector")
-        with
+        match Host.definition workspace with
         | None -> return ()
-        | Some tile ->
-          let width, height =
-            if String.equal workspace.name "Timing" then 28, 6 else 32, 12
-          in
-          mutate_workspace
-            session
-            (Resize_tile { tile = tile.id; geometry = { x = 0; y = 0; width; height } })
+        | Some definition ->
+          Deferred.List.iter registry.tiles ~how:`Sequential ~f:(fun tile ->
+            if not (Workspace.Workspace_id.equal tile.workspace workspace.id)
+            then return ()
+            else (
+              match
+                List.Assoc.find
+                  (Hardcaml_workbench_workspaces.Definition.specs definition)
+                  tile.kind
+                  ~equal:String.equal
+              with
+              | None -> return ()
+              | Some geometry ->
+                mutate_workspace session (Resize_tile { tile = tile.id; geometry })))
       in
       add_default_tiles session registry workspace)
   | _ -> return ()
+;;
+
+let simulation_request session tile_id operation =
+  match current_project session with
+  | None -> return ()
+  | Some project ->
+    let instance_id = session.hello.instance_id in
+    let local = Host.local session.host tile_id in
+    let client = session.client in
+    let view = Simulation_view.begin_request local.simulation in
+    session.host <- Host.set_local session.host tile_id { local with simulation = view };
+    let%bind response =
+      request session.diagnostics_file (fun () ->
+        Http.Client.simulation client { instance_id; project = project.id; operation })
+    in
+    if phys_equal client session.client
+       && V1.Daemon_instance_id.equal instance_id session.hello.instance_id
+       && Option.value_map (current_project session) ~default:false ~f:(fun p ->
+         Project_id.equal p.id project.id)
+    then (
+      let local = Host.local session.host tile_id in
+      let simulation =
+        Simulation_view.receive
+          local.simulation
+          ~ticket:view.request
+          ~selected:view.attempt
+          operation
+          response
+      in
+      session.host <- Host.set_local session.host tile_id { local with simulation };
+      match Simulation_view.detail simulation with
+      | Some d when simulation.logs ->
+        (match List.find (project_jobs session) ~f:(fun j -> Job_id.equal j.id d.job) with
+         | Some job -> read_job_log session (Some job)
+         | None ->
+           (log_state session d.job).fetch
+           <- Presentation.Log_fetch.Error
+                "Job logs unavailable in this daemon; normalized historical results \
+                 remain readable";
+           return ())
+      | _ -> return ())
+    else return ()
+;;
+
+let refresh_simulation session =
+  Host.tiles session.host
+  |> List.filter ~f:(fun tile -> String.equal tile.kind "simulation")
+  |> Deferred.List.iter ~how:`Sequential ~f:(fun tile ->
+    let view = (Host.local session.host tile.id).simulation in
+    match view.attempt with
+    | _ when view.busy -> return ()
+    | Some id -> simulation_request session tile.id (Observe id)
+    | None when not view.older -> simulation_request session tile.id Get
+    | None -> return ())
 ;;
 
 let refresh_host session =
@@ -815,6 +1358,7 @@ let refresh_host session =
   let%bind () = load_presentation_preferences session in
   let%bind () = workspace_request session Get in
   let%bind () = initialize_host_layout session in
+  let%bind () = refresh_simulation session in
   let%bind () = asic_request session Get in
   let%bind () =
     match session.view_on_allocation, session.host.registry, session.asic with
@@ -837,8 +1381,13 @@ let refresh_host session =
        | Awaiting -> return ())
     | _ -> return ()
   in
-  (* One bounded read intent per distinct visible run, shared by all its tiles. *)
-  let runs = Host.evidence_runs session.host in
+  (* Visible evidence and active runs share the same bounded read-intent scheduler. *)
+  let runs =
+    Host.evidence_runs session.host
+    @ Option.value_map session.asic ~default:[] ~f:(fun snapshot ->
+      List.filter_map snapshot.runs ~f:(fun run ->
+        if Asic_intents.live_status run.status then Some run.run else None))
+  in
   match session.asic with
   | None -> return ()
   | Some snapshot ->
@@ -971,13 +1520,36 @@ and reconnect session =
     session.host
     <- { session.host with
          registry = None
+       ; timing = []
        ; palette = None
        ; prefix = 0
        ; editing_filter = false
+       ; planned_run = Planned_run.reset session.host.planned_run ~scope:""
        };
     session.asic <- None;
+    session.host
+    <- { session.host with
+         locals =
+           List.map session.host.locals ~f:(fun (id, local) ->
+             ( id
+             , { local with
+                 simulation =
+                   { local.simulation with
+                     snapshot = None
+                   ; busy = false
+                   ; request = local.simulation.request + 1
+                   }
+               } ))
+       };
     if instance_changed
     then (
+      session.host
+      <- { session.host with
+           active = None
+         ; focus = None
+         ; locals = []
+         ; workspace_focus = []
+         };
       session.view_on_allocation <- None;
       session.asic_reads <- Asic_intents.empty);
     if instance_changed
@@ -1939,6 +2511,7 @@ let host_data session : Host_view.data =
                 else "(project/read operation)")
              ~f:Host_view.run_label)
           (Option.value_map op.error ~default:"" ~f:(fun e -> " — " ^ e)))
+      @ List.concat_map asic.finalizations ~f:Host_view.finalization_lines
       @ Option.value_map asic.preview ~default:[] ~f:(fun p ->
         [ "PREVIEW " ^ p.plan_identity
         ; "Selection: " ^ Sexp.to_string_hum (Asic.Selection.sexp_of_t p.selection)
@@ -1962,12 +2535,14 @@ let host_data session : Host_view.data =
   ; status = session.status
   ; environment = session.environment_label
   ; asic_lines
+  ; asic = session.asic
   }
 ;;
 
 let render session dimensions =
   let render_host () =
     session.last_dimensions <- Some dimensions;
+    reconcile_synthesis session;
     let host =
       match session.presentation_preference_notice with
       | None -> session.host
@@ -2040,6 +2615,10 @@ let session_of_baseline_fixture (fixture : Baseline_fixture.t) =
     ; presentation_preference_notice = None
     ; preference_saves = Deferred.unit
     ; asic_reads = Asic_intents.empty
+    ; remembered_acceptance = ""
+    ; artifact_viewer = None
+    ; artifact_binary_viewer = None
+    ; artifact_export_busy = false
     }
   in
   reconcile_selection session;
@@ -2126,6 +2705,94 @@ let host_catalog session =
     session.host
     ~project:(current_project session)
     ~jobs:(project_jobs session)
+  @ (match Host.focused session.host with
+     | Some tile when String.equal tile.kind "simulation" ->
+       let v = (Host.local session.host tile.id).simulation in
+       let cmd id title operation =
+         Host.command
+           ("simulation." ^ id)
+           ("Simulation: " ^ title)
+           "suite cases seed history"
+           (Host.Simulation (tile.id, operation))
+       in
+       [ cmd "discover" "Discover suites explicitly" Discover
+       ; cmd "history" "Newest history page" (History { before = None; limit = 25 })
+       ]
+       @ Option.value_map v.snapshot ~default:[] ~f:(fun s ->
+         Option.value_map s.next_before ~default:[] ~f:(fun before ->
+           [ cmd
+               "older"
+               "Older history page"
+               (History { before = Some before; limit = 25 })
+           ])
+         @ List.map s.attempts ~f:(fun a ->
+           cmd ("open." ^ a.id) ("Reopen " ^ a.id ^ " " ^ a.suite) (Observe a.id))
+         @ Option.value_map s.discovery ~default:[] ~f:(fun d ->
+           List.map d.suites ~f:(fun suite ->
+             Host.command
+               ("simulation.launch." ^ suite.id)
+               ("Simulation: Launch form " ^ suite.label)
+               "seed parameters cases"
+               (Simulation_form
+                  ( tile.id
+                  , Option.value s.discovery_digest ~default:""
+                  , suite
+                  , submission_key "simulation" )))))
+       @ Option.value_map (Simulation_view.detail v) ~default:[] ~f:(fun d ->
+         [ cmd "cancel" ("Cancel " ^ d.id) (Cancel d.id)
+         ; Host.command
+             "simulation.logs"
+             "Simulation: Toggle stream-labelled job logs"
+             "stdout stderr"
+             (Simulation_logs tile.id)
+         ]
+         @ List.map d.cases ~f:(fun c ->
+           Host.command
+             ("simulation.case." ^ c.case_id)
+             ("Simulation: Select case " ^ c.case_id)
+             "detail failure"
+             (Simulation_case (tile.id, c.case_id)))
+         @ (let failed =
+              List.filter_map d.cases ~f:(fun c ->
+                if Simulation.Case_status.equal c.status Failed
+                then Some c.case_id
+                else None)
+            in
+            if List.is_empty failed
+            then []
+            else
+              [ cmd
+                  "rerun-failed"
+                  "Rerun all failed (original inputs; current project)"
+                  (Rerun
+                     { submission_key = submission_key "simulation-rerun"
+                     ; attempt_id = d.id
+                     ; cases = failed
+                     })
+              ])
+         @ Option.value_map v.case_id ~default:[] ~f:(fun id ->
+           [ cmd
+               "rerun-case"
+               ("Rerun case " ^ id ^ " (original inputs; current project)")
+               (Rerun
+                  { submission_key = submission_key "simulation-rerun"
+                  ; attempt_id = d.id
+                  ; cases = [ id ]
+                  })
+           ])
+         @ List.concat_map d.artifacts ~f:(fun a ->
+           [ Host.command
+               ("simulation.export." ^ a.id)
+               ("Simulation: Export exact bytes " ^ a.label)
+               "trace waveform"
+               (Simulation_export (a, false))
+           ; Host.command
+               ("simulation.viewer." ^ a.id)
+               ("Simulation: Open external viewer " ^ a.label)
+               "trace waveform"
+               (Simulation_export (a, true))
+           ]))
+     | _ -> [])
   @ Option.value_map session.remembered_selection ~default:[] ~f:(fun selection ->
     let available =
       Option.value_map session.asic ~default:false ~f:(fun asic ->
@@ -2148,6 +2815,10 @@ let host_catalog session =
         "run synth last used"
         (Asic (Plan selection))
     ])
+  @ Host.launch_commands
+      session.host
+      ~preview:(Option.bind session.asic ~f:(fun asic -> asic.preview))
+      ~view_pending:(Option.is_some session.view_on_allocation)
   @ Option.value_map session.asic ~default:[] ~f:(fun asic ->
     List.concat_map asic.flows ~f:(fun flow ->
       Host.command
@@ -2161,31 +2832,13 @@ let host_catalog session =
           ("Plan ASIC " ^ flow.id ^ " / " ^ profile ^ " (enter endpoint)")
           "run synth preview"
           (Edit_plan (flow.id, profile))))
-    @ Option.value_map asic.preview ~default:[] ~f:(fun preview ->
-      let label =
-        sprintf
-          "%s / %s → %s [%s]"
-          preview.selection.flow
-          preview.selection.profile
-          preview.selection.endpoint
-          preview.plan_identity
-      in
-      [ Host.command
-          "asic.launch"
-          ("Launch " ^ label)
-          "run synth"
-          (Launch_asic (preview, false))
-      ; Host.command
-          ?unavailable:
-            (if Option.is_some session.view_on_allocation
-             then Some "Another launch-and-view is awaiting allocation"
-             else None)
-          "asic.launch-view"
-          ("Launch and view in captured context: " ^ label)
-          "run select"
-          (Launch_asic (preview, true))
-      ])
     @ Host.asic_cancel_commands asic
+    @ List.map asic.finalizations ~f:(fun finalization ->
+      Host.command
+        ("asic.finalize-observe." ^ finalization.key)
+        ("Reconnect finalization " ^ finalization.key ^ " (read-only)")
+        "observe phase acceptance status"
+        (Asic (Observe_finalization finalization.key)))
     @ List.concat_map asic.runs ~f:(fun run ->
       [ Host.command
           ("asic.refresh." ^ Host_view.run_label run.run)
@@ -2199,16 +2852,214 @@ let host_catalog session =
            ^ " (enter exact attempt)")
           "import terminal results timing physical checks read-only"
           (Edit_finalization run.run)
-      ]))
+      ; Host.command
+          ("asic.artifacts." ^ Host_view.run_label run.run)
+          ("Browse reports/artifacts " ^ Host_view.run_label run.run)
+          "catalog report bounded text"
+          (Browse_artifacts run.run)
+      ]
+      @ List.map Inspection_view.defaults ~f:(fun (domain, stage) ->
+        Host.command
+          ("asic.inspection." ^ domain ^ "." ^ Host_view.run_label run.run)
+          ("Inspect "
+           ^ (if String.equal domain "timing" then "timing paths" else domain)
+           ^ " "
+           ^ Host_view.run_label run.run
+           ^ " · "
+           ^ stage)
+          "typed rows endpoints corner group producer"
+          (Browse_inspection (run.run, domain, stage)))
+      @ Option.value_map run.execution_file ~default:[] ~f:(fun execution_file ->
+        [ Host.command
+            ("asic.finalize." ^ Host_view.run_label run.run)
+            ("Finalize (collect) " ^ Host_view.run_label run.run)
+            "collect terminal reports"
+            (Finalize_collect (run.run, execution_file))
+        ; Host.command
+            ("asic.finalize-accept." ^ Host_view.run_label run.run)
+            ("Finalize and accept " ^ Host_view.run_label run.run)
+            "explicit collateral testbench replay"
+            (Edit_acceptance (run.run, execution_file))
+        ])))
+;;
+
+let open_timing_workspace session ~(run : Run_ref.t) ~stage =
+  let instance = session.hello.instance_id in
+  let project = Option.map (current_project session) ~f:(fun p -> p.Project.id) in
+  match session.host.registry, Host.active session.host with
+  | Some initial, Some active ->
+    let name = "Timing · captured " ^ run.id ^ " · " ^ submission_key "inspect" in
+    let valid () =
+      V1.Daemon_instance_id.equal instance session.hello.instance_id
+      && Option.equal
+           Project_id.equal
+           project
+           (Option.map (current_project session) ~f:(fun p -> p.Project.id))
+      && Option.exists session.host.registry ~f:(fun s ->
+        Workspace.Session_id.equal initial.session_id s.session_id)
+    in
+    let%bind workspace =
+      match Host.matching_timing initial ~run with
+      | Some workspace -> return (Some workspace.id)
+      | None ->
+        let%bind () =
+          mutate_workspace
+            session
+            (Create_workspace { window = active.window; name; context = active.context })
+        in
+        if not (valid ())
+        then return None
+        else (
+          match session.host.registry with
+          | None -> return None
+          | Some current ->
+            (match
+               List.find current.workspaces ~f:(fun w ->
+                 String.equal w.name name
+                 && not
+                      (List.exists initial.workspaces ~f:(fun old ->
+                         Workspace.Workspace_id.equal old.id w.id)))
+             with
+             | None -> return None
+             | Some workspace ->
+               let%bind () = mutate_workspace session (Make_independent workspace.id) in
+               if not (valid ())
+               then return None
+               else (
+                 match session.host.registry with
+                 | None -> return None
+                 | Some registry ->
+                   if not
+                        (List.exists registry.workspaces ~f:(fun current ->
+                           Workspace.Workspace_id.equal current.id workspace.id))
+                   then return None
+                   else (
+                     let workspace = Workspace.workspace registry workspace.id in
+                     let context = Workspace.context registry workspace.context in
+                     (* Never select through a shared context if independence was
+                        rejected. *)
+                     if Workspace.Context_id.equal context.id registry.main_context
+                        || List.exists initial.contexts ~f:(fun old ->
+                          Workspace.Context_id.equal old.id context.id)
+                        || List.count registry.workspaces ~f:(fun w ->
+                             Workspace.Context_id.equal w.context context.id)
+                           <> 1
+                     then return None
+                     else (
+                       let%map () =
+                         mutate_workspace
+                           session
+                           (Select_run
+                              { workspace = workspace.id
+                              ; context = context.id
+                              ; expected_selection_revision = context.selection_revision
+                              ; run = Some run
+                              })
+                       in
+                       Some workspace.id)))))
+    in
+    (match workspace with
+     | None -> return ()
+     | Some workspace when valid () ->
+       let%bind () =
+         mutate_workspace
+           session
+           (Hardcaml_workbench_workspaces.Definition.apply
+              Hardcaml_workbench_workspaces.Timing.definition
+              ~workspace)
+       in
+       if not (valid ())
+       then return ()
+       else (
+         match session.host.registry with
+         | None -> return ()
+         | Some registry ->
+           (match Host.matching_timing ~workspace registry ~run with
+            | Some matching when Workspace.Workspace_id.equal matching.id workspace ->
+              (match
+                 List.find registry.tiles ~f:(fun tile ->
+                   Workspace.Workspace_id.equal tile.workspace workspace
+                   && String.equal tile.kind "timing-paths"
+                   && Option.value_map
+                        matching.zoomed_tile
+                        ~default:true
+                        ~f:(Workspace.Tile_id.equal tile.id)
+                   && not tile.hidden)
+               with
+               | None -> return ()
+               | Some tile ->
+                 let generation =
+                   List.Assoc.find
+                     session.host.timing
+                     (Workspace.Workspace_id.to_string workspace)
+                     ~equal:String.equal
+                   |> Option.value_map ~default:1 ~f:(fun view ->
+                     view.Inspection_view.generation + 1)
+                 in
+                 let view =
+                   Host.timing session.host tile
+                   |> Option.filter ~f:(fun view ->
+                     String.equal view.stage stage && Run_ref.equal view.run run)
+                   |> Option.value
+                        ~default:(Timing_workspace.create ~generation ~run ~stage)
+                 in
+                 let view =
+                   { view with
+                     Inspection_view.workspace_epoch =
+                       Some (Host.timing_epoch registry workspace)
+                   }
+                 in
+                 let view =
+                   Option.value_map
+                     session.asic
+                     ~default:view
+                     ~f:(Inspection_view.reconcile view)
+                 in
+                 session.host
+                 <- Host.set_timing (Host.switch session.host workspace) tile view;
+                 session.host
+                 <- Host.set_local
+                      session.host
+                      tile.id
+                      { (Host.local session.host tile.id) with
+                        artifacts = None
+                      ; inspection = None
+                      };
+                 session.host
+                 <- { session.host with
+                      focus = Some tile.id
+                    ; notice = "Timing investigation · captured run " ^ run.id
+                    };
+                 (* Already-loaded observations are sufficient; opening does not
+                    re-extract. *)
+                 if Option.is_some view.index
+                 then return ()
+                 else (
+                   let operation = Inspection_view.operation view in
+                   asic_request
+                     ~inspection_request:(tile.id, Inspection_view.capture view operation)
+                     session
+                     operation))
+            | _ -> return ()))
+     | Some _ -> return ())
+  | _ -> return ()
 ;;
 
 let execute_host session captured action ~exit =
   let open Bonsai_term in
-  let async f =
+  let captured_client = session.client in
+  let captured_project = Option.map (current_project session) ~f:(fun p -> p.id) in
+  let async ?(on_rejected = ignore) f =
     Effect.of_deferred_thunk (fun () ->
       if Host.current session.host captured
+         && phys_equal captured_client session.client
+         && Option.equal
+              Project_id.equal
+              captured_project
+              (Option.map (current_project session) ~f:(fun p -> p.id))
       then f ()
       else (
+        on_rejected ();
         session.host
         <- { session.host with
              notice = "Command target changed before dispatch; reopen palette"
@@ -2222,10 +3073,198 @@ let execute_host session captured action ~exit =
     Effect.Ignore)
   else (
     match action with
+    | Host.Simulation (tile, operation) ->
+      let local = Host.local session.host tile in
+      (match operation with
+       | Observe id ->
+         session.host
+         <- Host.set_local
+              session.host
+              tile
+              { local with
+                simulation = Simulation_view.select local.simulation id
+              ; scroll = 0
+              }
+       | _ -> ());
+      async (fun () -> simulation_request session tile operation)
+    | Simulation_case (tile, case_id) ->
+      let local = Host.local session.host tile in
+      session.host
+      <- Host.set_local
+           session.host
+           tile
+           { local with
+             simulation = { local.simulation with case_id = Some case_id }
+           ; scroll = 0
+           };
+      Effect.Ignore
+    | Simulation_logs tile ->
+      let local = Host.local session.host tile in
+      session.host
+      <- Host.set_local
+           session.host
+           tile
+           { local with
+             simulation = { local.simulation with logs = not local.simulation.logs }
+           };
+      Effect.Ignore
+    | Simulation_form (tile, digest, suite, key) ->
+      let form = Simulation_view.Form.create suite in
+      session.host
+      <- { session.host with
+           palette =
+             Some
+               { capture = captured
+               ; commands = []
+               ; query = Simulation_view.Form.query form
+               ; index = 0
+               ; argument = Some (Simulation_selection (tile, digest, key, form))
+               }
+         };
+      Effect.Ignore
+    | Simulation_edit (tile, digest, key, form) ->
+      session.host
+      <- { session.host with
+           notice = ""
+         ; palette =
+             Some
+               { capture = captured
+               ; commands = []
+               ; query = Simulation_view.Form.query form
+               ; index = 0
+               ; argument = Some (Simulation_selection (tile, digest, key, form))
+               }
+         };
+      Effect.Ignore
+    | Simulation_export (artifact, open_viewer) ->
+      let tile = Option.map (Host.focused session.host) ~f:(fun t -> t.id) in
+      let notice message =
+        let message =
+          Artifact_view.safe
+            (sprintf "Simulation %s / %s: %s" artifact.attempt_id artifact.id message)
+        in
+        session.host <- { session.host with notice = message };
+        Option.iter tile ~f:(fun id ->
+          let local = Host.local session.host id in
+          session.host
+          <- Host.set_local
+               session.host
+               id
+               { local with simulation = { local.simulation with notice = Some message } })
+      in
+      async (fun () ->
+        if session.artifact_export_busy
+        then (
+          notice "Another artifact export is in progress";
+          return ())
+        else (
+          session.artifact_export_busy <- true;
+          Monitor.protect
+            ~finally:(fun () ->
+              session.artifact_export_busy <- false;
+              return ())
+            (fun () ->
+              match current_project session with
+              | None -> return ()
+              | Some project ->
+                let instance_id = session.hello.instance_id in
+                let client = session.client in
+                let current () =
+                  phys_equal client session.client
+                  && V1.Daemon_instance_id.equal instance_id session.hello.instance_id
+                  && Option.value_map
+                       (current_project session)
+                       ~default:false
+                       ~f:(fun p -> Project_id.equal p.id project.id)
+                in
+                let viewer =
+                  if open_viewer then session.artifact_binary_viewer else None
+                in
+                if open_viewer && Option.is_none viewer
+                then (
+                  notice
+                    "Configure --simulation-viewer /absolute/viewer for simulation traces";
+                  return ())
+                else (
+                  notice
+                    "Exporting simulation bytes (<=64 MiB); verifying identity and SHA256";
+                  let%map result =
+                    Simulation_export.run
+                      ~artifact
+                      ~current
+                      ~viewer
+                      ~fetch:(fun ~offset ~limit ->
+                        let%map r =
+                          request session.diagnostics_file (fun () ->
+                            Http.Client.simulation
+                              client
+                              { instance_id
+                              ; project = project.id
+                              ; operation =
+                                  Read_artifact_bytes
+                                    { attempt_id = artifact.attempt_id
+                                    ; artifact_id = artifact.id
+                                    ; sha256 = Option.value artifact.sha256 ~default:""
+                                    ; offset
+                                    ; limit
+                                    }
+                              })
+                        in
+                        match r with
+                        | Error e -> Or_error.error_string e
+                        | Ok s ->
+                          Or_error.of_option
+                            s.byte_page
+                            ~error:(Error.of_string "Missing simulation byte page"))
+                      ~publish:Simulation_export.publish_private
+                      ~launch:Artifact_export.launch_viewer
+                  in
+                  notice
+                    (match result with
+                     | Ok path -> "Verified simulation bytes retained: " ^ path
+                     | Error e -> "Simulation export: " ^ Error.to_string_hum e)))))
     | Host.Registry mutation -> async (fun () -> mutate_workspace session mutation)
     | Switch id ->
       session.host <- Host.switch session.host id;
       Effect.Ignore
+    | Create_testing_workspace ->
+      async (fun () ->
+        match session.host.registry, Host.active session.host with
+        | Some registry, Some active
+          when not
+                 (List.exists registry.workspaces ~f:(fun w ->
+                    Option.equal String.equal w.preset (Some "testing"))) ->
+          let%bind () =
+            mutate_workspace
+              session
+              (Create_workspace
+                 { window = active.window
+                 ; name = "Testing"
+                 ; context = registry.main_context
+                 })
+          in
+          (match session.host.registry with
+           | Some current
+             when Workspace.Session_id.equal current.session_id registry.session_id ->
+             (match
+                List.find current.workspaces ~f:(fun w ->
+                  String.equal w.name "Testing"
+                  && not
+                       (List.exists registry.workspaces ~f:(fun old ->
+                          Workspace.Workspace_id.equal old.id w.id)))
+              with
+              | None -> return ()
+              | Some workspace ->
+                let%map () =
+                  mutate_workspace
+                    session
+                    (Hardcaml_workbench_workspaces.Definition.apply
+                       Hardcaml_workbench_workspaces.Testing.definition
+                       ~workspace:workspace.id)
+                in
+                session.host <- Host.switch session.host workspace.id)
+           | _ -> return ())
+        | _ -> return ())
     | Apply_default_layout ->
       async (fun () ->
         match session.host.registry with
@@ -2301,10 +3340,152 @@ let execute_host session captured action ~exit =
     | Inspect_artifact -> async (fun () -> inspect_artifact session)
     | Inspect_hierarchy -> async (fun () -> inspect_hierarchy session)
     | Discover_asic -> async (fun () -> asic_request session Discover)
+    | Prepare_stage (stage, run) ->
+      let remembered = session.remembered_selection in
+      let observed =
+        Option.bind session.asic ~f:(fun snapshot ->
+          List.find snapshot.runs ~f:(fun execution -> Run_ref.equal execution.run run)
+          |> Option.bind ~f:(fun execution -> execution.selection))
+      in
+      let generation = session.host.stage_generation + 1 in
+      let instance = session.hello.instance_id in
+      let message =
+        "Preparing NEW run through "
+        ^ stage.id
+        ^ "; discovering capabilities if needed; reopen palette when ready"
+      in
+      session.host
+      <- { session.host with
+           stage_generation = generation
+         ; stage_preparation = Some message
+         ; notice = message
+         };
+      let current () =
+        Host.current session.host captured
+        && phys_equal captured_client session.client
+        && V1.Daemon_instance_id.equal instance session.hello.instance_id
+        && Option.equal
+             Project_id.equal
+             captured_project
+             (Option.map (current_project session) ~f:(fun p -> p.id))
+        && generation = session.host.stage_generation
+      in
+      let fail reason =
+        if generation = session.host.stage_generation
+        then
+          session.host
+          <- { session.host with stage_preparation = Some reason; notice = reason }
+      in
+      async
+        ~on_rejected:(fun () -> fail "Stage preparation target changed; press r again")
+        (fun () ->
+          let missing () =
+            Option.value_map session.asic ~default:true ~f:(fun snapshot ->
+              let flow =
+                match Option.first_some remembered observed with
+                | Some selection -> Some selection.Asic.Selection.flow
+                | None -> Option.map snapshot.catalog_default ~f:(fun pair -> pair.flow)
+              in
+              not
+                (List.exists snapshot.flows ~f:(fun candidate ->
+                   Option.equal String.equal flow (Some candidate.id)
+                   && List.mem
+                        candidate.fresh_stage_endpoints
+                        stage.id
+                        ~equal:String.equal)))
+          in
+          let rec discover remaining =
+            if (not (current ())) || remaining = 0
+            then return ()
+            else if (not (missing ()))
+                    && not
+                         (Option.exists session.asic ~f:(fun snapshot ->
+                            List.exists snapshot.operations ~f:(fun op ->
+                              String.equal op.kind "discover" && Plain_rpc.active op)))
+            then return ()
+            else (
+              let%bind () = Clock.after (Time_float.Span.of_ms 100.) in
+              if not (current ())
+              then return ()
+              else (
+                let%bind () = asic_request session Get in
+                discover (remaining - 1)))
+          in
+          let%bind () =
+            if Option.is_none stage.action && missing ()
+            then (
+              let%bind () = asic_request session Discover in
+              discover 50)
+            else return ()
+          in
+          if not (current ())
+          then (
+            fail "Stage preparation superseded or context changed; press r again";
+            return ())
+          else (
+            match
+              Stage_action.resolve ~stage ~remembered ~observed ~snapshot:session.asic
+            with
+            | Error reason ->
+              fail ("Stage preparation failed: " ^ reason ^ "; press r to retry");
+              return ()
+            | Ok selection ->
+              let planned_run, ticket =
+                Planned_run.begin_plan session.host.planned_run selection
+              in
+              session.host
+              <- { session.host with
+                   planned_run
+                 ; stage_preparation = None
+                 ; remembered_selection = Some selection
+                 ; notice =
+                     "Planning NEW run; Space c c: Launch when ready (reopen palette)"
+                 };
+              let response = asic_request ~plan_request:ticket session (Plan selection) in
+              let%bind () = save_preferences session selection in
+              response))
+    | Unavailable_launch ->
+      session.host
+      <- { session.host with
+           notice =
+             "Captured launch was unavailable; reopen palette to capture the ready \
+              preview"
+         };
+      Effect.Ignore
     | Asic (Plan selection as operation) ->
-      async (fun () ->
-        let%bind () = save_preferences session selection in
-        asic_request session operation)
+      (match current_project session with
+       | None -> Effect.Ignore
+       | Some project ->
+         (* Fence at command acceptance, before effect dispatch or preference I/O can
+            yield to a poll, a newer Plan, or Launch. *)
+         let planned_run =
+           Planned_run.reset session.host.planned_run ~scope:(plan_scope session project)
+         in
+         let planned_run, ticket = Planned_run.begin_plan planned_run selection in
+         session.host
+         <- { session.host with
+              planned_run
+            ; stage_preparation = None
+            ; stage_generation = session.host.stage_generation + 1
+            };
+         async
+           ~on_rejected:(fun () ->
+             session.host
+             <- { session.host with
+                  planned_run =
+                    Planned_run.receipt
+                      session.host.planned_run
+                      ticket
+                      ~floor:Int.max_value
+                      (Error "Command target changed before Plan dispatch")
+                })
+           (fun () ->
+             if not (Planned_run.current_ticket session.host.planned_run ticket)
+             then return ()
+             else (
+               let response = asic_request ~plan_request:ticket session operation in
+               let%bind () = save_preferences session selection in
+               response)))
     | Asic (Cancel key as operation) ->
       async (fun () ->
         if Option.value_map session.asic ~default:false ~f:(fun snapshot ->
@@ -2317,7 +3498,89 @@ let execute_host session captured action ~exit =
                notice = "ASIC operation is no longer active and owned: " ^ key
              };
           return ()))
+    | Asic (Finalize { acceptance = Some acceptance; _ } as operation) ->
+      session.remembered_acceptance
+      <- Sexp.to_string_mach (Asic.Acceptance.sexp_of_t acceptance);
+      async (fun () -> asic_request session operation)
     | Asic operation -> async (fun () -> asic_request session operation)
+    | Finalize_collect (run, execution_file) ->
+      async (fun () ->
+        let key = submission_key "finalize" in
+        asic_request session (Finalize { key; run; execution_file; acceptance = None }))
+    | Browse_artifacts run ->
+      (match Host.focused session.host, session.host.registry with
+       | Some tile, Some registry ->
+         let scope =
+           Workspace.resolve_tile registry tile.id
+           |> Result.ok
+           |> Option.bind ~f:(fun r -> r.run)
+         in
+         let local = Host.local session.host tile.id in
+         let generation = local.artifact_generation + 1 in
+         let view =
+           Artifact_view.create
+             ?scope
+             ~generation
+             ~viewer_configured:(Option.is_some session.artifact_viewer)
+             ~binary_viewer_configured:(Option.is_some session.artifact_binary_viewer)
+             run
+         in
+         let operation = Asic.Operation.List_artifacts run in
+         let artifact_request = capture_artifact_request session tile view operation in
+         session.host
+         <- Host.set_local
+              session.host
+              tile.id
+              { local with
+                artifacts = Some view
+              ; inspection = None
+              ; artifact_generation = generation
+              };
+         async (fun () -> asic_request ?artifact_request session operation)
+       | _ -> Effect.Ignore)
+    | Browse_inspection (run, "timing", stage) ->
+      async (fun () -> open_timing_workspace session ~run ~stage)
+    | Browse_inspection (run, domain, stage) ->
+      (match Host.focused session.host, session.host.registry with
+       | Some tile, Some registry ->
+         let scope =
+           Workspace.resolve_tile registry tile.id
+           |> Result.ok
+           |> Option.bind ~f:(fun r -> r.run)
+         in
+         let local = Host.local session.host tile.id in
+         let generation = local.inspection_generation + 1 in
+         let view = Inspection_view.create ?scope ~generation ~run ~domain ~stage () in
+         session.host
+         <- Host.set_local
+              session.host
+              tile.id
+              { local with
+                inspection = Some view
+              ; inspection_generation = generation
+              ; artifacts = None
+              };
+         let operation = Inspection_view.operation view in
+         let inspection_request = tile.id, Inspection_view.capture view operation in
+         async (fun () -> asic_request ~inspection_request session operation)
+       | _ -> Effect.Ignore)
+    | Edit_acceptance (run, execution_file) ->
+      let key = submission_key "finalize-accept" in
+      session.host
+      <- { session.host with
+           palette =
+             Some
+               { capture = captured
+               ; commands = []
+               ; query = session.remembered_acceptance
+               ; index = 0
+               ; argument = Some (Host.Acceptance (run, execution_file, key))
+               }
+         ; notice =
+             "Explicit collateral required; Enter finalizes and accepts the captured \
+              execution"
+         };
+      Effect.Ignore
     | Edit_plan (flow, profile) ->
       let query =
         Option.value_map session.remembered_selection ~default:"" ~f:(fun selection ->
@@ -2357,19 +3620,32 @@ let execute_host session captured action ~exit =
          };
       Effect.Ignore
     | Launch_asic (preview, view) ->
-      if not
-           (Option.value_map session.asic ~default:false ~f:(fun asic ->
-              Option.equal Asic.Preview.equal asic.preview (Some preview)))
-      then (
+      let ready () =
+        Option.is_none session.host.stage_preparation
+        && Planned_run.launchable session.host.planned_run preview
+        && Option.value_map session.asic ~default:false ~f:(fun asic ->
+          Option.equal Asic.Preview.equal asic.preview (Some preview))
+      in
+      let invalidated () =
         session.host
         <- { session.host with
-             notice = "ASIC preview invalidated; prepare the plan again"
-           };
+             notice =
+               "ASIC preview unavailable or launch unresolved; inspect plan/launch state \
+                before retrying explicitly"
+           }
+      in
+      if not (ready ())
+      then (
+        invalidated ();
         Effect.Ignore)
       else (
         let key = submission_key "asic-run" in
         async (fun () ->
-          if view && Option.is_some session.view_on_allocation
+          if not (ready ())
+          then (
+            invalidated ();
+            return ())
+          else if view && Option.is_some session.view_on_allocation
           then (
             session.host
             <- { session.host with
@@ -2382,12 +3658,29 @@ let execute_host session captured action ~exit =
               Option.iter (Host.launch_target session.host) ~f:(fun target ->
                 session.view_on_allocation <- Some (key, target));
             asic_request session (Run { key; preview }))))
+    | Set_presentation (id, presentation) ->
+      let local = Host.local session.host id in
+      session.host
+      <- Host.set_local session.host id { local with presentation; scroll = 0 };
+      session.host
+      <- { session.host with
+           notice =
+             "Presentation override: client-local until restart; reset inherits defaults"
+         };
+      Effect.Ignore
     | Local_headers | Resume_log ->
       Option.iter session.host.focus ~f:(fun id ->
         let local = Host.local session.host id in
         let local =
           match action with
-          | Local_headers -> { local with headers = not local.headers }
+          | Local_headers ->
+            let tile = Option.value_exn (Host.focused session.host) in
+            { local with
+              presentation =
+                { local.presentation with
+                  header = Some (not (Host.policy session.host tile).header)
+                }
+            }
           | _ -> { local with follow = true; scroll = 0 }
         in
         session.host <- Host.set_local session.host id local);
@@ -2425,13 +3718,59 @@ let execute_host session captured action ~exit =
 
 let scroll_host session delta =
   reconcile_synthesis session;
-  Option.iter session.last_dimensions ~f:(fun dimensions ->
-    session.host
-    <- Host_view.scroll_focused session.host (host_data session) dimensions ~delta)
+  match Host.focused session.host with
+  | Some tile when String.equal tile.kind "planned-run" ->
+    let local = Host.local session.host tile.id in
+    Option.iter session.last_dimensions ~f:(fun dimensions ->
+      let _, _, layout = Host_view.tile_layout session.host dimensions in
+      Option.iter
+        (List.find layout ~f:(fun (t, _) -> Workspace.Tile_id.equal t.id tile.id))
+        ~f:(fun (_, geometry) ->
+          let _, _, _, width, height =
+            Host_view.body_geometry
+              session.host
+              tile
+              ~width:geometry.width
+              ~height:geometry.height
+          in
+          let count =
+            Host_view.rows
+              (Host.set_local session.host tile.id { local with scroll = 0 })
+              (host_data session)
+              tile
+              ~width
+              ~height
+            |> List.length
+          in
+          let bound = Int.max 0 (count - height) in
+          let scroll =
+            Int64.(max zero (min (of_int bound) (of_int local.scroll + of_int delta)))
+            |> Int64.to_int_exn
+          in
+          session.host <- Host.set_local session.host tile.id { local with scroll }))
+  | _ ->
+    Option.iter session.last_dimensions ~f:(fun dimensions ->
+      session.host
+      <- Host_view.scroll_focused session.host (host_data session) dimensions ~delta)
 ;;
 
 let browse_host session delta =
-  scroll_host session delta;
+  let checklist =
+    Option.filter (Host.focused session.host) ~f:(fun tile ->
+      String.equal tile.kind "stage-checklist")
+  in
+  (match checklist with
+   | Some tile when not (Host.local session.host tile.id).utility_detail ->
+     Option.iter session.host.registry ~f:(fun registry ->
+       Workspace.resolve_tile registry tile.id
+       |> Result.ok
+       |> Option.bind ~f:(fun reference -> reference.run)
+       |> Option.iter ~f:(fun run ->
+         let stages =
+           Terminal_presentation.Overview_tiles.observed_stages ~asic:session.asic ~run
+         in
+         session.host <- Host.browse_stages session.host tile.id ~run ~stages ~delta))
+   | _ -> scroll_host session delta);
   change_synthesis session (fun tile local ->
     let synthesis =
       match Synthesis_view.State.mode local.synthesis with
@@ -2473,7 +3812,24 @@ let browse_host session delta =
     in
     let index = Int.max 0 (Int.min (List.length values - 1) (index + delta)) in
     let cursor = List.nth values index in
-    let visible = Int.max 1 (tile.requested_geometry.height - 2) in
+    let visible =
+      Option.bind session.last_dimensions ~f:(fun dimensions ->
+        let _, _, layout = Host_view.tile_layout session.host dimensions in
+        List.find layout ~f:(fun (t, _) -> Workspace.Tile_id.equal t.id tile.id)
+        |> Option.map ~f:(fun (_, g) ->
+          let _, _, _, _, height =
+            Host_view.body_geometry session.host tile ~width:g.width ~height:g.height
+          in
+          if String.equal tile.kind "run-selector"
+          then Int.min height (Host.policy session.host tile).run_selector_rows
+          else height))
+      |> Option.value ~default:(tile.requested_geometry.height - 2)
+      |> (fun height ->
+           if String.equal tile.kind "run-selector"
+           then Int.min height (Host.policy session.host tile).run_selector_rows
+           else height)
+      |> Int.max 1
+    in
     let scroll =
       if String.equal tile.kind "run-selector"
       then
@@ -2487,7 +3843,7 @@ let browse_host session delta =
     session.host <- Host.set_local session.host tile.id { local with cursor; scroll })
 ;;
 
-let host_handler session event ~exit : unit Bonsai_term.Effect.t option =
+let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option =
   let open Bonsai_term in
   let modal =
     Option.is_some session.host.palette
@@ -2495,6 +3851,13 @@ let host_handler session event ~exit : unit Bonsai_term.Effect.t option =
     || session.host.paste
   in
   let input = Host.decode_event event in
+  let workspace_navigation =
+    Option.exists (Host.focused session.host) ~f:(fun tile ->
+      String.equal tile.kind "workspace-tabs")
+    && Option.exists input ~f:(function
+      | Host.Character ('j' | 'k') | Next | Previous | Enter -> true
+      | _ -> false)
+  in
   let prefix = session.host.prefix > 0 in
   let captured = Host.capture session.host in
   let host, effect =
@@ -2510,6 +3873,17 @@ let host_handler session event ~exit : unit Bonsai_term.Effect.t option =
   match effect with
   | Host.Execute (capture, action) -> Some (execute_host session capture action ~exit)
   | Host.Activate ->
+    Option.iter (Host.focused host) ~f:(fun tile ->
+      if List.mem
+           [ "stage-checklist"; "live-status"; "planned-run" ]
+           tile.kind
+           ~equal:String.equal
+      then
+        session.host
+        <- Host.set_local
+             session.host
+             tile.id
+             { (Host.local session.host tile.id) with utility_detail = true; scroll = 0 });
     change_terminal_result session Terminal_result_view.State.inspect;
     change_synthesis session (fun _ local ->
       let mode =
@@ -2540,6 +3914,7 @@ let host_handler session event ~exit : unit Bonsai_term.Effect.t option =
          || Option.is_some host.palette
          || host.editing_filter
          || host.prefix > 0 -> Some Effect.Ignore
+  | Host.No_effect when workspace_navigation -> Some Effect.Ignore
   | Host.No_effect ->
     let dispatch id =
       Option.bind captured ~f:(fun capture ->
@@ -2548,6 +3923,48 @@ let host_handler session event ~exit : unit Bonsai_term.Effect.t option =
           execute_host session capture command.action ~exit))
     in
     (match input with
+     | Some (Character (('j' | 'k' | 'n' | 'p' | 'l') as key))
+       when Option.value_map (Host.focused session.host) ~default:false ~f:(fun t ->
+              String.equal t.kind "simulation") ->
+       let tile = Option.value_exn (Host.focused session.host) in
+       let local = Host.local session.host tile.id in
+       let v = local.simulation in
+       let choose values selected delta =
+         let index =
+           Option.bind selected ~f:(fun id ->
+             List.findi values ~f:(fun _ s -> String.equal id s) |> Option.map ~f:fst)
+           |> Option.value ~default:(if delta > 0 then -1 else 1)
+         in
+         List.nth values (Int.max 0 (Int.min (List.length values - 1) (index + delta)))
+       in
+       if Char.equal key 'j' || Char.equal key 'k'
+       then (
+         let values =
+           Option.value_map v.snapshot ~default:[] ~f:(fun s ->
+             List.map s.attempts ~f:(fun a -> a.id))
+         in
+         match
+           choose values v.attempt (if Char.equal key 'j' then 1 else -1), captured
+         with
+         | Some id, Some capture ->
+           Some (execute_host session capture (Simulation (tile.id, Observe id)) ~exit)
+         | _ -> Some Effect.Ignore)
+       else (
+         let simulation =
+           if Char.equal key 'l'
+           then { v with logs = not v.logs }
+           else (
+             let values =
+               Option.value_map (Simulation_view.detail v) ~default:[] ~f:(fun d ->
+                 List.map d.cases ~f:(fun c -> c.case_id))
+             in
+             { v with
+               case_id = choose values v.case_id (if Char.equal key 'n' then 1 else -1)
+             })
+         in
+         session.host
+         <- Host.set_local session.host tile.id { local with simulation; scroll = 0 };
+         Some Effect.Ignore)
      | Some (Character 'b') -> dispatch "project.build"
      | Some (Character 't') -> dispatch "project.test"
      | Some (Character 'i') -> dispatch "project.discover"
@@ -2559,7 +3976,53 @@ let host_handler session event ~exit : unit Bonsai_term.Effect.t option =
           Some Effect.Ignore
         | _ -> dispatch "synthesis.evidence")
      | Some (Character 'm') -> dispatch "synthesis.metrics"
+     | Some (Character 'r')
+       when Option.exists (Host.focused session.host) ~f:(fun tile ->
+              String.equal tile.kind "stage-checklist") ->
+       let selected =
+         Option.bind (Host.focused session.host) ~f:(fun tile ->
+           Option.bind session.host.registry ~f:(fun registry ->
+             Workspace.resolve_tile registry tile.id
+             |> Result.ok
+             |> Option.bind ~f:(fun reference -> reference.run)
+             |> Option.bind ~f:(fun run ->
+               let stages =
+                 Terminal_presentation.Overview_tiles.observed_stages
+                   ~asic:session.asic
+                   ~run
+               in
+               Host.stage_cursor (Host.local session.host tile.id) ~run ~stages
+               |> Option.map ~f:(fun stage -> stage, run))))
+       in
+       (match selected, captured with
+        | Some (stage, run), Some capture ->
+          session.host
+          <- { session.host with
+               notice =
+                 "Preparing NEW run; when preview ready: Space c c → Launch / Launch and \
+                  view"
+             };
+          Some (execute_host session capture (Prepare_stage (stage, run)) ~exit)
+        | None, _ ->
+          session.host
+          <- { session.host with notice = "No explicit stage observation selected" };
+          Some Effect.Ignore
+        | Some _, None ->
+          session.host
+          <- { session.host with
+               notice = "Stage action unavailable: workspace not loaded"
+             };
+          Some Effect.Ignore)
      | Some Escape ->
+       Option.iter (Host.focused session.host) ~f:(fun tile ->
+         let local = Host.local session.host tile.id in
+         if local.utility_detail
+         then
+           session.host
+           <- Host.set_local
+                session.host
+                tile.id
+                { local with utility_detail = false; scroll = 0 });
        change_terminal_result session Terminal_result_view.State.back;
        change_synthesis session (fun _ local ->
          { local with synthesis = Synthesis_view.State.back local.synthesis });
@@ -2592,17 +4055,20 @@ let host_handler session event ~exit : unit Bonsai_term.Effect.t option =
      | Some (Character 'k') | Some Previous ->
        browse_host session (-1);
        Some Effect.Ignore
-     | Some (Character (('1' | '2') as ch)) ->
-       let name = if Char.equal ch '1' then "Overview" else "Timing" in
-       Option.bind session.host.registry ~f:(fun s ->
-         List.find s.workspaces ~f:(fun w -> String.equal w.name name))
+     | Some (Character ('1' .. '9' as ch)) ->
+       let index = Char.to_int ch - Char.to_int '1' in
+       Option.bind session.host.registry ~f:(fun s -> List.nth s.workspaces index)
        |> Option.iter ~f:(fun w -> session.host <- Host.switch session.host w.id);
        Some Effect.Ignore
      | Some (Character (('[' | ']') as ch)) ->
        (match Host.focused session.host with
         | Some tile
           when Terminal_result_view.supports tile.kind
-               || String.equal tile.kind "synthesis" ->
+               || String.equal tile.kind "simulation"
+               || String.equal tile.kind "synthesis"
+               || String.equal tile.kind "live-status"
+               || String.equal tile.kind "planned-run"
+               || String.equal tile.kind "stage-checklist" ->
           scroll_host session (if Char.equal ch '[' then -1 else 1)
         | _ ->
           Option.iter session.host.focus ~f:(fun id ->
@@ -2616,8 +4082,246 @@ let host_handler session event ~exit : unit Bonsai_term.Effect.t option =
                  ; scroll = Int.max 0 (l.scroll + if Char.equal ch '[' then -1 else 1)
                  }));
        Some Effect.Ignore
-     | Some Focus -> Some Effect.Ignore
+     | Some (Focus | Focus_previous) -> Some Effect.Ignore
      | _ -> None)
+;;
+
+let host_handler_overlays session event ~exit =
+  let focused =
+    Option.bind (Host.focused session.host) ~f:(fun tile ->
+      Option.map (Host.local session.host tile.id).artifacts ~f:(fun view -> tile, view))
+  in
+  let input = Host.decode_event event in
+  let inspection =
+    Option.bind (Host.focused session.host) ~f:(fun tile ->
+      Option.map (Host.inspection session.host tile.id) ~f:(fun view -> tile, view))
+  in
+  let bypass =
+    Option.is_some session.host.palette
+    || session.host.editing_filter
+    || session.host.paste
+    || session.host.prefix > 0
+    ||
+    match input with
+    | Some (Host.Focus | Focus_previous | Paste_start | Paste_end) -> true
+    | Some (Character ' ') ->
+      not (Option.exists inspection ~f:(fun (_, view) -> view.editing))
+    | _ -> false
+  in
+  match inspection, focused with
+  | Some (tile, view), _ when not bypass ->
+    let action =
+      if view.editing
+      then (
+        match input with
+        | Some Host.Enter -> Some Inspection_view.Open
+        | Some Escape -> Some Back
+        | Some Backspace -> Some Backspace
+        | Some (Character c) -> Some (Character c)
+        | Some (Text text) -> Some (Text text)
+        | _ -> None)
+      else (
+        match event, input with
+        | _, Some Host.Enter -> Some Inspection_view.Open
+        | _, Some Escape -> Some Back
+        | _, Some (Next | Character 'j') -> Some Down
+        | _, Some (Previous | Character 'k') -> Some Up
+        | _, Some (Character 'n') -> Some Page_down
+        | _, Some (Character 'N') -> Some Page_up
+        | _, Some (Character '/') -> Some Filter
+        | _, Some (Character 's') -> Some Sort
+        | _, Some (Character 'c') -> Some (Cycle Corner)
+        | _, Some (Character 'g') -> Some (Cycle Group)
+        | _, Some (Character 'p') -> Some (Cycle Producer)
+        | _, Some (Character 'v') -> Some Near
+        | _, Some (Character 't') -> Some Stage
+        | _, Some (Character 'r') -> Some Refresh
+        | _, Some (Character 'd') -> Some Info
+        | Key_press { key = Arrow `Right; mods = [] }, _ -> Some Page_down
+        | Key_press { key = Arrow `Left; mods = [] }, _ -> Some Page_up
+        | _ -> None)
+    in
+    let operation =
+      Option.bind action ~f:(fun action ->
+        let width, height =
+          Option.value_map session.last_dimensions ~default:(80, 24) ~f:(fun dimensions ->
+            if Option.is_none (Host.timing_pane session.host tile)
+            then Host_view.inspection_viewport dimensions
+            else (
+              let _, _, layout = Host_view.tile_layout session.host dimensions in
+              List.find layout ~f:(fun (candidate, _) ->
+                Workspace.Tile_id.equal candidate.id tile.id)
+              |> Option.value_map ~default:(80, 24) ~f:(fun (_, geometry) ->
+                let _, _, _, width, height =
+                  Host_view.body_geometry
+                    session.host
+                    tile
+                    ~width:geometry.width
+                    ~height:geometry.height
+                in
+                width, height)))
+        in
+        let inspection, operation =
+          match Host.timing_pane session.host tile with
+          | None -> Inspection_view.input ~width ~height view action
+          | Some pane ->
+            let local = Host.local session.host tile.id in
+            let view, scroll, operation =
+              Timing_workspace.input ~pane ~scroll:local.scroll ~width ~height view action
+            in
+            let view =
+              Option.value_map
+                session.asic
+                ~default:view
+                ~f:(Inspection_view.reconcile view)
+            in
+            let operation =
+              match operation with
+              | Some (Asic.Operation.Inspect_detail _) when Option.is_some view.detail ->
+                None
+              | other -> other
+            in
+            session.host <- Host.set_local session.host tile.id { local with scroll };
+            Some view, operation
+        in
+        let local = Host.local session.host tile.id in
+        let inspection_generation =
+          Option.value_map inspection ~default:local.inspection_generation ~f:(fun v ->
+            v.generation)
+        in
+        session.host <- Host.set_inspection session.host tile.id inspection;
+        if Option.is_none (Host.timing_pane session.host tile)
+        then
+          session.host
+          <- Host.set_local
+               session.host
+               tile.id
+               { (Host.local session.host tile.id) with inspection_generation };
+        Option.bind operation ~f:(fun operation ->
+          Option.map inspection ~f:(fun view ->
+            operation, (tile.id, Inspection_view.capture view operation))))
+    in
+    Some
+      (Option.value_map
+         operation
+         ~default:Bonsai_term.Effect.Ignore
+         ~f:(fun (operation, inspection_request) ->
+           Bonsai_term.Effect.of_deferred_thunk (fun () ->
+             asic_request ~inspection_request session operation)))
+  | _, Some (tile, view)
+    when (not bypass)
+         &&
+         match input with
+         | Some (Character 'b') -> true
+         | _ -> false ->
+    let reference =
+      match view.reading with
+      | Some r -> Some r.artifact
+      | None -> List.nth view.catalog view.selected
+    in
+    let selected =
+      let open Or_error.Let_syntax in
+      let%bind viewer =
+        Or_error.of_option
+          session.artifact_binary_viewer
+          ~error:
+            (Error.of_string
+               "Binary view disabled; configure --artifact-binary-viewer \
+                ABSOLUTE_EXECUTABLE")
+      in
+      let%bind reference =
+        Or_error.of_option
+          reference
+          ~error:(Error.of_string "Select a known physical file")
+      in
+      let%bind () =
+        if List.exists view.catalog ~f:(Artifact_export.same_reference reference)
+        then Ok ()
+        else Or_error.error_string "Artifact reference changed"
+      in
+      let%map () = Artifact_binary_export.eligible reference in
+      viewer, reference
+    in
+    (match selected with
+     | Error e ->
+       artifact_export_notice session tile.id (Error.to_string_hum e);
+       Some Bonsai_term.Effect.Ignore
+     | Ok (viewer, reference) ->
+       Some
+         (Bonsai_term.Effect.of_deferred_thunk (fun () ->
+            export_artifact_binary session tile.id ~viewer reference)))
+  | _, Some (tile, view)
+    when (not bypass)
+         &&
+         match input with
+         | Some (Character 'x') -> true
+         | _ -> false ->
+    (match Artifact_view.external_reference view ~viewer:session.artifact_viewer with
+     | Error error ->
+       artifact_export_notice session tile.id (Error.to_string_hum error);
+       Some Bonsai_term.Effect.Ignore
+     | Ok (viewer, reference) ->
+       Some
+         (Bonsai_term.Effect.of_deferred_thunk (fun () ->
+            export_artifact_text session tile.id ~viewer reference)))
+  | _, Some (tile, view) when not bypass ->
+    let action =
+      match event, input with
+      | _, Some Host.Enter -> Some Artifact_view.Open
+      | _, Some Escape -> Some Back
+      | Key_press { key = Arrow `Right; mods = [] }, _ | _, Some (Character 'n') ->
+        Some Next
+      | Key_press { key = Arrow `Left; mods = [] }, _ | _, Some (Character 'p') ->
+        Some Previous
+      | _, Some (Next | Character 'j') -> Some Down
+      | _, Some (Previous | Character 'k') -> Some Up
+      | _ -> None
+    in
+    let operation =
+      Option.bind action ~f:(fun action ->
+        let width, height =
+          Option.value_map session.last_dimensions ~default:(80, 24) ~f:(fun dimensions ->
+            dimensions.width, dimensions.height)
+        in
+        let artifacts, operation = Artifact_view.input ~width ~height view action in
+        let local = Host.local session.host tile.id in
+        let artifact_generation =
+          Option.value_map artifacts ~default:local.artifact_generation ~f:(fun view ->
+            view.generation)
+        in
+        session.host
+        <- Host.set_local
+             session.host
+             tile.id
+             { local with artifacts; artifact_generation };
+        Option.map operation ~f:(fun operation ->
+          let artifact_request =
+            Option.bind artifacts ~f:(fun view ->
+              capture_artifact_request session tile view operation)
+          in
+          operation, artifact_request))
+    in
+    Some
+      (Option.value_map
+         operation
+         ~default:Bonsai_term.Effect.Ignore
+         ~f:(fun (operation, artifact_request) ->
+           Bonsai_term.Effect.of_deferred_thunk (fun () ->
+             asic_request ?artifact_request session operation)))
+  | _ -> host_handler_regular session event ~exit
+;;
+
+let host_handler session event ~exit =
+  if Host.is_interrupt event
+  then Some (exit ())
+  else (
+    reconcile_synthesis session;
+    match Host.route_inspection_filter_event session.host event with
+    | Filter_interrupt -> Some (exit ())
+    | Filter_handled host ->
+      session.host <- host;
+      Some Bonsai_term.Effect.Ignore
+    | Filter_pass -> host_handler_overlays session event ~exit)
 ;;
 
 let fs0_fixture scenario =
@@ -2708,6 +4412,28 @@ let fs0_fixture scenario =
     else registry
   in
   session.host <- Host.receive Host.empty registry;
+  if String.equal scenario "aesthetic-overview"
+  then (
+    let registry =
+      apply
+        registry
+        (Create_workspace
+           { window = overview.window; name = "Testing"; context = registry.main_context })
+    in
+    let registry =
+      List.fold
+        [ "live-status"; "workspace-tabs"; "stage-checklist" ]
+        ~init:registry
+        ~f:(fun registry kind ->
+          apply
+            registry
+            (Create_tile
+               { workspace = overview.id
+               ; kind
+               ; geometry = { x = 0; y = 0; width = 36; height = 12 }
+               }))
+    in
+    session.host <- Host.receive session.host registry);
   List.iter registry.tiles ~f:(fun tile ->
     if String.equal tile.kind "logs"
        || String.equal tile.kind "project-tests"
@@ -2786,7 +4512,7 @@ let capture_appearance_frames ~directory =
   Core_unix.mkdir_p directory;
   List.iter Appearance.Preset.all ~f:(fun preset ->
     List.iter
-      [ "synthesis-a"; "timing"; "pinned-synthesis"; "palette" ]
+      [ "aesthetic-overview"; "synthesis-a"; "timing"; "pinned-synthesis"; "palette" ]
       ~f:(fun scenario ->
         List.iter Appearance.Density.all ~f:(fun density ->
           List.iter capture_dimensions ~f:(fun dimensions ->
@@ -2816,102 +4542,119 @@ let capture_appearance_frames ~directory =
 
 let tui session ~exit ~dimensions graph =
   let open Bonsai_term in
-  let poll = Effect.of_deferred_thunk (fun () -> refresh session) in
+  (* Session navigation is currently mutable. Give those mutations a reactive invalidation
+     edge instead of waiting for the display clock to repaint. The clock below remains for
+     time-dependent displays, not input acknowledgement. *)
+  let revision, update_revision = Bonsai.state' 0 graph in
+  let invalidate update = update (fun revision -> revision + 1) in
+  let poll =
+    Bonsai.map update_revision ~f:(fun update ->
+      Effect.bind
+        (Effect.of_deferred_thunk (fun () -> refresh session))
+        ~f:(fun () -> invalidate update))
+  in
   Bonsai.Clock.every
     ~when_to_start_next_effect:`Wait_period_after_previous_effect_finishes_blocking
     ~trigger_on_activate:true
     (Bonsai.return (Time_ns.Span.of_ms 500.))
-    (Bonsai.return poll)
+    poll
     graph;
   let view =
-    Bonsai.map2
+    Bonsai.map3
       dimensions
       (Bonsai.Clock.approx_now ~tick_every:(Time_ns.Span.of_ms 100.) graph)
-      ~f:(fun dimensions _now -> render session dimensions)
+      revision
+      ~f:(fun dimensions _now _revision -> render session dimensions)
+  in
+  let handle (event : Event.t) =
+    if Host.is_interrupt event
+    then exit ()
+    else (
+      let hosted =
+        if Option.is_some session.host.registry
+           && Option.is_none session.hierarchy_view
+           && Option.is_none session.artifact_view
+           && not session.show_connection_details
+        then host_handler session event ~exit
+        else None
+      in
+      match hosted with
+      | Some effect -> effect
+      | None ->
+        (match event with
+         | Key_press { key; mods = [] } when key_is 'q' key -> exit ()
+         | Key_press { key; mods = [ Ctrl ] } when key_is 'c' key || key_is 'C' key ->
+           exit ()
+         | Key_press { key; mods = [] } when key_is 'b' key ->
+           Effect.of_deferred_thunk (fun () -> submit session `Build)
+         | Key_press { key; mods = [] } when key_is 't' key ->
+           Effect.of_deferred_thunk (fun () -> submit session `Test)
+         | Key_press { key; mods = [] } when key_is 'c' key ->
+           Effect.of_deferred_thunk (fun () -> cancel_selected session)
+         | Key_press { key; mods = [] } when key_is 'i' key ->
+           Effect.of_deferred_thunk (fun () -> refresh_integration session)
+         | Key_press { key; mods = [] } when key_is 'n' key ->
+           cycle_target session;
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'm' key ->
+           cycle_configuration session;
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'g' key ->
+           Effect.of_deferred_thunk (fun () -> generate_rtl session)
+         | Key_press { key; mods = [] } when key_is 'a' key ->
+           cycle_artifact session;
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'v' key ->
+           Effect.of_deferred_thunk (fun () -> inspect_artifact session)
+         | Key_press { key; mods = [] } when key_is 'h' key ->
+           Effect.of_deferred_thunk (fun () -> inspect_hierarchy session)
+         | Key_press { key; mods = [] } when key_is 'u' key ->
+           move_hierarchy_selection session (-1);
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'o' key ->
+           move_hierarchy_selection session 1;
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'e' key ->
+           toggle_hierarchy_expansion session;
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'j' key ->
+           let count = List.length (project_jobs session) in
+           session.selected <- Int.min (Int.max 0 (count - 1)) (session.selected + 1);
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'k' key ->
+           session.selected <- Int.max 0 (session.selected - 1);
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'd' key ->
+           session.show_connection_details <- not session.show_connection_details;
+           session.connection_details_scroll <- 0;
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is '[' key ->
+           if session.show_connection_details
+           then
+             session.connection_details_scroll
+             <- Int.max 0 (session.connection_details_scroll - 1)
+           else
+             Option.iter session.hierarchy_view ~f:(fun view ->
+               view.pane_scroll <- Int.max 0 (view.pane_scroll - 1));
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is ']' key ->
+           if session.show_connection_details
+           then session.connection_details_scroll <- session.connection_details_scroll + 1
+           else
+             Option.iter session.hierarchy_view ~f:(fun view ->
+               view.pane_scroll <- view.pane_scroll + 1);
+           Effect.Ignore
+         | Key_press { key; mods = [] } when key_is 'r' key ->
+           Effect.of_deferred_thunk (fun () -> reconnect session)
+         | _ -> Effect.Ignore))
   in
   let handler =
-    Bonsai.return (fun (event : Event.t) ->
-      if Host.is_interrupt event
-      then exit ()
-      else (
-        let hosted =
-          if Option.is_some session.host.registry
-             && Option.is_none session.hierarchy_view
-             && Option.is_none session.artifact_view
-             && not session.show_connection_details
-          then host_handler session event ~exit
-          else None
-        in
-        match hosted with
-        | Some effect -> effect
-        | None ->
-          (match event with
-           | Key_press { key; mods = [] } when key_is 'q' key -> exit ()
-           | Key_press { key; mods = [ Ctrl ] } when key_is 'c' key || key_is 'C' key ->
-             exit ()
-           | Key_press { key; mods = [] } when key_is 'b' key ->
-             Effect.of_deferred_thunk (fun () -> submit session `Build)
-           | Key_press { key; mods = [] } when key_is 't' key ->
-             Effect.of_deferred_thunk (fun () -> submit session `Test)
-           | Key_press { key; mods = [] } when key_is 'c' key ->
-             Effect.of_deferred_thunk (fun () -> cancel_selected session)
-           | Key_press { key; mods = [] } when key_is 'i' key ->
-             Effect.of_deferred_thunk (fun () -> refresh_integration session)
-           | Key_press { key; mods = [] } when key_is 'n' key ->
-             cycle_target session;
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is 'm' key ->
-             cycle_configuration session;
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is 'g' key ->
-             Effect.of_deferred_thunk (fun () -> generate_rtl session)
-           | Key_press { key; mods = [] } when key_is 'a' key ->
-             cycle_artifact session;
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is 'v' key ->
-             Effect.of_deferred_thunk (fun () -> inspect_artifact session)
-           | Key_press { key; mods = [] } when key_is 'h' key ->
-             Effect.of_deferred_thunk (fun () -> inspect_hierarchy session)
-           | Key_press { key; mods = [] } when key_is 'u' key ->
-             move_hierarchy_selection session (-1);
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is 'o' key ->
-             move_hierarchy_selection session 1;
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is 'e' key ->
-             toggle_hierarchy_expansion session;
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is 'j' key ->
-             let count = List.length (project_jobs session) in
-             session.selected <- Int.min (Int.max 0 (count - 1)) (session.selected + 1);
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is 'k' key ->
-             session.selected <- Int.max 0 (session.selected - 1);
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is 'd' key ->
-             session.show_connection_details <- not session.show_connection_details;
-             session.connection_details_scroll <- 0;
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is '[' key ->
-             if session.show_connection_details
-             then
-               session.connection_details_scroll
-               <- Int.max 0 (session.connection_details_scroll - 1)
-             else
-               Option.iter session.hierarchy_view ~f:(fun view ->
-                 view.pane_scroll <- Int.max 0 (view.pane_scroll - 1));
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is ']' key ->
-             if session.show_connection_details
-             then
-               session.connection_details_scroll <- session.connection_details_scroll + 1
-             else
-               Option.iter session.hierarchy_view ~f:(fun view ->
-                 view.pane_scroll <- view.pane_scroll + 1);
-             Effect.Ignore
-           | Key_press { key; mods = [] } when key_is 'r' key ->
-             Effect.of_deferred_thunk (fun () -> reconnect session)
-           | _ -> Effect.Ignore)))
+    Bonsai.map update_revision ~f:(fun update event ->
+      let effect = handle event in
+      (* Publish local state immediately; publish any deferred response when it completes
+         too. Do not await a provider/HTTP read before local feedback. *)
+      Effect.Many
+        [ invalidate update; Effect.bind effect ~f:(fun () -> invalidate update) ])
   in
   ~view, ~handler
 ;;
@@ -3279,6 +5022,8 @@ let run_legacy
   ~refresh_integration:refresh_requested
   ~wait
   ~diagnostics_file
+  ~artifact_viewer
+  ~artifact_binary_viewer
   ()
   =
   let diagnostics_file =
@@ -3334,6 +5079,8 @@ let run_legacy
       match created with
       | Error message -> return (Or_error.error_string message)
       | Ok session ->
+        session.artifact_viewer <- artifact_viewer;
+        session.artifact_binary_viewer <- artifact_binary_viewer;
         reconcile_selection session;
         if plain || not (Core_unix.isatty Core_unix.stdout)
         then (
@@ -3478,6 +5225,8 @@ let run
   ~refresh_integration
   ~wait
   ~diagnostics_file
+  ~artifact_viewer
+  ~artifact_binary_viewer
   ()
   =
   let fail message =
@@ -3513,6 +5262,8 @@ let run
         ~refresh_integration
         ~wait
         ~diagnostics_file
+        ~artifact_viewer
+        ~artifact_binary_viewer
         ()
   else if List.count
             [ Option.is_some asic_operation
@@ -3642,6 +5393,26 @@ let command =
          "--artifact"
          (optional string)
          ~doc:"ID retrieve artifact content in plain mode"
+     and artifact_viewer =
+       flag
+         "--artifact-viewer"
+         (optional
+            (Command.Arg_type.create (fun path ->
+               Artifact_export.executable path |> Or_error.ok_exn)))
+         ~doc:
+           "ABSOLUTE_EXECUTABLE enable x to export sanitized ASIC text to a private \
+            local .txt and open it (no shell; disabled by default)"
+     and artifact_binary_viewer =
+       flag
+         "--artifact-binary-viewer"
+         ~aliases:[ "--simulation-viewer" ]
+         (optional
+            (Command.Arg_type.create (fun path ->
+               Artifact_binary_export.executable path |> Or_error.ok_exn)))
+         ~doc:
+           "ABSOLUTE_EXECUTABLE external viewer for verified ASIC binary files (b) and \
+            simulation traces (palette, <=64 MiB); alias --simulation-viewer; receives \
+            one private terminal-host path, no shell; disabled by default"
      and hierarchy =
        flag
          "--hierarchy"
@@ -3722,7 +5493,9 @@ let command =
          ~hierarchy
          ~refresh_integration
          ~wait
-         ~diagnostics_file)
+         ~diagnostics_file
+         ~artifact_viewer
+         ~artifact_binary_viewer)
 ;;
 
 let () = Command_unix.run command

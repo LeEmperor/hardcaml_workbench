@@ -1,0 +1,996 @@
+open! Core
+open Hardcaml_workbench_protocol
+open Bonsai_term
+
+(** Pure utility tiles. Only explicit per-stage observations fill in a checklist;
+    aggregate completion and metrics never stand in for stage evidence. *)
+module Status = struct
+  type t =
+    | Unknown
+    | Not_requested
+    | Pending
+    | Running
+    | Completed
+    | Failed
+    | Skipped
+    | Cancelled
+    | Unsupported
+    | Unrecognized of string
+  [@@deriving compare, equal, sexp]
+
+  let label = function
+    | Unknown -> "not reported"
+    | Not_requested -> "not requested"
+    | Pending -> "pending"
+    | Running -> "running"
+    | Completed -> "completed"
+    | Failed -> "failed"
+    | Skipped -> "skipped"
+    | Cancelled -> "cancelled"
+    | Unsupported -> "unsupported"
+    | Unrecognized value -> "unknown: " ^ value
+  ;;
+end
+
+module Role = struct
+  type t =
+    | Heading
+    | Foreground
+    | Muted
+    | Active
+    | Running
+    | Success
+    | Warning
+    | Failure
+  [@@deriving compare, equal, sexp]
+end
+
+type row =
+  { label : string
+  ; value : string
+  ; role : Role.t
+  ; status : Status.t option
+  ; active : bool
+  ; workspace : Workspace.Workspace_id.t option
+  ; details : string list
+  ; display_run : Run_ref.t option
+  }
+
+let row
+  ?(role = Role.Foreground)
+  ?status
+  ?(active = false)
+  ?workspace
+  ?(details = [])
+  ?display_run
+  label
+  value
+  =
+  { label; value; role; status; active; workspace; details; display_run }
+;;
+
+let status_role : Status.t -> Role.t = function
+  | Unknown | Not_requested | Unsupported | Unrecognized _ -> Muted
+  | Pending | Skipped | Cancelled -> Warning
+  | Running -> Running
+  | Completed -> Success
+  | Failed -> Failure
+;;
+
+(** [requested=false] is not allowed to erase an observed outcome. A completed stage from
+    an earlier invocation can legitimately be outside the current request. *)
+let stage_status (stage : Stage.t) : Status.t =
+  match stage.status with
+  | Not_run -> if stage.requested then Pending else Not_requested
+  | Running -> Running
+  | Completed -> Completed
+  | Failed _ -> Failed
+  | Skipped _ -> Skipped
+;;
+
+let stage_row (stage : Stage.t) =
+  let status = stage_status stage in
+  let reason =
+    match stage.status with
+    | Failed { reason } | Skipped { reason } -> [ "Reason: " ^ reason ]
+    | Not_run | Running | Completed -> []
+  in
+  row
+    ~role:(status_role status)
+    ~status
+    ~details:([ sprintf "Requested: %b" stage.requested ] @ reason)
+    stage.name
+    (Status.label status)
+;;
+
+let default_stages = [ "Synthesis"; "Placement"; "CTS"; "Routing"; "Checks" ]
+let run_identity (run : Run_ref.t) = Backend_id.to_string run.backend ^ "/" ^ run.id
+
+let asic_stage_status : Asic.Stage.Status.t -> Status.t = function
+  | Pending -> Pending
+  | Running -> Running
+  | Completed -> Completed
+  | Failed -> Failed
+  | Skipped -> Skipped
+  | Cancelled -> Cancelled
+  | Not_requested -> Not_requested
+  | Unsupported -> Unsupported
+  | Unknown value -> Unrecognized value
+;;
+
+let asic_stage_row ~run ~selected (stage : Asic.Stage.t) =
+  let status = asic_stage_status stage.status in
+  row
+    ~role:(status_role status)
+    ~status
+    ~active:selected
+    ~details:
+      ([ "Run: " ^ run_identity run
+       ; "Stage ID: " ^ stage.id
+       ; sprintf "Requested: %b" stage.requested
+       ; "Reason: " ^ Option.value stage.reason ~default:"not reported"
+       ]
+       @ (match stage.status, stage.action with
+          | Unsupported, _ -> [ "Action: unavailable (unsupported stage)" ]
+          | _, None -> [ "Action: unavailable (no advertised stage selection)" ]
+          | _, Some _ ->
+            [ "Action: r prepares NEW run through endpoint (never resume this run)" ])
+       @ Option.to_list
+           (Option.map stage.action ~f:(fun selection ->
+              "Advertised selection: "
+              ^ Sexp.to_string_hum (Asic.Selection.sexp_of_t selection))))
+    stage.name
+    (Status.label status)
+;;
+
+(** Compact Overview keeps the six explicit stage observations ahead of aggregate facts.
+    Callers retain full rows for inspection; this only controls presentation. *)
+let checklist_rows ?(compact = false) ~stages ~aggregate () =
+  if not compact
+  then aggregate @ stages
+  else (
+    match stages with
+    | [] -> aggregate
+    | first :: rest ->
+      { first with
+        details =
+          first.details
+          @ List.concat_map aggregate ~f:(fun row ->
+            (row.label ^ ": " ^ row.value) :: row.details)
+      }
+      :: rest)
+;;
+
+let%test_unit "compact checklist prioritizes explicit stages and retains aggregate \
+               inspection"
+  =
+  let stages =
+    List.init 6 ~f:(fun i -> row ~status:Status.Unknown (Int.to_string i) "not reported")
+  in
+  let aggregate = [ row ~details:[ "source digest" ] "Accept (agg.)" "pass" ] in
+  let compact = checklist_rows ~compact:true ~stages ~aggregate () in
+  assert (List.length compact = 6);
+  assert (
+    List.for_all compact ~f:(fun r -> Option.equal Status.equal r.status (Some Unknown)));
+  assert (List.mem (List.hd_exn compact).details "Accept (agg.): pass" ~equal:String.equal);
+  assert (List.mem (List.hd_exn compact).details "source digest" ~equal:String.equal);
+  assert (List.length (checklist_rows ~stages ~aggregate ()) = 7)
+;;
+
+let execution ~asic ~run =
+  Option.bind asic ~f:(fun (snapshot : Asic.Snapshot.t) ->
+    List.find snapshot.runs ~f:(fun execution -> Run_ref.equal execution.run run))
+;;
+
+let observed_stages ~asic ~run =
+  execution ~asic ~run |> Option.value_map ~default:[] ~f:(fun run -> run.stages)
+;;
+
+(** Only shorten ASCII opaque identifiers. Human/provider labels remain intact and are
+    clipped by display cells during rendering, never by UTF-8 byte offsets. *)
+let short_id text =
+  if String.for_all text ~f:(fun char -> Char.to_int char < 128)
+     && String.length text > 15
+  then String.prefix text 6 ^ "..." ^ String.suffix text 6
+  else text
+;;
+
+let run_label (run : Run_ref.t) =
+  Option.filter run.label ~f:(fun label -> not (String.is_empty (String.strip label)))
+  |> Option.value ~default:run.id
+;;
+
+(** Keep combining marks attached to their preceding scalar. All clipping budgets are
+    terminal cells, and a suffix is contiguous (never skip a wide scalar to fill a gap). *)
+let display_clusters text =
+  let rec loop offset acc =
+    if offset >= String.length text
+    then List.rev acc
+    else (
+      let decoded = Stdlib.String.get_utf_8_uchar text offset in
+      let length = Stdlib.Uchar.utf_decode_length decoded in
+      let scalar = String.sub text ~pos:offset ~len:length in
+      let acc =
+        match acc with
+        | previous :: rest
+          when View.uchar_tty_width (Stdlib.Uchar.utf_decode_uchar decoded) = 0 ->
+          (previous ^ scalar) :: rest
+        | _ -> scalar :: acc
+      in
+      loop (offset + length) acc)
+  in
+  loop 0 []
+;;
+
+let cell_width text = View.width (View.text text)
+
+let take_cells ~width clusters =
+  let rec loop remaining = function
+    | [] -> []
+    | cluster :: rest ->
+      let cells = cell_width cluster in
+      if cells > remaining then [] else cluster :: loop (remaining - cells) rest
+  in
+  loop (Int.max 0 width) clusters
+;;
+
+let fit_run_label ~width (run : Run_ref.t) =
+  let width = Int.max 0 width in
+  let head = run_label run in
+  let full = if String.equal head run.id then head else head ^ " · " ^ run.id in
+  if cell_width full <= width
+  then full
+  else if width <= 2
+  then String.concat (take_cells ~width (display_clusters head))
+  else (
+    let tail_budget = Int.min 8 (Int.max 1 (width - 2)) in
+    let tail =
+      display_clusters run.id
+      |> List.rev
+      |> take_cells ~width:tail_budget
+      |> List.rev
+      |> String.concat
+    in
+    let prefix =
+      display_clusters head
+      |> take_cells ~width:(width - cell_width tail - 1)
+      |> String.concat
+    in
+    prefix ^ "…" ^ tail)
+;;
+
+(** Status vocabularies are field-specific. An unfamiliar value remains visible but
+    neutral: e.g. operation completion cannot turn acceptance into a pass. These aggregate
+    facts deliberately have no [Status.t] stage/checklist marker. *)
+module Fact = struct
+  type t =
+    | Operation
+    | Physical_completion
+    | Verdict
+    | Summary_completion
+
+  let role field value : Role.t =
+    match field, value with
+    | Operation, "completed"
+    | Physical_completion, "full"
+    | Verdict, "pass"
+    | Summary_completion, "completed" -> Success
+    | Operation, "failed" | Physical_completion, "failed" | Verdict, "fail" -> Failure
+    | Operation, ("running" | "starting") -> Running
+    | Operation, ("interrupted" | "cancelled" | "queued")
+    | Physical_completion, ("partial" | "incomplete")
+    | Verdict, ("not_evaluated" | "not_requested" | "skipped") -> Warning
+    | _ -> Muted
+  ;;
+end
+
+let freshness_label : Asic.Summary.Freshness.t -> string * Role.t = function
+  | Validated -> "validated", Success
+  | Cached_unverified -> "cached/unverified", Warning
+  | Missing_source -> "source unavailable", Warning
+  | Refresh_failed _ -> "refresh failed", Warning
+;;
+
+(** Compose only with a summary whose [run] matches the selected run; the caller already
+    has that identity when loading host data. Cached facts retain their reported verdict,
+    with freshness visible on every row and in inspection. No metrics, check counts, or
+    summary completion are used to populate stages. *)
+let summary_rows ?(freshness = true) (summary : Asic.Summary.t) =
+  let show_freshness = freshness in
+  let freshness, freshness_role = freshness_label summary.freshness in
+  let details =
+    [ "Run: " ^ run_identity summary.run
+    ; "Freshness: " ^ freshness
+    ; "Observed at: " ^ summary.observed_at
+    ; "Source digest: " ^ summary.source_digest
+    ; "Execution file: " ^ summary.execution_file
+    ; "Producer: " ^ summary.producer
+    ]
+    @
+    match summary.freshness with
+    | Refresh_failed reason -> [ "Refresh error: " ^ reason ]
+    | Validated | Cached_unverified | Missing_source -> []
+  in
+  let fact ?(extra = []) field label value =
+    let visible = if String.is_empty value then "not reported" else value in
+    let visible =
+      match summary.freshness with
+      | Validated -> visible
+      | Cached_unverified | Missing_source | Refresh_failed _ ->
+        visible ^ " (" ^ freshness ^ ")"
+    in
+    row ~role:(Fact.role field value) ~details:(details @ extra) label visible
+  in
+  (if show_freshness || not (Asic.Summary.Freshness.equal summary.freshness Validated)
+   then [ row ~role:freshness_role ~details "Freshness" freshness ]
+   else [])
+  @
+  match summary.terminal with
+  | None ->
+    [ fact Summary_completion "Outcome (agg.)" summary.completion
+    ; fact Verdict "Accept (agg.)" summary.acceptance
+    ; row ~role:Muted ~details "Terminal result" "not imported"
+    ]
+  | Some terminal ->
+    let extra =
+      [ "Finalization attempt: " ^ terminal.attempt
+      ; "Results file: " ^ terminal.results_file
+      ; "Results digest: " ^ terminal.results_digest
+      ]
+    in
+    [ fact ~extra Operation "Operation (agg.)" terminal.operation_status
+    ; fact ~extra Physical_completion "Physical (agg.)" terminal.physical_completion
+    ; fact ~extra Verdict "Accept (agg.)" terminal.acceptance
+    ; fact ~extra Verdict "Timing (agg.)" terminal.timing_goal
+    ]
+    @
+    if List.is_empty terminal.checks
+    then
+      [ row ~role:Muted ~details:(details @ extra) "Checks (aggregate)" "not reported" ]
+    else
+      List.map terminal.checks ~f:(fun (check : Asic.Check.t) ->
+        fact
+          ~extra:
+            (extra
+             @ Option.to_list
+                 (Option.map check.reason ~f:(fun reason -> "Reason: " ^ reason))
+             @ Option.to_list
+                 (Option.map check.source ~f:(fun source -> "Source: " ^ source)))
+          Verdict
+          ("Check " ^ check.name ^ " (aggregate)")
+          check.status)
+;;
+
+(** [observation] must identify its run explicitly. [expected_stages] supplies labels
+    only, not a claim that work was requested. Matching is exact; extra observed stages
+    are preserved. Duplicate observations are ambiguous and never produce a pass. *)
+let stage_rows ?(expected_stages = default_stages) ~selected_run ~asic ~observation () =
+  let observed =
+    match selected_run, observation with
+    | Some selected, Some (run, stages) when Run_ref.equal selected run -> stages
+    | _ -> []
+  in
+  (* Preserve the requested checklist order, followed by any provider-specific names. *)
+  let names =
+    List.stable_dedup
+      (expected_stages @ List.map observed ~f:(fun (s : Stage.t) -> s.name))
+      ~compare:String.compare
+  in
+  let missing_reason =
+    match selected_run, observation with
+    | None, _ -> "No run selected"
+    | Some selected, Some (run, _) when not (Run_ref.equal selected run) ->
+      "Stage observation belongs to another run"
+    | Some _, _ -> "No explicit stage status reported"
+  in
+  let checklist =
+    List.map names ~f:(fun name ->
+      match List.filter observed ~f:(fun s -> String.equal s.name name) with
+      | [ stage ] -> stage_row stage
+      | stages ->
+        row
+          ~role:Muted
+          ~status:Unknown
+          ~details:
+            [ (if List.is_empty stages
+               then missing_reason
+               else "Conflicting/duplicate stage observations; inspect source")
+            ]
+          name
+          (Status.label Unknown))
+  in
+  let process =
+    match selected_run, asic with
+    | Some run, Some (snapshot : Asic.Snapshot.t) ->
+      (match List.find snapshot.runs ~f:(fun r -> Run_ref.equal r.run run) with
+       | None -> [ row ~role:Muted "Observation" "selected run unavailable" ]
+       | Some execution ->
+         [ row
+             ~role:Muted
+             ~details:
+               ([ "Run: " ^ run_identity run; "Process observation, not stage evidence" ]
+                @ Option.to_list execution.error)
+             "Process"
+             (if String.is_empty execution.status
+              then "not reported"
+              else execution.status)
+         ])
+    | Some _, None -> [ row ~role:Muted "Observation" "ASIC not loaded" ]
+    | None, _ -> [ row ~role:Muted "Run" "none selected" ]
+  in
+  checklist @ process
+;;
+
+(** Registry names are authoritative. Missing standard destinations are visible but have
+    no [workspace] target; the parent can disable input or offer creation. *)
+let navigation_rows ~(snapshot : Workspace.Snapshot.t) ~active_workspace =
+  let existing =
+    List.map snapshot.workspaces ~f:(fun w ->
+      let active =
+        Option.value_map
+          active_workspace
+          ~default:false
+          ~f:(Workspace.Workspace_id.equal w.id)
+      in
+      row
+        ~role:(if active then Active else Foreground)
+        ~active
+        ~workspace:w.id
+        ~details:
+          [ "Workspace: " ^ Workspace.Workspace_id.to_string w.id
+          ; "Window: " ^ Workspace.Window_id.to_string w.window
+          ; "Context: " ^ Workspace.Context_id.to_string w.context
+          ]
+        w.name
+        (if active then "active" else ""))
+  in
+  existing
+  @ List.filter_map [ "Overview"; "Timing"; "Testing" ] ~f:(fun name ->
+    if List.exists snapshot.workspaces ~f:(fun w -> String.equal w.name name)
+    then None
+    else Some (row ~role:Muted name "not created"))
+;;
+
+(** Connection is verbatim: no green/connected inference from an arbitrary transport
+    string. Project and run are explicit host inputs, never guessed from other runs. *)
+let status_rows
+  ~(snapshot : Workspace.Snapshot.t)
+  ~active_workspace
+  ~(project : Project.t option)
+  ~(selected_run : Run_ref.t option)
+  ~connection
+  =
+  let arrangement =
+    Option.bind active_workspace ~f:(fun id ->
+      List.find snapshot.workspaces ~f:(fun w -> Workspace.Workspace_id.equal w.id id))
+  in
+  let linkage =
+    match arrangement with
+    | None -> row ~role:Muted "Context" "workspace unavailable"
+    | Some w ->
+      (match
+         List.find snapshot.contexts ~f:(fun c ->
+           Workspace.Context_id.equal c.id w.context)
+       with
+       | None -> row ~role:Warning "Context" "unavailable"
+       | Some context ->
+         let shared =
+           Workspace.Context_id.equal context.id snapshot.main_context
+           || List.count snapshot.workspaces ~f:(fun other ->
+                Workspace.Context_id.equal other.context context.id)
+              > 1
+         in
+         row
+           ~details:
+             [ "Context: " ^ Workspace.Context_id.to_string context.id
+             ; "Workspace: " ^ Workspace.Workspace_id.to_string w.id
+             ; sprintf "Selection revision: %d" context.selection_revision
+             ]
+           "Context"
+           ((if shared then "Linked: " else "Independent: ") ^ context.name))
+  in
+  [ row "Connection" (if String.is_empty connection then "not reported" else connection)
+  ; row
+      ~details:
+        (Option.to_list
+           (Option.map project ~f:(fun p -> "Project: " ^ Project_id.to_string p.id)))
+      "Project"
+      (Option.value_map project ~default:"none open" ~f:(fun p -> p.name))
+  ; linkage
+  ; row
+      ?display_run:selected_run
+      ~details:
+        (Option.to_list
+           (Option.map selected_run ~f:(fun run -> "Run: " ^ run_identity run)))
+      "Run"
+      (Option.value_map selected_run ~default:"none selected" ~f:run_label)
+  ]
+;;
+
+let marker (appearance : Appearance.t) (row : row) =
+  match appearance.icons with
+  | None_ -> ""
+  | Ascii ->
+    (match row.status with
+     | Some Completed -> "[+] "
+     | Some Failed -> "[x] "
+     | Some Running -> "[>] "
+     | Some Pending -> "[ ] "
+     | Some Skipped -> "[-] "
+     | Some Cancelled -> "[!] "
+     | Some Unsupported -> "[~] "
+     | Some Not_requested -> "[.] "
+     | Some (Unknown | Unrecognized _) -> "[?] "
+     | None -> if row.active then "> " else "")
+  | Unicode ->
+    (match row.status with
+     | Some Completed -> "✓ "
+     | Some Failed -> "✗ "
+     | Some Running -> "▶ "
+     | Some Pending -> "○ "
+     | Some Skipped -> "− "
+     | Some Cancelled -> "! "
+     | Some Unsupported -> "~ "
+     | Some Not_requested -> "· "
+     | Some (Unknown | Unrecognized _) -> "? "
+     | None -> if row.active then "◆ " else "")
+;;
+
+(** Map roles to the host's theme, e.g. [Active -> Host_view.Role.Selection]. Full values
+    and identity are available through [inspection_lines] before clipping. [title=None]
+    makes a headerless tile. No nested frame or background is imposed. *)
+let row_spans ~appearance ~width ~indent row =
+  let prefix =
+    indent
+    ^ (if row.active && Option.is_some row.status then "> " else "")
+    ^ marker appearance row
+  in
+  let label = row.label ^ if String.is_empty row.value then "" else ": " in
+  let value =
+    Option.value_map row.display_run ~default:row.value ~f:(fun run ->
+      fit_run_label ~width:(Int.max 0 (width - cell_width (prefix ^ label))) run)
+  in
+  [ (if row.active then Role.Active else row.role), prefix
+  ; Role.Foreground, label
+  ; row.role, value
+  ]
+;;
+
+let render_row ?selected_bg ~appearance ~attrs ~width ~indent row =
+  View.hcat
+    (List.map (row_spans ~appearance ~width ~indent row) ~f:(fun (role, text) ->
+       let attrs =
+         attrs role
+         @ Option.value_map selected_bg ~default:[] ~f:(fun bg ->
+           if row.active then [ Attr.bg bg ] else [])
+       in
+       View.text ~attrs text))
+;;
+
+let render ?title ?selected_bg ~(appearance : Appearance.t) ~attrs ~width ~height rows =
+  let width = Int.max 0 width
+  and height = Int.max 0 height in
+  let heading =
+    Option.to_list
+      (Option.map title ~f:(fun title ->
+         let title =
+           match appearance.preset with
+           | Instrument -> String.uppercase title
+           | Structured | Minimal | Studio | Structured_studio -> title
+         in
+         View.text ~attrs:(attrs Role.Heading) title))
+  in
+  let indent =
+    match appearance.density with
+    | Comfortable when width >= 30 -> " "
+    | Compact | Comfortable -> ""
+  in
+  let content =
+    List.map rows ~f:(render_row ?selected_bg ~appearance ~attrs ~width ~indent)
+  in
+  let view = View.vcat (List.take (heading @ content) height) in
+  let view =
+    View.crop
+      ~r:(Int.max 0 (View.width view - width))
+      ~b:(Int.max 0 (View.height view - height))
+      view
+  in
+  View.zcat [ view; View.rectangle ~width ~height () ]
+;;
+
+let inspection_lines rows =
+  List.concat_map rows ~f:(fun row ->
+    (row.label ^ if String.is_empty row.value then "" else ": " ^ row.value)
+    :: row.details)
+;;
+
+(** Horizontal presentation preserves the original stage record and provider order.
+    Display labels are never identities. Actions are carried verbatim, never executed. *)
+module Stage_strip = struct
+  type item =
+    { stage : Asic.Stage.t
+    ; row : row
+    }
+
+  type t =
+    { lines : item list list
+    ; selected : item option
+    ; selected_line : row
+    }
+
+  let text ~appearance item =
+    (if item.row.active then "> " else "")
+    ^ marker appearance item.row
+    ^ item.row.label
+    ^ ": "
+    ^ item.row.value
+  ;;
+
+  let model ~appearance ~width ~run ~selected_id stages =
+    let items =
+      List.map stages ~f:(fun (stage : Asic.Stage.t) ->
+        { stage
+        ; row =
+            asic_stage_row
+              ~run
+              ~selected:(Option.equal String.equal selected_id (Some stage.id))
+              stage
+        })
+    in
+    let lines, line, _ =
+      List.fold items ~init:([], [], 0) ~f:(fun (lines, line, used) item ->
+        let cells = View.width (View.text (text ~appearance item)) in
+        let gap = if List.is_empty line then 0 else 3 in
+        if (not (List.is_empty line)) && used + gap + cells > Int.max 1 width
+        then lines @ [ line ], [ item ], cells
+        else lines, line @ [ item ], used + gap + cells)
+    in
+    let lines = lines @ if List.is_empty line then [] else [ line ] in
+    let selected = List.find items ~f:(fun item -> item.row.active) in
+    let selected_line =
+      match selected with
+      | None -> row ~role:Muted "Selected stage" "not available"
+      | Some item ->
+        { item.row with
+          label = "Selected: " ^ item.stage.name ^ " [" ^ item.stage.id ^ "]"
+        ; details = item.row.details
+        }
+    in
+    { lines; selected; selected_line }
+  ;;
+
+  let render ?selected_bg ~appearance ~attrs ~width ~height t =
+    let width = Int.max 0 width
+    and height = Int.max 0 height in
+    let selected =
+      render
+        ?selected_bg
+        ~appearance
+        ~attrs
+        ~width
+        ~height:(Int.min 1 height)
+        [ t.selected_line ]
+    in
+    let lines =
+      List.take t.lines (Int.max 0 (height - 1))
+      |> List.map ~f:(fun line ->
+        View.hcat
+          (List.concat_mapi line ~f:(fun i item ->
+             (if i = 0 then [] else [ View.text ~attrs:(attrs Role.Muted) " | " ])
+             @ [ render_row ?selected_bg ~appearance ~attrs ~width ~indent:"" item.row ])))
+    in
+    (* Selection stays visible even when wrapping exceeds the available strip height. *)
+    let view = View.vcat (lines @ if height = 0 then [] else [ selected ]) in
+    let view =
+      View.crop
+        ~r:(Int.max 0 (View.width view - width))
+        ~b:(Int.max 0 (View.height view - height))
+        view
+    in
+    View.zcat [ view; View.rectangle ~width ~height () ]
+  ;;
+end
+
+let%test_unit "horizontal stages wrap long duplicate labels without changing \
+               identity/actions"
+  =
+  let action : Asic.Selection.t =
+    { flow = "flow"
+    ; profile = "profile"
+    ; endpoint = "exact-endpoint"
+    ; assignments = [ "X=1" ]
+    }
+  in
+  let stages =
+    List.init 6 ~f:(fun i ->
+      { Asic.Stage.id = Int.to_string i
+      ; name = String.make 80 'a'
+      ; status = Completed
+      ; requested = false
+      ; reason = None
+      ; action = Some action
+      })
+  in
+  let appearance = Appearance.default in
+  let t =
+    Stage_strip.model
+      ~appearance
+      ~width:80
+      ~run:Fs0_fixture.run_a
+      ~selected_id:(Some "4")
+      stages
+  in
+  assert (List.length t.lines = 6);
+  assert (Asic.Stage.equal (Option.value_exn t.selected).stage (List.nth_exn stages 4));
+  assert (
+    List.equal
+      Asic.Stage.equal
+      (List.concat t.lines |> List.map ~f:(fun item -> item.Stage_strip.stage))
+      stages);
+  List.iter
+    [ 0, 0; 20, 2; 80, 4; 120, 5; 240, 8 ]
+    ~f:(fun (width, height) ->
+      let view = Stage_strip.render ~appearance ~attrs:(fun _ -> []) ~width ~height t in
+      assert (View.width view = width && View.height view = height))
+;;
+
+let%test_unit "stage outcomes preserve request and observation distinctions" =
+  let check requested status expect =
+    [%test_result: Status.t] (stage_status { name = "stage"; requested; status }) ~expect
+  in
+  check false Not_run Not_requested;
+  check true Not_run Pending;
+  check false Completed Completed;
+  check true Running Running;
+  check true (Failed { reason = "tool error" }) Failed;
+  check false (Skipped { reason = "unsupported" }) Skipped
+;;
+
+let%test_unit "ASIC stage projection preserves every explicit status and full action" =
+  let run = Fs0_fixture.run_a in
+  let action : Asic.Selection.t =
+    { flow = "ordinary"
+    ; profile = "default"
+    ; endpoint = "route"
+    ; assignments = [ "X=1" ]
+    }
+  in
+  let cases : (Asic.Stage.Status.t * string * Role.t) list =
+    [ Pending, "pending", Warning
+    ; Running, "running", Running
+    ; Completed, "completed", Success
+    ; Failed, "failed", Failure
+    ; Cancelled, "cancelled", Warning
+    ; Skipped, "skipped", Warning
+    ; Not_requested, "not requested", Muted
+    ; Unsupported, "unsupported", Muted
+    ; Unknown "provider-future", "unknown: provider-future", Muted
+    ]
+  in
+  List.iter cases ~f:(fun (status, value, role) ->
+    let stage : Asic.Stage.t =
+      { id = "route-id"
+      ; name = "Routing"
+      ; status
+      ; requested = false
+      ; reason = Some "exact provider reason"
+      ; action = Some action
+      }
+    in
+    let row = asic_stage_row ~run ~selected:true stage in
+    [%test_result: string] row.value ~expect:value;
+    [%test_result: Role.t] row.role ~expect:role;
+    assert row.active;
+    let detail = inspection_lines [ row ] |> String.concat ~sep:"\n" in
+    List.iter
+      [ "Stage ID: route-id"
+      ; "Requested: false"
+      ; "exact provider reason"
+      ; "asic/fixture-A"
+      ]
+      ~f:(fun text -> assert (String.is_substring detail ~substring:text));
+    match status with
+    | Unsupported -> assert (String.is_substring detail ~substring:"unavailable")
+    | _ ->
+      assert (String.is_substring detail ~substring:"NEW run");
+      assert (String.is_substring detail ~substring:"X=1"))
+;;
+
+let%test_unit "aggregate colors require field-specific explicit facts" =
+  let check field value expect = [%test_result: Role.t] (Fact.role field value) ~expect in
+  check Operation "completed" Success;
+  check Verdict "completed" Muted;
+  check Physical_completion "completed" Muted;
+  check Physical_completion "full" Success;
+  check Physical_completion "incomplete" Warning;
+  check Verdict "pass" Success;
+  check Verdict "fail" Failure;
+  check Verdict "not_evaluated" Warning;
+  check Verdict "unknown" Muted;
+  check Verdict "future-provider-verdict" Muted;
+  check Verdict "" Muted;
+  [%test_result: string] (short_id "0123456789abcdefghijkl") ~expect:"012345...ghijkl"
+;;
+
+let%test_unit "cached summary facts retain freshness and do not acquire stage statuses" =
+  let summary : Asic.Summary.t =
+    { run =
+        { backend = Backend_id.of_string "asic"
+        ; id = "saved-run"
+        ; build = None
+        ; label = None
+        }
+    ; source_digest = "digest"
+    ; execution_file = "/saved/execution.json"
+    ; plan_identity = None
+    ; cell_count = Some 100
+    ; cells = []
+    ; metrics = []
+    ; terminal = None
+    ; timing = []
+    ; completion = "completed"
+    ; acceptance = "unknown"
+    ; producer = "saved producer"
+    ; observed_at = "saved observation"
+    ; freshness = Cached_unverified
+    }
+  in
+  let rows = summary_rows summary in
+  assert (List.length (summary_rows ~freshness:false summary) = List.length rows);
+  let validated = { summary with freshness = Validated } in
+  assert (
+    List.length (summary_rows ~freshness:false validated)
+    = List.length (summary_rows validated) - 1);
+  let completion = List.nth_exn rows 1 in
+  [%test_result: Role.t] completion.role ~expect:Success;
+  [%test_result: string] completion.value ~expect:"completed (cached/unverified)";
+  assert (List.for_all rows ~f:(fun row -> Option.is_none row.status));
+  assert (List.mem completion.details "Run: asic/saved-run" ~equal:String.equal);
+  let failed = summary_rows { summary with freshness = Refresh_failed "offline" } in
+  assert (
+    List.mem (List.hd_exn failed).details "Refresh error: offline" ~equal:String.equal);
+  let terminal : Asic.Terminal_result.t =
+    { attempt = "attempt"
+    ; results_file = "/saved/results.json"
+    ; results_digest = "results-digest"
+    ; operation_status = "completed"
+    ; physical_completion = "incomplete"
+    ; acceptance = "not_evaluated"
+    ; timing_goal = "unknown"
+    ; metrics = []
+    ; checks =
+        [ { name = "drc"
+          ; status = "fail"
+          ; reason = Some "violations"
+          ; source = Some "report"
+          }
+        ]
+    ; evidence = "{}"
+    }
+  in
+  let terminal_rows = summary_rows { summary with terminal = Some terminal } in
+  let find label =
+    List.find_exn terminal_rows ~f:(fun row -> String.equal row.label label)
+  in
+  [%test_result: Role.t] (find "Operation (agg.)").role ~expect:Success;
+  [%test_result: Role.t] (find "Physical (agg.)").role ~expect:Warning;
+  [%test_result: Role.t] (find "Accept (agg.)").role ~expect:Warning;
+  [%test_result: Role.t] (find "Timing (agg.)").role ~expect:Muted;
+  let drc = find "Check drc (aggregate)" in
+  [%test_result: Role.t] drc.role ~expect:Failure;
+  assert (List.mem drc.details "Reason: violations" ~equal:String.equal);
+  assert (List.mem drc.details "Source: report" ~equal:String.equal);
+  assert (List.for_all terminal_rows ~f:(fun row -> Option.is_none row.status))
+;;
+
+let%test_unit "process completion is not stage evidence; mismatched and duplicate \
+               observations are unknown"
+  =
+  let run id : Run_ref.t =
+    { backend = Backend_id.of_string "asic"; id; build = None; label = None }
+  in
+  let selected = run "selected" in
+  let stage : Stage.t = { name = "Synthesis"; requested = true; status = Completed } in
+  let asic : Asic.Snapshot.t =
+    { configured = true
+    ; flows = []
+    ; catalog_default = None
+    ; description_json = None
+    ; preview = None
+    ; runs =
+        [ { run = selected
+          ; reference = { attempt = "attempt"; stream_id = "stream" }
+          ; selection = None
+          ; stages = []
+          ; cursor = 0
+          ; status = "completed"
+          ; execution_file = None
+          ; error = None
+          }
+        ]
+    ; operations = []
+    ; launches = []
+    ; summaries = []
+    ; finalizations = []
+    ; artifacts = []
+    ; artifact_pages = []
+    ; artifact_byte_pages = []
+    ; inspections = []
+    ; inspection_details = []
+    ; cache_error = None
+    }
+  in
+  let check observation expect =
+    let rows =
+      stage_rows
+        ~expected_stages:[ "Synthesis" ]
+        ~selected_run:(Some selected)
+        ~asic:(Some asic)
+        ~observation
+        ()
+    in
+    [%test_result: Status.t option] (List.hd_exn rows).status ~expect:(Some expect)
+  in
+  check None Unknown;
+  check (Some (run "other", [ stage ])) Unknown;
+  check (Some (selected, [ stage; stage ])) Unknown;
+  check (Some (selected, [ stage ])) Completed
+;;
+
+let%test_unit "navigation retains registry identities and missing destinations are not \
+               actionable"
+  =
+  let snapshot =
+    Workspace.initial ~session_id:(Workspace.Session_id.of_string "session")
+  in
+  let active = (List.hd_exn snapshot.workspaces).id in
+  let rows = navigation_rows ~snapshot ~active_workspace:(Some active) in
+  let overview = List.find_exn rows ~f:(fun row -> String.equal row.label "Overview") in
+  assert overview.active;
+  assert (Option.equal Workspace.Workspace_id.equal overview.workspace (Some active));
+  let testing = List.find_exn rows ~f:(fun row -> String.equal row.label "Testing") in
+  assert (Option.is_none testing.workspace);
+  assert (not testing.active);
+  [%test_result: string] testing.value ~expect:"not created"
+;;
+
+let%test_unit "Session labels use actual cells and retain distinguishable hash suffixes" =
+  let run =
+    { Fs0_fixture.run_a with
+      label = Some "Placement customer design"
+    ; id = "opaque0123456789abcdef0123456789abcdef"
+    }
+  in
+  assert (
+    String.equal (fit_run_label ~width:100 run) ("Placement customer design · " ^ run.id));
+  let short = fit_run_label ~width:26 run in
+  assert (String.is_prefix short ~prefix:"Placement");
+  assert (String.is_suffix short ~suffix:"…89abcdef");
+  assert (cell_width short <= 26);
+  let other = { run with id = "opaque0123456789abcdef0123456789abcdea" } in
+  assert (not (String.equal short (fit_run_label ~width:26 other)));
+  List.iter [ ""; "   " ] ~f:(fun label ->
+    let unlabeled = { run with label = Some label } in
+    assert (String.is_prefix (fit_run_label ~width:26 unlabeled) ~prefix:"opaque");
+    assert (String.equal (fit_run_label ~width:100 unlabeled) run.id);
+    assert (Option.equal String.equal unlabeled.label (Some label)));
+  List.iter
+    [ run
+    ; { run with label = None }
+    ; { run with label = Some "界é customer"; id = "識別界éabcdef界é" }
+    ]
+    ~f:(fun run ->
+      List.iter (List.init 100 ~f:Fn.id) ~f:(fun width ->
+        let label = fit_run_label ~width run in
+        assert (Stdlib.String.is_valid_utf_8 label);
+        assert (cell_width label <= width)));
+  let rows =
+    [ row ~display_run:run ~details:[ "Run: " ^ run_identity run ] "Run" (run_label run) ]
+  in
+  let spans =
+    row_spans ~appearance:Appearance.default ~width:32 ~indent:" " (List.hd_exn rows)
+  in
+  assert (cell_width (String.concat (List.map spans ~f:snd)) <= 32);
+  assert (
+    List.mem (inspection_lines rows) ("Run: " ^ run_identity run) ~equal:String.equal)
+;;

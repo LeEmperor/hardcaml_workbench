@@ -1,0 +1,13 @@
+(test
+ (name test_asic_artifacts)
+ (libraries
+  core
+  core_unix
+  cryptokit
+  yojson
+  hardcaml_workbench_backend
+  hardcaml_workbench_protocol)
+ (preprocess
+  (pps ppx_jane))
+ (lint
+  (pps ppx_js_style)))

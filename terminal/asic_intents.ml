@@ -37,23 +37,30 @@ type t =
 
 let empty = { observed = []; unknown_probed = []; summary_requested = [] }
 let mem runs run = List.mem runs run ~equal:Run_ref.equal
-let live_status status = List.mem [ "allocated"; "observing" ] status ~equal:String.equal
+
+let live_status status =
+  List.mem
+    [ "allocated"; "observing"; "running"; "starting"; "queued" ]
+    status
+    ~equal:String.equal
+;;
 
 let terminal (run : Asic.Run.t) =
-  Option.is_some run.execution_file
-  || List.mem
-       [ "completed"
-       ; "complete"
-       ; "succeeded"
-       ; "success"
-       ; "failed"
-       ; "cancelled"
-       ; "canceled"
-       ; "interrupted"
-       ; "terminated"
-       ]
-       run.status
-       ~equal:String.equal
+  (not (live_status run.status))
+  && (Option.is_some run.execution_file
+      || List.mem
+           [ "completed"
+           ; "complete"
+           ; "succeeded"
+           ; "success"
+           ; "failed"
+           ; "cancelled"
+           ; "canceled"
+           ; "interrupted"
+           ; "terminated"
+           ]
+           run.status
+           ~equal:String.equal)
 ;;
 
 let plan t ~now (snapshot : Asic.Snapshot.t) ~visible =
@@ -150,6 +157,7 @@ let fixture_run ?execution_file ?error status : Asic.Run.t =
   { run = fixture_reference
   ; reference = { attempt = "/explicit/fixture"; stream_id = "fixture" }
   ; selection = None
+  ; stages = []
   ; cursor = 0
   ; status
   ; execution_file
@@ -164,11 +172,19 @@ let fixture_operation ?run ?error key kind state : Asic.Pending.t =
 let fixture_snapshot ?(operations = []) ?(summaries = []) runs : Asic.Snapshot.t =
   { configured = true
   ; flows = []
+  ; catalog_default = None
   ; description_json = None
   ; preview = None
   ; runs
   ; operations
+  ; launches = []
   ; summaries
+  ; finalizations = []
+  ; artifacts = []
+  ; artifact_pages = []
+  ; artifact_byte_pages = []
+  ; inspections = []
+  ; inspection_details = []
   ; cache_error = None
   }
 ;;
@@ -237,6 +253,51 @@ let%test_unit "active owner suppresses duplicate reads, including after run allo
           ~visible:[ fixture_reference ]
       in
       assert (List.is_empty intents))
+;;
+
+let%test_unit "running stage updates are polled even with an execution file and cached \
+               summary"
+  =
+  let run = fixture_run ~execution_file:"/explicit/active/execution" "running" in
+  let stage : Asic.Stage.t =
+    { id = "placement"
+    ; name = "Placement"
+    ; status = Running
+    ; requested = true
+    ; reason = None
+    ; action = None
+    }
+  in
+  let snapshot =
+    fixture_snapshot ~summaries:[ fixture_summary ] [ { run with stages = [ stage ] } ]
+  in
+  let state, intents =
+    plan empty ~now:Time_ns.epoch snapshot ~visible:[ fixture_reference ]
+  in
+  assert (List.equal Asic.Operation.equal intents [ Observe fixture_reference ]);
+  let _, intents =
+    plan state ~now:Time_ns.epoch snapshot ~visible:[ fixture_reference ]
+  in
+  assert (List.is_empty intents);
+  let _, intents =
+    plan
+      state
+      ~now:(Time_ns.add Time_ns.epoch (Time_ns.Span.of_sec 2.))
+      snapshot
+      ~visible:[ fixture_reference ]
+  in
+  assert (List.equal Asic.Operation.equal intents [ Observe fixture_reference ]);
+  let completed =
+    { run with status = "completed"; stages = [ { stage with status = Completed } ] }
+  in
+  let _, intents =
+    plan
+      state
+      ~now:(Time_ns.add Time_ns.epoch (Time_ns.Span.of_sec 4.))
+      (fixture_snapshot ~summaries:[ fixture_summary ] [ completed ])
+      ~visible:[ fixture_reference ]
+  in
+  assert (List.is_empty intents)
 ;;
 
 let%test_unit "unowned live polling is throttled and unknown executions receive only one \

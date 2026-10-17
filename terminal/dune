@@ -4,22 +4,41 @@
   baseline_fixture
   fs0_fixture
   appearance
+  planned_run
+  stage_action
+  tile_presentation
+  panel
+  evidence_style
+  overview_tiles
+  overview_summary
+  overview_layout
   synthesis_view
   terminal_result_view
+  artifact_view
+  artifact_export
+  artifact_binary_export
+  inspection_view
+  timing_workspace
   presentation
   state
   workspace_host
+  palette_search
+  palette_view
   host_view
   plain_rpc
   launch_preferences
   presentation_preferences
-  asic_intents)
+  asic_intents
+  simulation_view
+  simulation_export)
  (libraries
+  async
   core
   core_unix
   core_unix.filename_unix
   core_unix.sys_unix
   hardcaml_workbench_protocol
+  hardcaml_workbench_workspaces
   bonsai_term
   notty-community
   cryptokit)

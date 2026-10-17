@@ -17,6 +17,7 @@ let run run : Asic.Run.t =
   { run
   ; reference = { attempt = "/explicit/synthetic/fs0/" ^ run.id; stream_id = run.id }
   ; selection = None
+  ; stages = []
   ; cursor = 1
   ; status = "completed"
   ; execution_file = Some (execution_file run)
@@ -45,14 +46,22 @@ let summary run cell_count cells : Asic.Summary.t =
 let snapshot : Asic.Snapshot.t =
   { configured = true
   ; flows = []
+  ; catalog_default = None
   ; description_json = None
   ; preview = None
   ; runs = [ run run_a; run run_b ]
   ; operations = []
+  ; launches = []
   ; summaries =
       [ summary run_a 50 [ "NAND2", 35; "DFF", 15 ]
       ; summary run_b 73 [ "NAND2", 50; "DFF", 23 ]
       ]
   ; cache_error = None
+  ; finalizations = []
+  ; artifacts = []
+  ; artifact_pages = []
+  ; artifact_byte_pages = []
+  ; inspections = []
+  ; inspection_details = []
   }
 ;;

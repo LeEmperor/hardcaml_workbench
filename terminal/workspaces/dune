@@ -1,0 +1,21 @@
+(library
+ (name hardcaml_workbench_workspaces)
+ (modules common definition layout overview timing testing presets)
+ (libraries core hardcaml_workbench_protocol)
+ (preprocess
+  (pps ppx_jane)))
+
+(executable
+ (name export_presets)
+ (modules export_presets)
+ (libraries core hardcaml_workbench_workspaces))
+
+(library
+ (name hardcaml_workbench_workspaces_test)
+ (modules test_workspaces)
+ (libraries core hardcaml_workbench_protocol hardcaml_workbench_workspaces)
+ (inline_tests
+  (flags
+   (-source-tree-root .)))
+ (preprocess
+  (pps ppx_jane)))

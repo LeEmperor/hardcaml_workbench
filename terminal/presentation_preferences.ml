@@ -39,12 +39,10 @@ let capture ~project_key (host : Host.t) =
   ; session = Option.map host.registry ~f:(fun registry -> registry.session_id)
   ; tile_headers =
       Option.value_map host.registry ~default:[] ~f:(fun registry ->
-        List.map registry.tiles ~f:(fun tile ->
-          { tile = tile.id
-          ; workspace = tile.workspace
-          ; kind = tile.kind
-          ; headers = (Host.local host tile.id).headers
-          }))
+        (* Only explicit header overrides persist; absent tiles inherit policy. *)
+        List.filter_map registry.tiles ~f:(fun tile ->
+          Option.map (Host.local host tile.id).presentation.header ~f:(fun headers ->
+            { tile = tile.id; workspace = tile.workspace; kind = tile.kind; headers })))
   }
 ;;
 
@@ -78,18 +76,21 @@ let apply t (host : Host.t) =
   | None -> host
   | Some registry ->
     List.fold registry.tiles ~init:host ~f:(fun host tile ->
-      let headers =
+      let header =
         if Option.equal W.Session_id.equal t.session (Some registry.session_id)
         then
           List.find t.tile_headers ~f:(fun pref ->
             W.Tile_id.equal pref.tile tile.id
             && W.Workspace_id.equal pref.workspace tile.workspace
             && String.equal pref.kind tile.kind)
-          |> Option.value_map ~default:Host.default_local.headers ~f:(fun pref ->
-            pref.headers)
-        else Host.default_local.headers
+          |> Option.map ~f:(fun pref -> pref.headers)
+        else None
       in
-      Host.set_local host tile.id { (Host.local host tile.id) with headers })
+      let local = Host.local host tile.id in
+      Host.set_local
+        host
+        tile.id
+        { local with presentation = { local.presentation with header } })
 ;;
 
 (* Reads and writes run on the caller's I/O worker. Rename is in the same directory:
@@ -128,12 +129,21 @@ let%test_unit "restart restores presentation, never navigation or daemon state" 
     Host.set_local
       host
       tile.id
-      { Host.default_local with headers = false; filter = "temporary"; scroll = 99 }
+      { Host.default_local with
+        presentation = { Host.default_local.presentation with header = Some false }
+      ; filter = "temporary"
+      ; scroll = 99
+      }
   in
   let host =
     { host with
       appearance =
-        { preset = Studio; color = Restrained; icons = Unicode; density = Comfortable }
+        { preset = Studio
+        ; color = Restrained
+        ; scheme = Slate
+        ; icons = Unicode
+        ; density = Comfortable
+        }
     ; layout_mode = Preferred
     ; chrome = false
     ; focus = Some (List.last_exn registry.tiles).id
@@ -150,7 +160,11 @@ let%test_unit "restart restores presentation, never navigation or daemon state" 
   assert (Appearance.equal restarted.appearance host.appearance);
   assert (Host.equal_layout_mode restarted.layout_mode Preferred);
   assert (not restarted.chrome);
-  assert (not (Host.local restarted tile.id).headers);
+  assert (
+    Option.equal
+      Bool.equal
+      (Host.local restarted tile.id).presentation.header
+      (Some false));
   assert (String.is_empty (Host.local restarted tile.id).filter);
   assert ((Host.local restarted tile.id).scroll = 0);
   assert (Option.is_none restarted.palette);
@@ -162,15 +176,18 @@ let%test_unit "restart restores presentation, never navigation or daemon state" 
     { registry with session_id = W.Session_id.of_string "replacement" }
   in
   let replaced = apply stored (Host.receive restarted other_session) in
-  assert (Host.local replaced tile.id).headers;
+  assert (Option.is_none (Host.local replaced tile.id).presentation.header);
   assert (Appearance.equal replaced.appearance host.appearance);
   let changed_kind =
     { registry with
       tiles = List.map registry.tiles ~f:(fun t -> { t with kind = "new-kind" })
     }
   in
-  assert
-    (Host.local (apply stored (Host.receive Host.empty changed_kind)) tile.id).headers;
+  assert (
+    Option.is_none
+      (Host.local (apply stored (Host.receive Host.empty changed_kind)) tile.id)
+        .presentation
+        .header);
   let changed_workspace =
     { registry with
       tiles =
@@ -178,9 +195,11 @@ let%test_unit "restart restores presentation, never navigation or daemon state" 
           { tile with workspace = W.Workspace_id.of_string "another-workspace" })
     }
   in
-  assert
-    (Host.local (apply stored (Host.receive Host.empty changed_workspace)) tile.id)
-      .headers;
+  assert (
+    Option.is_none
+      (Host.local (apply stored (Host.receive Host.empty changed_workspace)) tile.id)
+        .presentation
+        .header);
   let removed = apply stored (Host.receive Host.empty { registry with tiles = [] }) in
   assert (List.is_empty removed.locals)
 ;;
@@ -199,7 +218,7 @@ let%test_unit "strict schema validation and isolated identities" =
   rejects
     (String.substr_replace_first
        (encode stored)
-       ~pattern:"Structured"
+       ~pattern:"Instrument"
        ~with_:"Unknown_skin");
   rejects
     (String.substr_replace_first

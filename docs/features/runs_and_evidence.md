@@ -1,10 +1,15 @@
 # F05 — Run selection, references and historical evidence
 
-Status (2026-10-15): **FS0 exact registered runs, follow/pin-run bindings and durable
-reopening delivered**. [Acceptance](../fs0_acceptance.md) proves real 673/685 switching,
-simultaneous pinned/following UI and restart identity. Requirements below remain
-normative: broad store discovery is absent; immutable snapshots/archival retention
-are deferred by accepted [D3](../decisions.md), not FS0 blockers.
+Status (2026-10-16): **FS0 exact registered runs/follow/pin/reopening and FS1
+adopted-evidence investigation delivered**. [FS0 acceptance](../fs0_acceptance.md)
+proves real 673/685 switching and restart identity. [FS1 lifecycle](../fs1_lifecycle_and_artifacts.md)
+adds exact finalization attempts, persistent keys, independent operation/acceptance
+outcomes and selected terminal-result artifacts. [FS1 investigation](../fs1_investigation.md)
+adds source-hashed, stage/producer-attributed timing/clock/physical/routing indexes,
+exact row/digest detail and binary handoff. Requirements below remain normative:
+broad store discovery is absent; immutable snapshots/archival retention remain
+deferred by accepted [D3](../decisions.md). Later F06 source mapping/embedded graphics
+and FS2 structured simulation are not delivered by this completion.
 
 ## Requirements
 
@@ -46,9 +51,14 @@ Cached bytes alone must not be advertised as authoritative frozen evidence.
 
 ## First demo / later
 
-First: two distinguishable runs, linked/independent contexts, one clearly labeled
-reference and stale-response tests; historical reopening follows in M3. Broad store
-discovery can follow explicit-reference import if upstream listing is unavailable.
+Delivered: two distinguishable runs, linked/independent contexts, clearly labeled
+references, stale-response rejection and restart reopening, plus FS1 exact retained
+execution/finalization investigation. Restarted finalizations are unowned and never
+replay producers; inspection L2 reopens as cached/unverified until explicit refresh.
+Source hashes bind observed bytes; supplementary reports explicitly remain
+not-checkpoint-inventoried. Neither cached bytes nor external handoff establish
+immutable retention, source mapping or signoff. Broad store discovery remains later
+than the implemented explicit-reference registration/import path.
 Later: dedicated contextual A/B deltas and richer snapshot captures.
 
 Dependencies: F01 identities; F02 revisioned queries; F04/F10 workspace contexts;

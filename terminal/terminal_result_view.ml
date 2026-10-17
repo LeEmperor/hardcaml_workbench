@@ -38,7 +38,8 @@ module State = struct
   let scroll t ~delta ~max_offset =
     let current = Int.min t.offset (Int.max 0 max_offset) in
     let offset =
-      Int64.(max zero (min (of_int (Int.max 0 max_offset)) (of_int current + of_int delta)))
+      Int64.(
+        max zero (min (of_int (Int.max 0 max_offset)) (of_int current + of_int delta)))
     in
     { t with offset = Int64.to_int_exn offset }
   ;;
@@ -81,6 +82,20 @@ let context (terminal : Asic.Terminal_result.t) =
   ]
 ;;
 
+let semantic_context (terminal : Asic.Terminal_result.t) =
+  [ Evidence_style.fact
+      ~label:"Operation status (reported): "
+      Operation
+      terminal.operation_status
+  ; Evidence_style.fact
+      ~label:"Physical completion (reported): "
+      Physical_completion
+      terminal.physical_completion
+  ; Evidence_style.fact ~label:"Acceptance (reported): " Verdict terminal.acceptance
+  ; Evidence_style.fact ~label:"Timing goal (reported): " Verdict terminal.timing_goal
+  ]
+;;
+
 let is_timing (metric : Asic.Metric.t) =
   List.mem [ "setup_slack"; "hold_slack" ] metric.key ~equal:String.equal
 ;;
@@ -96,7 +111,7 @@ let is_declared_clock (metric : Asic.Metric.t) =
   String.equal metric.key "declared_clock_period"
 ;;
 
-let lines (terminal : Asic.Terminal_result.t) ~kind ~detail =
+let semantic_lines (terminal : Asic.Terminal_result.t) ~kind ~detail =
   let metrics =
     match kind with
     | "timing" -> List.filter terminal.metrics ~f:is_timing
@@ -143,93 +158,148 @@ let lines (terminal : Asic.Terminal_result.t) ~kind ~detail =
     if String.equal kind "checks"
     then
       if List.is_empty terminal.checks
-      then [ "Checks: unknown / not reported" ]
-      else List.map terminal.checks ~f:check_line
+      then [ Evidence_style.plain "Checks: unknown / not reported" ]
+      else List.map terminal.checks ~f:Evidence_style.check
     else if String.equal kind "cts"
     then
       if List.is_empty metrics
-      then [ "Declared clock period: unavailable / not reported" ]
-      else List.map metrics ~f:metric_line
+      then [ Evidence_style.plain "Declared clock period: unavailable / not reported" ]
+      else List.map metrics ~f:(fun metric -> Evidence_style.plain (metric_line metric))
     else if List.mem [ "timing"; "placement"; "finalization" ] kind ~equal:String.equal
     then
       if List.is_empty metrics
-      then [ "Metrics: unavailable / not reported" ]
-      else List.map metrics ~f:metric_line
+      then [ Evidence_style.plain "Metrics: unavailable / not reported" ]
+      else List.map metrics ~f:(fun metric -> Evidence_style.plain (metric_line metric))
     else []
   in
-  heading
+  List.map heading ~f:Evidence_style.plain
   @ measurements
-  @ context terminal
-  @ notes
-  @ [ "Enter / e: full context & evidence | j/k or [ ] scroll | Esc overview" ]
+  @ semantic_context terminal
+  @ List.map notes ~f:Evidence_style.plain
+  @ [ Evidence_style.plain
+        "Enter / e: full context & evidence | j/k or [ ] scroll | Esc overview"
+    ]
   @
   if not detail
   then []
   else
-    [ "Finalization attempt (exact): " ^ terminal.attempt
-    ; "Results file (full): " ^ terminal.results_file
-    ; "Results digest: " ^ terminal.results_digest
-    ; "All terminal metrics (reported; no inferred stage attribution)"
-    ]
-    @ List.concat_map terminal.metrics ~f:(fun metric ->
-      [ "Key: " ^ metric.key
-      ; metric_line metric
-      ; "Metric source (full): " ^ Option.value metric.source ~default:"not reported"
-      ])
-    @ [ "All terminal checks (reported)" ]
+    List.map
+      ([ "Finalization attempt (exact): " ^ terminal.attempt
+       ; "Results file (full): " ^ terminal.results_file
+       ; "Results digest: " ^ terminal.results_digest
+       ; "All terminal metrics (reported; no inferred stage attribution)"
+       ]
+       @ List.concat_map terminal.metrics ~f:(fun metric ->
+         [ "Key: " ^ metric.key
+         ; metric_line metric
+         ; "Metric source (full): " ^ Option.value metric.source ~default:"not reported"
+         ])
+       @ [ "All terminal checks (reported)" ])
+      ~f:Evidence_style.plain
     @ List.concat_map terminal.checks ~f:(fun check ->
-      [ check_line check
-      ; "Check source (full): " ^ Option.value check.source ~default:"not reported"
+      [ Evidence_style.check check
+      ; Evidence_style.plain
+          ("Check source (full): " ^ Option.value check.source ~default:"not reported")
       ])
-    @ [ "Terminal evidence (full):"; terminal.evidence ]
+    @ List.map [ "Terminal evidence (full):"; terminal.evidence ] ~f:Evidence_style.plain
 ;;
 
-let rows ?(fallback = []) ?(request_context = []) state ~run ~summary ~kind ~width ~height
+let lines terminal ~kind ~detail =
+  semantic_lines terminal ~kind ~detail |> List.map ~f:Evidence_style.text
+;;
+
+let semantic_rows
+  ?(fallback = [])
+  ?(request_context = [])
+  state
+  ~run
+  ~summary
+  ~kind
+  ~width
+  ~height
   =
   if width <= 0 || height <= 0
   then []
   else (
     let state = State.reconcile state ~run ~summary in
+    let fallback = List.map fallback ~f:Evidence_style.plain in
+    let request_context = List.map request_context ~f:Evidence_style.plain in
     let content =
       match summary with
       | Some s when Run_ref.equal run s.Asic.Summary.run ->
         (match s.terminal with
          | Some terminal ->
-           [ "Run: " ^ Backend_id.to_string run.backend ^ "/" ^ run.id
-           ; "Freshness: "
-             ^ Sexp.to_string_hum (Asic.Summary.Freshness.sexp_of_t s.freshness)
+           [ Evidence_style.plain
+               ("Run: " ^ Backend_id.to_string run.backend ^ "/" ^ run.id)
+           ; [ { Evidence_style.text = "Freshness: "; role = Plain }
+             ; { text = Sexp.to_string_hum (Asic.Summary.Freshness.sexp_of_t s.freshness)
+               ; role = Evidence_style.freshness_role s.freshness
+               }
+             ]
            ]
            @ request_context
-           @ lines terminal ~kind ~detail:state.detail
+           @ semantic_lines terminal ~kind ~detail:state.detail
            @
            if state.detail
            then
-             [ "Run reference (full): " ^ Sexp.to_string_hum (Run_ref.sexp_of_t run)
-             ; "Summary source digest: " ^ s.source_digest
-             ; "Execution file (full): " ^ s.execution_file
-             ]
+             List.map
+               [ "Run reference (full): " ^ Sexp.to_string_hum (Run_ref.sexp_of_t run)
+               ; "Summary source digest: " ^ s.source_digest
+               ; "Execution file (full): " ^ s.execution_file
+               ]
+               ~f:Evidence_style.plain
            else []
          | None ->
            if (not state.detail) && not (List.is_empty fallback)
            then fallback
            else
-             [ "No terminal result imported; inspect exact finalization reference" ]
+             [ Evidence_style.plain
+                 "No terminal result imported; inspect exact finalization reference"
+             ]
              @ request_context)
       | None | Some _ ->
         if (not state.detail) && not (List.is_empty fallback)
         then fallback
-        else [ "Terminal result unavailable for this exact run" ] @ request_context
+        else
+          [ Evidence_style.plain "Terminal result unavailable for this exact run" ]
+          @ request_context
     in
-    let wrapped = List.concat_map content ~f:(Synthesis_view.wrap ~width) in
-    let offset = Int.min state.offset (Int.max 0 (List.length wrapped - height)) in
-    List.take (List.drop wrapped offset) height)
+    Evidence_style.page ~width ~height ~offset:state.offset content)
 ;;
 
-let scroll ?(fallback = []) ?(request_context = []) state ~run ~summary ~kind ~width ~height ~delta =
+let rows ?fallback ?request_context state ~run ~summary ~kind ~width ~height =
+  semantic_rows ?fallback ?request_context state ~run ~summary ~kind ~width ~height
+  |> List.map ~f:Evidence_style.text
+;;
+
+let scroll
+  ?(fallback = [])
+  ?(request_context = [])
+  state
+  ~run
+  ~summary
+  ~kind
+  ~width
+  ~height
+  ~delta
+  =
   let state = State.reconcile state ~run ~summary in
-  let content = rows ~fallback ~request_context { state with offset = 0 }
-      ~run ~summary ~kind ~width ~height:Int.max_value in
-  State.scroll state ~delta ~max_offset:(if height <= 0 || width <= 0 then 0 else Int.max 0 (List.length content - height))
+  let content =
+    rows
+      ~fallback
+      ~request_context
+      { state with offset = 0 }
+      ~run
+      ~summary
+      ~kind
+      ~width
+      ~height:Int.max_value
+  in
+  State.scroll
+    state
+    ~delta
+    ~max_offset:
+      (if height <= 0 || width <= 0 then 0 else Int.max 0 (List.length content - height))
 ;;
 
 module%test Tests = struct
@@ -366,6 +436,64 @@ module%test Tests = struct
       List.mem detail "Metric source (full): /private/timing#slow" ~equal:String.equal)
   ;;
 
+  let%test_unit "typed terminal spans isolate failed checks from reasons and raw evidence"
+    =
+    let terminal =
+      { terminal with
+        acceptance = "fail"
+      ; checks =
+          [ { name = "DRC"
+            ; status = "pending"
+            ; reason = Some "passed failed"
+            ; source = None
+            }
+          ]
+      ; evidence = "Validated passed failed pending"
+      }
+    in
+    let spans = List.concat (semantic_lines terminal ~kind:"checks" ~detail:true) in
+    let has text role =
+      List.exists spans ~f:(fun span ->
+        String.equal span.text text && Evidence_style.Role.equal span.role role)
+    in
+    assert (has "fail" Failed);
+    assert (has "pending" Pending);
+    assert (has " — passed failed" Plain);
+    assert (has terminal.evidence Plain);
+    let s =
+      { (List.hd_exn Fs0_fixture.snapshot.summaries) with
+        terminal = Some terminal
+      ; freshness = Validated
+      }
+    in
+    List.iter [ 1; 17; 80 ] ~f:(fun width ->
+      let styled =
+        semantic_rows
+          State.empty
+          ~run:s.run
+          ~summary:(Some s)
+          ~kind:"checks"
+          ~width
+          ~height:100
+      in
+      let spans = List.concat styled in
+      assert (
+        List.exists spans ~f:(fun span -> Evidence_style.Role.equal span.role Validated));
+      assert (
+        List.for_all styled ~f:(fun row ->
+          Bonsai_term.View.width (Bonsai_term.View.text (Evidence_style.text row))
+          <= width)));
+    assert (
+      List.is_empty
+        (semantic_rows
+           State.empty
+           ~run:{ s.run with id = "other" }
+           ~summary:(Some s)
+           ~kind:"checks"
+           ~width:80
+           ~height:0))
+  ;;
+
   let%test_unit "run/result replacement clears details and paging; rendering is bounded" =
     let s =
       { (List.hd_exn Fs0_fixture.snapshot.summaries) with terminal = Some terminal }
@@ -403,5 +531,43 @@ module%test Tests = struct
         (rows state ~run:s.run ~summary:(Some s) ~kind:"timing" ~width:0 ~height:3));
     assert ((State.scroll state ~delta:Int.min_value ~max_offset:100).offset = 0);
     assert (not (State.back state).detail)
+  ;;
+
+  let%test_unit "bottom paging reverses immediately, including after viewport resize" =
+    let s =
+      { (List.hd_exn Fs0_fixture.snapshot.summaries) with terminal = Some terminal }
+    in
+    let initial =
+      State.reconcile State.empty ~run:s.run ~summary:(Some s) |> State.inspect
+    in
+    let move state ~width ~height delta =
+      scroll state ~run:s.run ~summary:(Some s) ~kind:"finalization" ~width ~height ~delta
+    in
+    let view state ~width ~height =
+      rows state ~run:s.run ~summary:(Some s) ~kind:"finalization" ~width ~height
+    in
+    let bottom =
+      List.fold (List.init 100 ~f:Fn.id) ~init:initial ~f:(fun state _ ->
+        move state ~width:20 ~height:3 1)
+    in
+    let bottom = move bottom ~width:20 ~height:3 Int.max_value in
+    let still_bottom = move bottom ~width:20 ~height:3 100 in
+    assert (still_bottom.offset = bottom.offset);
+    let reverse = move still_bottom ~width:20 ~height:3 (-1) in
+    assert (reverse.offset = bottom.offset - 1);
+    assert (
+      List.equal
+        String.equal
+        (List.drop (view reverse ~width:20 ~height:3) 1)
+        (List.take (view bottom ~width:20 ~height:3) 2));
+    let resized_bottom = view bottom ~width:100 ~height:8 in
+    let resized_reverse = move bottom ~width:100 ~height:8 (-1) in
+    assert (
+      List.equal
+        String.equal
+        (List.drop (view resized_reverse ~width:100 ~height:8) 1)
+        (List.take resized_bottom 7));
+    assert (resized_reverse.offset < bottom.offset);
+    assert (initial.offset = 0)
   ;;
 end

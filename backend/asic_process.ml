@@ -99,7 +99,12 @@ let run ?(stop_grace_seconds = 5.) ~seconds ~cancel ~on_process ~on_line invocat
           let%map status = waited in
           match status with
           | Ok () -> Buffer.contents stdout
-          | Error _ -> failwith ("ASIC command failed: " ^ Buffer.contents stderr))
+          | Error _ ->
+            failwith
+              ("ASIC command failed ("
+               ^ Unix.Exit_or_signal.to_string_hum status
+               ^ "): "
+               ^ Buffer.contents stderr))
       in
       match%bind
         Deferred.any

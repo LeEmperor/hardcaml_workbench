@@ -4,6 +4,16 @@ This slice implements the public named-flow boundary in `protocol/asic.ml`,
 `project_integration/asic_config.ml`, `adapters/asic_adapter.ml` and
 `backend/asic_{service,process,public}.ml`. It does not link `hardcaml_asic`.
 
+**FS1 extension:** the historical synthesis-only launch/cache limits below describe
+FS0. Current code also capability-checks known physical endpoints and supports
+explicit read-only finalization import with aggregate timing/resources/checks and
+declared-clock provenance. Later [lifecycle/artifact](fs1_lifecycle_and_artifacts.md)
+and [investigation](fs1_investigation.md) slices deliver owned collect/accept,
+bounded report paging, timing/clock/physical/routing exploration and exact binary
+handoff. Summary blobs write v4/read v1–v4, with separate bounded inspection caches;
+launcher stop grace is 15 seconds (queries retain 5). Those later records own
+current adopted scope, verification and limits; the body below retains FS0 evidence.
+
 ## Delivered daemon integration
 
 `backend/dune` and package declarations include **`yojson`**. The daemon owns the
@@ -194,8 +204,10 @@ retention/cleanup by the owner; this module does not scan unrelated namespaces.
 
 The parent-owned generic supervisor is not modified. `asic_process.ml` is a narrow
 integration seam using native Async Process creation, incremental bounded pipe
-draining, deadlines, SIGTERM then five-second SIGKILL escalation and reaping of
+draining, deadlines, SIGTERM followed by bounded SIGKILL escalation and reaping of
 **only its own PID**. It never signals groups or finds historical PIDs. A daemon
+uses a 15-second launcher grace and five-second query grace after the FS1
+cancellation correction; the original FS0 seam used five seconds for both. It
 starts the owned Async wait immediately and skips signalling already-reaped
 children. Installed `async_unix/process.ml` also checks its own wait deferred
 before signalling, protecting the exit/reap/PID-reuse race; no raw PID signalling
@@ -228,9 +240,9 @@ With the parent's exclusive serialized execution grant, both checks passed:
 ```
 
 The edited service/test OCaml files also passed `ocamlformat --check` in the selected
-switch. Parent-wide format/lint, runtest and build passed; later synthesis-tile
-terminal checks passed. Final parent-wide format/lint/unit/build checks and current
-HTTP/PTY/installed acceptance also passed; see the construction plan.
+switch. Format/lint, runtest, build, synthesis-tile checks and HTTP/PTY/installed
+acceptance passed for this recorded FS0 slice. Later FS1 verification is recorded
+separately in the construction plan and its linked acceptance records.
 [Installed checks](fs0_install_checks.md) and [native acceptance](fs0_acceptance.md)
 record passed installed native/external fixture/legacy captures, actual HTTP+PTY
 fixtures and strictly serial real synthesis: **673/685 cells**, both completed,
@@ -244,6 +256,8 @@ is `/tmp/opencode/workbench-fs0-unzwt0kn/`. Exact report paths, plan identities 
 digests remain in the acceptance record. Fixture report calls stayed 2→2; real
 call counts were not instrumented. The initial unsupported `--timeout` failure is
 preserved; the authorized config change to `stage_timeout_seconds ()` allowed the
-unchanged candidate binaries to complete. No placement/signoff or unsupported
-timing acceptance is claimed. Broader interactive races and real container
-termination coverage remain followups, not unrun integration as a whole.
+unchanged candidate binaries to complete. This FS0 run did not establish
+placement/signoff, rich timing or real container termination. Subsequent FS1
+records separately establish physical execution, inspection and owned-container/
+postcheck cancellation specimens. Broader interactive race permutations remain
+coverage followups, not unrun integration as a whole.

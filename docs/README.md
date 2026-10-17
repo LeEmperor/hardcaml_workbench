@@ -21,19 +21,34 @@ Project/provider commands remain useful without the application.
 | [Rendering](rendering.md) | Presentation, input, layout and headless interaction requirements |
 | [Appearance handoffs](design/README.md) | Imported older design doc, newer gallery and implementation qualifications |
 | [Appearance presets](appearance_presets.md) | Try the implemented A–E skins and independent presentation controls |
+| [Frontend composition](frontend_composition.md) | Where workspace layouts live; bounded fuzzy palette, per-tile chrome, status colors, preset migration and actual PTY evidence |
+| [Frontend refinement](frontend_refinement.md) | Current panel/palette styling, compact six-domain Overview, run-selector sizing and dedicated Timing investigation workspace |
+| [Overview sidebar and schemes](overview_sidebar.md) | Latest dense Overview composition, color-scheme controls, planned-run semantics and native verification |
+| [Real ASIC example demo](real_asic_example_demo.md) | Current black-theme/status polish, split checklist/planned-run sidebar and exact commands for genuine retained ASIC evidence |
+| [Synthetic Testing and dual demo](synthetic_testing.md) | Three default workspaces, seeded FS2 cases/results/artifacts, roomier Session layouts and synthetic/actual-example launch pairs |
+| [Launch and stage consistency](launch_stage_consistency.md) | Exact plan-to-launch lifecycle, real structured stage observations and read-only refresh of existing runs |
+| [Checklist preparation and launch](checklist_launch_workflow.md) | Restored real j/k/r preparation, on-demand capability discovery, visible Launch availability and exact input capture |
+| [Synthetic flow demo](synthetic_flow.md) | Launch populated Overview/Timing workspaces and operate a simulated flow through the real daemon, without EDA |
 | [Synthesis inspection](synthesis_inspection.md) | FS1/F06 cell table, filter/sort, row detail and evidence controls |
+| [FS1 acceptance](fs1_acceptance.md) | Aggregate timing/resources/checks, declared-clock context, finalization import, real physical/acceptance/cancellation evidence and remaining scope |
+| [Finalization and artifacts](fs1_lifecycle_and_artifacts.md) | Workbench-owned collect/accept, live phases, cancel/reconnect, bounded report paging and explicit external text export |
+| [FS1 investigation](fs1_investigation.md) | Completed adopted-evidence scope: paths, measured clocks, physical/routing tables, binary handoff, verified provider generation and activation |
+| [FS2 simulation](fs2_acceptance.md) | Structured suites/cases/seeds, live failures, reruns, history and trace controls with real Cyclesim/native HTTP/PTY evidence |
+| [FS2 provider contract](fs2_simulation_contract.md) / [implementation plan](fs2_implementation_plan.md) | Versioned configuration/events/RPC, bounds and feature-set ownership |
 | [Formatting](formatting_guide.md) | Source conventions |
 | [Backlog](backlog/README.md) | Deferred work and reactivation triggers |
 | [Archive](archive/README.md) | Superseded plans and historical acceptance evidence |
 
 The feature list is the concise product inventory; feature sets group delivery
-themes (FS0 delivered; bounded FS1 and FS5 slices underway). Focused feature documents record
+themes (FS0 and adopted-evidence FS1 delivered; substantial FS2 accepted and closed;
+FS5's first appearance slice delivered).
+Focused feature documents record
 behavior and boundaries; the construction plan alone owns implementation order and
 completion checklist. Focused acceptance records linked there own exact runtime
 evidence. A feature request or a provider capability is not proof
 of an implemented Workbench feature.
 
-## Current orientation — 2026-10-15
+## Current orientation — 2026-10-16
 
 - **FS0 Demos A–C delivered with bounded limitations:** typed execution boundary,
   tile host/palette, project-scoped tests/logs, named workspaces, linked/independent
@@ -47,9 +62,13 @@ of an implemented Workbench feature.
 - **D1 accepted:** windows are attached surfaces; Overview/Timing/Resources are
   workspaces. Their selectors control a shared Main run context by default, with
   explicit independence/relink and per-tile references. See [F10](features/run_contexts.md).
-- [F09 simulation/tests](features/simulation_and_tests.md) now use the existing
-  generic Dune supervisor through the Execution module and project-scoped tiles.
-  Rich cases/seeds/traces remain later FS2 work.
+- [F09 simulation/tests](features/simulation_and_tests.md) retain generic Dune tests
+  and add structured FS2 suites/cases/seeds, live outcomes, targeted reruns, bounded
+  history and exact trace export over the existing supervisor. Real Cyclesim and
+  native HTTP/PTY acceptance passed. The owner accepted the basic demo and authorized
+  milestone closure; [controls and evidence](fs2_acceptance.md),
+  [followups](backlog/fs2_followups.md), and
+  [integration handoff](fs2_acceptance.md#integration-handoff).
 - **D2/D3 FS0 defaults accepted:** captured/revalidated targets, no missing-flow
   fallback, ordinary launch does not select, guarded launch-and-view, follow/pin-run
   first. Immutable snapshots/archival retention and richer command policy are later.
@@ -62,15 +81,33 @@ of an implemented Workbench feature.
   utility chrome mountable and headers configurable. FS5/V1's first A–E skins and
   independent color/icon/density controls are delivered; richer gallery fixtures,
   reusable tabs and final aesthetic review remain pending. No embedded editor is selected.
+- Limits: shelf layout rather than freeform geometry; domain refresh is polled and
+  the endpoint/assignment form remains basic. Local input redraw is immediate.
+  Embedded graphical editing and unsupported source mappings remain later work.
+  Broader frontend race/reconnect/cancellation coverage and scaling measurements
+  remain explicit followups.
 - FS3's [first adoption slice](fs3_adoption.md) delivers existing-project initialization,
   CLI template export/import/clone and persistent client appearance/header choices.
-- Limits: shelf layout rather than freeform geometry; clock-driven redraw and a basic
-  endpoint/assignment form; timing unsupported. Remaining frontend race/reconnect/
-  cancellation coverage and scaling measurements are explicit in M0–M3.
-- FS1's first [synthesis inspector](synthesis_inspection.md) is delivered over cached
-  evidence. FS2 structured simulation remains unstarted. Prior parent format/lint,
-  runtest, build and installed/fixture/capture checks are recorded in the plan.
-  The takeover recheck passed the five-mode raw Ctrl-C PTY matrix against current
-  built binaries; this is frontend fixture evidence, not another real-tool acceptance.
+- FS1 now includes [synthesis metrics and aggregate physical evidence](fs1_acceptance.md),
+  signed timing, check verdicts, verified declared clocks and exact finalization
+  import. Real six-stage execution, external acceptance and owned-container
+  cancellation have separate retained evidence. The final [FS1 investigation](fs1_investigation.md)
+  delivers path/corner/group navigation, measured clock evidence and stage-specific
+  physical/routing/congestion tables. FS2 project-scoped structured simulation is
+  now delivered independently of ASIC configuration.
+- Workbench-owned finalization/acceptance and report/artifact text viewing are
+  delivered, with real palette/transport detach, cancellation, idempotency and
+  restart checks. External text opening uses a private terminal-host export,
+  not the daemon's original path. Exact binary handoff is also delivered, with
+  a real exported GDS loaded headlessly by KLayout; interactive GUI rendering and
+  embedded editing are not claimed by that test.
+- Parent format/lint, full runtest/build, installed workflow, actual metrics/physical
+  HTTP/PTY/L2 checks, original synthesis inspection and the five-mode interrupt
+  matrix passed. Evidence and limitations are recorded in the active plan.
+- **Owner usability confirmation:** Escape now works well in the timing-inspection
+  workflow. This closes the reported latency followup; clearer inspector breadcrumbs,
+  contextual help, a Close inspector command, and less prominent raw JSON remain
+  [usability polish](backlog/README.md#inspector-usability-polish). FS2's independent
+  delivery and acceptance are recorded separately above.
 
 Build, launch and check commands are in the repository [README](../README.md).

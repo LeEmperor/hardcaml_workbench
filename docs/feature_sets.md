@@ -1,6 +1,6 @@
 # Feature sets
 
-Updated 2026-10-15. **FS numbers group product work**, F numbers identify individual
+Updated 2026-10-16. **FS numbers group product work**, F numbers identify individual
 feature specs, and M numbers order implementation/acceptance in the construction
 plan. One feature can contribute slices to several sets; completing a set does not
 mean every linked feature is finished. Later set scope is provisional and can be
@@ -98,10 +98,34 @@ large-detail indexes can follow measured need in later feature-set slices.
 
 ## FS1 — ASIC evidence investigation
 
-**In progress:** first F06 slice is the [cached synthesis inspector](synthesis_inspection.md):
+**Delivered for the adopted evidence interfaces, with explicit limits:** first F06 slice is the [cached synthesis inspector](synthesis_inspection.md):
 cell table sorting/filtering, row detail and evidence drilldown. It consumes FS0
-summaries without changing provider contracts or invoking tools. Rich timing,
-checks, clocks and physical views below remain subsequent work.
+summaries without invoking tools. Subsequent [FS1 delivery](fs1_acceptance.md) adds
+synthesis area/diagnostic metrics, explicit finalization import, aggregate signed
+timing, physical resources, reported DRC/LVS/antenna verdicts, declared-clock
+configuration and full evidence inspection. Real physical completion, separate
+external acceptance pass/fail import and owned-container cancellation are exercised.
+Workbench-owned collect/accept lifecycle, cancellation/reconnect and bounded text
+report/artifact viewing with explicit terminal-host export are also delivered;
+see [lifecycle evidence](fs1_lifecycle_and_artifacts.md). The final
+[investigation slice](fs1_investigation.md) delivers retained setup/hold paths,
+corner/group/producer/stage navigation, measured clock latency/skew and supplied
+relationships, stage-specific placement/routing/congestion tables, and byte-exact
+external GDS handoff verified by headless KLayout loading. Provider-owned parsing,
+bounded L1/L2 indexes and on-demand detail preserve original measurement context.
+
+This completes the useful FS1 investigation/operation scope against this adopted
+provider, not every future F06 capability. Missing generated-clock/source-mapping
+evidence remains unavailable rather than inferred; embedded graphical editors,
+spatial heatmaps, arbitrary-tool adoption and exhaustive lifecycle-race coverage
+remain later extensions. No new physical execution or signoff verdict was produced
+by the final read-only inspection acceptance.
+
+The owner subsequently confirmed that Escape responsiveness works well in the
+manual timing-inspection workflow. There are no remaining FS1 feature blockers
+for this adoption. [Inspector presentation polish](backlog/README.md#inspector-usability-polish)
+and additional lifecycle/performance coverage can proceed alongside later sets;
+they do not turn FS1 into an open-ended implementation gate for FS2.
 
 Timing summaries/path detail, checks, clocks and physical/resource slices with
 original evidence and context. Full physical operation/cancellation acceptance
@@ -111,13 +135,29 @@ intermediate snapshots and fine-grained progress may depend on further ASIC work
 
 ## FS2 — Simulation helpers and test views
 
-Status: **not started**; FS0's generic test attempts do not implement structured suites.
+Status: **milestone closed — structured project-scoped simulation delivered and
+accepted**, 2026-10-16; see
+[controls and acceptance](fs2_acceptance.md) and the
+[versioned provider/RPC contract](fs2_simulation_contract.md). Structured suites,
+cases, seeds/parameters, live progress/outcomes, targeted reruns, durable history,
+failure reports and byte-exact trace export are implemented over the existing
+supervisor. Actual Cyclesim, native HTTP and terminal PTY acceptance passed.
+The owner confirmed the basic demo works and authorized closure. Manual acceptance
+is scoped to that workflow; broader checks retain their automated evidence.
 
 Extend FS0's generic test runner with project-declared suites, cases, seeds,
 structured progress/outcomes, targeted reruns and failure/trace artifacts. Rich
 adapters can proceed without ASIC for Cyclesim or ordinary RTL tests. Gate-level
 association depends on real build/output provenance. Embedded waveform exploration
 is a separately activated extension, not an automatic FS2 prerequisite.
+
+FS0 supplies execution/host contracts; completed FS1 supplies artifact patterns and
+optional ASIC evidence. FS2 owns simulation semantics and supplies configuration/view
+identifiers for later FS3 setup/templates. No unfinished FS1 or FS3 gate remains.
+Gate-level adapters, exact archived-build replay and ASIC acceptance contribution
+remain explicit later integrations, not claims of this project-scoped delivery.
+They and adoption/performance improvements are tracked in
+[named followups](backlog/fs2_followups.md), not as blockers to the closed milestone.
 
 ## FS3 — Workspace adoption and project setup
 

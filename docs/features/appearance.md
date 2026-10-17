@@ -1,6 +1,10 @@
 # F12 — Composable appearance system and candidate gallery
 
-Status (2026-10-15): **FS0 seams plus first A–E skins delivered**. The palette switches
+Status (2026-10-16): **FS0 seams, A–E skins and frontend composition delivered**.
+The palette is now a bounded fuzzy overlay with matched-character highlighting and
+Tab/Shift-Tab selection. Tile chrome/badges and semantic status colors are configurable;
+Overview/Timing/Testing use centralized composable definitions with stable preset IDs.
+See [controls and verification](../frontend_composition.md). The palette switches
 preset, vivid/selective/restrained color, off/ASCII/Unicode markers and compact/
 comfortable density. [Controls/captures](../appearance_presets.md) record tested scope.
 Choices remain client-local/unpersisted. This starts FS5; rich Timing fixtures,
