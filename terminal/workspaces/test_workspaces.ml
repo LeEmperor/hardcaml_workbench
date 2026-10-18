@@ -4,8 +4,51 @@ open Hardcaml_workbench_workspaces
 
 let kinds d = List.map d.Definition.tiles ~f:(fun t -> t.Common.kind)
 
-let%test_unit "Timing and Testing thirds preserve investigation and visible FS2 geometry" =
-  List.iter [ Timing.definition; Testing.definition ] ~f:(fun d ->
+let%test_unit "cooperative Testing is bounded, readable and project scoped" =
+  let d = Testing.definition in
+  assert (not (List.mem (kinds d) "run-selector" ~equal:String.equal));
+  assert (not (List.mem (kinds d) "simulation" ~equal:String.equal));
+  List.iter
+    [ 120, 40; 180, 55; 80, 24 ]
+    ~f:(fun (width, height) ->
+      match Layout.compute d ~width ~height:(height - 2) ~kinds:(kinds d) with
+      | Compact -> assert (width = 80)
+      | Grid cells ->
+        assert (List.length cells = List.length d.tiles);
+        List.iteri cells ~f:(fun i a ->
+          assert (a.Workspace.Geometry.x >= 0 && a.y >= 0);
+          assert (a.width >= 24 && a.height >= 1);
+          assert (a.x + a.width <= width && a.y + a.height <= height - 2);
+          List.iter
+            (List.drop cells (i + 1))
+            ~f:(fun b ->
+              assert (
+                a.x + a.width <= b.x
+                || b.x + b.width <= a.x
+                || a.y + a.height <= b.y
+                || b.y + b.height <= a.y)));
+        if width >= 120
+        then (
+          let cell kind =
+            List.nth_exn
+              cells
+              (List.findi_exn (kinds d) ~f:(fun _ k -> String.equal kind k) |> fst)
+          in
+          assert ((cell "live-status").width <= width / 4);
+          List.iter [ "simulation-catalog"; "simulation-detail" ] ~f:(fun kind ->
+            let g = cell kind in
+            assert (g.width >= 48 && g.height >= 12));
+          List.iter
+            [ "simulation-attempts"
+            ; "simulation-cases"
+            ; "simulation-artifacts"
+            ; "simulation-logs"
+            ]
+            ~f:(fun kind -> assert ((cell kind).height >= 7))))
+;;
+
+let%test_unit "Timing thirds preserve investigation geometry" =
+  List.iter [ Timing.definition ] ~f:(fun d ->
     List.iter
       [ 80, 24; 120, 40; 180, 55 ]
       ~f:(fun (width, terminal_height) ->
@@ -31,10 +74,7 @@ let%test_unit "Timing and Testing thirds preserve investigation and visible FS2 
               (List.findi_exn (kinds d) ~f:(fun _ k -> String.equal kind k) |> fst)
           in
           if width = 80
-          then (
-            (* The generic narrow grid retains every pane, including FS2. *)
-            List.iter cells ~f:(fun g -> assert (g.height >= 6));
-            if String.equal d.id "testing" then assert ((cell "simulation").width >= 24))
+          then List.iter cells ~f:(fun g -> assert (g.height >= 6))
           else (
             let session = cell "live-status"
             and selector = cell "run-selector" in
@@ -43,38 +83,21 @@ let%test_unit "Timing and Testing thirds preserve investigation and visible FS2 
             assert (session.height = 7 && selector.height = 7);
             assert (selector.x = session.width && selector.width = width - session.width);
             assert (selector.y = session.y);
-            if String.equal d.id "timing"
-            then (
-              let paths = cell "timing-paths"
-              and detail = cell "timing-detail"
-              and context = cell "timing-context" in
-              assert (paths.x = 0 && paths.y = session.y + session.height);
-              assert (paths.width >= 32 && paths.height >= 10);
-              assert (detail.x = paths.width && detail.y = paths.y);
-              assert (detail.width >= 48 && detail.height >= 10);
-              assert (context.x = detail.x && context.width = detail.width);
-              assert (context.y = detail.y + detail.height && context.height >= 8);
-              assert (paths.height = detail.height + context.height);
-              assert (context.y + context.height = height))
-            else (
-              let tests = cell "project-tests"
-              and simulation = cell "simulation"
-              and execution = cell "execution"
-              and logs = cell "logs" in
-              assert (tests.x = 0 && tests.width = session.width);
-              assert (tests.y = session.y + session.height && tests.height >= 6);
-              assert (tests.y + tests.height = height);
-              assert (simulation.y = selector.y + selector.height);
-              assert (simulation.height = if width = 120 then 15 else 24);
-              assert (execution.y = simulation.y + simulation.height);
-              assert (logs.y = execution.y + execution.height);
-              List.iter [ simulation; execution; logs ] ~f:(fun g ->
-                assert (g.x = selector.x && g.width = selector.width && g.height >= 6));
-              assert (logs.y + logs.height = height)))))
+            let paths = cell "timing-paths"
+            and detail = cell "timing-detail"
+            and context = cell "timing-context" in
+            assert (paths.x = 0 && paths.y = session.y + session.height);
+            assert (paths.width >= 32 && paths.height >= 10);
+            assert (detail.x = paths.width && detail.y = paths.y);
+            assert (detail.width >= 48 && detail.height >= 10);
+            assert (context.x = detail.x && context.width = detail.width);
+            assert (context.y = detail.y + detail.height && context.height >= 8);
+            assert (paths.height = detail.height + context.height);
+            assert (context.y + context.height = height))))
 ;;
 
-let%test_unit "Timing and Testing sparse membership retains duplicate and custom extras" =
-  List.iter [ Timing.definition; Testing.definition ] ~f:(fun d ->
+let%test_unit "Timing sparse membership retains duplicate and custom extras" =
+  List.iter [ Timing.definition ] ~f:(fun d ->
     let ks =
       ("custom-provider"
        :: List.rev
@@ -388,6 +411,66 @@ let%test_unit "unknown preset IDs never select a known definition by display nam
     }
   in
   assert (Option.is_none (Presets.for_arrangement w))
+;;
+
+let%test_unit "shared restore API repairs every preset in the captured renamed workspace" =
+  let ok = function
+    | Ok s -> s
+    | Error e -> raise_s [%sexp (e : V1.Error.t)]
+  in
+  List.iter Presets.all ~f:(fun d ->
+    let s =
+      Workspace.initial ~session_id:(Workspace.Session_id.of_string "restore-api")
+    in
+    let w = List.hd_exn s.workspaces in
+    let mutate (s : Workspace.Snapshot.t) mutation =
+      Workspace.apply s (Mutate { expected_revision = s.revision; mutation }) |> ok
+    in
+    let first = List.hd_exn s.tiles in
+    let s =
+      mutate s (Rename_workspace { workspace = w.id; name = "Captured custom desk" })
+    in
+    let s = mutate s (Set_tile_hidden { tile = first.id; hidden = true }) in
+    let s =
+      mutate
+        s
+        (Create_tile
+           { workspace = w.id
+           ; kind = "custom-extra"
+           ; geometry = first.requested_geometry
+           })
+    in
+    let extra = List.last_exn s.tiles in
+    let s = mutate s (Set_zoom { workspace = w.id; tile = Some extra.id }) in
+    let mutation = Definition.restore d ~workspace:w.id in
+    assert (
+      Workspace.Mutation.equal
+        mutation
+        (Restore_default_layout
+           { workspace = w.id; preset = d.id; tiles = Definition.specs d }));
+    let next = mutate s mutation in
+    assert (next.revision = s.revision + 1);
+    assert (String.equal (Workspace.workspace next w.id).name "Captured custom desk");
+    assert (Option.equal String.equal (Workspace.workspace next w.id).preset (Some d.id));
+    assert (Option.is_none (Workspace.workspace next w.id).zoomed_tile);
+    assert (List.equal Workspace.Context.equal s.contexts next.contexts);
+    assert (
+      Workspace.Tile.equal (Workspace.tile next extra.id) { extra with hidden = true });
+    List.iter d.tiles ~f:(fun expected ->
+      let actual =
+        List.find_exn next.tiles ~f:(fun t ->
+          Workspace.Workspace_id.equal t.workspace w.id
+          && String.equal t.kind expected.Common.kind)
+      in
+      assert (not actual.hidden);
+      assert (Workspace.Geometry.equal actual.requested_geometry expected.geometry));
+    let visible =
+      List.filter next.tiles ~f:(fun t ->
+        Workspace.Workspace_id.equal t.workspace w.id && not t.hidden)
+    in
+    assert (List.length visible = List.length d.tiles);
+    let repeated = mutate next mutation in
+    assert (Workspace.Snapshot.equal { next with revision = repeated.revision } repeated))
 ;;
 
 let%test_unit "sparse membership and resize thresholds never overflow or overlap" =

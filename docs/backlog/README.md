@@ -1,5 +1,14 @@
 # Backlog
 
+## Feature ticket catalog
+
+The owner's current feature intake is organized into [individual WB tickets](../features/README.md),
+with an [intake crosswalk](../features/intake.md) and [dependency map](../features/dependencies.md).
+Use those tickets for estimates, scope and open decisions. This page retains
+unactivated longer-term ideas and links from earlier delivery records; it does not
+create a competing queue. Existing FS2-F IDs map to tickets in
+[the compatibility crosswalk](fs2_followups.md#canonical-ticket-crosswalk--2026-10-17).
+
 This directory holds discussed work deliberately deferred beyond the active
 [plan](../construction_phase_plan.md). It is not an automatic next-phase queue.
 Reactivate an item by moving its concrete requirements into the architecture/plan.
@@ -26,6 +35,11 @@ matrix and from final aesthetic approval; see the
 [measured followup](../fs1_investigation.md#escape-responsiveness-in-tmux--2026-10-16-followup).
 
 The following are presentation followups, not FS1 feature blockers:
+
+Canonical planning: [WB-054 contextual controls](../features/presentation/WB-054-contextual-controls.md)
+and [WB-055 lightweight peeks](../features/presentation/WB-055-source-path-peeks.md).
+Timing's concise summary/detail/provenance composition has already been delivered;
+the earlier raw-JSON prominence note below is historical, not an untouched feature.
 
 - Show workspace → explorer → detail breadcrumbs and the active input mode.
 - Provide contextual Escape/help hints and an explicit **Close inspector** palette
@@ -57,11 +71,20 @@ is observed; they do not reopen the completed FS1 or FS2 milestones.
 Provider-owned canonical results, registered Workbench evidence, named saved
 arrangements, linked/independent contexts, pins and F11's bounded L1/L2 summaries
 are delivered. FS1 adds separate bounded rich-inspection indexes and on-demand
-detail. Multi-window adoption acceptance, templates and freeform geometry remain
-active FS3/host followups. Predictive prefetch and more elaborate indexing are
+detail. Preset-preserving templates and selected presentation persistence are now
+delivered. [Window attachment](../features/workspaces/WB-047-window-attachment.md)
+and [interactive/freeform layout](../features/workspaces/WB-046-interactive-layout-editing.md)
+remain FS3/host followups. Predictive prefetch and more elaborate indexing are
 later optimizations justified by measured workloads.
 F12's semantic tokens/composable chrome, initial A–E skins and independent
-color/icon/density controls are delivered. Richer gallery fixtures, reusable tabs,
-persisted local preferences and final aesthetic review remain active FS5/adoption
-work, not deferred by the arbitrary theme-extension row. Full floating-window
-management remains an experiment.
+color/icon/density controls and native activity indicators are delivered. Remaining
+[presentation tickets](../features/README.md#presentation-and-interaction) cover
+richer gallery fixtures, reusable tabs, additional persistent overrides and further
+owner review—not reimplementation of current global/header persistence.
+
+Deferred-table items with canonical tickets: comparator WB-012, graphical physical
+inspection WB-020, Vivado WB-011, waveforms WB-028 and power analysis WB-026. Broader
+Bonsai Web surfaces, persistent Tcl sessions, board/ILA operations, power-domain
+intent verification, multi-project sessions, distributed workers and dynamic plugins
+remain unticketed deferred ideas here; they are not silently included in those
+tickets' story points.

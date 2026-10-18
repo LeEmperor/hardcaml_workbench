@@ -517,12 +517,18 @@ def exercise(test):
                'New registry explicitly awaits shared-definition bootstrap')
     current = initial
     starters = {}
-    for kind, count in [('generic', 4), ('asic', 9), ('overview', 11), ('timing', 6), ('testing', 7)]:
+    for kind, count in [('generic', 4), ('asic', 9), ('overview', 11), ('timing', 6), ('testing', 10)]:
         text = test.command(test.args.workspace_cli, ['starter', kind], 'starter-' + kind)
         template = parse(text)
         starters[kind] = template
         test.check(field(template, 'version') == '1' and len(field(template, 'views')) == count,
                    kind + ' offline starter has expected version and view count')
+        if kind == 'testing':
+            test.check([field(view, 'kind') for view in field(template, 'views')] ==
+                       ['workspace-tabs', 'live-status', 'project-tests', 'execution',
+                        'simulation-catalog', 'simulation-attempts', 'simulation-cases',
+                        'simulation-detail', 'simulation-artifacts', 'simulation-logs'],
+                       'Testing starter has exact ordered cooperative panes without ASIC run selector')
         path = test.evidence / (kind + '.sexp')
         path.write_text(text)
         current, created = test.imported(current, template, path, kind + ' imported', 'import-' + kind)

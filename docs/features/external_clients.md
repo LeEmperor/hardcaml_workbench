@@ -1,5 +1,13 @@
 # F08 — Ches, source navigation and automation
 
+**Ticket entry points:** [WB-018 Ches tiles](integrations/WB-018-ches-tiles.md),
+[WB-021 source navigation](evidence/WB-021-source-navigation.md),
+[WB-029 VCS inspection](integrations/WB-029-version-control.md) and
+[WB-033 Quick-Harn](exploration/WB-033-quick-harn-playground.md).
+Ches projection and embedded comparative editing are separate scopes; neither
+requires copying terminal pixels or duplicating daemon-owned semantic state.
+Generic automation/MCP remains deferred beyond these individually scoped tickets.
+
 Status: requested future consumers of the module/command boundary.
 
 ## Requirements

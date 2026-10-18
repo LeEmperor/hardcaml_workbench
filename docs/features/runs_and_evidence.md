@@ -1,5 +1,13 @@
 # F05 — Run selection, references and historical evidence
 
+**Ticket entry points:** [WB-006 timestamps](evidence/WB-006-evidence-timestamps.md),
+[WB-009 Timing-coherency triage](evidence/WB-009-timing-coherency.md),
+[WB-012 comparison](evidence/WB-012-run-comparison.md),
+[WB-037 archived replay](verification/WB-037-archived-replay.md) and
+[WB-038 acceptance bridge](verification/WB-038-acceptance-bridge.md).
+Lifecycle, freshness, report availability and verdicts remain independent facts.
+Estimates and concrete open decisions live in the [individual tickets](README.md).
+
 Status (2026-10-16): **FS0 exact registered runs/follow/pin/reopening and FS1
 adopted-evidence investigation delivered**. [FS0 acceptance](../fs0_acceptance.md)
 proves real 673/685 switching and restart identity. [FS1 lifecycle](../fs1_lifecycle_and_artifacts.md)

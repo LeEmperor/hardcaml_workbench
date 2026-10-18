@@ -1,5 +1,13 @@
 # F01 — Project integration and capabilities
 
+**Ticket entry points:** [WB-010 progressive adoption](project/WB-010-progressive-adoption.md),
+[WB-004 build/bundle status](project/WB-004-build-bundle-status.md),
+[WB-008 leaf/OOC scope](project/WB-008-leaf-out-of-context.md),
+[WB-011 Vivado](integrations/WB-011-vivado.md) and
+[WB-039 simulation setup](project/WB-039-simulation-setup.md).
+This file retains architectural contracts; the [catalog](README.md) owns separate
+feature estimates, dependencies and owner-review assumptions.
+
 Status (2026-10-16): **FS0 public ASIC adapter and FS1 adopted-evidence integration
 delivered**, alongside generic Dune and driver integration. Public named-flow
 launch, durable observation/read/report, capability-checked physical endpoints,

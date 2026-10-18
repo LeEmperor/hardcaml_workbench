@@ -1,5 +1,12 @@
 # F10 — Shared run contexts and linked selectors
 
+**Ticket entry points:** [WB-024 context wording](presentation/WB-024-context-link-label.md),
+[WB-012 explicit comparison](evidence/WB-012-run-comparison.md),
+[WB-016 window config](workspaces/WB-016-window-configuration.md) and
+[WB-047 surface attachment](workspaces/WB-047-window-attachment.md).
+Shared Main selection remains distinct from local focus, timing-path selection and
+simulation-attempt selection. See [ticket dependency handoffs](dependencies.md).
+
 Status (2026-10-15): **FS0 D1 contexts implemented and persisted**: shared Main,
 multiple selectors, independent/relink, revision fences and per-tile run pins.
 [Acceptance](../fs0_acceptance.md) covers real switching and exact context/pin
@@ -43,8 +50,9 @@ Project session
 
 ## Shared versus local state
 
-Share selected-run identity/revision only. Each tile owns geometry, focus, filter,
-browsing cursor, expansion and scroll. A remote selection must be indicated even
+Share selected-run identity/revision only. Tile-local browsing includes filter,
+cursor, expansion and scroll. The host/client owns focus and effective geometry;
+requested layout is retained through the authoritative registry. A remote selection must be indicated even
 when filtered/offscreen, without forcing another user's browsing position to jump.
 Exact navigation-versus-activation keys are settled with the command/input design.
 

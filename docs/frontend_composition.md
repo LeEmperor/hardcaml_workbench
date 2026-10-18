@@ -89,6 +89,10 @@ context linkage, pins and now a stable workspace `preset` ID.
 - **Reset arrangement: … (preserve extras and pins)** additionally restores the
   matched preset tiles' requested geometry. It preserves hidden state and order;
   it is not a destructive delete-and-recreate or reset-all operation.
+- **Restore default layout: … (hide extras)** is the explicit recovery option:
+  show default occurrences, hide extras/duplicates, restore requested geometry,
+  clear zoom and select/persist Fit after success. It preserves IDs, bindings,
+  contexts and appearance. [Detailed controls and receipt semantics](default_layout_restore.md).
 
 Rebuild/restart daemon and clients together after this change: the workspace wire
 record/mutation vocabulary changed. Saved legacy S-expression snapshots are covered

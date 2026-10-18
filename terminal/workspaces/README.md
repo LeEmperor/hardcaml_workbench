@@ -1,5 +1,11 @@
 # Workspace definitions
 
+**Current Testing composition:** `testing.ml` now uses cooperative simulation
+catalog/attempt/case/detail/artifact/log panes and a compact Session/generic-tests/
+execution column. Investigation selection is client/workspace-local, not ASIC Main;
+the legacy `simulation` tile remains independently usable. Preset Apply preserves
+old extras rather than silently removing them. [Controls/evidence](../../docs/testing_workspace.md).
+
 Start with `overview.ml`, `timing.ml`, or `testing.ml` to change a workspace's
 default tile membership and Fit composition. Shared tile defaults and the small
 `Stack` / `Columns` / `Weighted_columns` / `Narrow` / `Leaf` vocabulary live in `common.ml`.
@@ -19,6 +25,13 @@ Saved live arrangements remain under the daemon's state directory as
 tiles, pins, contexts, ordering or hidden state. Apply adds missing tiles; explicit
 Reset also restores matched requested geometry. Rebuild daemon/client/exporter
 together, then select the desired preset from the palette.
+
+**Restore default layout: … (hide extras)** is the stronger explicit recovery
+operation: it atomically shows defaults, hides extras/duplicates, restores sizes
+and clears zoom, then the initiating client selects/persists Fit after success.
+IDs, bindings, contexts, selections and appearance are retained. Apply/Reset above
+remain additive. `Definition.restore` uses the same definitions; no separate layout
+table or implicit startup restoration is involved. [Controls](../../docs/default_layout_restore.md).
 
 See [the full source map, customization guide and verification](../../docs/frontend_composition.md)
 for display overrides, migration, palette controls and synthetic startup.

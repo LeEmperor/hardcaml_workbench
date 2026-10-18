@@ -1,5 +1,12 @@
 # Three-workspace synthetic demo and roomier Session panels
 
+**Current Testing extension, 2026-10-17:** the shared preset now composes Catalog,
+Attempts, Cases, Detail, Artifacts and Logs with a compact generic-test/Session/
+execution column. It supersedes the original single-panel proportions below.
+The same synthetic cases exercise these panes; standalone `simulation` remains
+supported as an independent legacy tile. The actual ASIC example now separately
+has a genuine FIFO provider. See [current controls and real evidence](testing_workspace.md).
+
 Implemented and verified 2026-10-17. The synthetic demo now supplies **Overview,
 Timing and Testing** by default, including useful explicitly synthetic FS2 results.
 Timing and Testing layouts have wider Session/sidebar regions. The actual ASIC
@@ -116,14 +123,16 @@ python3 -B scripts/real-asic-example-demo.py daemon
 
 ```sh
 cd /home/wayne/devel/jane/hardcaml_workbench
-python3 -B scripts/real-asic-example-demo.py seed
 python3 -B scripts/real-asic-example-demo.py client
 ```
 
 Each demo uses its own automatically chosen port/state, so they can be open side by
 side. The real root is `hardcaml_asic_example`, with673 genuine synthesis cells,
-retained signoff/acceptance and rich Timing inspection. This pass does not inject
-synthetic FS2 cases into that root or claim a real FIFO structured-test adapter.
+retained signoff/acceptance and rich Timing inspection. Daemon/client alone reopen
+saved state; seed is an explicit historical import, not a startup requirement.
+The original synthetic pass did not inject cases into that root. The subsequent
+[Testing cluster](testing_workspace.md) separately adopts its actual FIFO Cyclesim
+tests, with genuine reports/traces and no implied ASIC-run provenance.
 The real provider's structured recipe/occurrences now populate checklist status on
 Refresh. Checklist r also uses the project's explicit fresh-prefix capability
 mapping, with bounded discovery when needed. See [real evidence and limitations](real_asic_example_demo.md)

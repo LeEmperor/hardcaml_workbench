@@ -1,10 +1,16 @@
 # Feature sets
 
-Updated 2026-10-16. **FS numbers group product work**, F numbers identify individual
-feature specs, and M numbers order implementation/acceptance in the construction
+Updated 2026-10-17. **FS numbers group product work**, F numbers identify architectural
+area specs, WB numbers identify individual tickets, and M numbers order implementation/acceptance in the construction
 plan. One feature can contribute slices to several sets; completing a set does not
 mean every linked feature is finished. Later set scope is provisional and can be
 refined when activated.
+
+The [categorized WB catalog](features/README.md) contains the current owner intake,
+one file per feature, with provisional estimates and dependency contracts. See its
+[intake crosswalk](features/intake.md) and [dependency map](features/dependencies.md).
+Cross-set labels are intentional: a Testing redesign can be FS2+FS5, while shared
+layout persistence is FS3+FS5. These classifications do not reopen closed milestones.
 
 ## At a glance
 
@@ -50,8 +56,9 @@ evidence. FS0 does not complete the full normative specs.
 **Delivered:** daemon-routed Execution module over the existing supervisor,
 project-scoped test/log tiles, palette, Main/independent contexts and shelf tile
 host. Generic HTTP and installed tests pass; RTL/hierarchy and legacy captures
-remain covered. D2/D3 FS0 defaults were explicitly approved. Redraw remains
-clock-driven; no full reactive-publication or high-tile-count benchmark is claimed.
+remain covered. D2/D3 FS0 defaults were explicitly approved. Domain delivery remains
+polled; local input and deferred completion invalidate the view immediately.
+Fully subscription-driven publication and high-tile-count measurements remain followups.
 
 ### FS0b: bounded ASIC synthesis integration
 
@@ -146,6 +153,11 @@ supervisor. Actual Cyclesim, native HTTP and terminal PTY acceptance passed.
 The owner confirmed the basic demo works and authorized closure. Manual acceptance
 is scoped to that workflow; broader checks retain their automated evidence.
 
+**Subsequent extension delivered, 2026-10-17:** actual FIFO project adoption and a
+test catalog (WB-034/WB-032), plus the implemented cooperative Testing investigation
+(WB-063; owner visual review pending). See [current controls/evidence](testing_workspace.md).
+This reuses simulation v1 and preserves the independent counter acceptance fixture.
+
 Extend FS0's generic test runner with project-declared suites, cases, seeds,
 structured progress/outcomes, targeted reruns and failure/trace artifacts. Rich
 adapters can proceed without ASIC for Cyclesim or ordinary RTL tests. Gate-level
@@ -215,3 +227,21 @@ Source priority and implementation corrections are recorded in [design/README](d
 - The [construction plan](construction_phase_plan.md) owns checkboxes and evidence.
 - The [decision log](decisions.md) owns accepted policy and unresolved questions.
 - Do not create competing implementation checklists in each set description.
+
+## Proposed ticket reading routes
+
+These are thematic entry points, not new mandatory milestone checklists. The
+catalog tables contain all tickets and cross-set tags; the links below identify
+coherent slices to discuss together.
+
+| Set | Candidate slices and explicit boundaries |
+| --- | --- |
+| FS0 shared foundation | [WB-004](features/project/WB-004-build-bundle-status.md) build/bundle state; [WB-005](features/infrastructure/WB-005-process-monitor.md) owned processes; [WB-010](features/project/WB-010-progressive-adoption.md) progressive adoption; [WB-027](features/infrastructure/WB-027-performance-measurement.md) measurement; [WB-041](features/infrastructure/WB-041-durable-logs.md)/[042](features/infrastructure/WB-042-resource-budgets.md)/[043](features/infrastructure/WB-043-slow-storage.md) storage; [WB-064](features/infrastructure/WB-064-generic-job-detail.md) generic detail |
+| FS1 evidence | [WB-003](features/evidence/WB-003-evidence-refresh-activity.md)/[006](features/evidence/WB-006-evidence-timestamps.md)/[009](features/evidence/WB-009-timing-coherency.md) visibility/coherency; [WB-007](features/project/WB-007-hierarchy-tile.md)/[008](features/project/WB-008-leaf-out-of-context.md) hierarchy/IP scope; [WB-012](features/evidence/WB-012-run-comparison.md) comparison; [WB-020](features/evidence/WB-020-graphical-physical-inspection.md)/[021](features/evidence/WB-021-source-navigation.md)/[022](features/evidence/WB-022-signal-name-annotations.md)/[023](features/evidence/WB-023-provider-evidence.md)/[026](features/evidence/WB-026-power-analysis.md) new evidence/inspection; [WB-065](features/infrastructure/WB-065-asic-lifecycle-coverage.md) coverage |
+| FS2 verification | [WB-032](features/verification/WB-032-test-catalog.md)/[034](features/verification/WB-034-fifo-adapter.md)/[063](features/presentation/WB-063-testing-workspace.md) real adoption/investigation; [WB-028](features/verification/WB-028-waveform-viewer.md)/[030](features/verification/WB-030-seed-parameter-sweeps.md) waveform/sweeps; [WB-035](features/verification/WB-035-generated-rtl-simulation.md)/[036](features/verification/WB-036-gate-level-simulation.md)/[037](features/verification/WB-037-archived-replay.md)/[038](features/verification/WB-038-acceptance-bridge.md) adapters/replay/bridge; [WB-039](features/project/WB-039-simulation-setup.md)/[040](features/infrastructure/WB-040-trace-streaming.md)/[044](features/infrastructure/WB-044-load-acceptance.md)/[062](features/verification/WB-062-submission-recovery.md) adoption/robustness. Formal WB-025 is a new proof domain, not a missing original FS2 gate. |
+| FS3 adoption | [Workspace/input category](features/README.md#workspaces-input-and-configuration), [WB-048](features/presentation/WB-048-presentation-persistence.md) remaining override persistence and [WB-049](features/project/WB-049-config-migration.md)/[050](features/project/WB-050-upward-discovery.md)/[051](features/project/WB-051-new-project-creation.md)/[052](features/project/WB-052-adoption-polish.md) setup. Templates/window config are distinct from live surface attachment. |
+| FS4 extensions | [WB-011](features/integrations/WB-011-vivado.md) Vivado; [WB-018](features/integrations/WB-018-ches-tiles.md) Ches; [WB-029](features/integrations/WB-029-version-control.md) VCS; [WB-017](features/project/WB-017-project-files.md) files; [WB-025](features/verification/WB-025-formal-verification.md), [WB-031](features/exploration/WB-031-design-space-sweeper.md), [WB-033](features/exploration/WB-033-quick-harn-playground.md) proof/design exploration. Each needs its own bounded activation. |
+| FS5 presentation | [Presentation category](features/README.md#presentation-and-interaction): small alignment/wording/control work through tabs, peeks, floats and a richer gallery. Native spinners, existing schemes and persisted global appearance are already delivered. |
+
+The newer WB-009 report requires exact-run triage; earlier adopted-evidence FS1
+acceptance remains recorded and must not be used to dismiss or pre-diagnose it.

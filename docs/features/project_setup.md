@@ -1,5 +1,14 @@
 # F07 — Project setup and approachable presets
 
+**Ticket entry points:** [WB-010 progressive adoption](project/WB-010-progressive-adoption.md),
+[WB-017 project files](project/WB-017-project-files.md),
+[WB-039 simulation setup](project/WB-039-simulation-setup.md),
+[WB-049 config migration](project/WB-049-config-migration.md),
+[WB-050 upward discovery](project/WB-050-upward-discovery.md),
+[WB-051 creation](project/WB-051-new-project-creation.md) and
+[WB-052 adoption polish](project/WB-052-adoption-polish.md).
+The [catalog](README.md) separates additional work from the delivered initializer.
+
 Status: bounded existing-project initializer delivered; current root manifest remains
 supported. See [FS3 adoption](../fs3_adoption.md) for the initializer, portable
 starter templates and persistent presentation preferences. Configuration-directory
@@ -23,8 +32,10 @@ by the 2026-10-17 integration evidence.
   change precedence when both old and new configuration exist.
 - Offer starter/minimal layouts with a small visible command set. Users can add
   tiles/controls as they learn; the backend retains its real capabilities.
-- Default Overview/Timing/Resources workspaces deliberately link to the session's
-  Main run context. Templates instantiate separate views; session persistence
+- Current shared starters are Overview/Timing/Testing; Resources is an illustrative
+  future arrangement. ASIC-following views deliberately link to the session's Main
+  context; Testing attempts remain project-scoped without implied ASIC association.
+  Templates instantiate separate views; session persistence
   preserves intended shared context identities/linkage (F10). A minimal generic
   project can instead start with build/log and project-test views (F09).
 - Appearance presets (F12) are separate from functional workspace templates.

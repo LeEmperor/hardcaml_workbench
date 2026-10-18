@@ -1,5 +1,14 @@
 # F02 — Providers, modules and tiles
 
+**Ticket entry points:** [WB-005 process view](infrastructure/WB-005-process-monitor.md),
+[WB-007 hierarchy tile](project/WB-007-hierarchy-tile.md),
+[WB-018 Ches projection](integrations/WB-018-ches-tiles.md),
+[WB-053 tile-local tabs](presentation/WB-053-tile-local-tabs.md),
+[WB-057 utility placement](presentation/WB-057-utility-placement.md) and
+[WB-064 generic job detail](infrastructure/WB-064-generic-job-detail.md).
+New views consume shared typed modules; they do not create new authoritative stores
+or per-tile execution engines. See [catalog conventions](README.md).
+
 Status (2026-10-16): **FS0 execution boundary, daemon ASIC service and tile host,
 plus FS1 shared typed inspection delivered**. See [Execution](../fs0_execution_module.md),
 [terminal](../fs0_terminal.md) and [FS1 investigation](../fs1_investigation.md).

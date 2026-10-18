@@ -8,6 +8,7 @@ module State = Terminal_presentation.State
 module Host = Terminal_presentation.Workspace_host
 module Host_view = Terminal_presentation.Host_view
 module Appearance = Terminal_presentation.Appearance
+module Indicator = Terminal_presentation.Indicator
 module Synthesis_view = Terminal_presentation.Synthesis_view
 module Terminal_result_view = Terminal_presentation.Terminal_result_view
 module Plain_rpc = Terminal_presentation.Plain_rpc
@@ -21,6 +22,8 @@ module Inspection_view = Terminal_presentation.Inspection_view
 module Timing_workspace = Terminal_presentation.Timing_workspace
 module Fs0_fixture = Terminal_presentation.Fs0_fixture
 module Simulation_view = Terminal_presentation.Simulation_view
+module Testing_workspace = Terminal_presentation.Testing_workspace
+module Simulation_catalog = Terminal_presentation.Simulation_catalog
 module Simulation_export = Terminal_presentation.Simulation_export
 module Planned_run = Terminal_presentation.Planned_run
 module Stage_action = Terminal_presentation.Stage_action
@@ -521,6 +524,7 @@ let load_presentation_preferences session =
            (Some project_key)
       then return ()
       else (
+        session.host <- Host.invalidate_layout_intent session.host;
         (* Reopening a changed canonical project/environment must not carry the previous
            context's presentation into the new registry. *)
         if Option.is_some session.presentation_preferences_loaded
@@ -875,6 +879,72 @@ let mutate_workspace session mutation =
           let%map () = workspace_request session Get in
           if not (String.is_empty notice)
           then session.host <- { session.host with notice }))
+;;
+
+let restore_default_layout session (captured : Host.capture) ticket workspace definition =
+  match current_project session with
+  | None -> return ()
+  | Some project ->
+    if (not (Host.current session.host captured))
+       || not (Workspace.Workspace_id.equal workspace captured.workspace)
+    then return ()
+    else if session.registry_busy
+    then (
+      session.host
+      <- { session.host with notice = "Workspace update pending; retry deliberately" };
+      return ())
+    else (
+      let instance_id = session.hello.instance_id in
+      let client = session.client in
+      session.registry_busy <- true;
+      Monitor.protect
+        ~finally:(fun () ->
+          session.registry_busy <- false;
+          return ())
+        (fun () ->
+          let%bind response =
+            request session.diagnostics_file (fun () ->
+              Http.Client.workspace
+                client
+                { instance_id
+                ; project = project.id
+                ; operation =
+                    Mutate
+                      { expected_revision = captured.revision
+                      ; mutation =
+                          Hardcaml_workbench_workspaces.Definition.restore
+                            definition
+                            ~workspace
+                      }
+                })
+          in
+          if not
+               (phys_equal client session.client
+                && V1.Daemon_instance_id.equal instance_id session.hello.instance_id
+                && Option.value_map (current_project session) ~default:false ~f:(fun p ->
+                  Project_id.equal p.id project.id))
+          then return ()
+          else (
+            let acknowledged =
+              match response with
+              | Error message ->
+                session.host <- { session.host with notice = "Workspace: " ^ message };
+                false
+              | Ok snapshot ->
+                let host, pending =
+                  Presentation_preferences.receive
+                    session.presentation_preferences
+                    session.host
+                    snapshot
+                in
+                session.host <- host;
+                session.presentation_preferences <- pending;
+                reconcile_synthesis session;
+                Workspace.Session_id.equal snapshot.session_id captured.session
+            in
+            let host, save = Host.finish_restore session.host ticket ~acknowledged in
+            session.host <- host;
+            if save then save_presentation_preferences session else return ())))
 ;;
 
 let capture_artifact_request session (tile : Workspace.Tile.t) view operation =
@@ -1301,37 +1371,107 @@ let initialize_host_layout session =
   | _ -> return ()
 ;;
 
-let simulation_request session tile_id operation =
+let simulation_request session tile_id (operation : Simulation.Operation.t) =
   match current_project session with
   | None -> return ()
   | Some project ->
     let instance_id = session.hello.instance_id in
     let local = Host.local session.host tile_id in
     let client = session.client in
-    let view = Simulation_view.begin_request local.simulation in
-    session.host <- Host.set_local session.host tile_id { local with simulation = view };
+    let shared =
+      Option.exists (Host.simulation_tile session.host tile_id) ~f:(fun tile ->
+        Testing_workspace.is_pane tile.kind)
+    in
+    if shared
+    then (
+      let scope = Project_id.to_string project.id in
+      let identity, previous, state =
+        Option.value_or_thunk (Host.testing session.host tile_id) ~default:(fun () ->
+          ref (), scope, Testing_workspace.empty)
+      in
+      let identity, state =
+        if String.equal scope previous
+        then identity, state
+        else ref (), Testing_workspace.empty
+      in
+      let state =
+        match operation with
+        | Discover ->
+          Testing_workspace.update_catalog state Simulation_catalog.begin_discovery
+        | _ -> state
+      in
+      session.host
+      <- Host.set_testing
+           session.host
+           tile_id
+           (identity, scope, Testing_workspace.begin_request state))
+    else
+      session.host
+      <- Host.set_simulation
+           session.host
+           tile_id
+           (Simulation_view.begin_request (Host.simulation session.host tile_id));
+    let shared_identity =
+      Option.map (Host.testing session.host tile_id) ~f:(fun (identity, _, _) -> identity)
+    in
+    let view = Host.simulation session.host tile_id in
     let%bind response =
       request session.diagnostics_file (fun () ->
         Http.Client.simulation client { instance_id; project = project.id; operation })
     in
     if phys_equal client session.client
-       && phys_equal local.identity (Host.local session.host tile_id).identity
+       && (if shared
+           then
+             Option.equal
+               phys_equal
+               shared_identity
+               (Option.map (Host.testing session.host tile_id) ~f:(fun (identity, _, _) ->
+                  identity))
+           else phys_equal local.identity (Host.local session.host tile_id).identity)
        && V1.Daemon_instance_id.equal instance_id session.hello.instance_id
        && Option.value_map (current_project session) ~default:false ~f:(fun p ->
          Project_id.equal p.id project.id)
     then (
-      let local = Host.local session.host tile_id in
-      let simulation =
-        Simulation_view.receive
-          local.simulation
-          ~ticket:view.request
-          ~selected:view.attempt
-          operation
-          response
+      let response =
+        if shared
+        then
+          Result.map response ~f:(fun (snapshot : Simulation.Snapshot.t) ->
+            { snapshot with
+              discovery_job =
+                Option.filter snapshot.discovery_job ~f:(fun id ->
+                  not
+                    (List.exists (project_jobs session) ~f:(fun job ->
+                       Job_id.equal job.id id
+                       &&
+                       match job.state with
+                       | Complete | Failed | Cancelled -> true
+                       | _ -> false)))
+            })
+        else response
       in
-      session.host <- Host.set_local session.host tile_id { local with simulation };
+      session.host
+      <- (if shared
+          then
+            Host.update_testing session.host tile_id (fun state ->
+              Testing_workspace.receive
+                state
+                ~ticket:view.request
+                ~selected:view.attempt
+                operation
+                response)
+          else
+            Host.set_simulation
+              session.host
+              tile_id
+              (Simulation_view.receive
+                 (Host.simulation session.host tile_id)
+                 ~ticket:view.request
+                 ~selected:view.attempt
+                 operation
+                 response));
+      let simulation = Host.simulation session.host tile_id in
       match Simulation_view.detail simulation with
-      | Some d when simulation.logs ->
+      | Some d when simulation.logs || shared ->
         (match List.find (project_jobs session) ~f:(fun j -> Job_id.equal j.id d.job) with
          | Some job -> read_job_log session (Some job)
          | None ->
@@ -1346,9 +1486,16 @@ let simulation_request session tile_id operation =
 
 let refresh_simulation session =
   Host.tiles session.host
-  |> List.filter ~f:(fun tile -> String.equal tile.kind "simulation")
+  |> List.filter ~f:(fun tile -> Host.simulation_kind tile.kind)
+  |> List.fold ~init:[] ~f:(fun acc tile ->
+    if Testing_workspace.is_pane tile.kind
+       && List.exists acc ~f:(fun old ->
+         Testing_workspace.is_pane old.Workspace.Tile.kind
+         && Workspace.Workspace_id.equal old.workspace tile.workspace)
+    then acc
+    else acc @ [ tile ])
   |> Deferred.List.iter ~how:`Sequential ~f:(fun tile ->
-    let view = (Host.local session.host tile.id).simulation in
+    let view = Host.simulation session.host tile.id in
     match view.attempt with
     | _ when view.busy -> return ()
     | Some id -> simulation_request session tile.id (Observe id)
@@ -2531,10 +2678,12 @@ let host_data session : Host_view.data =
   }
 ;;
 
-let render session dimensions =
+let render ?indicator_frames session dimensions =
   let render_host () =
     session.last_dimensions <- Some dimensions;
     reconcile_synthesis session;
+    let data = host_data session in
+    session.host <- Host_view.reconcile_simulation_viewports session.host data dimensions;
     let host =
       match session.presentation_preference_notice with
       | None -> session.host
@@ -2547,7 +2696,7 @@ let render session dimensions =
               (List.filter [ notice; session.host.notice ] ~f:(Fn.non String.is_empty))
         }
     in
-    Host_view.render host (host_data session) dimensions
+    Host_view.render ?indicator_frames host data dimensions
   in
   match session.host.registry with
   | None
@@ -2698,8 +2847,8 @@ let host_catalog session =
     ~project:(current_project session)
     ~jobs:(project_jobs session)
   @ (match Host.focused session.host with
-     | Some tile when String.equal tile.kind "simulation" ->
-       let v = (Host.local session.host tile.id).simulation in
+     | Some tile when Host.simulation_kind tile.kind ->
+       let v = Host.simulation session.host tile.id in
        let cmd id title operation =
          Host.command
            ("simulation." ^ id)
@@ -2719,25 +2868,34 @@ let host_catalog session =
            ])
          @ List.map s.attempts ~f:(fun a ->
            cmd ("open." ^ a.id) ("Reopen " ^ a.id ^ " " ^ a.suite) (Observe a.id))
-         @ Option.value_map s.discovery ~default:[] ~f:(fun d ->
-           List.map d.suites ~f:(fun suite ->
-             Host.command
-               ("simulation.launch." ^ suite.id)
-               ("Simulation: Launch form " ^ suite.label)
-               "seed parameters cases"
-               (Simulation_form
-                  ( tile.id
-                  , Option.value s.discovery_digest ~default:""
-                  , suite
-                  , submission_key "simulation" )))))
+         @
+         if Testing_workspace.is_pane tile.kind
+         then []
+         else
+           Option.value_map s.discovery ~default:[] ~f:(fun d ->
+             List.map d.suites ~f:(fun suite ->
+               Host.command
+                 ("simulation.launch." ^ suite.id)
+                 ("Simulation: Launch form " ^ suite.label)
+                 "seed parameters cases"
+                 (Simulation_form
+                    ( tile.id
+                    , Option.value s.discovery_digest ~default:""
+                    , suite
+                    , submission_key "simulation" )))))
+       @ (if Testing_workspace.is_pane tile.kind
+          then
+            [ Host.testing_launch_command session.host tile.id
+            ; Host.command
+                "simulation.catalog-accept"
+                "Simulation: Accept current discovery for selected subset"
+                "stale catalog"
+                (Testing_accept tile.id)
+            ]
+          else [])
        @ Option.value_map (Simulation_view.detail v) ~default:[] ~f:(fun d ->
-         [ cmd "cancel" ("Cancel " ^ d.id) (Cancel d.id)
-         ; Host.command
-             "simulation.logs"
-             "Simulation: Toggle stream-labelled job logs"
-             "stdout stderr"
-             (Simulation_logs tile.id)
-         ]
+         [ cmd "cancel" ("Cancel " ^ d.id) (Cancel d.id) ]
+         @ Host.simulation_log_commands tile
          @ List.map d.cases ~f:(fun c ->
            Host.command
              ("simulation.case." ^ c.case_id)
@@ -3066,39 +3224,64 @@ let execute_host session captured action ~exit =
   else (
     match action with
     | Host.Simulation (tile, operation) ->
-      let local = Host.local session.host tile in
       (match operation with
        | Observe id ->
          session.host
-         <- Host.set_local
+         <- Host.set_simulation
               session.host
               tile
-              { local with
-                simulation = Simulation_view.select local.simulation id
-              ; scroll = 0
-              }
+              (Simulation_view.select (Host.simulation session.host tile) id);
+         (match Host.simulation_tile session.host tile with
+          | Some tile_info when Host_view.simulation_cursor_pane tile_info.kind ->
+            let local = Host.local session.host tile in
+            session.host <- Host.set_local session.host tile { local with follow = true }
+          | _ -> ())
        | _ -> ());
       async (fun () -> simulation_request session tile operation)
     | Simulation_case (tile, case_id) ->
-      let local = Host.local session.host tile in
+      let view = Host.simulation session.host tile in
       session.host
-      <- Host.set_local
-           session.host
-           tile
-           { local with
-             simulation = { local.simulation with case_id = Some case_id }
-           ; scroll = 0
-           };
+      <- (match Host.simulation_tile session.host tile with
+          | Some tile_info when Testing_workspace.is_pane tile_info.kind ->
+            Host.update_testing session.host tile (fun state ->
+              Testing_workspace.select_case state case_id)
+          | _ ->
+            Host.set_simulation session.host tile { view with case_id = Some case_id });
       Effect.Ignore
     | Simulation_logs tile ->
-      let local = Host.local session.host tile in
+      let view = Host.simulation session.host tile in
       session.host
-      <- Host.set_local
-           session.host
-           tile
-           { local with
-             simulation = { local.simulation with logs = not local.simulation.logs }
-           };
+      <- Host.set_simulation session.host tile { view with logs = not view.logs };
+      Effect.Ignore
+    | Testing_accept tile ->
+      session.host
+      <- Host.update_testing session.host tile (fun state ->
+           Testing_workspace.update_catalog state Simulation_catalog.accept);
+      Effect.Ignore
+    | Testing_launch_unavailable reason ->
+      session.host <- { session.host with notice = reason };
+      Effect.Ignore
+    | Testing_launch (tile, launch) ->
+      (match Host.validate_testing_launch session.host tile launch with
+       | Error error ->
+         session.host <- { session.host with notice = Error.to_string_hum error }
+       | Ok () ->
+         let { Host.suite; selection; digest } = launch.inputs in
+         let form = Simulation_view.Form.create ~selection suite in
+         session.host
+         <- { session.host with
+              palette =
+                Some
+                  { capture = captured
+                  ; commands = []
+                  ; query = Simulation_view.Form.query form
+                  ; index = 0
+                  ; argument =
+                      Some
+                        (Simulation_selection
+                           (tile, digest, submission_key "simulation", form))
+                  }
+            });
       Effect.Ignore
     | Simulation_form (tile, digest, suite, key) ->
       let form = Simulation_view.Form.create suite in
@@ -3130,19 +3313,30 @@ let execute_host session captured action ~exit =
       Effect.Ignore
     | Simulation_export (artifact, open_viewer) ->
       let tile = Option.map (Host.focused session.host) ~f:(fun t -> t.id) in
+      let identity = Option.map tile ~f:(Host.simulation_identity session.host) in
+      let owner_current () =
+        Option.value_map tile ~default:false ~f:(fun id ->
+          Option.equal
+            phys_equal
+            identity
+            (Some (Host.simulation_identity session.host id))
+          && Option.equal
+               String.equal
+               (Host.simulation session.host id).attempt
+               (Some artifact.attempt_id))
+      in
       let notice message =
         let message =
           Artifact_view.safe
             (sprintf "Simulation %s / %s: %s" artifact.attempt_id artifact.id message)
         in
-        session.host <- { session.host with notice = message };
-        Option.iter tile ~f:(fun id ->
-          let local = Host.local session.host id in
-          session.host
-          <- Host.set_local
-               session.host
-               id
-               { local with simulation = { local.simulation with notice = Some message } })
+        if owner_current ()
+        then (
+          session.host <- { session.host with notice = message };
+          Option.iter tile ~f:(fun id ->
+            let view = Host.simulation session.host id in
+            session.host
+            <- Host.set_simulation session.host id { view with notice = Some message }))
       in
       async (fun () ->
         if session.artifact_export_busy
@@ -3162,7 +3356,8 @@ let execute_host session captured action ~exit =
                 let instance_id = session.hello.instance_id in
                 let client = session.client in
                 let current () =
-                  phys_equal client session.client
+                  owner_current ()
+                  && phys_equal client session.client
                   && V1.Daemon_instance_id.equal instance_id session.hello.instance_id
                   && Option.value_map
                        (current_project session)
@@ -3216,6 +3411,15 @@ let execute_host session captured action ~exit =
                      | Ok path -> "Verified simulation bytes retained: " ^ path
                      | Error e -> "Simulation export: " ^ Error.to_string_hum e)))))
     | Host.Registry mutation -> async (fun () -> mutate_workspace session mutation)
+    | Restore_default_layout (workspace, definition) ->
+      let host, ticket = Host.begin_restore session.host captured in
+      let instance_id = session.hello.instance_id in
+      session.host <- host;
+      async (fun () ->
+        if V1.Daemon_instance_id.equal instance_id session.hello.instance_id
+        then restore_default_layout session captured ticket workspace definition
+        else return ())
+    | Restore_default_layout_unavailable -> Effect.Ignore
     | Switch id ->
       session.host <- Host.switch session.host id;
       Effect.Ignore
@@ -3687,7 +3891,7 @@ let execute_host session captured action ~exit =
       session.host <- Host.set_appearance session.host appearance;
       Effect.of_deferred_thunk (fun () -> save_presentation_preferences session)
     | Set_layout_mode layout_mode ->
-      session.host <- { session.host with layout_mode };
+      session.host <- Host.set_layout_mode session.host layout_mode;
       Effect.of_deferred_thunk (fun () -> save_presentation_preferences session)
     | Synthesis_mode mode ->
       change_synthesis session (fun _ local ->
@@ -3907,6 +4111,12 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
          || host.editing_filter
          || host.prefix > 0 -> Some Effect.Ignore
   | Host.No_effect when workspace_navigation -> Some Effect.Ignore
+  | Host.No_effect
+    when Option.exists (Host.focused session.host) ~f:(fun tile ->
+           Testing_workspace.is_pane tile.kind)
+         && Option.exists input ~f:(function
+           | Character ('j' | 'k' | 'n' | 'p' | 'x' | 'a') | Next | Previous -> true
+           | _ -> false) -> Some Effect.Ignore
   | Host.No_effect ->
     let dispatch id =
       Option.bind captured ~f:(fun capture ->
@@ -3958,6 +4168,36 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
          <- Host.set_local session.host tile.id { local with simulation; scroll = 0 };
          Some Effect.Ignore)
      | Some (Character 'b') -> dispatch "project.build"
+     | Some (Character 'd')
+       when Option.exists (Host.focused session.host) ~f:(fun tile ->
+              Host.simulation_kind tile.kind) -> dispatch "simulation.discover"
+     | Some (Character 'r')
+       when Option.exists (Host.focused session.host) ~f:(fun tile ->
+              String.equal tile.kind "simulation-catalog") ->
+       dispatch "simulation.catalog-launch"
+     | Some (Character 'u')
+       when Option.exists (Host.focused session.host) ~f:(fun tile ->
+              String.equal tile.kind "simulation-catalog") ->
+       dispatch "simulation.catalog-accept"
+     | Some (Character (('e' | 'v') as key))
+       when Option.exists (Host.focused session.host) ~f:(fun tile ->
+              String.equal tile.kind "simulation-artifacts") ->
+       let tile = Option.value_exn (Host.focused session.host) in
+       Option.bind
+         (Testing_workspace.artifact (Host.testing_state session.host tile.id))
+         ~f:(fun artifact ->
+           dispatch
+             ((if Char.equal key 'e' then "simulation.export." else "simulation.viewer.")
+              ^ artifact.id))
+     | Some (Character 'r')
+       when Option.exists (Host.focused session.host) ~f:(fun tile ->
+              Testing_workspace.is_pane tile.kind) -> dispatch "simulation.rerun-case"
+     | Some (Character 'f')
+       when Option.exists (Host.focused session.host) ~f:(fun tile ->
+              Testing_workspace.is_pane tile.kind) -> dispatch "simulation.rerun-failed"
+     | Some (Character 'h')
+       when Option.exists (Host.focused session.host) ~f:(fun tile ->
+              Host.simulation_kind tile.kind) -> dispatch "simulation.history"
      | Some (Character 't') -> dispatch "project.test"
      | Some (Character 'i') -> dispatch "project.discover"
      | Some (Character 's') -> dispatch "synthesis.cycle-sort"
@@ -4056,7 +4296,7 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
        (match Host.focused session.host with
         | Some tile
           when Terminal_result_view.supports tile.kind
-               || String.equal tile.kind "simulation"
+               || Host.simulation_kind tile.kind
                || String.equal tile.kind "synthesis"
                || String.equal tile.kind "live-status"
                || String.equal tile.kind "planned-run"
@@ -4534,6 +4774,7 @@ let capture_appearance_frames ~directory =
 
 let tui session ~exit ~dimensions graph =
   let open Bonsai_term in
+  let open Bonsai.Let_syntax in
   (* Session navigation is currently mutable. Give those mutations a reactive invalidation
      edge instead of waiting for the display clock to repaint. The clock below remains for
      time-dependent displays, not input acknowledgement. *)
@@ -4551,12 +4792,41 @@ let tui session ~exit ~dimensions graph =
     (Bonsai.return (Time_ns.Span.of_ms 500.))
     poll
     graph;
-  let view =
+  let display =
     Bonsai.map3
       dimensions
       (Bonsai.Clock.approx_now ~tick_every:(Time_ns.Span.of_ms 100.) graph)
       revision
-      ~f:(fun dimensions _now _revision -> render session dimensions)
+      ~f:(fun (dimensions : Dimensions.t) now revision ->
+        let animate =
+          (not (Appearance.Icons.equal session.host.appearance.icons None_))
+          && Option.is_some session.host.registry
+          && Option.is_none session.hierarchy_view
+          && Option.is_none session.artifact_view
+          && (not session.show_connection_details)
+          && dimensions.width >= minimum_width
+          && dimensions.height >= minimum_height
+        in
+        (* Preserve both invalidation tokens through to rendering. With mutable session
+           state, unchanged dimensions/gating do not mean an unchanged view. *)
+        dimensions, animate, now, revision)
+  in
+  let animate = Bonsai.map display ~f:(fun (_, animate, _, _) -> animate) in
+  (* One native pair for the client. Animation only invalidates the view; provider refresh
+     remains exclusively on the independent polling edge above. *)
+  let indicator_frames =
+    match%sub animate with
+    | false -> Bonsai.return None
+    | true ->
+      let dot = Bonsai_term_spinner.component ~kind:Dot graph in
+      let line = Bonsai_term_spinner.component ~kind:Line graph in
+      let%arr dot and line in
+      Some { Indicator.dot; line }
+  in
+  let view =
+    let%arr dimensions, _, _now, _revision = display
+    and indicator_frames in
+    render ?indicator_frames session dimensions
   in
   let handle (event : Event.t) =
     if Host.is_interrupt event

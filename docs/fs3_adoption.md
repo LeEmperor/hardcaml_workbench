@@ -1,5 +1,11 @@
 # FS3 — Existing-project setup and reusable workspaces
 
+**Default-layout recovery added 2026-10-18:** use **Restore default layout: Overview /
+Timing / Testing (hide extras)** to show the built-in membership, hide accidental
+extras, restore geometry, clear zoom and select Fit in one acknowledged operation.
+Unlike additive Apply/Reset, this also repairs visibility; pins, contexts and
+appearance remain. See [the recovery guide](default_layout_restore.md).
+
 Integrated with current `oxcaml`, 2026-10-17. This slice delivers an existing-project
 initializer, portable workspace templates and persistent client presentation choices.
 Multi-monitor UX, configuration-location migration and new-project creation remain

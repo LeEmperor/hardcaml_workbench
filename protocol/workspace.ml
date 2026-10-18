@@ -212,6 +212,11 @@ module Mutation = struct
         ; preset : string
         ; tiles : (string * Geometry.t) list
         }
+    | Restore_default_layout of
+        { workspace : Workspace_id.t
+        ; preset : string
+        ; tiles : (string * Geometry.t) list
+        }
   [@@deriving bin_io, compare, equal, sexp]
 end
 
@@ -616,6 +621,54 @@ let apply_mutation (s : Snapshot.t) (mutation : Mutation.t) =
               }
             ]
       })
+  | Restore_default_layout { workspace = id; preset; tiles } ->
+    valid_name preset;
+    require (not (List.is_empty tiles)) "Empty default layout definition";
+    List.iter tiles ~f:(fun (kind, geometry) ->
+      valid_name kind;
+      valid_geometry geometry);
+    ignore (workspace s id : Arrangement.t);
+    let claimed, s =
+      List.fold tiles ~init:([], s) ~f:(fun (claimed, s) (kind, geometry) ->
+        match
+          List.find s.tiles ~f:(fun t ->
+            Workspace_id.equal t.workspace id
+            && String.equal t.kind kind
+            && not (List.mem claimed t.id ~equal:Tile_id.equal))
+        with
+        | Some t ->
+          ( t.id :: claimed
+          , update_tile s t.id ~f:(fun t ->
+              { t with hidden = false; requested_geometry = geometry }) )
+        | None ->
+          let fresh, s = allocate s "tile" in
+          let tile_id = Tile_id.of_string fresh in
+          ( tile_id :: claimed
+          , { s with
+              tiles =
+                s.tiles
+                @ [ { Tile.id = tile_id
+                    ; workspace = id
+                    ; kind
+                    ; binding = Follow
+                    ; hidden = false
+                    ; requested_geometry = geometry
+                    }
+                  ]
+            } ))
+    in
+    let s =
+      { s with
+        tiles =
+          List.map s.tiles ~f:(fun t ->
+            if Workspace_id.equal t.workspace id
+               && not (List.mem claimed t.id ~equal:Tile_id.equal)
+            then { t with hidden = true }
+            else t)
+      }
+    in
+    update_workspace s id ~f:(fun w ->
+      { w with preset = Some preset; zoomed_tile = None })
   | Apply_preset { workspace = id; preset; tiles }
   | Reset_arrangement { workspace = id; preset; tiles } ->
     valid_name preset;

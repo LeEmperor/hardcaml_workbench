@@ -1,5 +1,14 @@
 # F11 — Tiered run-summary caching and fast switching
 
+**Ticket entry points:** [WB-003 refresh activity](evidence/WB-003-evidence-refresh-activity.md),
+[WB-006 evidence time](evidence/WB-006-evidence-timestamps.md),
+[WB-027 measurement](infrastructure/WB-027-performance-measurement.md),
+[WB-040 streaming](infrastructure/WB-040-trace-streaming.md),
+[WB-042 budgets](infrastructure/WB-042-resource-budgets.md) and
+[WB-043 slow storage](infrastructure/WB-043-slow-storage.md).
+Measure actual workloads before expanding caches; provider canonical evidence and
+client-visible freshness remain independent of storage/presentation optimization.
+
 Status (2026-10-16): **FS0 bounded summary L1/L2 and FS1 bounded inspection caches,
 coalesced reads, observation invalidation and explicit Refresh implemented**.
 [Provider integration](../fs0_provider_integration.md)

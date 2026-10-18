@@ -1,12 +1,26 @@
 # Real ASIC example demo and black-theme polish
 
-**Latest binary refresh, 2026-10-17:** the integrated FS3 daemon/client/exporter
-copies are prepared. Receipt: `receipts/refresh-binaries-14357dcbbedb43c6855fbfbf1c429988/`.
+**Latest binary refresh, 2026-10-18:** default-layout restoration, cooperative
+Testing/catalog, integrated FS3 and native activity/icon daemon/client/exporter
+copies are prepared. Receipt:
+`receipts/refresh-binaries-573452bea4d94baeb0635f81832ce473/`.
 Once active jobs finish, restart the matching daemon/client pair to adopt them;
 existing processes and state were preserved. Daemon/client alone reopen saved
 state—do not repeat `seed` for this upgrade. See [FS3 integration](fs3_adoption.md)
 for persistent appearance/header controls and template semantics. The historical
 real-evidence measurements below are unchanged; this refresh did not rerun EDA.
+Use **Appearance: Icons Unicode / ASCII / Off** for the new indicators; see
+[native activity controls and evidence](terminal_indicators_plan.md).
+For accidental extra/hidden tiles or changed sizes, use the new
+[Restore default layout](default_layout_restore.md) palette command after upgrading
+the pair. It hides extras rather than deleting them and preserves run/pin state.
+
+**Real FIFO testing is now available:** a genuine project-owned Cyclesim provider
+is installed separately from the ASIC provider. Use **Create Testing workspace**,
+focus Catalog, press **d**, then choose cases and explicitly confirm a launch.
+The new panes coordinate attempts/cases/detail/artifacts/logs without borrowing
+ASIC-run provenance. See [full controls and real proof](testing_workspace.md).
+No synthetic tests were injected into this root and no physical flow was rerun.
 
 Implemented and verified 2026-10-16. The next demo opens the actual
 `/home/wayne/devel/jane/hardcaml_asic_example` project using retained genuine named

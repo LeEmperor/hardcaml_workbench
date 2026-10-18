@@ -1,5 +1,13 @@
 # F12 — Composable appearance system and candidate gallery
 
+**Ticket entry points:** [presentation catalog](README.md#presentation-and-interaction)
+and [workspace/input catalog](README.md#workspaces-input-and-configuration).
+WB-001/019/024 are narrow alignment/control/wording requests; WB-048/053–061 cover
+remaining persistence, tabs, peeks, floats, utility placement, glyph modes and reviewed
+composition. [WB-002](presentation/WB-002-native-icons-animation.md) explicitly extends
+the already delivered native indicators; it does not reopen that implementation.
+See each ticket for original size label, provisional points and open design choices.
+
 Status (2026-10-16): **FS0 seams, A–E skins and frontend composition delivered**.
 The palette is now a bounded fuzzy overlay with matched-character highlighting and
 Tab/Shift-Tab selection. Tile chrome/badges and semantic status colors are configurable;
@@ -7,8 +15,11 @@ Overview/Timing/Testing use centralized composable definitions with stable prese
 See [controls and verification](../frontend_composition.md). The palette switches
 preset, vivid/selective/restrained color, off/ASCII/Unicode markers and compact/
 comfortable density. [Controls/captures](../appearance_presets.md) record tested scope.
-Choices remain client-local/unpersisted. This starts FS5; rich Timing fixtures,
-reusable tab groups, Nerd Font mode, source peeks and final default review remain.
+FS3 retains global appearance and explicit tile-header choices across restart;
+other tile overrides remain transient. Native Dot/Line activity indicators and
+compact Unicode/ASCII/off semantic glyphs are now integrated; see
+[indicator evidence](../terminal_indicators_plan.md). Richer gallery fixtures,
+reusable tab groups, Nerd Font mode and source peeks remain later work.
 Sources: [newer gallery](../design/tui_candidate_gallery_handoff.md) supersedes the
 [older handoff](../design/tui_design_system_handoff.md). See the
 [interpretation notes](../design/README.md) for implementation corrections.
@@ -103,8 +114,10 @@ imports; prove reuse within Workbench before requiring cross-repository packagin
 | D — Studio | Rich tabs/contextual actions inspired by Posting |
 | E — Structured Studio | B's framed structure plus D's tabs/polish |
 
-A/B are currently preferred visually; D's tabs are valued. No default is selected.
-E is specified in the export but not present in its described HTML prototype.
+The historical gallery preference favored A/B visually and D-style tabs. No final
+product default has been selected; current Instrument/Carbon startup/review defaults
+are documented in the appearance guide. E was absent from the original described
+HTML prototype, but all five skins are implemented in the current terminal.
 
 Compare **all five** with identical labeled synthetic Overview and Timing fixtures.
 The gallery uses the same component/host contracts and injected state, not five

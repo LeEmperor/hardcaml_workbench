@@ -1,5 +1,14 @@
 # F03 — Command palette and project-owned flows
 
+**Ticket entry points:** [WB-003 refresh activity](evidence/WB-003-evidence-refresh-activity.md),
+[WB-014 hotkeys](workspaces/WB-014-hotkey-configuration.md),
+[WB-019 hideable controls](presentation/WB-019-hideable-controls.md),
+[WB-030 test sweeps](verification/WB-030-seed-parameter-sweeps.md),
+[WB-031 design sweeps](exploration/WB-031-design-space-sweeper.md) and
+[WB-062 uncertain submissions](verification/WB-062-submission-recovery.md).
+Each must preserve explicit execution and captured/revalidated command targets.
+The [dependency map](dependencies.md) describes required shared interfaces.
+
 Status (2026-10-16): **FS0 palette/captured commands and FS1 physical, finalization
 and inspection actions delivered**. Remembered Plan inputs and exact-preview launch
 now cover capability-checked known physical endpoints as well as synthesis.

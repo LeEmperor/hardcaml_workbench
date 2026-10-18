@@ -9,12 +9,15 @@ Project/provider commands remain useful without the application.
 | Document | What it answers |
 | --- | --- |
 | [Feature list](feature_list.md) | What users want to do, what exists, and what comes first |
+| [Feature ticket catalog](features/README.md) |65 categorized WB tickets: one file each, priority, size/points, dependencies and decisions |
+| [Intake crosswalk](features/intake.md) / [dependency map](features/dependencies.md) |Where every submitted request went and what each prerequisite must supply |
 | [Feature sets](feature_sets.md) | FS0 initial demos and later themed groups of work |
 | [Demo construction plan](construction_phase_plan.md) | What to implement next and how to demonstrate it |
 | [Decision log](decisions.md) | Accepted D1/D2/D3 FS0 defaults and later command/snapshot policy |
 | [FS0 acceptance](fs0_acceptance.md) | Actual HTTP/PTY fixtures, real 673/685 synthesis and live cached UI reopening |
 | [Installed checks](fs0_install_checks.md) | Passed native installed workflow, external fixture and legacy captures |
 | [FS3 adoption](fs3_adoption.md) | Existing-project initializer, portable workspace templates and persistent presentation preferences |
+| [Restore default layout](default_layout_restore.md) |One-step recovery: show defaults, hide extras, restore sizes, clear zoom and select Fit while preserving evidence/pins |
 | [Provider integration](fs0_provider_integration.md) | Implemented public API, configuration, cache and supervision limits |
 | [Terminal host](fs0_terminal.md) / [Execution module](fs0_execution_module.md) | Current UI controls and daemon-routed generic execution boundary |
 | [Architecture](hardcaml_workbench_architecture.md) | Runtime, ownership, data and integration boundaries |
@@ -34,6 +37,7 @@ Project/provider commands remain useful without the application.
 | [Finalization and artifacts](fs1_lifecycle_and_artifacts.md) | Workbench-owned collect/accept, live phases, cancel/reconnect, bounded report paging and explicit external text export |
 | [FS1 investigation](fs1_investigation.md) | Completed adopted-evidence scope: paths, measured clocks, physical/routing tables, binary handoff, verified provider generation and activation |
 | [FS2 simulation](fs2_acceptance.md) | Structured suites/cases/seeds, live failures, reruns, history and trace controls with real Cyclesim/native HTTP/PTY evidence |
+| [Testing catalog and real FIFO](testing_workspace.md) / [cluster plan](testing_cluster_plan.md) |Current cooperative Testing panes, explicit catalog/subset launch, genuine FIFO pass/failure/traces and final native evidence |
 | [FS2 provider contract](fs2_simulation_contract.md) / [implementation plan](fs2_implementation_plan.md) | Versioned configuration/events/RPC, bounds and feature-set ownership |
 | [Formatting](formatting_guide.md) | Source conventions |
 | [Backlog](backlog/README.md) | Deferred work and reactivation triggers |
@@ -42,13 +46,15 @@ Project/provider commands remain useful without the application.
 The feature list is the concise product inventory; feature sets group delivery
 themes (FS0 and adopted-evidence FS1 delivered; substantial FS2 accepted and closed;
 FS5's first appearance slice delivered).
-Focused feature documents record
-behavior and boundaries; the construction plan alone owns implementation order and
-completion checklist. Focused acceptance records linked there own exact runtime
+F01–F12 feature documents record architectural behavior and boundaries; the WB
+catalog owns proposed feature scope, estimates and dependencies. The construction
+plan alone owns activated implementation order and delivery checklist. Ticket
+acceptance criteria describe a future completion gate, not an active implementation
+checklist. Focused acceptance records linked there own exact runtime
 evidence. A feature request or a provider capability is not proof
 of an implemented Workbench feature.
 
-## Current orientation — 2026-10-16
+## Current orientation — 2026-10-17
 
 - **FS0 Demos A–C delivered with bounded limitations:** typed execution boundary,
   tile host/palette, project-scoped tests/logs, named workspaces, linked/independent
@@ -105,9 +111,19 @@ of an implemented Workbench feature.
   HTTP/PTY/L2 checks, original synthesis inspection and the five-mode interrupt
   matrix passed. Evidence and limitations are recorded in the active plan.
 - **Owner usability confirmation:** Escape now works well in the timing-inspection
-  workflow. This closes the reported latency followup; clearer inspector breadcrumbs,
-  contextual help, a Close inspector command, and less prominent raw JSON remain
+  workflow. This closes the reported latency followup. Timing's concise summary/
+  detail/provenance split is also delivered; clearer inspector breadcrumbs,
+  contextual help and a Close inspector command remain
   [usability polish](backlog/README.md#inspector-usability-polish). FS2's independent
-  delivery and acceptance are recorded separately above.
+   delivery and acceptance are recorded separately above.
+
+- FS3 post-merge integration and native icons/activity are delivered; see
+  [FS3 integration](fs3_integration_plan.md) and
+  [native indicator evidence](terminal_indicators_plan.md). Preset identity,
+  atomic defaults and selected persistent presentation choices are foundations,
+  not outstanding catalog tasks.
+- The owner's new report of empty Timing paths is separately tracked as
+  [WB-009](features/evidence/WB-009-timing-coherency.md), with no asserted root cause
+  or implicit authorization for a new physical flow.
 
 Build, launch and check commands are in the repository [README](../README.md).

@@ -507,33 +507,24 @@ let status_rows
   ]
 ;;
 
+let status_indicator : Status.t -> Indicator.t = function
+  | Running -> Running
+  | Pending -> Pending
+  | Completed -> Completed
+  | Failed -> Failed
+  | Cancelled -> Cancelled
+  | Skipped -> Skipped
+  | Not_requested -> Not_requested
+  | Unknown | Unsupported | Unrecognized _ -> Unknown
+;;
+
 let marker (appearance : Appearance.t) (row : row) =
-  match appearance.icons with
-  | None_ -> ""
-  | Ascii ->
-    (match row.status with
-     | Some Completed -> "[+] "
-     | Some Failed -> "[x] "
-     | Some Running -> "[>] "
-     | Some Pending -> "[ ] "
-     | Some Skipped -> "[-] "
-     | Some Cancelled -> "[!] "
-     | Some Unsupported -> "[~] "
-     | Some Not_requested -> "[.] "
-     | Some (Unknown | Unrecognized _) -> "[?] "
-     | None -> if row.active then "> " else "")
-  | Unicode ->
-    (match row.status with
-     | Some Completed -> "✓ "
-     | Some Failed -> "✗ "
-     | Some Running -> "▶ "
-     | Some Pending -> "○ "
-     | Some Skipped -> "− "
-     | Some Cancelled -> "! "
-     | Some Unsupported -> "~ "
-     | Some Not_requested -> "· "
-     | Some (Unknown | Unrecognized _) -> "? "
-     | None -> if row.active then "◆ " else "")
+  match row.status with
+  | Some status ->
+    let glyph = Indicator.text appearance.icons (status_indicator status) in
+    if String.is_empty glyph then "" else glyph ^ " "
+  | None ->
+    if row.active && not (Appearance.Icons.equal appearance.icons None_) then "> " else ""
 ;;
 
 (** Map roles to the host's theme, e.g. [Active -> Host_view.Role.Selection]. Full values
@@ -556,18 +547,62 @@ let row_spans ~appearance ~width ~indent row =
   ]
 ;;
 
-let render_row ?selected_bg ~appearance ~attrs ~width ~indent row =
+let render_row
+  ?indicator_frames
+  ?indicator_fg
+  ?selected_bg
+  ~appearance
+  ~attrs
+  ~width
+  ~indent
+  row
+  =
+  let spans = row_spans ~appearance ~width ~indent row in
   View.hcat
-    (List.map (row_spans ~appearance ~width ~indent row) ~f:(fun (role, text) ->
+    (List.mapi spans ~f:(fun i (role, text) ->
        let attrs =
          attrs role
          @ Option.value_map selected_bg ~default:[] ~f:(fun bg ->
            if row.active then [ Attr.bg bg ] else [])
        in
-       View.text ~attrs text))
+       if i = 0
+          && Option.equal Status.equal row.status (Some Running)
+          && Option.is_some indicator_frames
+          && not (Appearance.Icons.equal appearance.icons None_)
+       then (
+         let prefix = indent ^ if row.active then "> " else "" in
+         let glyph = Indicator.view ?frames:indicator_frames appearance.icons Running in
+         let glyph =
+           View.crop
+             ~r:(Int.max 0 (View.width glyph - 1))
+             ~b:(Int.max 0 (View.height glyph - 1))
+             glyph
+           |> fun glyph -> View.zcat [ glyph; View.rectangle ~width:1 ~height:1 () ]
+         in
+         View.hcat
+           [ View.text ~attrs prefix
+           ; View.hcat
+               [ glyph
+               ; View.text (if String.is_empty (marker appearance row) then "" else " ")
+               ]
+             |> View.with_colors'
+                  ?fg:indicator_fg
+                  ?bg:(if row.active then selected_bg else None)
+           ])
+       else View.text ~attrs text))
 ;;
 
-let render ?title ?selected_bg ~(appearance : Appearance.t) ~attrs ~width ~height rows =
+let render
+  ?indicator_frames
+  ?indicator_fg
+  ?title
+  ?selected_bg
+  ~(appearance : Appearance.t)
+  ~attrs
+  ~width
+  ~height
+  rows
+  =
   let width = Int.max 0 width
   and height = Int.max 0 height in
   let heading =
@@ -586,7 +621,17 @@ let render ?title ?selected_bg ~(appearance : Appearance.t) ~attrs ~width ~heigh
     | Compact | Comfortable -> ""
   in
   let content =
-    List.map rows ~f:(render_row ?selected_bg ~appearance ~attrs ~width ~indent)
+    List.map
+      rows
+      ~f:
+        (render_row
+           ?indicator_frames
+           ?indicator_fg
+           ?selected_bg
+           ~appearance
+           ~attrs
+           ~width
+           ~indent)
   in
   let view = View.vcat (List.take (heading @ content) height) in
   let view =
@@ -602,6 +647,68 @@ let inspection_lines rows =
   List.concat_map rows ~f:(fun row ->
     (row.label ^ if String.is_empty row.value then "" else ": " ^ row.value)
     :: row.details)
+;;
+
+let%test_unit "native stage frames change only running markers, with fixed cell budgets" =
+  let image view =
+    let buffer = Buffer.create 100 in
+    Notty.Render.to_buffer
+      buffer
+      Notty.Cap.dumb
+      (0, 0)
+      (View.width view, View.height view)
+      (View.Private.notty_image view);
+    Buffer.contents buffer
+  in
+  let frames glyph : Indicator.frames =
+    { dot = View.text glyph; line = View.text glyph }
+  in
+  List.iter Appearance.Icons.all ~f:(fun icons ->
+    let appearance = { Appearance.default with icons; density = Compact } in
+    List.iter
+      [ Status.Running
+      ; Pending
+      ; Completed
+      ; Failed
+      ; Cancelled
+      ; Skipped
+      ; Not_requested
+      ; Unknown
+      ; Unsupported
+      ; Unrecognized "running passed"
+      ]
+      ~f:(fun status ->
+        let rows =
+          [ row
+              ~role:(status_role status)
+              ~status
+              ~active:true
+              "界é stage"
+              (Status.label status)
+          ]
+        in
+        let render ?indicator_frames width height =
+          render ?indicator_frames ~appearance ~attrs:(fun _ -> []) ~width ~height rows
+        in
+        List.iter
+          [ 0, 0; 1, 1; 8, 2; 40, 2 ]
+          ~f:(fun (width, height) ->
+            let a = render ~indicator_frames:(frames "A") width height in
+            let b = render ~indicator_frames:(frames "B") width height in
+            assert (View.width a = width && View.height a = height);
+            assert (View.width b = width && View.height b = height));
+        let a = render ~indicator_frames:(frames "A") 60 1 |> image in
+        let b = render ~indicator_frames:(frames "B") 60 1 |> image in
+        let animated =
+          Status.equal status Running && not (Appearance.Icons.equal icons None_)
+        in
+        assert (Bool.equal (not (String.equal a b)) animated);
+        assert (String.is_substring a ~substring:("界é stage: " ^ Status.label status));
+        assert (String.equal (render 60 1 |> image) (render 60 1 |> image));
+        assert (
+          String.equal
+            (List.hd_exn (inspection_lines rows))
+            ("界é stage: " ^ Status.label status))))
 ;;
 
 (** Horizontal presentation preserves the original stage record and provider order.
@@ -659,11 +766,22 @@ module Stage_strip = struct
     { lines; selected; selected_line }
   ;;
 
-  let render ?selected_bg ~appearance ~attrs ~width ~height t =
+  let render
+    ?indicator_frames
+    ?indicator_fg
+    ?selected_bg
+    ~appearance
+    ~attrs
+    ~width
+    ~height
+    t
+    =
     let width = Int.max 0 width
     and height = Int.max 0 height in
     let selected =
       render
+        ?indicator_frames
+        ?indicator_fg
         ?selected_bg
         ~appearance
         ~attrs
@@ -677,7 +795,16 @@ module Stage_strip = struct
         View.hcat
           (List.concat_mapi line ~f:(fun i item ->
              (if i = 0 then [] else [ View.text ~attrs:(attrs Role.Muted) " | " ])
-             @ [ render_row ?selected_bg ~appearance ~attrs ~width ~indent:"" item.row ])))
+             @ [ render_row
+                   ?indicator_frames
+                   ?indicator_fg
+                   ?selected_bg
+                   ~appearance
+                   ~attrs
+                   ~width
+                   ~indent:""
+                   item.row
+               ])))
     in
     (* Selection stays visible even when wrapping exceeds the available strip height. *)
     let view = View.vcat (lines @ if height = 0 then [] else [ selected ]) in

@@ -31,6 +31,19 @@ type layout_mode =
   | Preferred
 [@@deriving equal, sexp]
 
+type testing_inputs =
+  { suite : Simulation.Suite.t
+  ; selection : Simulation.Selection.t
+  ; digest : string
+  }
+
+type testing_launch =
+  { identity : unit ref
+  ; scope : string
+  ; workspace : W.Workspace_id.t
+  ; inputs : testing_inputs
+  }
+
 type action =
   | Registry of W.Mutation.t
   | Switch of W.Workspace_id.t
@@ -53,6 +66,8 @@ type action =
   | Unavailable_launch
   | Prepare_stage of Asic.Stage.t * Run_ref.t
   | Apply_default_layout
+  | Restore_default_layout of W.Workspace_id.t * P.Definition.t
+  | Restore_default_layout_unavailable
   | Create_testing_workspace
   | Local_headers
   | Set_presentation of W.Tile_id.t * T.overrides
@@ -71,6 +86,9 @@ type action =
   | Simulation_case of W.Tile_id.t * string
   | Simulation_logs of W.Tile_id.t
   | Simulation_export of Simulation.Artifact.t * bool
+  | Testing_launch of W.Tile_id.t * testing_launch
+  | Testing_launch_unavailable of string
+  | Testing_accept of W.Tile_id.t
 
 type command =
   { id : string
@@ -91,6 +109,11 @@ type argument =
   | Finalization_attempt of Run_ref.t
   | Acceptance of Run_ref.t * string * string
   | Simulation_selection of W.Tile_id.t * string * string * Simulation_view.Form.t
+
+type restore_ticket =
+  { intent : unit ref
+  ; capture : capture
+  }
 
 type palette =
   { capture : capture
@@ -115,9 +138,11 @@ type t =
   ; workspace_focus : (string * W.Tile_id.t option) list
   ; appearance : Appearance.t
   ; layout_mode : layout_mode
+  ; layout_intent : unit ref
   ; presentation : T.overrides
   ; workspace_presentation : (string * T.overrides) list
   ; timing : (string * Timing_workspace.t) list
+  ; testing : (string * (unit ref * string * Testing_workspace.t)) list
   ; planned_run : Planned_run.t
   ; stage_preparation : string option
   ; stage_generation : int
@@ -139,9 +164,11 @@ let empty =
   ; workspace_focus = []
   ; appearance = Appearance.default
   ; layout_mode = Fit
+  ; layout_intent = ref ()
   ; presentation = T.inherit_
   ; workspace_presentation = []
   ; timing = []
+  ; testing = []
   ; planned_run = Planned_run.empty
   ; stage_preparation = None
   ; stage_generation = 0
@@ -169,6 +196,30 @@ let default_local =
   }
 ;;
 
+let invalidate_layout_intent t = { t with layout_intent = ref () }
+let set_layout_mode t layout_mode = { (invalidate_layout_intent t) with layout_mode }
+
+let begin_restore t capture =
+  let t = invalidate_layout_intent t in
+  t, { intent = t.layout_intent; capture }
+;;
+
+(** A receipt permits a local Fit only for the still-current intent. The registry may
+    already have applied to the captured workspace after client navigation. *)
+let finish_restore t ticket ~acknowledged =
+  let current =
+    phys_equal t.layout_intent ticket.intent
+    && Option.equal W.Workspace_id.equal t.active (Some ticket.capture.workspace)
+    && Option.exists t.registry ~f:(fun registry ->
+      W.Session_id.equal registry.session_id ticket.capture.session)
+  in
+  if not current
+  then t, false
+  else (
+    let t = invalidate_layout_intent t in
+    if acknowledged then { t with layout_mode = Fit }, true else t, false)
+;;
+
 let local t id =
   List.Assoc.find t.locals (W.Tile_id.to_string id) ~equal:String.equal
   |> Option.value_or_thunk ~default:(fun () -> { default_local with identity = ref () })
@@ -178,6 +229,128 @@ let set_local t id value =
   { t with
     locals = List.Assoc.add t.locals ~equal:String.equal (W.Tile_id.to_string id) value
   }
+;;
+
+let simulation_tile t id =
+  Option.bind t.registry ~f:(fun registry ->
+    List.find registry.tiles ~f:(fun tile -> W.Tile_id.equal tile.id id))
+;;
+
+let testing t id =
+  Option.bind (simulation_tile t id) ~f:(fun tile ->
+    if Testing_workspace.is_pane tile.kind
+    then
+      List.Assoc.find
+        t.testing
+        (W.Workspace_id.to_string tile.workspace)
+        ~equal:String.equal
+    else None)
+;;
+
+let set_testing t id value =
+  match simulation_tile t id with
+  | Some tile when Testing_workspace.is_pane tile.kind ->
+    { t with
+      testing =
+        List.Assoc.add
+          t.testing
+          ~equal:String.equal
+          (W.Workspace_id.to_string tile.workspace)
+          value
+    }
+  | _ -> t
+;;
+
+let testing_state t id =
+  Option.value_map
+    (testing t id)
+    ~default:Testing_workspace.empty
+    ~f:(fun (_, _, state) -> state)
+;;
+
+let update_testing t id f =
+  let identity, scope, state =
+    Option.value_or_thunk (testing t id) ~default:(fun () ->
+      ref (), "", Testing_workspace.empty)
+  in
+  set_testing t id (identity, scope, f state)
+;;
+
+let simulation t id =
+  match simulation_tile t id with
+  | Some tile when Testing_workspace.is_pane tile.kind ->
+    Testing_workspace.view (testing_state t id)
+  | _ -> (local t id).simulation
+;;
+
+let set_simulation t id view =
+  match simulation_tile t id with
+  | Some tile when Testing_workspace.is_pane tile.kind ->
+    update_testing t id (fun state -> Testing_workspace.set_view state view)
+  | _ -> set_local t id { (local t id) with simulation = view }
+;;
+
+let simulation_kind kind =
+  String.equal kind "simulation" || Testing_workspace.is_pane kind
+;;
+
+let simulation_identity t id =
+  match testing t id with
+  | Some (identity, _, _) -> identity
+  | None -> (local t id).identity
+;;
+
+let capture_testing_inputs catalog =
+  Or_error.map (Simulation_catalog.launch catalog) ~f:(fun (suite, selection, digest) ->
+    { suite; selection; digest })
+;;
+
+let validate_testing_inputs catalog captured =
+  match capture_testing_inputs catalog with
+  | Error error ->
+    Or_error.error_string (Error.to_string_hum error ^ "; reopen the launch command")
+  | Ok current ->
+    if Simulation.Suite.equal captured.suite current.suite
+       && Simulation.Selection.equal captured.selection current.selection
+       && String.equal captured.digest current.digest
+    then Ok ()
+    else
+      Or_error.error_string
+        "Catalog choices or discovery changed; reopen the launch command"
+;;
+
+let testing_launch_action t id =
+  match simulation_tile t id, testing t id with
+  | Some tile, Some (identity, scope, state) ->
+    (match capture_testing_inputs (Testing_workspace.catalog state) with
+     | Error error -> Testing_launch_unavailable (Error.to_string_hum error)
+     | Ok inputs ->
+       Testing_launch (id, { identity; scope; workspace = tile.workspace; inputs }))
+  | _ ->
+    Testing_launch_unavailable "No current Testing catalog; reopen the launch command"
+;;
+
+let validate_testing_launch t id captured =
+  match simulation_tile t id, testing t id with
+  | Some tile, Some (identity, scope, state)
+    when phys_equal captured.identity identity
+         && String.equal captured.scope scope
+         && W.Workspace_id.equal captured.workspace tile.workspace ->
+    validate_testing_inputs (Testing_workspace.catalog state) captured.inputs
+  | _ ->
+    Or_error.error_string "Testing workspace identity changed; reopen the launch command"
+;;
+
+let set_filter t id filter =
+  let l = local t id in
+  let t = set_local t id { l with filter; scroll = 0 } in
+  match simulation_tile t id with
+  | Some tile when String.equal tile.kind "simulation-catalog" ->
+    let t = set_local t id { (local t id) with follow = true } in
+    update_testing t id (fun state ->
+      Testing_workspace.update_catalog state (fun catalog ->
+        Simulation_catalog.set_filter catalog filter))
+  | _ -> t
 ;;
 
 (** The catalog captures sparse overrides. Only a changed header is durable; the other
@@ -427,13 +600,14 @@ let receive t (s : W.Snapshot.t) =
     let t =
       match t.registry with
       | Some previous when not (W.Session_id.equal previous.session_id s.session_id) ->
-        { t with
+        { (invalidate_layout_intent t) with
           active = None
         ; focus = None
         ; locals = []
         ; workspace_focus = []
         ; workspace_presentation = []
         ; timing = []
+        ; testing = []
         ; palette = None
         ; prefix = 0
         ; editing_filter = false
@@ -517,12 +691,32 @@ let receive t (s : W.Snapshot.t) =
     let t =
       { t with
         registry = Some s
+      ; layout_intent =
+          (if Option.equal W.Workspace_id.equal active t.active
+           then t.layout_intent
+           else ref ())
       ; active
       ; locals
       ; notice
       ; timing
       ; workspace_focus
       ; workspace_presentation
+      ; testing =
+          List.filter t.testing ~f:(fun (id, _) ->
+            let members registry =
+              List.filter registry.W.Snapshot.tiles ~f:(fun tile ->
+                String.equal id (W.Workspace_id.to_string tile.workspace)
+                && Testing_workspace.is_pane tile.kind)
+              |> List.map ~f:(fun tile -> W.Tile_id.to_string tile.id, tile.kind)
+              |> List.sort ~compare:[%compare: string * string]
+            in
+            match t.registry with
+            | Some previous ->
+              workspace_exists id
+              && (not (List.is_empty (members s)))
+              && List.for_all (members previous) ~f:(fun member ->
+                List.mem (members s) member ~equal:[%equal: string * string])
+            | None -> false)
       }
     in
     let focus =
@@ -549,6 +743,7 @@ let reconnect t ~replacement =
   let t =
     { t with
       palette = None
+    ; layout_intent = ref ()
     ; prefix = 0
     ; paste = false
     ; inspection_paste = None
@@ -557,6 +752,9 @@ let reconnect t ~replacement =
     ; stage_preparation = None
     ; planned_run = Planned_run.reset t.planned_run ~scope:""
     ; timing = List.map t.timing ~f:(fun (id, view) -> id, invalidate_inspection view)
+    ; testing =
+        List.map t.testing ~f:(fun (id, (identity, scope, state)) ->
+          id, (identity, scope, Testing_workspace.reconnect state))
     ; locals =
         List.map t.locals ~f:(fun (id, local) ->
           ( id
@@ -590,8 +788,63 @@ let reconnect t ~replacement =
     ; workspace_focus = []
     ; workspace_presentation = []
     ; timing = []
+    ; testing = []
     }
   else t
+;;
+
+let%test_unit "cooperative simulation state is workspace-local and legacy isolated" =
+  let apply s mutation =
+    W.apply s (Mutate { expected_revision = s.W.Snapshot.revision; mutation })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let s = W.initial ~session_id:(W.Session_id.of_string "testing-shared") in
+  let first = List.hd_exn s.workspaces
+  and second = List.last_exn s.workspaces in
+  let s = apply s (P.Definition.apply P.Testing.definition ~workspace:first.id) in
+  let s = apply s (P.Definition.apply P.Testing.definition ~workspace:second.id) in
+  let s =
+    apply
+      s
+      (Create_tile
+         { workspace = first.id
+         ; kind = "simulation"
+         ; geometry = { x = 0; y = 0; width = 80; height = 20 }
+         })
+  in
+  let find workspace kind =
+    List.find_exn s.tiles ~f:(fun tile ->
+      W.Workspace_id.equal tile.workspace workspace && String.equal tile.kind kind)
+  in
+  let catalog = find first.id "simulation-catalog" in
+  let detail = find first.id "simulation-detail" in
+  let other = find second.id "simulation-detail" in
+  let legacy = find first.id "simulation" in
+  let host = receive empty s in
+  let host =
+    update_testing host catalog.id (fun state ->
+      Testing_workspace.select_attempt state "chosen")
+  in
+  assert (Option.equal String.equal (simulation host detail.id).attempt (Some "chosen"));
+  assert (Option.is_none (simulation host other.id).attempt);
+  assert (Option.is_none (simulation host legacy.id).attempt);
+  let host = set_local host catalog.id { (local host catalog.id) with scroll = 9 } in
+  assert ((local host detail.id).scroll = 0);
+  let host = receive host { s with revision = s.revision + 1 } in
+  assert (Option.equal String.equal (simulation host detail.id).attempt (Some "chosen"));
+  let host = reconnect host ~replacement:false in
+  assert (Option.equal String.equal (simulation host detail.id).attempt (Some "chosen"));
+  let host =
+    receive
+      host
+      { s with
+        revision = s.revision + 2
+      ; tiles =
+          List.filter s.tiles ~f:(fun tile -> not (W.Tile_id.equal tile.id catalog.id))
+      }
+  in
+  assert (Option.is_none (simulation host detail.id).attempt)
 ;;
 
 let capture t =
@@ -814,6 +1067,7 @@ let switch t id =
     let t =
       { t with
         active = Some id
+      ; layout_intent = (if changed then ref () else t.layout_intent)
       ; focus
       ; workspace_focus
       ; stage_generation = (t.stage_generation + if changed then 1 else 0)
@@ -967,6 +1221,33 @@ let current t c =
 
 let command ?unavailable id title aliases action =
   { id; title; aliases; action; unavailable }
+;;
+
+let testing_launch_command t id =
+  let action = testing_launch_action t id in
+  let unavailable =
+    match action with
+    | Testing_launch_unavailable reason -> Some reason
+    | _ -> None
+  in
+  command
+    ?unavailable
+    "simulation.catalog-launch"
+    "Simulation: Launch selected catalog subset"
+    "suite seed parameters cases"
+    action
+;;
+
+let simulation_log_commands (tile : W.Tile.t) =
+  if Testing_workspace.is_pane tile.kind
+  then []
+  else
+    [ command
+        "simulation.logs"
+        "Simulation: Toggle stream-labelled job logs"
+        "stdout stderr"
+        (Simulation_logs tile.id)
+    ]
 ;;
 
 let launch_commands t ~preview ~view_pending =
@@ -1205,20 +1486,21 @@ let asic_cancel_commands (snapshot : Asic.Snapshot.t) =
 ;;
 
 let project_scoped_kind kind =
-  List.mem
-    [ "simulation"
-    ; "execution"
-    ; "project-tests"
-    ; "logs"
-    ; "project"
-    ; "navigation"
-    ; "asic"
-    ; "live-status"
-    ; "workspace-tabs"
-    ; "planned-run"
-    ]
-    kind
-    ~equal:String.equal
+  Testing_workspace.is_pane kind
+  || List.mem
+       [ "simulation"
+       ; "execution"
+       ; "project-tests"
+       ; "logs"
+       ; "project"
+       ; "navigation"
+       ; "asic"
+       ; "live-status"
+       ; "workspace-tabs"
+       ; "planned-run"
+       ]
+       kind
+       ~equal:String.equal
 ;;
 
 let job_attempt_kind kind =
@@ -1240,6 +1522,178 @@ let evidence_runs t =
 ;;
 
 let definition = P.Presets.for_arrangement
+
+let restore_commands (workspace : W.Arrangement.t) =
+  let make ?unavailable id title action =
+    command ?unavailable id title "restore default preset layout hide extras fit" action
+  in
+  List.map P.Presets.all ~f:(fun d ->
+    make
+      ("workspace.restore-default-layout." ^ d.P.Definition.id)
+      ("Restore default layout: " ^ d.name ^ " (hide extras)")
+      (Restore_default_layout (workspace.id, d)))
+  @ [ make
+        ?unavailable:
+          (if Option.is_none (definition workspace)
+           then
+             Some
+               "Unknown/custom preset; choose Restore default layout: Overview, Timing \
+                or Testing"
+           else None)
+        "workspace.restore-default-layout"
+        "Restore default layout (current preset; hide extras)"
+        (Option.value_map
+           (definition workspace)
+           ~default:Restore_default_layout_unavailable
+           ~f:(fun d -> Restore_default_layout (workspace.id, d)))
+    ]
+;;
+
+let%test_unit "restore commands capture named definitions and stable current preset, \
+               never names"
+  =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "restore-commands") in
+  let workspace =
+    { (List.hd_exn registry.workspaces) with name = "Testing"; preset = Some "timing" }
+  in
+  let commands = restore_commands workspace in
+  assert (List.length commands = 4);
+  List.iter P.Presets.all ~f:(fun definition ->
+    let command =
+      List.find_exn commands ~f:(fun command ->
+        String.equal
+          command.id
+          ("workspace.restore-default-layout." ^ definition.P.Definition.id))
+    in
+    assert (Option.is_none command.unavailable);
+    assert (
+      String.equal
+        command.title
+        ("Restore default layout: " ^ definition.name ^ " (hide extras)"));
+    match command.action with
+    | Restore_default_layout (id, captured) ->
+      assert (W.Workspace_id.equal id workspace.id);
+      assert (phys_equal captured definition)
+    | _ -> assert false);
+  let current commands = List.last_exn commands in
+  (match (current commands).action with
+   | Restore_default_layout (id, definition) ->
+     assert (W.Workspace_id.equal id workspace.id);
+     assert (String.equal definition.id "timing")
+   | _ -> assert false);
+  List.iter [ None; Some "unknown" ] ~f:(fun preset ->
+    let commands = restore_commands { workspace with name = "Overview"; preset } in
+    assert (Option.is_some (current commands).unavailable);
+    assert (
+      List.for_all (List.take commands 3) ~f:(fun command ->
+        Option.is_none command.unavailable));
+    match (current commands).action with
+    | Restore_default_layout_unavailable -> ()
+    | _ -> assert false)
+;;
+
+let%test_unit "restore Fit requires acknowledgement and current local intent, preserving \
+               preferences"
+  =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "restore-receipts") in
+  let host = receive empty registry |> fun host -> set_layout_mode host Preferred in
+  let tile = List.hd_exn registry.tiles in
+  let host =
+    set_local
+      host
+      tile.id
+      { (local host tile.id) with presentation = { T.inherit_ with header = Some false } }
+  in
+  let host =
+    { host with
+      chrome = false
+    ; appearance = { host.appearance with icons = Unicode }
+    ; presentation = { T.inherit_ with header = Some false }
+    ; workspace_presentation =
+        [ W.Workspace_id.to_string (Option.value_exn host.active), T.inherit_ ]
+    }
+  in
+  let captured = Option.value_exn (capture host) in
+  let pending, ticket = begin_restore host captured in
+  let failed, save = finish_restore pending ticket ~acknowledged:false in
+  assert ((not save) && equal_layout_mode failed.layout_mode Preferred);
+  let late, save = finish_restore failed ticket ~acknowledged:true in
+  assert ((not save) && equal_layout_mode late.layout_mode Preferred);
+  let success, save =
+    finish_restore
+      (receive pending { registry with revision = registry.revision + 1 })
+      ticket
+      ~acknowledged:true
+  in
+  assert (save && equal_layout_mode success.layout_mode Fit);
+  assert (Appearance.equal success.appearance host.appearance);
+  assert (Bool.equal success.chrome host.chrome);
+  assert (phys_equal success.presentation host.presentation);
+  assert (
+    List.equal
+      [%equal: string * T.overrides]
+      success.workspace_presentation
+      host.workspace_presentation);
+  assert (phys_equal (local success tile.id) (local host tile.id));
+  let other =
+    List.find_exn registry.workspaces ~f:(fun workspace ->
+      not (W.Workspace_id.equal workspace.id captured.workspace))
+  in
+  let superseded, _ = begin_restore pending captured in
+  List.iter
+    [ set_layout_mode pending Preferred (* Even choosing the same value supersedes. *)
+    ; set_layout_mode (set_layout_mode pending Fit) Preferred
+    ; superseded
+    ; switch (switch pending other.id) captured.workspace
+    ; reconnect pending ~replacement:false
+    ; invalidate_layout_intent pending (* canonical project change *)
+    ; receive pending { registry with session_id = W.Session_id.of_string "replacement" }
+    ]
+    ~f:(fun host ->
+      let completed, save = finish_restore host ticket ~acknowledged:true in
+      assert (not save);
+      assert (equal_layout_mode completed.layout_mode host.layout_mode));
+  let _, save = finish_restore success ticket ~acknowledged:true in
+  assert (not save)
+;;
+
+let%test_unit "restore capture rejects revision and workspace changes without \
+               retargeting definitions"
+  =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "restore-capture") in
+  let host = receive empty registry in
+  let captured = Option.value_exn (capture host) in
+  let workspace = Option.value_exn (active host) in
+  let command = List.hd_exn (restore_commands workspace) in
+  let other =
+    List.find_exn registry.workspaces ~f:(fun workspace ->
+      not (W.Workspace_id.equal workspace.id captured.workspace))
+  in
+  assert (current host captured);
+  assert (not (current (switch host other.id) captured));
+  assert (
+    not
+      (current (receive host { registry with revision = registry.revision + 1 }) captured));
+  assert (
+    not
+      (current
+         (receive
+            host
+            { registry with session_id = W.Session_id.of_string "new-session" })
+         captured));
+  match command.action with
+  | Restore_default_layout (workspace, definition) ->
+    assert (W.Workspace_id.equal workspace captured.workspace);
+    assert (String.equal definition.id "overview");
+    (match P.Definition.restore definition ~workspace with
+     | Restore_default_layout { workspace; preset; tiles } ->
+       assert (W.Workspace_id.equal workspace captured.workspace);
+       assert (String.equal preset "overview");
+       assert (
+         List.equal [%equal: string * W.Geometry.t] tiles (P.Definition.specs definition))
+     | _ -> assert false)
+  | _ -> assert false
+;;
 
 let matching_timing ?workspace:expected_workspace (registry : W.Snapshot.t) ~run =
   List.find registry.workspaces ~f:(fun workspace ->
@@ -1493,9 +1947,12 @@ let policy t (tile : W.Tile.t) =
 ;;
 
 let binding_kind (tile : W.Tile.t) : T.Binding.t =
-  match tile.binding with
-  | Pin_run _ -> Pinned
-  | Follow -> if project_scoped_kind tile.kind then Project else Follow
+  if Testing_workspace.is_pane tile.kind
+  then Project
+  else (
+    match tile.binding with
+    | Pin_run _ -> Pinned
+    | Follow -> if project_scoped_kind tile.kind then Project else Follow)
 ;;
 
 let presentation_commands t (tile : W.Tile.t) =
@@ -1621,6 +2078,7 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
     in
     let geometry : W.Geometry.t = { x = 0; y = 0; width = 40; height = 10 } in
     base
+    @ restore_commands w
     @ List.map s.workspaces ~f:(fun w ->
       command
         ("workspace." ^ W.Workspace_id.to_string w.id)
@@ -1692,6 +2150,12 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
         ; "execution"
         ; "project-tests"
         ; "simulation"
+        ; "simulation-catalog"
+        ; "simulation-attempts"
+        ; "simulation-cases"
+        ; "simulation-detail"
+        ; "simulation-artifacts"
+        ; "simulation-logs"
         ; "logs"
         ; "timing"
         ; "synthesis"
@@ -2297,17 +2761,13 @@ let input t event ~commands : t * effect =
   | _ when t.editing_filter ->
     (match event, t.focus with
      | (Escape | Enter), _ -> { t with editing_filter = false }, No_effect
-     | Clear_filter, Some id ->
-       let l = local t id in
-       set_local t id { l with filter = ""; scroll = 0 }, No_effect
+     | Clear_filter, Some id -> set_filter t id "", No_effect
      | Character ch, Some id ->
        let l = local t id in
-       ( set_local t id { l with filter = l.filter ^ String.of_char ch; scroll = 0 }
-       , No_effect )
+       set_filter t id (l.filter ^ String.of_char ch), No_effect
      | Backspace, Some id ->
        let l = local t id in
-       ( set_local t id { l with filter = String.drop_suffix l.filter 1; scroll = 0 }
-       , No_effect )
+       set_filter t id (String.drop_suffix l.filter 1), No_effect
      | _ -> t, No_effect)
   | _ ->
     (match t.palette with
@@ -2479,8 +2939,334 @@ let input t event ~commands : t * effect =
           ( Option.value_map (workspace_cursor t tile.id) ~default:t ~f:(fun w ->
               switch t w.id)
           , No_effect )
+        | (Character ('j' | 'k' | 'n' | 'p' | 'x' | 'a') | Next | Previous), _
+          when Option.exists (focused t) ~f:(fun tile ->
+                 Testing_workspace.is_pane tile.kind) ->
+          let tile = Option.value_exn (focused t) in
+          let delta =
+            match event with
+            | Character ('k' | 'p') | Previous -> -1
+            | _ -> 1
+          in
+          let state = testing_state t tile.id in
+          let state =
+            match Testing_workspace.pane tile.kind with
+            | Some Catalog ->
+              Testing_workspace.update_catalog state (fun catalog ->
+                match event with
+                | Character 'x' -> Simulation_catalog.toggle_current catalog
+                | Character 'a' -> Simulation_catalog.select_all catalog
+                | Character ('n' | 'p') -> Simulation_catalog.move_suite catalog delta
+                | _ -> Simulation_catalog.move_case catalog delta)
+            | Some Cases -> Testing_workspace.move_case state delta
+            | Some Artifacts -> Testing_workspace.move_artifact state delta
+            | Some Attempts ->
+              let view = Testing_workspace.view state in
+              let attempts =
+                Option.value_map view.snapshot ~default:[] ~f:(fun s -> s.attempts)
+              in
+              let index =
+                Option.bind view.attempt ~f:(fun id ->
+                  List.findi attempts ~f:(fun _ a ->
+                    String.equal id a.Simulation.Summary.id)
+                  |> Option.map ~f:fst)
+                |> Option.value ~default:(if delta > 0 then -1 else 1)
+              in
+              (match
+                 List.nth
+                   attempts
+                   (Int.max 0 (Int.min (List.length attempts - 1) (index + delta)))
+               with
+               | None -> state
+               | Some a when Option.equal String.equal view.attempt (Some a.id) -> state
+               | Some a ->
+                 let state = Testing_workspace.select_attempt state a.id in
+                 (* Selection invalidates the previous receipt. Let the next shared
+                    observation start even when the superseded request is in flight. *)
+                 Testing_workspace.set_view
+                   state
+                   { (Testing_workspace.view state) with busy = false })
+            | _ -> state
+          in
+          let t = update_testing t tile.id (fun _ -> state) in
+          let local = local t tile.id in
+          set_local t tile.id { local with follow = true }, No_effect
+        | Enter, _
+          when Option.exists (focused t) ~f:(fun tile ->
+                 String.equal tile.kind "simulation-catalog") ->
+          let tile = Option.value_exn (focused t) in
+          (match capture t with
+           | None -> t, No_effect
+           | Some capture -> t, Execute (capture, testing_launch_action t tile.id))
         | Enter, _ -> { t with prefix = 0 }, Activate
         | _, _ -> { t with prefix = 0 }, No_effect))
+;;
+
+let%test_unit "catalog reducer browses filters and captures subset without launching" =
+  let s = W.initial ~session_id:(W.Session_id.of_string "testing-keys") in
+  let workspace = List.hd_exn s.workspaces in
+  let s =
+    W.apply
+      s
+      (Mutate
+         { expected_revision = s.revision
+         ; mutation = P.Definition.apply P.Testing.definition ~workspace:workspace.id
+         })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let tile =
+    List.find_exn s.tiles ~f:(fun tile ->
+      W.Workspace_id.equal tile.workspace workspace.id
+      && String.equal tile.kind "simulation-catalog")
+  in
+  let host = { (receive empty s) with focus = Some tile.id } in
+  let suite : Simulation.Suite.t =
+    { id = "fifo"
+    ; label = "FIFO"
+    ; cases = [ { id = "first"; label = "First" }; { id = "second"; label = "Second" } ]
+    ; default_seed = "42"
+    ; parameters = []
+    }
+  in
+  let snapshot : Simulation.Snapshot.t =
+    { configured = true
+    ; discovery = Some { protocol_version = 1; suites = [ suite ] }
+    ; discovery_digest = Some "exact-digest"
+    ; discovery_job = None
+    ; discovery_error = None
+    ; attempts =
+        [ { Simulation.Summary.id = "attempt"
+          ; job = Job_id.of_string "job"
+          ; suite = "fifo"
+          ; seed = "42"
+          ; created_at = "now"
+          ; parent = None
+          ; lifecycle = Finished
+          ; outcome = Passed
+          }
+        ]
+    ; next_before = None
+    ; history_error = None
+    ; detail = None
+    ; byte_page = None
+    }
+  in
+  let host =
+    update_testing host tile.id (fun state ->
+      Testing_workspace.receive state ~ticket:0 ~selected:None Get (Ok snapshot))
+  in
+  let press host key =
+    let host, effect = input host key ~commands:[] in
+    (match effect with
+     | No_effect -> ()
+     | _ -> assert false);
+    host
+  in
+  let host = press host (Character 'x') in
+  let host =
+    press host (Character '/')
+    |> fun host -> press host (Character 's') |> fun host -> press host Enter
+  in
+  let catalog = Testing_workspace.catalog (testing_state host tile.id) in
+  assert (List.equal String.equal (Simulation_catalog.selected_cases catalog) [ "second" ]);
+  assert (String.equal (Simulation_catalog.filter catalog) "s");
+  let host, effect = input host Enter ~commands:[] in
+  (match effect with
+   | Execute (_, Testing_launch (id, captured)) ->
+     assert (W.Tile_id.equal id tile.id);
+     assert (List.equal String.equal captured.inputs.selection.cases [ "second" ]);
+     assert (Or_error.is_ok (validate_testing_launch host id captured))
+   | _ -> assert false);
+  assert (Option.is_none (simulation host tile.id).attempt);
+  assert ((simulation host tile.id).request = 0);
+  let attempts =
+    List.find_exn s.tiles ~f:(fun tile ->
+      W.Workspace_id.equal tile.workspace workspace.id
+      && String.equal tile.kind "simulation-attempts")
+  in
+  let host = { host with focus = Some attempts.id } in
+  let pending = Simulation_view.begin_request (simulation host attempts.id) in
+  let host = set_simulation host attempts.id pending in
+  let host = press host (Character 'j') in
+  assert (Option.equal String.equal (simulation host attempts.id).attempt (Some "attempt"));
+  assert (not (simulation host attempts.id).busy);
+  let late =
+    Testing_workspace.receive
+      (testing_state host attempts.id)
+      ~ticket:pending.request
+      ~selected:pending.attempt
+      Get
+      (Error "obsolete observation")
+  in
+  assert (Option.is_none (Testing_workspace.view late).error)
+;;
+
+let%test_unit "catalog launch captures exact inputs and rejects changed catalog choices" =
+  let suite : Simulation.Suite.t =
+    { id = "fifo"
+    ; label = "FIFO"
+    ; cases = [ { id = "a"; label = "A" }; { id = "b"; label = "B" } ]
+    ; parameters = []
+    ; default_seed = "42"
+    }
+  in
+  let snapshot : Simulation.Snapshot.t =
+    { configured = true
+    ; discovery =
+        Some { protocol_version = 1; suites = [ suite; { suite with id = "other" } ] }
+    ; discovery_digest = Some "captured-digest"
+    ; discovery_job = None
+    ; discovery_error = None
+    ; attempts = []
+    ; next_before = None
+    ; history_error = None
+    ; detail = None
+    ; byte_page = None
+    }
+  in
+  let catalog = Simulation_catalog.update Simulation_catalog.empty snapshot in
+  let captured = capture_testing_inputs catalog |> Or_error.ok_exn in
+  assert (String.equal captured.suite.id "fifo");
+  assert (String.equal captured.digest "captured-digest");
+  assert (List.equal String.equal captured.selection.cases [ "a"; "b" ]);
+  assert (Or_error.is_ok (validate_testing_inputs catalog captured));
+  assert (
+    Or_error.is_ok
+      (validate_testing_inputs
+         (Simulation_catalog.move_case catalog 1
+          |> fun catalog -> Simulation_catalog.set_filter catalog "b")
+         captured));
+  let reject catalog =
+    match validate_testing_inputs catalog captured with
+    | Ok () -> assert false
+    | Error error ->
+      assert (String.is_substring (Error.to_string_hum error) ~substring:"reopen")
+  in
+  reject (Simulation_catalog.toggle_case catalog "a");
+  reject (Simulation_catalog.select_suite catalog "other");
+  reject
+    (Simulation_catalog.update
+       catalog
+       { snapshot with discovery_digest = Some "new-digest" }
+     |> Simulation_catalog.accept);
+  reject
+    (Simulation_catalog.update
+       catalog
+       { snapshot with
+         discovery =
+           Some { protocol_version = 1; suites = [ { suite with default_seed = "99" } ] }
+       }
+     |> Simulation_catalog.accept);
+  reject (Simulation_catalog.begin_discovery catalog);
+  reject (Simulation_catalog.discovery_failed catalog "authoritative discovery failed")
+;;
+
+let%test_unit "launch palette retains captured subset across model refresh and fences \
+               workspace lifetime"
+  =
+  let registry =
+    W.initial ~session_id:(W.Session_id.of_string "captured-testing-command")
+  in
+  let workspace = List.hd_exn registry.workspaces in
+  let registry =
+    W.apply
+      registry
+      (Mutate
+         { expected_revision = registry.revision
+         ; mutation = P.Definition.apply P.Testing.definition ~workspace:workspace.id
+         })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let tile =
+    List.find_exn registry.tiles ~f:(fun tile ->
+      W.Workspace_id.equal tile.workspace workspace.id
+      && String.equal tile.kind "simulation-catalog")
+  in
+  let suite : Simulation.Suite.t =
+    { id = "fifo"
+    ; label = "FIFO"
+    ; cases = [ { id = "a"; label = "A" }; { id = "b"; label = "B" } ]
+    ; default_seed = "42"
+    ; parameters = []
+    }
+  in
+  let snapshot : Simulation.Snapshot.t =
+    { configured = true
+    ; discovery = Some { protocol_version = 1; suites = [ suite ] }
+    ; discovery_digest = Some "digest"
+    ; discovery_job = None
+    ; discovery_error = None
+    ; attempts = []
+    ; next_before = None
+    ; history_error = None
+    ; detail = None
+    ; byte_page = None
+    }
+  in
+  let host =
+    receive empty registry
+    |> fun host ->
+    update_testing host tile.id (fun state ->
+      Testing_workspace.receive state ~ticket:0 ~selected:None Get (Ok snapshot))
+  in
+  let command = testing_launch_command host tile.id in
+  assert (Option.is_none command.unavailable);
+  let captured =
+    match command.action with
+    | Testing_launch (_, captured) -> captured
+    | _ -> assert false
+  in
+  assert (Or_error.is_ok (validate_testing_launch host tile.id captured));
+  let palette =
+    { capture = Option.value_exn (capture host)
+    ; commands = [ command ]
+    ; query = ""
+    ; index = 0
+    ; argument = None
+    }
+  in
+  let host = { host with palette = Some palette; focus = Some tile.id } in
+  let host =
+    update_testing host tile.id (fun state ->
+      Testing_workspace.update_catalog state (fun catalog ->
+        Simulation_catalog.toggle_case catalog "a"))
+  in
+  let host, effect = input host Enter ~commands:[ testing_launch_command host tile.id ] in
+  (match effect with
+   | Execute (_, Testing_launch (id, actual)) ->
+     assert (W.Tile_id.equal id tile.id);
+     assert (List.equal String.equal actual.inputs.selection.cases [ "a"; "b" ]);
+     assert (Or_error.is_error (validate_testing_launch host id actual))
+   | _ -> assert false);
+  let host =
+    update_testing host tile.id (fun state ->
+      Testing_workspace.update_catalog state (fun catalog ->
+        Simulation_catalog.toggle_case catalog "a"))
+  in
+  (* Restore exact ordering so only the lifetime fence differs. *)
+  let host =
+    update_testing host tile.id (fun state ->
+      Testing_workspace.update_catalog state Simulation_catalog.select_all)
+  in
+  assert (Or_error.is_ok (validate_testing_launch host tile.id captured));
+  let _, scope, state = Option.value_exn (testing host tile.id) in
+  let replaced = set_testing host tile.id (ref (), scope, state) in
+  assert (Or_error.is_error (validate_testing_launch replaced tile.id captured));
+  let disabled =
+    update_testing host tile.id (fun state ->
+      Testing_workspace.update_catalog state (fun catalog ->
+        Simulation_catalog.discovery_failed catalog "exact failure"))
+  in
+  let command = testing_launch_command disabled tile.id in
+  (match command.action with
+   | Testing_launch_unavailable reason ->
+     assert (Option.equal String.equal command.unavailable (Some reason));
+     assert (String.is_substring reason ~substring:"exact failure")
+   | _ -> assert false);
+  assert (List.is_empty (simulation_log_commands tile));
+  assert (List.length (simulation_log_commands { tile with kind = "simulation" }) = 1)
 ;;
 
 let%test_unit "simulation palette paste captures cases without launching or losing \

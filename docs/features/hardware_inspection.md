@@ -1,5 +1,15 @@
 # F06 — Hardware and stage evidence inspection
 
+**Ticket entry points:** [WB-007 hierarchy](project/WB-007-hierarchy-tile.md),
+[WB-009 reported Timing issue](evidence/WB-009-timing-coherency.md),
+[WB-020 graphics](evidence/WB-020-graphical-physical-inspection.md),
+[WB-021 source navigation](evidence/WB-021-source-navigation.md),
+[WB-022 signal annotations](evidence/WB-022-signal-name-annotations.md),
+[WB-023 provider evidence](evidence/WB-023-provider-evidence.md) and
+[WB-026 power](evidence/WB-026-power-analysis.md).
+The new Timing report is unconfirmed and exact-run-specific; retained FS1 acceptance
+does not establish its cause. Source/naming/display mappings require explicit identity.
+
 Status (2026-10-16): RTL/artifact/provenance, elaborated hierarchy and **FS0 synthesis
 cell count/breakdown with evidence context delivered**. [Acceptance](../fs0_acceptance.md)
 records real 673/685 counts, completed execution and `not_evaluated` acceptance.
@@ -39,7 +49,7 @@ graphical/editor surfaces and unsupported source mappings remain later extension
 | Clocks / CTS | Declared/generated clocks and relationships, constraint coverage, measured skew/insertion where supplied |
 | Routing | Provider-produced routing/congestion/antenna evidence and artifacts |
 | Checks / signoff / finalization | Independent check outcomes, scope, report evidence and supported finalization operation outcomes |
-| Simulation / tests / regressions | [F09](simulation_and_tests.md): generic runner/attempts first, structured cases/seeds and trace artifacts later |
+| Simulation / tests / regressions | [F09](simulation_and_tests.md): generic runner plus delivered structured cases/seeds/history/artifacts; further inspection/adapters are ticketed |
 | General summary | Compatible execution/resource/timing/check summaries composed from shared modules |
 
 Metric names such as “placement pressure” are examples of desired insight, not a
@@ -66,8 +76,9 @@ evidence; similar instance names are not sufficient proof of correspondence.
 - Overview provenance uses short, meaningful producer/stage/source labels with
   explicit detail inspection for complete structured records and absolute paths.
   Do not dump serialized JSON into normal metric rows or discard original evidence
-  to shorten a label. Owner review (2026-10-15) identified the current raw producer/
-  source display as a presentation followup, not an FS0 functionality blocker.
+  to shorten a label. The owner's 2026-10-15 raw-provenance concern was followed by
+  concise Overview and Timing detail/provenance composition; any remaining polish
+  must identify a particular surface rather than treating that work as undelivered.
 - Source jumps use file/range and source identity where supplied. Generated RTL
   locations are useful even when no reliable OCaml source mapping exists.
 - F12's Overview/Timing gallery uses synthetic metrics, paths, diagnostics and source
@@ -83,8 +94,8 @@ timing, clock, physical, routing, lifecycle and external-viewer slices are deliv
 The generic simulation/test module has its own delivered F09 baseline, independent
 of ASIC report availability; structured simulation belongs to FS2. Later F06
 extensions include embedded graphical/editor surfaces, reliable source mapping
-where supplied, and additional provider formats/coverage. Inspector breadcrumbs,
-contextual help and concise provenance are presentation followups; the owner has
-confirmed the Escape-responsiveness fix.
+where supplied, and additional provider formats/coverage. Inspector breadcrumbs and
+contextual help remain presentation followups; concise Timing provenance and the
+owner-confirmed Escape-responsiveness fix are delivered.
 
 Dependencies: F01 provider evidence; F02 shared modules; F05 scoped results.

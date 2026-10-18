@@ -1,5 +1,34 @@
 # FS2 followups after milestone closure
 
+## Canonical ticket crosswalk — 2026-10-17
+
+The [WB catalog](../features/README.md) now owns per-feature scope, estimates,
+dependencies and open decisions. The original FS2-F headings below remain stable
+historical activation notes so existing links keep working. They are not a second
+implementation queue. The accepted FS2 milestone stays closed.
+
+| Earlier followup | Current ticket(s) |
+| --- | --- |
+| FS2-F01 FIFO adoption | [WB-034](../features/verification/WB-034-fifo-adapter.md), delivered with genuine FIFO/native proof; [controls](../testing_workspace.md) |
+| FS2-F02 trace streaming | [WB-040](../features/infrastructure/WB-040-trace-streaming.md) |
+| FS2-F03 slow storage | [WB-043](../features/infrastructure/WB-043-slow-storage.md) |
+| FS2-F04 uncertain submission/reconnect | [WB-062](../features/verification/WB-062-submission-recovery.md); same-session local-state preservation already improved in FS3 |
+| FS2-F05 logs/budgets | [WB-041](../features/infrastructure/WB-041-durable-logs.md) and [WB-042](../features/infrastructure/WB-042-resource-budgets.md) |
+| FS2-F06 load/usability | [WB-044](../features/infrastructure/WB-044-load-acceptance.md) remains; [WB-063](../features/presentation/WB-063-testing-workspace.md) implementation verified, owner composition review pending |
+| FS2-F07 generated/gate-level simulation | [WB-035](../features/verification/WB-035-generated-rtl-simulation.md) and [WB-036](../features/verification/WB-036-gate-level-simulation.md) |
+| FS2-F08 replay | [WB-037](../features/verification/WB-037-archived-replay.md) |
+| FS2-F09 waveforms | [WB-028](../features/verification/WB-028-waveform-viewer.md) |
+| FS2-F10 catalogs/sweeps/comparisons | [WB-032](../features/verification/WB-032-test-catalog.md) and [WB-030](../features/verification/WB-030-seed-parameter-sweeps.md) cover catalog UI/test sweeps. [WB-012](../features/evidence/WB-012-run-comparison.md) supplies reusable pairing/quantity rules, not case regression diffing. Arbitrary generated-case contracts and suite/case/seed-aligned cross-attempt comparison remain deferred here, outside these initial estimates. |
+| FS2-F11 acceptance bridge | [WB-038](../features/verification/WB-038-acceptance-bridge.md) |
+| FS2-F12 setup/starters | [WB-039](../features/project/WB-039-simulation-setup.md) for configuration generation; shared Testing starter/templates are already delivered by FS3 |
+
+The new owner requests also include [formal proof](../features/verification/WB-025-formal-verification.md),
+[design/build sweeping](../features/exploration/WB-031-design-space-sweeper.md) and
+[Quick-Harn comparison](../features/exploration/WB-033-quick-harn-playground.md).
+They are new proposed scopes, not retroactive requirements of the closed milestone.
+
+## Original closure and activation notes
+
 Recorded 2026-10-16. The agreed substantial FS2 milestone is **delivered, accepted
 and closed**. [Acceptance](../fs2_acceptance.md) records automated evidence and the
 owner's scoped manual confirmation. The items below preserve additional scope;
@@ -9,6 +38,9 @@ scope to the construction plan rather than reopening all of FS2.
 ## Recommended next adoption task
 
 ### FS2-F01 — FIFO project adoption
+
+**Delivered 2026-10-17:** [actual FIFO/catalog/Testing evidence](../testing_workspace.md).
+The original trigger/acceptance below describes the now implemented adoption.
 
 **Trigger:** the owner wants to use structured simulation on `hardcaml_asic_example`.
 Expose its actual directed/seeded FIFO Cyclesim tests through the existing provider

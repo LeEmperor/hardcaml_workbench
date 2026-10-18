@@ -1,5 +1,20 @@
 # Hardcaml Workbench — Demo construction plan
 
+## Planning intake — 2026-10-17
+
+The [WB feature catalog](features/README.md) now organizes the owner's new requests
+as individually estimated tickets. [Intake traceability](features/intake.md) covers
+all 62 submitted entries (61 unique features), plus four retained followups. See
+[dependency handoffs](features/dependencies.md) before selecting an implementation
+slice. This documentation pass activates no feature, performs no runtime acceptance
+and changes none of the delivered milestones below. In particular, the new Timing
+report is [WB-009](features/evidence/WB-009-timing-coherency.md), not a diagnosed
+failure of all previously accepted timing evidence.
+
+When work is explicitly selected, reference its WB IDs here and record the actual
+acceptance evidence. Ticket acceptance checkboxes are proposed gates, not claims
+that implementation has started.
+
 Updated 2026-10-16. **FS0 Demos A–C and FS1's adopted-evidence functional scope are
 delivered with explicit limits.** This is
 the active status/checklist, replacing the October 12 P0–P7 plan in the
@@ -260,6 +275,31 @@ geometry and richer endpoint forms remain explicit gaps; domain refresh remains 
 with immediate local input/completion redraw after the Escape-latency followup.
 
 ## M4 — Rich evidence and live acceptance (FS1/FS2)
+
+### Testing adoption/investigation cluster — 2026-10-17
+
+Activated WB-034, WB-032 and WB-063; [shared plan](testing_cluster_plan.md),
+[current user guide and evidence](testing_workspace.md).
+
+- [x] Genuine FIFO directed/seeded Cyclesim adapter with native VCD/reports,
+  full-uint64 seed mapping, explicit checker-only mismatch and preserved ordinary
+  CLI/Dune tests. Persistent installation/configuration in the actual example.
+- [x] Explicit suite/case catalog, subset/filter/defaults, stale-discovery disabled
+  reasons and exact captured suite/selection/digest command revalidation.
+- [x] Cooperative Catalog/Attempts/Cases/Detail/Artifacts/Logs with client/workspace
+  investigation, independent tile scroll, one request stream and lifecycle fences.
+- [x] Typed cursor-follow and compact artifact navigation at normal/narrow sizes;
+  generic tests/legacy simulation stay independent, old arrangement extras preserved.
+- [x] Final normal format/lint/full tests/build at20; real FIFO native proof and
+  synthetic/FS2/checklist/indicator/interrupt regressions pass with private state.
+- [ ] Owner visual/workflow review of the new Testing composition. WB-063 remains
+  partial for that explicit gate only; implementation and automated proof are complete.
+
+Definitive real proof: `/tmp/opencode/fifo-testing-wx4xhzjp/` (21 cooperative
+assertions plus6 actual geometry checks). Synthetic cooperative proof:
+`/tmp/opencode/testing-workspace-w56bs6_c/verified.json` (15 checks). Broader receipts
+are in the shared plan. No physical EDA, live investigation reset or Git authorship
+operations occurred; the original FS2 milestone remains accepted and closed.
 
 ### Real checklist preparation/launch followup — 2026-10-17
 
@@ -525,6 +565,21 @@ Synthesis area/check counters are now projected into the current summary.
 
 ## M5 — Multi-window polish and adoption (FS3)
 
+### Explicit default-layout recovery — 2026-10-18
+
+[Shared plan](default_layout_restore_plan.md), [controls/evidence](default_layout_restore.md).
+
+- [x] One atomic captured-revision restore: show default occurrences, hide extras/
+  duplicates, restore requested sizes, clear zoom; preserve identities/pins/context.
+- [x] Named/current preset commands, stable-ID selection and custom/unknown disabled
+  reasons; no display-name inference or implicit restoration.
+- [x] Success-only Fit persistence with late-response/local-intent fences; existing
+  additive Apply/Reset and appearance preferences retained.
+- [x] Normal full checks at20; native58, FS3 adoption141, cooperative Testing15 and
+  interrupt5/5 proofs passed. Owner's live layout was not mutated by these tests.
+
+Final native receipt: `/tmp/opencode/default-layout-restore-t4rz4qvv/result.json`.
+
 **First adoption slice delivered; full multi-monitor acceptance pending.**
 
 **Post-merge integration completed 2026-10-17:**
@@ -565,6 +620,25 @@ FS2 native Cyclesim and all five interrupt regressions pass. Exact evidence is i
 the integration plan. This does not claim full multi-monitor acceptance.
 
 ## V1 — Independent appearance gallery (FS5)
+
+### Native activity and semantic icons — 2026-10-17
+
+[Shared plan and evidence](terminal_indicators_plan.md),
+[controls](appearance_presets.md#native-activity-and-semantic-icons--2026-10-17).
+
+- [x] Actual installed Bonsai Term Dot/Line components, shared per client, with
+  independent input/display invalidation and provider polling.
+- [x] Typed lifecycle/request indicators in stages, runs, jobs, planned-run and
+  structured simulation; compact pin/seed/artifact/log context glyphs.
+- [x] Unicode/ASCII/Off modes, persisted choice, deterministic pure captures,
+  one-cell glyph policy and unchanged dense geometry/unadorned titles.
+- [x] Canonical simulation row metadata preserves full text and independent
+  process/case outcomes; no report/log keyword inference.
+- [x] Full normal checks at20; native indicator351, FS2 45, Overview130,
+  checklist61 and interrupt5/5 acceptance. Real tools were not launched.
+
+Native evidence: `/tmp/opencode/terminal-indicators-e67675e54fe0/result.json`.
+Initial Off-mode redraw failure was fixed and covered by the final native run.
 
 ### Synthetic Testing and wider Session panels — 2026-10-17
 

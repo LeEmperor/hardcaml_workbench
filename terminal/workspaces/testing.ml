@@ -1,45 +1,56 @@
 open Common
 
-(** Full-width proportions and framed minimum heights. Give FS2 most of the evidence
-    area's spare rows while retaining independent execution and log panels. *)
-let sidebar_weight = 1
-
-let main_weight = 2
-let session_height = 7
-let project_tests_height = 6
-let selector_height = 7
-let simulation_height = 12
-let simulation_weight = 3
-let execution_height = 6
-let logs_height = 6
+(** Project-only investigation. The compact utility column keeps generic process tests and
+    execution accessible without borrowing ASIC selection/provenance. *)
+let pane kind =
+  tile
+    ~presentation:
+      { inherit_presentation with
+        run_reference = Some false
+      ; binding_badge = Some "hidden"
+      ; padding = Some 0
+      ; hints = Some false
+      ; compact_summary = Some true
+      }
+    kind
+;;
 
 let definition : Definition.t =
   { id = "testing"
   ; name = "Testing"
   ; tiles =
       [ navigation
-      ; session
-      ; selector
-      ; tile "project-tests"
-      ; tile "simulation"
-      ; tile "execution"
-      ; tile "logs"
+      ; pane "live-status"
+      ; pane "project-tests"
+      ; pane "execution"
+      ; pane "simulation-catalog"
+      ; pane "simulation-attempts"
+      ; pane "simulation-cases"
+      ; pane "simulation-detail"
+      ; pane "simulation-artifacts"
+      ; pane "simulation-logs"
       ]
   ; layout =
       Stack
         [ navigation_leaf
         ; Weighted_columns
-            [ ( sidebar_weight
+            [ ( 1
               , Stack
-                  [ leaf ~height:session_height ~weight:0 "live-status"
-                  ; leaf ~height:project_tests_height "project-tests"
+                  [ leaf ~height:6 ~weight:0 "live-status"
+                  ; leaf ~height:6 "project-tests"
+                  ; leaf ~height:6 "execution"
                   ] )
-            ; ( main_weight
+            ; ( 2
               , Stack
-                  [ leaf ~height:selector_height ~weight:0 "run-selector"
-                  ; leaf ~height:simulation_height ~weight:simulation_weight "simulation"
-                  ; leaf ~height:execution_height "execution"
-                  ; leaf ~height:logs_height "logs"
+                  [ leaf ~height:12 ~weight:2 "simulation-catalog"
+                  ; leaf ~height:7 "simulation-attempts"
+                  ; leaf ~height:7 "simulation-cases"
+                  ] )
+            ; ( 2
+              , Stack
+                  [ leaf ~height:12 ~weight:2 "simulation-detail"
+                  ; leaf ~height:7 "simulation-artifacts"
+                  ; leaf ~height:7 "simulation-logs"
                   ] )
             ]
         ]

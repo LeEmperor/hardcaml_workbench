@@ -121,7 +121,10 @@ module Form = struct
     ; field : int
     }
 
-  let create suite = { suite; selection = selection suite; field = 0 }
+  let create ?selection:captured suite =
+    { suite; selection = Option.value captured ~default:(selection suite); field = 0 }
+  ;;
+
   let parameter t = List.nth t.suite.parameters (t.field - 2)
   let confirming t = t.field >= 2 + List.length t.suite.parameters
 
@@ -234,90 +237,210 @@ let progress (p : S.Progress.t) =
 
 let atom f x = Sexp.to_string_mach (f x)
 
-let rows t ~log_lines =
+type row =
+  { text : string
+  ; indicator : Indicator.t option
+  ; value_start : int option
+  ; hint : bool
+  ; selected : bool
+  }
+
+(** [selected] marks a navigator cursor for viewport following. It belongs only to the
+    first physical line of a row; legacy rows default to [false]. *)
+let row ?indicator ?value_start ?(hint = false) ?(selected = false) text =
+  { text; indicator; value_start; hint; selected }
+;;
+
+let plain_rows texts = List.map texts ~f:(fun text -> row text)
+
+let lifecycle_indicator : S.Lifecycle.t -> Indicator.t = function
+  | Queued -> Pending
+  | Running -> Running
+  | Finished -> Completed
+  | Cancelled | Interrupted -> Cancelled
+;;
+
+let attempt_indicator lifecycle (outcome : S.Outcome.t) =
+  match lifecycle, outcome with
+  | S.Lifecycle.Finished, Passed -> Indicator.Completed
+  | Finished, Failed -> Failed
+  | Finished, (Unknown | Incomplete) -> Unknown
+  | _ -> lifecycle_indicator lifecycle
+;;
+
+let case_indicator ~lifecycle : S.Case_status.t -> Indicator.t = function
+  | Pending -> Pending
+  | Running ->
+    (* A terminal/interrupted attempt cannot leave an old case spinning. *)
+    if S.Lifecycle.equal lifecycle Running then Running else Unknown
+  | Passed -> Completed
+  | Failed -> Failed
+  | Skipped -> Skipped
+  | Incomplete -> Unknown
+;;
+
+(** Canonical presentation projection. Metadata comes only from typed facts or explicit
+    context; provider messages and logs remain plain text. [value_start] is a
+    terminal-cell offset into the sanitized text, keeping case identities label-neutral. *)
+let annotated_rows t ~log_lines =
+  let request_indicator = if t.busy then Some Indicator.Running else None in
   let rows =
-    [ "Structured simulation — project scoped"
-    ; "j/k attempts; n/p cases; [/] scroll; l logs; palette: launch/rerun/cancel/export"
+    [ row ?indicator:request_indicator "Structured simulation — project scoped"
+    ; row
+        ~hint:true
+        "j/k attempts; n/p cases; [/] scroll; l logs; palette: launch/rerun/cancel/export"
     ]
   in
-  let rows = rows @ Option.to_list t.notice @ Option.to_list t.error in
+  let rows = rows @ plain_rows (Option.to_list t.notice @ Option.to_list t.error) in
   let rows =
     rows
     @
     match t.snapshot with
-    | None -> [ "Loading simulation catalog/history" ]
+    | None -> [ row ?indicator:request_indicator "Loading simulation catalog/history" ]
     | Some s ->
-      [ (if s.configured
-         then "Provider configured"
-         else "No simulation provider configured")
+      [ row
+          (if s.configured
+           then "Provider configured"
+           else "No simulation provider configured")
       ]
-      @ Option.to_list s.discovery_error
-      @ Option.to_list s.history_error
+      @ plain_rows (Option.to_list s.discovery_error @ Option.to_list s.history_error)
       @ Option.value_map s.discovery_job ~default:[] ~f:(fun j ->
-        [ "Discovery job: " ^ Job_id.to_string j ])
+        [ row ("Discovery job: " ^ Job_id.to_string j) ])
       @ (match detail t with
-         | None -> [ "Select an attempt from the palette (no job is launched)" ]
+         | None -> [ row "Select an attempt from the palette (no job is launched)" ]
          | Some d ->
-           [ "Attempt: " ^ d.id
-           ; sprintf
-               "%s / %s; process exit: %s"
-               (atom S.Lifecycle.sexp_of_t d.lifecycle)
-               (atom S.Outcome.sexp_of_t d.outcome)
-               (Option.value_map d.exit_code ~default:"unreported" ~f:Int.to_string)
-           ; sprintf
-               "Suite: %s; seed: %s"
-               d.captured.selection.suite
-               d.captured.selection.seed
-           ; "Parameters: "
-             ^ Sexp.to_string_mach
-                 ([%sexp_of: (string * string) list] d.captured.selection.parameters)
-           ; sprintf
-               "Explicit ASIC input references: %d"
-               (List.length d.captured.selection.asic_inputs)
+           [ row ~indicator:(attempt_indicator d.lifecycle d.outcome) ("Attempt: " ^ d.id)
+           ; row
+               (sprintf
+                  "%s / %s; process exit: %s"
+                  (atom S.Lifecycle.sexp_of_t d.lifecycle)
+                  (atom S.Outcome.sexp_of_t d.outcome)
+                  (Option.value_map d.exit_code ~default:"unreported" ~f:Int.to_string))
+           ; row
+               ~indicator:Seed
+               (sprintf
+                  "Suite: %s; seed: %s"
+                  d.captured.selection.suite
+                  d.captured.selection.seed)
+           ; row
+               ("Parameters: "
+                ^ Sexp.to_string_mach
+                    ([%sexp_of: (string * string) list] d.captured.selection.parameters))
+           ; row
+               (sprintf
+                  "Explicit ASIC input references: %d"
+                  (List.length d.captured.selection.asic_inputs))
            ]
            @ Option.value_map d.parent ~default:[] ~f:(fun p ->
-             [ "Rerun of " ^ p.attempt_id ^ " on current project" ])
-           @ Option.to_list d.diagnostic
+             [ row ("Rerun of " ^ p.attempt_id ^ " on current project") ])
+           @ plain_rows (Option.to_list d.diagnostic)
            @ Option.value_map d.progress ~default:[] ~f:(fun p ->
-             [ "Progress: " ^ progress p ])
+             [ row ("Progress: " ^ progress p) ])
            @ List.concat_map
                (List.stable_sort d.cases ~compare:(fun a b ->
                   Bool.compare
                     (not (Option.equal String.equal t.case_id (Some a.case_id)))
                     (not (Option.equal String.equal t.case_id (Some b.case_id)))))
                ~f:(fun c ->
-                 [ (if Option.equal String.equal t.case_id (Some c.case_id)
+                 let prefix =
+                   (if Option.equal String.equal t.case_id (Some c.case_id)
                     then "> "
                     else "  ")
                    ^ c.case_id
                    ^ ": "
-                   ^ atom S.Case_status.sexp_of_t c.status
+                 in
+                 [ row
+                     ~indicator:(case_indicator ~lifecycle:d.lifecycle c.status)
+                     ~value_start:
+                       (Bonsai_term.View.width
+                          (Bonsai_term.View.text (Artifact_view.safe prefix)))
+                     (prefix ^ atom S.Case_status.sexp_of_t c.status)
                  ]
                  @ Option.value_map c.progress ~default:[] ~f:(fun p ->
-                   [ "  " ^ progress p ])
+                   [ row ("  " ^ progress p) ])
                  @ Option.value_map c.message ~default:[] ~f:(fun m ->
-                   String.split_lines m |> List.map ~f:(fun l -> "  " ^ l)))
+                   String.split_lines m |> List.map ~f:(fun l -> row ("  " ^ l))))
            @ List.map d.artifacts ~f:(fun a ->
-             sprintf
-               "Artifact %s: %s [%s]"
-               a.id
-               a.label
-               (atom S.Artifact.Availability.sexp_of_t a.availability))
+             row
+               ~indicator:Artifact
+               (sprintf
+                  "Artifact %s: %s [%s]"
+                  a.id
+                  a.label
+                  (atom S.Artifact.Availability.sexp_of_t a.availability)))
            @
            if t.logs
-           then "JOB LOG (historical logs may be unavailable)" :: log_lines d.job
+           then
+             row ~indicator:Log "JOB LOG (historical logs may be unavailable)"
+             :: plain_rows (log_lines d.job)
            else [])
-      @ [ (if t.older then "HISTORY (older page)" else "HISTORY (newest page)") ]
+      @ [ row (if t.older then "HISTORY (older page)" else "HISTORY (newest page)") ]
       @ List.map s.attempts ~f:(fun a ->
-        sprintf
-          "%s %s seed=%s %s/%s"
-          a.id
-          a.suite
-          a.seed
-          (atom S.Lifecycle.sexp_of_t a.lifecycle)
-          (atom S.Outcome.sexp_of_t a.outcome))
+        row
+          ~indicator:(attempt_indicator a.lifecycle a.outcome)
+          (sprintf
+             "%s %s seed=%s %s/%s"
+             a.id
+             a.suite
+             a.seed
+             (atom S.Lifecycle.sexp_of_t a.lifecycle)
+             (atom S.Outcome.sexp_of_t a.outcome)))
   in
-  List.concat_map rows ~f:String.split_lines |> List.map ~f:Artifact_view.safe
+  List.concat_map rows ~f:(fun row ->
+    String.split_lines row.text
+    |> List.mapi ~f:(fun i text ->
+      { text = Artifact_view.safe text
+      ; indicator = (if i = 0 then row.indicator else None)
+      ; value_start = (if i = 0 then row.value_start else None)
+      ; hint = row.hint
+      ; selected = i = 0 && row.selected
+      }))
+;;
+
+let rows t ~log_lines = annotated_rows t ~log_lines |> List.map ~f:(fun row -> row.text)
+
+let%test_unit "canonical rows preserve legacy text and distinguish request facts from \
+               messages"
+  =
+  let t =
+    { empty with
+      notice =
+        Some "Structured simulation — project scoped\nLoading simulation catalog/history"
+    ; error = Some "running completed failed"
+    }
+  in
+  let expected =
+    [ "Structured simulation — project scoped"
+    ; "j/k attempts; n/p cases; [/] scroll; l logs; palette: launch/rerun/cancel/export"
+    ; "Structured simulation — project scoped"
+    ; "Loading simulation catalog/history"
+    ; "running completed failed"
+    ; "Loading simulation catalog/history"
+    ]
+  in
+  List.iter
+    [ t; begin_request t ]
+    ~f:(fun t ->
+      let log_lines _ = assert false in
+      assert (List.equal String.equal (rows t ~log_lines) expected);
+      let projected = annotated_rows t ~log_lines in
+      List.iteri projected ~f:(fun i row ->
+        assert (not row.selected);
+        assert (Bool.equal row.hint (i = 1));
+        assert (Option.is_none row.value_start);
+        match row.indicator with
+        | Some Running -> assert (t.busy && (i = 0 || i = 5))
+        | None -> assert (not (t.busy && (i = 0 || i = 5)))
+        | Some _ -> assert false))
+;;
+
+let%test_unit "row cursor metadata is opt-in without changing legacy text" =
+  let text = "full-case-id: Failed" in
+  let plain = row text in
+  let selected = row ~selected:true text in
+  assert ((not plain.selected) && selected.selected);
+  assert (String.equal plain.text selected.text);
+  assert (Option.is_none selected.indicator)
 ;;
 
 let%test_unit "request and attempt fences reject stale receipts" =
@@ -520,4 +643,36 @@ let%test_unit "history, selection, normalized failure and captured rerun inputs 
   assert (
     Option.equal String.equal stale.attempt (Some "different")
     && Option.is_none (detail stale))
+;;
+
+let%test_unit "launch form starts from exact catalog subset and captured defaults" =
+  let suite : S.Suite.t =
+    { id = "suite"
+    ; label = "Suite"
+    ; default_seed = "1"
+    ; cases = [ { id = "a"; label = "A" }; { id = "b"; label = "B" } ]
+    ; parameters = [ { key = "mode"; label = "Mode"; default = "normal"; choices = [] } ]
+    }
+  in
+  let captured =
+    { (selection suite) with
+      cases = [ "b" ]
+    ; seed = "99"
+    ; parameters = [ "mode", "captured" ]
+    }
+  in
+  let form = Form.create ~selection:captured suite in
+  assert (String.equal (Form.query form) "b");
+  let next f =
+    match Form.accept f (Form.query f) |> Or_error.ok_exn with
+    | `Next f -> f
+    | `Launch _ -> assert false
+  in
+  let form = next form in
+  assert (String.equal (Form.query form) "99");
+  let form = next form in
+  assert (String.equal (Form.query form) "captured");
+  match Form.accept (next form) "launch" |> Or_error.ok_exn with
+  | `Launch actual -> assert (S.Selection.equal actual captured)
+  | `Next _ -> assert false
 ;;

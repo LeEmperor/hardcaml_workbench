@@ -1,5 +1,11 @@
 # FS2 — Structured simulation, reruns and trace evidence
 
+**New adoption/investigation evidence, 2026-10-17:** the actual FIFO example now
+uses FS2, with catalog/subset launch and coordinated Testing panes. See
+[current guide and final evidence](testing_workspace.md) and
+[shared cluster plan](testing_cluster_plan.md). These extend the closed milestone;
+the new composition's owner visual review remains pending.
+
 **Milestone closed: structured project-scoped simulation delivered and accepted,
 2026-10-16.** This records the agreed substantial FS2 slice, verified with an actual
 Hardcaml Cyclesim provider and native HTTP/PTY interaction. No ASIC physical flow or

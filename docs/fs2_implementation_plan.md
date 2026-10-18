@@ -1,5 +1,11 @@
 # FS2 — Structured simulation delivery
 
+**Subsequent activated extension, 2026-10-17:** WB-034 genuine FIFO adoption,
+WB-032 test catalog and WB-063 cooperative Testing investigation are implemented
+and automatically verified. The shared coordination plan is
+[testing_cluster_plan.md](testing_cluster_plan.md); [current controls](testing_workspace.md).
+This leaves the original accepted milestone below closed.
+
 **Milestone closed, 2026-10-16: structured project-scoped simulation delivered and
 accepted.** The owner confirmed the basic demo works and authorized closeout after
 automated verification. This is the retained implementation/coordination plan for

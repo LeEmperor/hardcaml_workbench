@@ -1,5 +1,22 @@
 # F04 — Named workspaces, tiles and saved layouts
 
+**Default recovery delivered 2026-10-18:** the explicit
+[Restore default layout](../default_layout_restore.md) command atomically restores
+visible preset membership/geometry and clears zoom, then selects Fit on success.
+Extras are hidden rather than deleted; IDs, pins, contexts, selections and appearance
+are preserved. This does not implement arbitrary interactive editing or user-defined
+default-file configuration.
+
+**Ticket entry points:** [WB-013 mouse](workspaces/WB-013-mouse-support.md),
+[WB-015 layout files](workspaces/WB-015-layout-file-usability.md),
+[WB-016 window files](workspaces/WB-016-window-configuration.md),
+[WB-045 template picker](workspaces/WB-045-template-picker.md),
+[WB-046 interactive editing](workspaces/WB-046-interactive-layout-editing.md),
+[WB-047 attachment](workspaces/WB-047-window-attachment.md) and
+[WB-056 floating panes](presentation/WB-056-floating-panes.md).
+These extend delivered preset/templates/registry behavior; file configuration,
+interactive geometry and live surface attachment have distinct acceptance gates.
+
 Status (2026-10-15): **FS0 named workspace/tile host and autosaved session restoration
 delivered** with Main/independent contexts and pins. See [terminal](../fs0_terminal.md)
 and [acceptance](../fs0_acceptance.md). Requirements below remain normative: current

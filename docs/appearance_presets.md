@@ -67,6 +67,32 @@ Nerd Font mode and final visual polish remain subsequent F12/gallery work.
 
 ## Captures
 
+### Native activity and semantic icons — 2026-10-17
+
+The current client uses the installed `Bonsai_term_spinner` component for active
+work, with one shared Dot/Line pair rather than a timer per tile. Choose:
+
+- **Appearance: Icons Unicode** — compact glyphs and the native dot spinner.
+- **Appearance: Icons ASCII** — printable fallback symbols and the native line spinner.
+- **Appearance: Icons Off** — no added indicators; all labels and controls remain.
+
+Indicators appear beside checklist stages, run/job lifecycle values, planned-run
+readiness/producer state and structured simulation requests/attempts/cases. Pins,
+simulation seed/artifact/log headings also have compact context glyphs. Titles stay
+lowercase and unadorned, and the current dense layout remains intact. All glyphs
+are single-cell in the renderer; no Nerd Font is required.
+
+Animation follows actual pending requests or active producers, not elapsed time
+alone or text found inside reports. Historical/detached ASIC observations do not
+animate without an exact active producer. Completion, simulation verdicts and
+evidence freshness stay distinct; full labels/identities are retained. Appearance
+changes do not invoke providers. The icon setting persists with FS3 preferences.
+
+[Implementation and native evidence](terminal_indicators_plan.md):351 indicator
+checks plus existing FS2, Overview, checklist and interrupt regressions passed.
+
+### Deterministic skin captures
+
 Generate plain-text and ANSI terminal frames without a daemon or EDA:
 
 ```sh

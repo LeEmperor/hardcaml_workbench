@@ -201,6 +201,34 @@ def details(client, attempt):
     return field(client.rpc('(Observe %s)' % sexp(attempt), domain='simulation', wait=False), 'detail')[0]
 
 
+def ensure_legacy_simulation(client, name='Legacy simulation'):
+    """An explicit independent legacy/full tile, separate from cooperative Testing.
+
+    Use public mutations only; this must not change any provider/attempt identity.
+    """
+    def snapshot():
+        return client.rpc(domain='workspace', wait=False)
+
+    def mutate(operation):
+        current = snapshot()
+        return client.rpc('(Mutate (expected_revision %s) (mutation %s))' %
+                          (field(current, 'revision'), operation), domain='workspace', wait=False)
+
+    current = snapshot()
+    matches = [w for w in field(current, 'workspaces') if field(w, 'name') == name]
+    if matches:
+        return matches[0]
+    window = field(field(current, 'workspaces')[0], 'window')
+    current = mutate('(Create_workspace (window %s) (name %s) (context %s))' %
+                     (sexp(window), sexp(name), sexp(field(current, 'main_context'))))
+    workspace = next(w for w in field(current, 'workspaces') if field(w, 'name') == name)
+    wid = field(workspace, 'id')
+    mutate('(Make_independent %s)' % sexp(wid))
+    mutate('(Create_tile (workspace %s) (kind simulation) '
+           '(geometry ((x 0) (y 0) (width 120) (height 36))))' % sexp(wid))
+    return next(w for w in field(snapshot(), 'workspaces') if field(w, 'id') == wid)
+
+
 def attempts(client):
     return field(client.rpc(domain='simulation', wait=False), 'attempts')
 
@@ -431,13 +459,16 @@ def native(base, args):
 
 def terminal_checks(base, args, client, pass_id, fail_id, check):
     before = {field(a, 'id') for a in attempts(client)}
+    ensure_legacy_simulation(client)
     terminal = Terminal(base, args, client)
     try:
         terminal.capture('overview', ['Overview', 'Timing', 'Testing', 'Session', 'Stage checklist'])
         terminal.palette('Switch to Timing')
         terminal.capture('timing', ['Timing', 'Session', 'Timing · Paths', 'Timing · Provenance'])
         terminal.palette('Switch to Testing')
-        terminal.capture('testing', ['Testing', 'Session', 'Structured simulation', 'seed=314159', 'seed=42'])
+        terminal.capture('testing', ['Testing', 'Session', 'SIMULATION CATALOG', 'ATTEMPTS', 'CASES', 'ARTIFACTS'])
+        terminal.palette('Switch to Legacy simulation')
+        terminal.capture('legacy-testing', ['Structured simulation', 'seed=314159', 'seed=42'])
         terminal.focus_simulation()
         terminal.palette('Simulation: Reopen ' + fail_id + ' synthetic-checks')
         terminal.capture('failure', ['Failed', 'SYNTHETIC', '314159'])
@@ -445,7 +476,7 @@ def terminal_checks(base, args, client, pass_id, fail_id, check):
         terminal.palette('Simulation: Select case seeded-pattern')
         terminal.capture('selected-case', ['> seeded-pattern: Passed'])
         terminal.palette('Appearance: C - Minimal')
-        terminal.capture('theme', ['> seeded-pattern: Passed', 'Session'])
+        terminal.capture('theme', ['> seeded-pattern: Passed', 'Legacy simulation'])
         terminal.palette('Zoom focused tile')
         terminal.palette('Simulation: Toggle stream-labelled job logs')
         terminal.capture('logs', ['JOB LOG'])
@@ -467,7 +498,7 @@ def terminal_checks(base, args, client, pass_id, fail_id, check):
         terminal.capture('rerun', ['Rerun of', 'Passed'])
         provider.save(base / 'pty-rerun.json', child)
         terminal.palette('Unzoom workspace')
-        terminal.capture('testing-rerun-full', ['Session', 'Structured simulation', 'seed: 42', 'Passed'])
+        terminal.capture('testing-rerun-full', ['Legacy simulation', 'Structured simulation', 'seed: 42', 'Passed'])
     finally:
         terminal.close()
     terminal = Terminal(base, args, client, width=180, height=55)
@@ -476,7 +507,9 @@ def terminal_checks(base, args, client, pass_id, fail_id, check):
         terminal.palette('Switch to Timing')
         terminal.capture('timing-large', ['Session', 'Timing · Paths', 'Timing · Provenance'])
         terminal.palette('Switch to Testing')
-        terminal.capture('testing-large', ['Session', 'Structured simulation', 'synthetic-checks'])
+        terminal.capture('testing-large', ['Session', 'SIMULATION CATALOG', 'ATTEMPTS', 'ARTIFACTS'])
+        terminal.palette('Switch to Legacy simulation')
+        terminal.capture('legacy-testing-large', ['Structured simulation', 'synthetic-checks'])
         terminal.focus_simulation()
         terminal.palette('Simulation: Reopen ' + fail_id + ' synthetic-checks')
         terminal.capture('failure-large', ['314159', 'Failed', 'injected-mismatch', 'SYNTHETIC'])

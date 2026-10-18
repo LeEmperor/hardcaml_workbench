@@ -36,7 +36,17 @@ acceptance passed. Start with the [Cyclesim example](examples/fs2_cyclesim/READM
 and [FS2 controls/acceptance](docs/fs2_acceptance.md). ASIC association is optional;
 embedded waveforms and real gate-level adapters remain later integrations.
 
+**Testing adoption extension:** the actual FIFO example now has a project-owned
+FS2 provider with directed/seeded cases and genuine VCD/report artifacts. A catalog
+and cooperative Attempts/Cases/Detail/Artifacts/Logs workspace expose the existing
+backend coherently. [Open it and try the controls](docs/testing_workspace.md);
+[implementation/evidence](docs/testing_cluster_plan.md). The original standalone
+simulation tile and independent counter fixture remain supported.
+
 ## Documentation
+
+- [Restore a default workspace layout](docs/default_layout_restore.md) — one-step
+  recovery from extra/hidden tiles or altered sizes, preserving runs and pins.
 
 - [Documentation index](docs/README.md) — orientation and reading routes.
 - [FS0 controls](docs/fs0_terminal.md) and [acceptance](docs/fs0_acceptance.md) — run the demo and inspect its evidence.

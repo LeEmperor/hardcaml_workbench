@@ -4,6 +4,7 @@
   baseline_fixture
   fs0_fixture
   appearance
+  indicator
   planned_run
   stage_action
   tile_presentation
@@ -30,6 +31,8 @@
   presentation_preferences
   asic_intents
   simulation_view
+  simulation_catalog
+  testing_workspace
   simulation_export)
  (libraries
   async
@@ -73,6 +76,7 @@
   async
   bonsai
   bonsai_term
+  bonsai_term_components.spinner
   core
   core_unix.command_unix
   hardcaml_workbench_native_http

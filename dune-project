@@ -26,6 +26,7 @@
    core_unix
    bonsai
    bonsai_term
+   bonsai_term_components
    ; Direct use of Notty is limited to the development baseline capture, which
    ; serialises a rendered bonsai_term view; bonsai_term already requires it.
    notty-community

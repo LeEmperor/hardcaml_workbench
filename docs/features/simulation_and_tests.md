@@ -1,5 +1,17 @@
 # F09 — Simulation and test module, runner and tiles
 
+**Ticket entry points:** [verification/simulation catalog](README.md#verification-and-simulation)
+and [execution/storage catalog](README.md#execution-storage-and-observability).
+Important independent slices include [WB-025 formal](verification/WB-025-formal-verification.md),
+[WB-028 waveforms](verification/WB-028-waveform-viewer.md),
+[WB-030 test sweeps](verification/WB-030-seed-parameter-sweeps.md),
+[WB-032 catalog UI](verification/WB-032-test-catalog.md),
+[WB-034 FIFO](verification/WB-034-fifo-adapter.md) and
+[WB-063 Testing composition](presentation/WB-063-testing-workspace.md).
+[FS2-F compatibility links](../backlog/fs2_followups.md) preserve existing references.
+Formal proof, test-seed sweeps and design/build sweeps have different input/outcome
+contracts; none silently changes the accepted structured-simulation milestone.
+
 Status (2026-10-16): **FS0 generic execution/test module and FS2 structured
 project-scoped simulation delivered; agreed FS2 milestone accepted and closed**
 over the existing supervisor, without a second
@@ -11,6 +23,12 @@ Actual Cyclesim and native HTTP/PTY acceptance passed; see
 [provider/RPC contract](../fs2_simulation_contract.md).
 Owner acceptance covers the basic demo workflow; additional adoption/performance
 work is in [FS2 followups](../backlog/fs2_followups.md).
+
+The 2026-10-17 [Testing cluster](../testing_workspace.md) adds genuine FIFO adoption,
+explicit catalog/subset launch and cooperative attempt/case/detail/artifact/log
+panes. WB-032/WB-034 are delivered; WB-063 implementation and automated acceptance
+are complete, with owner visual review pending. The original generic/structured
+and process/semantic distinctions below remain authoritative.
 Generic Dune test jobs still do not acquire structured cases or restart history
 automatically. Gate-level adapters, archived-build replay and embedded waveform
 exploration remain later integrations. Historical FS0 evidence is in

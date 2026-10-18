@@ -151,7 +151,7 @@ module Role = struct
     | _ -> p.background
   ;;
 
-  let attrs (appearance : Appearance.t) role =
+  let foreground (appearance : Appearance.t) role =
     let p = palette appearance in
     let accent =
       match appearance.color with
@@ -159,25 +159,27 @@ module Role = struct
       | Selective -> p.selective
       | Vivid -> p.accent
     in
-    let fg =
-      match role with
-      | Muted | Inactive_tab -> p.muted
-      | Border ->
-        (match appearance.color with
-         | Vivid -> p.border
-         | _ -> p.muted)
-      | Focus | Selection | Active_tab -> accent
-      | Metric | Matched ->
-        (match appearance.color with
-         | Vivid -> p.metric
-         | _ -> p.foreground)
-      | Success -> p.success
-      | Warning -> p.warning
-      | Failure -> p.failure
-      | Running -> accent
-      | Heading -> rgb 255 255 255
-      | _ -> p.foreground
-    in
+    match role with
+    | Muted | Inactive_tab -> p.muted
+    | Border ->
+      (match appearance.color with
+       | Vivid -> p.border
+       | _ -> p.muted)
+    | Focus | Selection | Active_tab -> accent
+    | Metric | Matched ->
+      (match appearance.color with
+       | Vivid -> p.metric
+       | _ -> p.foreground)
+    | Success -> p.success
+    | Warning -> p.warning
+    | Failure -> p.failure
+    | Running -> accent
+    | Heading -> rgb 255 255 255
+    | _ -> p.foreground
+  ;;
+
+  let attrs (appearance : Appearance.t) role =
+    let fg = foreground appearance role in
     let bg = backdrop appearance role in
     [ Attr.fg fg; Attr.bg bg ]
     @
@@ -307,15 +309,62 @@ let run_selector_row ~width ~status_width ~cursor ~active run status =
 let run_status_role = function
   | "completed" -> Role.Success
   | "failed" -> Failure
-  | "running" | "starting" -> Running
+  | "running" | "starting" | "observing" -> Running
   | "pending" | "queued" | "cancelled" | "interrupted" | "skipped" -> Warning
   | _ -> Foreground
 ;;
 
-let run_selector_view appearance ~width ~status_width ~cursor ~active run status =
+(** Only lifecycle fields enter this mapping, never arbitrary report text. *)
+let run_indicator : string -> Indicator.t = function
+  | "running" | "starting" | "observing" -> Running
+  | "pending" | "queued" -> Pending
+  | "completed" -> Completed
+  | "failed" -> Failed
+  | "cancelled" | "interrupted" -> Cancelled
+  | "skipped" -> Skipped
+  | _ -> Unknown
+;;
+
+let indicator_view ?indicator_frames appearance role kind =
+  let glyph = Indicator.view ?frames:indicator_frames appearance.Appearance.icons kind in
+  if Appearance.Icons.equal appearance.icons None_
+  then View.none
+  else
+    View.hcat [ box ~width:1 ~height:1 glyph; View.text " " ]
+    |> View.with_colors' ~fg:(Role.foreground appearance role)
+;;
+
+let run_has_producer data run =
+  Option.exists data.asic ~f:(fun snapshot ->
+    List.exists snapshot.Asic.Snapshot.runs ~f:(fun execution ->
+      Run_ref.equal execution.run run
+      && List.mem
+           [ "queued"; "pending"; "starting"; "running"; "observing" ]
+           execution.status
+           ~equal:String.equal)
+    && List.exists snapshot.operations ~f:(fun operation ->
+      String.equal operation.kind "run"
+      && (Plain_rpc.active operation || String.equal operation.state "reserving")
+      && Option.exists operation.run ~f:(Run_ref.equal run)))
+;;
+
+let run_selector_view
+  ?indicator_frames
+  appearance
+  ~width
+  ~status_width
+  ~cursor
+  ~active
+  run
+  status
+  =
   let status_role = run_status_role status in
-  let row = run_selector_row ~width ~status_width ~cursor ~active run status in
-  let identity_width = Int.max 0 (width - status_width) in
+  let icon =
+    indicator_view ?indicator_frames appearance status_role (run_indicator status)
+  in
+  let text_width = Int.max 0 (width - View.width icon) in
+  let row = run_selector_row ~width:text_width ~status_width ~cursor ~active run status in
+  let identity_width = Int.max 0 (text_width - status_width) in
   let identity = E.text (E.clip ~width:identity_width (E.plain row)) in
   let status = E.text (E.clip ~width:status_width (E.plain status)) in
   let attrs role =
@@ -324,6 +373,9 @@ let run_selector_view appearance ~width ~status_width ~cursor ~active run status
   in
   View.hcat
     [ View.text ~attrs:(attrs (if cursor then Selection else Foreground)) identity
+    ; icon
+      |> View.with_colors'
+           ?bg:(if cursor then Some (Role.backdrop appearance Selection) else None)
     ; View.text ~attrs:(attrs status_role) status
     ]
   |> box ~width ~height:1
@@ -550,6 +602,14 @@ let utility_rows host data tile =
       |> Option.bind ~f:(fun reference -> reference.run)
     in
     match tile.kind with
+    | "live-status" when H.compact_summary host tile ->
+      Some
+        [ Overview_tiles.row "Connection" data.status
+        ; Overview_tiles.row
+            "Project"
+            (Option.value_map data.project ~default:"none" ~f:(fun p -> p.Project.name))
+        ; Overview_tiles.row "Scope" "Project tests"
+        ]
     | "live-status" ->
       Some
         (Overview_tiles.status_rows
@@ -687,10 +747,13 @@ let evidence_attrs appearance : E.Role.t -> Attr.t list = function
 ;;
 
 let tile_run host tile =
-  Option.bind host.H.registry ~f:(fun registry ->
-    W.resolve_tile registry tile.W.Tile.id
-    |> Result.ok
-    |> Option.bind ~f:(fun reference -> reference.run))
+  if Testing_workspace.is_pane tile.W.Tile.kind
+  then None
+  else
+    Option.bind host.H.registry ~f:(fun registry ->
+      W.resolve_tile registry tile.W.Tile.id
+      |> Result.ok
+      |> Option.bind ~f:(fun reference -> reference.run))
 ;;
 
 (* Chrome is removed at typed construction locations, before wrapping/paging. Never search
@@ -891,7 +954,7 @@ let semantic_rows host data tile ~width ~height =
 (* A shallow plan panel must show state and endpoint before verbose explanatory metadata.
    Summary facts each occupy one display-cell-clipped line; Enter retains the complete
    wrapped typed model, including exact identity and JSON. *)
-let planned_rows host tile ~width =
+let planned_source_rows host tile =
   let detail = (H.local host tile.W.Tile.id).utility_detail in
   let model = Planned_run.model host.H.planned_run in
   let rows = Planned_run.rows model ~detail in
@@ -902,10 +965,7 @@ let planned_rows host tile ~width =
     ]
   | None ->
     if detail
-    then
-      List.concat_map rows ~f:(fun row ->
-        wrap_cells ~width (Artifact_view.safe row.Planned_run.text)
-        |> List.map ~f:(fun text -> { row with text }))
+    then rows
     else (
       let selection =
         Option.value_map model.selection ~default:[] ~f:(fun selection ->
@@ -956,12 +1016,203 @@ let planned_rows host tile ~width =
         [ { Planned_run.role = Fact; text = "exact allocated run: " ^ id } ])
       @ Option.value_map model.launch.key ~default:[] ~f:(fun key ->
         [ { Planned_run.role = Fact; text = "submission key: " ^ key } ])
-      @ List.drop selection 1
-      |> List.map ~f:(fun row ->
-        { row with
-          Planned_run.text =
-            E.text (E.clip ~width (E.plain (Artifact_view.safe row.Planned_run.text)))
-        }))
+      @ List.drop selection 1)
+;;
+
+let planned_rows host tile ~width =
+  let detail = (H.local host tile.W.Tile.id).utility_detail in
+  planned_source_rows host tile
+  |> List.concat_map ~f:(fun row ->
+    let text = Artifact_view.safe row.Planned_run.text in
+    (if detail then wrap_cells ~width text else [ E.text (E.clip ~width (E.plain text)) ])
+    |> List.map ~f:(fun text -> { row with text }))
+;;
+
+let plan_indicator : Planned_run.status -> Indicator.t = function
+  | Empty -> Not_requested
+  | Pending -> Running
+  | Failed -> Failed
+  | Stale -> Stale
+  | Ready -> Ready
+;;
+
+let producer_indicator : Planned_run.launch_status -> Indicator.t = function
+  | Submitting | Allocated | Running -> Running
+  | Completed -> Completed
+  | Launch_failed -> Failed
+  | Cancelled -> Cancelled
+  | Detached | Unavailable -> Unknown
+;;
+
+let planned_role : Planned_run.role -> Role.t = function
+  | Fact -> Foreground
+  | Muted -> Muted
+  | Warning -> Warning
+  | Error -> Failure
+  | Success -> Success
+;;
+
+let planned_view_rows ?indicator_frames host tile ~width =
+  let model = Planned_run.model host.H.planned_run in
+  let detail = (H.local host tile.W.Tile.id).utility_detail in
+  planned_source_rows host tile
+  |> List.concat_mapi ~f:(fun i row ->
+    let kind =
+      if Option.is_some host.stage_preparation
+      then None
+      else if i = 0
+      then Some (plan_indicator model.status)
+      else if i = if detail then 1 else 2
+      then Some (producer_indicator model.launch.state)
+      else None
+    in
+    let role = planned_role row.Planned_run.role in
+    let icon_role =
+      match kind with
+      | Some Running -> Role.Running
+      | Some Completed | Some Ready -> Success
+      | Some Failed -> Failure
+      | Some Stale | Some Cancelled -> Warning
+      | _ -> Muted
+    in
+    let icon =
+      Option.value_map
+        kind
+        ~default:View.none
+        ~f:(indicator_view ?indicator_frames host.appearance icon_role)
+    in
+    let text_width = Int.max 0 (width - View.width icon) in
+    let text = Artifact_view.safe row.text in
+    let texts = if detail then wrap_cells ~width:text_width text else [ text ] in
+    List.mapi texts ~f:(fun j text ->
+      View.hcat
+        [ (if j = 0 then icon else View.rectangle ~width:(View.width icon) ~height:1 ())
+        ; View.text ~attrs:(Role.attrs host.appearance role) text
+        ]
+      |> box ~width ~height:1))
+;;
+
+let job_indicator : Job.State.t -> Indicator.t = function
+  | Queued -> Pending
+  | Starting | Running -> Running
+  | Complete -> Completed
+  | Failed -> Failed
+  | Cancelled -> Cancelled
+;;
+
+let indicator_role : Indicator.t -> Role.t = function
+  | Running -> Running
+  | Completed -> Success
+  | Failed -> Failure
+  | Pending | Cancelled | Skipped | Stale -> Warning
+  | Ready -> Success
+  | Not_requested | Unknown | Pin | Artifact | Log | Seed | Report | Trace | Info -> Muted
+;;
+
+let simulation_annotations host data tile =
+  match Testing_workspace.pane tile.W.Tile.kind with
+  | Some pane ->
+    (match pane with
+     | Catalog ->
+       [ Simulation_view.row "d discover | n/p suite | j/k case | x toggle"
+       ; Simulation_view.row "a all | / filter | Enter launch | u accept"
+       ]
+     | Artifacts ->
+       let view = H.simulation host tile.id in
+       List.map
+         (Option.to_list view.error @ Option.to_list view.notice)
+         ~f:Simulation_view.row
+     | _ -> [])
+    @ Testing_workspace.rows (H.testing_state host tile.id) pane ~log_lines:data.log_lines
+  | None ->
+    Simulation_view.annotated_rows (H.simulation host tile.id) ~log_lines:data.log_lines
+;;
+
+let simulation_view_rows_with_selection ?indicator_frames host data tile ~width =
+  simulation_annotations host data tile
+  |> List.filter ~f:(fun row ->
+    (not row.Simulation_view.hint) || (H.policy host tile).hints)
+  |> List.concat_map
+       ~f:(fun { Simulation_view.text; indicator = kind; value_start; selected; _ } ->
+         let role = Option.value_map kind ~default:Role.Foreground ~f:indicator_role in
+         let icon =
+           Option.value_map
+             kind
+             ~default:View.none
+             ~f:(indicator_view ?indicator_frames host.H.appearance role)
+         in
+         let used = ref 0 in
+         wrap_cells ~width:(width - View.width icon) text
+         |> List.mapi ~f:(fun i text ->
+           let neutral_cells =
+             Option.value_map value_start ~default:(cell_width text) ~f:(fun start ->
+               Int.clamp_exn (start - !used) ~min:0 ~max:(cell_width text))
+           in
+           used := !used + cell_width text;
+           let neutral = E.text (E.clip ~width:neutral_cells (E.plain text)) in
+           let view =
+             View.hcat
+               [ (if i = 0
+                  then icon
+                  else View.rectangle ~width:(View.width icon) ~height:1 ())
+               ; View.text ~attrs:(Role.attrs host.appearance Foreground) neutral
+               ; View.text ~attrs:(Role.attrs host.appearance role) text
+                 |> View.crop ~l:neutral_cells
+               ]
+             |> box ~width ~height:1
+           in
+           selected && i = 0, view))
+;;
+
+let simulation_view_rows ?indicator_frames host data tile ~width =
+  simulation_view_rows_with_selection ?indicator_frames host data tile ~width
+  |> List.map ~f:snd
+;;
+
+let simulation_cursor_pane kind =
+  match Testing_workspace.pane kind with
+  | Some (Catalog | Attempts | Cases | Artifacts) -> true
+  | Some (Detail | Logs) | None -> false
+;;
+
+(** Display-cell wrapping precedes viewport selection. Only typed cursor metadata
+    participates; provider text and checkbox membership cannot move the viewport. *)
+let ensure_visible ~start ~height ~length ~selected =
+  let maximum = Int.max 0 (length - Int.max 1 height) in
+  let start = Int.clamp_exn start ~min:0 ~max:maximum in
+  match selected with
+  | Some cursor when height > 0 ->
+    Int.clamp_exn
+      (if cursor < start
+       then cursor
+       else if cursor >= start + height
+       then cursor - height + 1
+       else start)
+      ~min:0
+      ~max:maximum
+  | _ -> start
+;;
+
+let%test_unit "cursor viewport keeps its origin until the cursor crosses a boundary" =
+  let follow start cursor =
+    ensure_visible ~start ~height:6 ~length:100 ~selected:(Some cursor)
+  in
+  assert (follow 20 20 = 20);
+  assert (follow 20 25 = 20);
+  assert (follow 20 19 = 19);
+  assert (follow 20 26 = 21);
+  assert (ensure_visible ~start:200 ~height:6 ~length:100 ~selected:None = 94);
+  assert (ensure_visible ~start:0 ~height:0 ~length:0 ~selected:None = 0)
+;;
+
+let simulation_viewport_start host tile ~height rows =
+  let local = H.local host tile.W.Tile.id in
+  let selected =
+    if simulation_cursor_pane tile.kind && local.follow
+    then List.findi rows ~f:(fun _ (selected, _) -> selected) |> Option.map ~f:fst
+    else None
+  in
+  ensure_visible ~start:local.scroll ~height ~length:(List.length rows) ~selected
 ;;
 
 let rows host data tile ~width ~height =
@@ -1048,17 +1299,28 @@ let rows host data tile ~width ~height =
             [ "No matching Timing investigation"
             ; "Use Inspect timing paths for this exact run"
             ])
-       | "simulation" ->
-         Simulation_view.rows local.simulation ~log_lines:data.log_lines
-         |> List.filteri ~f:(fun i _ -> i <> 1 || (H.policy host tile).hints)
+       | kind when H.simulation_kind kind ->
+         simulation_annotations host data tile
+         |> List.filter ~f:(fun row ->
+           (not row.Simulation_view.hint) || (H.policy host tile).hints)
+         |> List.map ~f:(fun row -> row.Simulation_view.text)
          |> List.concat_map ~f:(wrap_cells ~width)
        | "execution" | "project-tests" ->
-         [ (if String.equal tile.kind "project-tests"
-            then "Project tests (not ASIC-run scoped)"
-            else "Project execution attempts")
-         ; "Environment: " ^ data.environment
-         ; "Case details / progress: unavailable (generic command runner)"
-         ]
+         (if H.compact_summary host tile
+          then
+            [ (if String.equal tile.kind "project-tests"
+               then "Generic project tests"
+               else "Execution attempts")
+            ; "Process results only"
+            ; "b build | t test"
+            ]
+          else
+            [ (if String.equal tile.kind "project-tests"
+               then "Project tests (not ASIC-run scoped)"
+               else "Project execution attempts")
+            ; "Environment: " ^ data.environment
+            ; "Case details / progress: unavailable (generic command runner)"
+            ])
          @ Option.value_map selected ~default:[] ~f:(fun job ->
            Presentation.job_outcome_lines job
            @
@@ -1119,7 +1381,7 @@ let rows host data tile ~width ~height =
   then rows
   else if String.equal tile.kind "run-selector"
   then rows
-  else if String.equal tile.kind "simulation"
+  else if H.simulation_kind tile.kind
   then List.drop rows (Int.min local.scroll (Int.max 0 (List.length rows - height)))
   else List.drop rows local.scroll
 ;;
@@ -1301,9 +1563,15 @@ let timing_body appearance ~pane ~scroll ~width ~height (view : Timing_workspace
     |> colored appearance Foreground
 ;;
 
-let tile_view host data tile ~width ~height =
+let tile_view ?indicator_frames host data tile ~width ~height =
   let appearance = host.H.appearance in
   let local = H.local host tile.W.Tile.id in
+  let indicator_frames =
+    if List.mem [ "stage-checklist"; "synthesis" ] tile.kind ~equal:String.equal
+       && not (Option.exists (tile_run host tile) ~f:(run_has_producer data))
+    then None
+    else indicator_frames
+  in
   let policy = H.policy host tile in
   let show_title = T.show_title policy in
   let show_badge = T.show_badge policy (H.binding_kind tile) in
@@ -1311,9 +1579,14 @@ let tile_view host data tile ~width ~height =
     Option.value_map host.H.focus ~default:false ~f:(W.Tile_id.equal tile.id)
   in
   let binding =
-    match tile.binding with
-    | Pin_run run -> "PIN " ^ run_label run
-    | Follow -> if H.project_scoped_kind tile.kind then "project" else "follow"
+    if Testing_workspace.is_pane tile.kind
+    then "project"
+    else (
+      match tile.binding with
+      | Pin_run run ->
+        let glyph = Indicator.text appearance.icons Pin in
+        (if String.is_empty glyph then "" else glyph ^ " ") ^ "PIN " ^ run_label run
+      | Follow -> if H.project_scoped_kind tile.kind then "project" else "follow")
   in
   let _, _, _, body_width, body_height = body_geometry host tile ~width ~height in
   let geometry = panel_geometry host tile ~width ~height in
@@ -1442,6 +1715,8 @@ let tile_view host data tile ~width ~height =
     match compact with
     | Some rows ->
       Overview_tiles.render
+        ?indicator_frames
+        ~indicator_fg:(Role.foreground appearance Running)
         ~selected_bg:(Role.backdrop appearance Selection)
         ~appearance
         ~attrs:(utility_attrs appearance)
@@ -1491,6 +1766,8 @@ let tile_view host data tile ~width ~height =
             |> Fn.flip List.take (Int.max 0 available)
             |> List.map ~f:(fun (run, status) ->
               run_selector_view
+                ?indicator_frames:
+                  (if run_has_producer data run then indicator_frames else None)
                 appearance
                 ~width:body_width
                 ~status_width
@@ -1519,6 +1796,8 @@ let tile_view host data tile ~width ~height =
          if List.is_empty stages
          then
            Overview_tiles.render
+             ?indicator_frames
+             ~indicator_fg:(Role.foreground appearance Running)
              ~selected_bg:(Role.backdrop appearance Selection)
              ~appearance
              ~attrs:(utility_attrs appearance)
@@ -1566,6 +1845,8 @@ let tile_view host data tile ~width ~height =
            let hint_height = Int.min (List.length hints) (Int.max 0 (body_height - 2)) in
            let strip =
              Overview_tiles.Stage_strip.render
+               ?indicator_frames
+               ~indicator_fg:(Role.foreground appearance Running)
                ~selected_bg:(Role.backdrop appearance Selection)
                ~appearance
                ~attrs:(utility_attrs appearance)
@@ -1601,6 +1882,8 @@ let tile_view host data tile ~width ~height =
          View.vcat
            [ lines ~appearance ~role:Muted ~width:body_width ~height:hint_height hints
            ; Overview_tiles.render
+               ?indicator_frames
+               ~indicator_fg:(Role.foreground appearance Running)
                ~selected_bg:(Role.backdrop appearance Selection)
                ~appearance
                ~attrs:(utility_attrs appearance)
@@ -1643,6 +1926,8 @@ let tile_view host data tile ~width ~height =
            then tabline
            else
              Overview_tiles.render
+               ?indicator_frames
+               ~indicator_fg:(Role.foreground appearance Running)
                ~selected_bg:(Role.backdrop appearance Selection)
                ~appearance
                ~attrs:(utility_attrs appearance)
@@ -1673,6 +1958,8 @@ let tile_view host data tile ~width ~height =
          |> box ~width:body_width ~height:body_height
        | Some rows ->
          Overview_tiles.render
+           ?indicator_frames
+           ~indicator_fg:(Role.foreground appearance Running)
            ~selected_bg:(Role.backdrop appearance Selection)
            ~appearance
            ~attrs:(utility_attrs appearance)
@@ -1683,26 +1970,67 @@ let tile_view host data tile ~width ~height =
   let body =
     if String.equal tile.kind "planned-run"
     then
-      planned_rows host tile ~width:body_width
-      |> List.map ~f:(fun row ->
-        let role =
-          match row.Planned_run.role with
-          | Fact -> Role.Foreground
-          | Muted -> Muted
-          | Warning -> Warning
-          | Error -> Failure
-          | Success -> Success
-        in
-        role, row.text)
+      planned_view_rows ?indicator_frames host tile ~width:body_width
       |> Fn.flip List.drop local.scroll
       |> Fn.flip List.take body_height
-      |> List.map ~f:(fun (role, text) ->
-        lines ~appearance ~role ~width:body_width ~height:1 [ text ])
       |> View.vcat
       |> box ~width:body_width ~height:body_height
       |> colored appearance Foreground
     else if Option.is_some local.inspection || Option.is_some local.artifacts
     then body
+    else if H.simulation_kind tile.kind
+    then (
+      let views =
+        simulation_view_rows_with_selection
+          ?indicator_frames
+          host
+          data
+          tile
+          ~width:body_width
+      in
+      List.drop views (simulation_viewport_start host tile ~height:body_height views)
+      |> Fn.flip List.take body_height
+      |> List.map ~f:snd
+      |> View.vcat
+      |> box ~width:body_width ~height:body_height)
+    else if List.mem [ "execution"; "project-tests" ] tile.kind ~equal:String.equal
+    then (
+      let jobs =
+        List.filter data.jobs ~f:(fun job ->
+          (not (String.equal tile.kind "project-tests"))
+          || (String.equal job.kind.namespace "dune" && String.equal job.kind.name "test"))
+      in
+      List.mapi rows ~f:(fun i text ->
+        let index = i - (List.length rows - List.length jobs) in
+        match if index < 0 then None else List.nth jobs index with
+        | None -> lines ~appearance ~width:body_width ~height:1 [ text ]
+        | Some job ->
+          let kind = job_indicator job.state in
+          let role = indicator_role kind in
+          View.hcat
+            [ View.text
+                ~attrs:(Role.attrs appearance Foreground)
+                ((if Option.equal
+                       String.equal
+                       local.cursor
+                       (Some (Job_id.to_string job.id))
+                  then ">"
+                  else " ")
+                 ^ " "
+                 ^ Job_id.to_string job.id
+                 ^ "  ")
+            ; indicator_view ?indicator_frames appearance role kind
+            ; View.text
+                ~attrs:(Role.attrs appearance role)
+                (Job.State.to_string job.state)
+            ; View.text
+                ~attrs:(Role.attrs appearance Foreground)
+                ("  " ^ Job.Kind.to_string job.kind)
+            ]
+          |> box ~width:body_width ~height:1)
+      |> Fn.flip List.take body_height
+      |> View.vcat
+      |> box ~width:body_width ~height:body_height)
     else (
       match Timing_workspace.pane tile.kind, H.timing host tile with
       | Some pane, Some view ->
@@ -1895,6 +2223,23 @@ let tile_layout host ({ Dimensions.width; height } : Dimensions.t) =
   available, compact, layout
 ;;
 
+let reconcile_simulation_viewports host data dimensions =
+  let _, _, layout = tile_layout host dimensions in
+  List.fold layout ~init:host ~f:(fun host (tile, g) ->
+    if not (simulation_cursor_pane tile.W.Tile.kind)
+    then host
+    else (
+      let _, _, _, width, height =
+        body_geometry host tile ~width:g.W.Geometry.width ~height:g.height
+      in
+      let rows = simulation_view_rows_with_selection host data tile ~width in
+      let local = H.local host tile.id in
+      let scroll = simulation_viewport_start host tile ~height rows in
+      if scroll = local.scroll
+      then host
+      else H.set_local host tile.id { local with scroll }))
+;;
+
 let scroll_run_focused host data dimensions ~delta =
   let _, _, layout = tile_layout host dimensions in
   match H.focused host, host.H.registry with
@@ -1905,21 +2250,14 @@ let scroll_run_focused host data dimensions ~delta =
          |> Result.ok
          |> Option.bind ~f:(fun reference -> reference.run) )
      with
-     | Some (_, g), _ when String.equal tile.kind "simulation" ->
+     | Some (_, g), _ when H.simulation_kind tile.kind ->
        let _, _, _, width, height =
          body_geometry host tile ~width:g.width ~height:g.height
        in
        let local = H.local host tile.id in
-       let full =
-         rows
-           (H.set_local host tile.id { local with scroll = 0 })
-           data
-           tile
-           ~width
-           ~height
-       in
+       let full = simulation_view_rows_with_selection host data tile ~width in
        let maximum = Int.max 0 (List.length full - height) in
-       let scroll = Int.max 0 (Int.min maximum local.scroll) in
+       let scroll = simulation_viewport_start host tile ~height full in
        let scroll =
          if delta >= 0
          then scroll + Int.min delta (maximum - scroll)
@@ -1927,7 +2265,13 @@ let scroll_run_focused host data dimensions ~delta =
            scroll
            - Int.min scroll (if delta = Int.min_value then Int.max_value else -delta)
        in
-       H.set_local host tile.id { local with scroll }
+       H.set_local
+         host
+         tile.id
+         { local with
+           scroll
+         ; follow = (if simulation_cursor_pane tile.kind then false else local.follow)
+         }
      | Some (_, g), Some run ->
        let _, _, _, width, height =
          body_geometry host tile ~width:g.width ~height:g.height
@@ -2028,7 +2372,12 @@ let inspection_viewport (dimensions : Dimensions.t) =
   Int.max 1 dimensions.width, Int.max 1 dimensions.height
 ;;
 
-let render_workspace host data ({ Dimensions.width; height } as dimensions) =
+let render_workspace
+  ?indicator_frames
+  host
+  data
+  ({ Dimensions.width; height } as dimensions)
+  =
   let appearance = host.H.appearance in
   let width = Int.max 1 width
   and height = Int.max 1 height in
@@ -2073,7 +2422,8 @@ let render_workspace host data ({ Dimensions.width; height } as dimensions) =
         ]
     else
       List.map layout ~f:(fun (tile, (g : W.Geometry.t)) ->
-        tile_view host data tile ~width:g.width ~height:g.height |> View.pad ~l:g.x ~t:g.y)
+        tile_view ?indicator_frames host data tile ~width:g.width ~height:g.height
+        |> View.pad ~l:g.x ~t:g.y)
       |> View.zcat
   in
   let footer =
@@ -2301,7 +2651,7 @@ let render_palette host dimensions background =
 
 (* A focused explorer covers the workspace. Do not construct the obscured tile images:
    those have different widths and would wrap the same large source a second time. *)
-let render host data dimensions =
+let render ?indicator_frames host data dimensions =
   let inspection_tile =
     match host.H.inspection_paste with
     | None -> H.focused host
@@ -2321,7 +2671,7 @@ let render host data dimensions =
         (Inspection_view.rows view ~width ~height)
       |> colored host.appearance Surface
       |> box ~width ~height
-    | None -> render_workspace host data dimensions
+    | None -> render_workspace ?indicator_frames host data dimensions
   in
   render_palette host dimensions background
 ;;
@@ -2403,6 +2753,584 @@ let refinement_fixture (definition : P.Definition.t) =
     List.find_exn (H.tiles host) ~f:(fun tile -> String.equal tile.W.Tile.kind kind)
   in
   host, data, find
+;;
+
+let%test_unit "lifecycle icons do not turn readiness, ownership or completion into case \
+               pass"
+  =
+  let glyph = Indicator.text Unicode in
+  let check actual expected = assert (String.equal (glyph actual) (glyph expected)) in
+  List.iter
+    [ Planned_run.Submitting, Indicator.Running
+    ; Allocated, Running
+    ; Running, Running
+    ; Completed, Completed
+    ; Launch_failed, Failed
+    ; Cancelled, Cancelled
+    ; Detached, Unknown
+    ; Unavailable, Unknown
+    ]
+    ~f:(fun (state, expected) -> check (producer_indicator state) expected);
+  List.iter
+    [ Planned_run.Empty, Indicator.Not_requested
+    ; Pending, Running
+    ; Failed, Failed
+    ; Stale, Stale
+    ; Ready, Ready
+    ]
+    ~f:(fun (state, expected) -> check (plan_indicator state) expected);
+  assert (not (String.equal (glyph (plan_indicator Ready)) (glyph Completed)));
+  List.iter
+    [ Job.State.Queued, Indicator.Pending
+    ; Starting, Running
+    ; Running, Running
+    ; Complete, Completed
+    ; Failed, Failed
+    ; Cancelled, Cancelled
+    ]
+    ~f:(fun (state, expected) -> check (job_indicator state) expected);
+  List.iter
+    [ Simulation.Lifecycle.Finished; Cancelled; Interrupted; Queued ]
+    ~f:(fun lifecycle ->
+      check (Simulation_view.case_indicator ~lifecycle Running) Unknown);
+  check (Simulation_view.case_indicator ~lifecycle:Running Running) Running;
+  check (Simulation_view.case_indicator ~lifecycle:Finished Incomplete) Unknown;
+  check (Simulation_view.case_indicator ~lifecycle:Finished Passed) Completed;
+  check (Simulation_view.attempt_indicator Finished Unknown) Unknown;
+  check (Simulation_view.attempt_indicator Finished Incomplete) Unknown;
+  check (Simulation_view.attempt_indicator Finished Failed) Failed;
+  check (Simulation_view.attempt_indicator Finished Passed) Completed;
+  List.iter
+    [ "pass"; "detached"; "unknown"; "unavailable"; "running in report" ]
+    ~f:(fun status -> check (run_indicator status) Unknown)
+;;
+
+let%test_unit "cooperative Testing renderer keeps project scope and bounded panes" =
+  let host, data, find = refinement_fixture P.Testing.definition in
+  let catalog = find "simulation-catalog" in
+  assert (
+    T.Binding.equal
+      (H.binding_kind { catalog with binding = Pin_run Fs0_fixture.run_a })
+      Project);
+  let host = H.set_filter host catalog.id "directed" in
+  assert (
+    String.equal
+      (Simulation_catalog.filter
+         (Testing_workspace.catalog (H.testing_state host catalog.id)))
+      "directed");
+  List.iter
+    [ 120, 40; 180, 55; 40, 12 ]
+    ~f:(fun (width, height) ->
+      let view = render host data { Dimensions.width; height } in
+      assert (View.width view = width && View.height view = height));
+  let frame text : Indicator.frames = { dot = View.text text; line = View.text text } in
+  List.iter
+    [ "simulation-catalog"
+    ; "simulation-attempts"
+    ; "simulation-cases"
+    ; "simulation-detail"
+    ; "simulation-artifacts"
+    ; "simulation-logs"
+    ]
+    ~f:(fun kind ->
+      let tile = find kind in
+      let host = { host with appearance = { host.appearance with icons = None_ } } in
+      let a =
+        tile_view ~indicator_frames:(frame "A") host data tile ~width:48 ~height:12
+      in
+      let b =
+        tile_view ~indicator_frames:(frame "B") host data tile ~width:48 ~height:12
+      in
+      assert (String.equal (plain_text a) (plain_text b));
+      assert (
+        not (String.is_substring (plain_text a) ~substring:(run_label Fs0_fixture.run_a))));
+  let text =
+    tile_view host data (find "project-tests") ~width:24 ~height:8 |> plain_text
+  in
+  assert (String.is_substring text ~substring:"Generic project tests");
+  assert (String.is_substring text ~substring:"Process results only")
+;;
+
+let%test_unit "long cooperative lists follow typed wrapped cursors and respect manual \
+               scroll"
+  =
+  let host, data, find = refinement_fixture P.Testing.definition in
+  let cases =
+    List.init 40 ~f:(fun i ->
+      { Simulation.Case.id = sprintf "case-%02d" i
+      ; label = "Long case label wrapping across narrow display cells"
+      })
+  in
+  let suite : Simulation.Suite.t =
+    { id = "suite-00"
+    ; label = "Selected suite"
+    ; cases
+    ; default_seed = "42"
+    ; parameters =
+        List.init 20 ~f:(fun i ->
+          { Simulation.Parameter.key = sprintf "p%d" i
+          ; label = "Parameter"
+          ; default = "0"
+          ; choices = []
+          })
+    }
+  in
+  let selection = Simulation_view.selection suite in
+  let attempt : Simulation.Attempt.t =
+    { id = "attempt-24"
+    ; job = Job_id.of_string "exact-long-list-job"
+    ; project_root = "/fixture"
+    ; created_at = "now"
+    ; parent = None
+    ; captured =
+        { selection
+        ; discovery_digest = String.make 64 'd'
+        ; provider_executable = "/provider"
+        ; provider_args = []
+        ; environment = Inherit_daemon
+        }
+    ; lifecycle = Finished
+    ; outcome = Failed
+    ; exit_code = Some 0
+    ; diagnostic = None
+    ; progress = None
+    ; cases =
+        List.map cases ~f:(fun c ->
+          { Simulation.Case_result.case_id = c.id
+          ; status = Failed
+          ; message = None
+          ; progress = None
+          })
+    ; artifacts =
+        List.mapi cases ~f:(fun i c ->
+          { Simulation.Artifact.id = sprintf "artifact-%02d" i
+          ; attempt_id = "attempt-24"
+          ; case_id = Some c.id
+          ; label = sprintf "Artifact-%02d long wrapping artifact label" i
+          ; kind = "report"
+          ; media_type = "text/plain"
+          ; size = Some 42
+          ; sha256 = Some (String.make 64 'a')
+          ; availability = Available
+          })
+    ; next_sequence = 0
+    ; recent_events = []
+    }
+  in
+  let snapshot : Simulation.Snapshot.t =
+    { configured = true
+    ; discovery =
+        Some
+          { protocol_version = 1
+          ; suites = List.init 30 ~f:(fun i -> { suite with id = sprintf "suite-%02d" i })
+          }
+    ; discovery_digest = Some (String.make 64 'd')
+    ; discovery_job = None
+    ; discovery_error = None
+    ; history_error = None
+    ; next_before = None
+    ; detail = Some attempt
+    ; byte_page = None
+    ; attempts =
+        List.init 25 ~f:(fun i ->
+          { Simulation.Summary.id = sprintf "attempt-%02d" i
+          ; job = attempt.job
+          ; suite = suite.id
+          ; seed = "42"
+          ; created_at = "now"
+          ; parent = None
+          ; lifecycle = Finished
+          ; outcome = Failed
+          })
+    }
+  in
+  let view =
+    { Simulation_view.empty with snapshot = Some snapshot; attempt = Some attempt.id }
+  in
+  let host = H.set_simulation host (find "simulation-catalog").id view in
+  let overview = simulation_annotations host data (find "simulation-catalog") in
+  let first_case =
+    List.findi_exn overview ~f:(fun _ row -> row.Simulation_view.selected) |> fst
+  in
+  assert (first_case < 10);
+  let prefix =
+    List.take overview (first_case + 1)
+    |> List.map ~f:(fun row -> row.Simulation_view.text)
+    |> String.concat ~sep:"\n"
+  in
+  assert (not (String.is_substring prefix ~substring:(String.make 64 'd')));
+  assert (not (String.is_substring prefix ~substring:"Parameter p"));
+  assert (String.is_substring prefix ~substring:"Ready for explicit launch");
+  List.iter
+    [ 120, 40; 40, 12; 24, 8 ]
+    ~f:(fun (width, height) ->
+      let dimensions : Dimensions.t = { width; height } in
+      List.iter
+        [ "simulation-catalog", 39
+        ; "simulation-attempts", 25
+        ; "simulation-cases", 40
+        ; "simulation-artifacts", 40
+        ]
+        ~f:(fun (kind, moves) ->
+          let tile = find kind in
+          let host = { host with focus = Some tile.id } in
+          let host =
+            if String.equal kind "simulation-attempts"
+            then H.set_simulation host tile.id { view with attempt = None }
+            else host
+          in
+          let reconcile host = reconcile_simulation_viewports host data dimensions in
+          let selected_visible host =
+            let _, _, layout = tile_layout host dimensions in
+            let _, g =
+              List.find_exn layout ~f:(fun (t, _) -> W.Tile_id.equal t.id tile.id)
+            in
+            let _, _, _, body_width, body_height =
+              body_geometry host tile ~width:g.width ~height:g.height
+            in
+            let rows =
+              simulation_view_rows_with_selection host data tile ~width:body_width
+            in
+            let index = List.findi_exn rows ~f:(fun _ (selected, _) -> selected) |> fst in
+            assert (List.count rows ~f:fst = 1);
+            let start = (H.local host tile.id).scroll in
+            assert (start <= index && index < start + body_height);
+            let image = tile_view host data tile ~width:g.width ~height:g.height in
+            assert (View.width image = g.width && View.height image = g.height)
+          in
+          let press host key =
+            let host, _ = H.input host (Character key) ~commands:[] in
+            let host = reconcile host in
+            selected_visible host;
+            host
+          in
+          let host =
+            List.init moves ~f:Fn.id
+            |> List.fold ~init:host ~f:(fun host _ -> press host 'j')
+          in
+          let state = H.testing_state host tile.id in
+          (match kind with
+           | "simulation-catalog" ->
+             assert (
+               Option.equal
+                 String.equal
+                 (Simulation_catalog.case_id (Testing_workspace.catalog state))
+                 (Some "case-39"))
+           | "simulation-attempts" ->
+             assert (
+               Option.equal
+                 String.equal
+                 (Testing_workspace.view state).attempt
+                 (Some "attempt-24"))
+           | "simulation-cases" ->
+             assert (
+               Option.equal
+                 String.equal
+                 (Testing_workspace.view state).case_id
+                 (Some "case-39"))
+           | "simulation-artifacts" ->
+             assert (
+               Option.equal
+                 String.equal
+                 (Testing_workspace.selected_artifact state)
+                 (Some "artifact-39"))
+           | _ -> assert false);
+          assert ((H.local host tile.id).scroll > 0);
+          let host = scroll_run_focused host data dimensions ~delta:Int.min_value in
+          assert ((not (H.local host tile.id).follow) && (H.local host tile.id).scroll = 0);
+          let host = reconcile host in
+          assert ((H.local host tile.id).scroll = 0);
+          let host = press host 'k' in
+          assert ((H.local host tile.id).follow && (H.local host tile.id).scroll > 0);
+          ignore
+            (List.init moves ~f:Fn.id
+             |> List.fold ~init:host ~f:(fun host _ -> press host 'k')
+             : H.t)));
+  List.iter [ "simulation-detail"; "simulation-logs" ] ~f:(fun kind ->
+    let tile = find kind in
+    let host =
+      H.set_local host tile.id { (H.local host tile.id) with scroll = 17; follow = true }
+    in
+    let host =
+      reconcile_simulation_viewports host data { Dimensions.width = 120; height = 40 }
+    in
+    assert ((H.local host tile.id).scroll = 17))
+;;
+
+let%test_unit "simulation annotations preserve typed rows, logs and terminal case fences" =
+  let definition =
+    { P.Testing.definition with
+      tiles = P.Testing.definition.tiles @ [ P.Common.tile "simulation" ]
+    }
+  in
+  let host, data, find = refinement_fixture definition in
+  let tile = find "simulation" in
+  let attempt : Simulation.Attempt.t =
+    { id = "exact-running-ID"
+    ; job = Job_id.of_string "exact-job"
+    ; project_root = "/fixture"
+    ; created_at = "now"
+    ; parent = None
+    ; captured =
+        { selection =
+            { suite = "suite"
+            ; cases = [ "case" ]
+            ; seed = "17"
+            ; parameters = []
+            ; asic_inputs = []
+            }
+        ; discovery_digest = "digest"
+        ; provider_executable = "/fixture/provider"
+        ; provider_args = []
+        ; environment = V1.Environment_selection.Inherit_daemon
+        }
+    ; lifecycle = Running
+    ; outcome = Unknown
+    ; exit_code = None
+    ; diagnostic = Some "completed failed running\nraw diagnostic"
+    ; progress = None
+    ; cases =
+        [ { case_id = "case"
+          ; status = Running
+          ; message = Some "passed\nraw message"
+          ; progress = None
+          }
+        ]
+    ; artifacts = []
+    ; next_sequence = 0
+    ; recent_events = []
+    }
+  in
+  let snapshot : Simulation.Snapshot.t =
+    { configured = true
+    ; discovery = None
+    ; discovery_digest = None
+    ; discovery_job = None
+    ; discovery_error = None
+    ; history_error = Some "running\nraw history error"
+    ; attempts = []
+    ; next_before = None
+    ; detail = Some attempt
+    ; byte_page = None
+    }
+  in
+  let logs =
+    [ "running failed completed"
+    ; "Attempt: exact-running-ID"
+    ; "case: Running"
+    ; "raw\nlog"
+    ]
+  in
+  let data = { data with log_lines = (fun _ -> logs) } in
+  let frames glyph : Indicator.frames =
+    { dot = View.text glyph; line = View.text glyph }
+  in
+  List.iter Appearance.Icons.all ~f:(fun icons ->
+    List.iter [ Simulation.Lifecycle.Running; Finished; Interrupted ] ~f:(fun lifecycle ->
+      let simulation =
+        { Simulation_view.empty with
+          snapshot = Some { snapshot with detail = Some { attempt with lifecycle } }
+        ; attempt = Some attempt.id
+        ; logs = true
+        ; case_id = Some "case"
+        }
+      in
+      let host =
+        H.set_local
+          { host with appearance = { host.appearance with icons } }
+          tile.id
+          { H.default_local with simulation }
+      in
+      let source = Simulation_view.rows simulation ~log_lines:data.log_lines in
+      let projected =
+        Simulation_view.annotated_rows simulation ~log_lines:data.log_lines
+      in
+      assert (
+        List.equal
+          String.equal
+          source
+          (List.map projected ~f:(fun row -> row.Simulation_view.text)));
+      let log_count = List.concat_map logs ~f:String.split_lines |> List.length in
+      let log_start = List.length source - 1 - log_count in
+      List.iteri projected ~f:(fun i { Simulation_view.text; indicator = kind; _ } ->
+        if (i >= log_start && i < log_start + log_count)
+           || List.mem
+                [ "raw diagnostic"
+                ; "completed failed running"
+                ; "  passed"
+                ; "  raw message"
+                ; "running"
+                ]
+                text
+                ~equal:String.equal
+        then assert (Option.is_none kind));
+      let views frames width =
+        simulation_view_rows ~indicator_frames:frames host data tile ~width
+      in
+      let a = views (frames "A") 120 |> View.vcat |> plain_text in
+      let b = views (frames "B") 120 |> View.vcat |> plain_text in
+      let animated =
+        Simulation.Lifecycle.equal lifecycle Running
+        && not (Appearance.Icons.equal icons None_)
+      in
+      assert (Bool.equal (not (String.equal a b)) animated);
+      List.iter logs ~f:(fun log ->
+        String.split_lines log
+        |> List.iter ~f:(fun line -> assert (String.is_substring a ~substring:line)));
+      if Appearance.Icons.equal icons None_
+      then
+        assert (
+          String.equal
+            a
+            (List.map source ~f:(fun text -> View.text text |> box ~width:120 ~height:1)
+             |> View.vcat
+             |> plain_text));
+      List.iter [ 0; 1; 7; 32; 120 ] ~f:(fun width ->
+        let a = views (frames "A") width
+        and b = views (frames "B") width in
+        assert (List.length a = List.length b);
+        List.iter a ~f:(fun view ->
+          assert (View.width view = width && View.height view = 1)))))
+;;
+
+let%test_unit "shared host frames follow exact producers and leave tile layout unchanged" =
+  let host, data, find = refinement_fixture P.Overview.definition in
+  let stage_tile = find "stage-checklist" in
+  let plan_tile = find "planned-run" in
+  let snapshot = Option.value_exn data.asic in
+  let operation : Asic.Pending.t =
+    { key = "run:exact"
+    ; kind = "run"
+    ; state = "executing"
+    ; run = Some Fs0_fixture.run_a
+    ; error = None
+    }
+  in
+  let snapshot =
+    { snapshot with
+      operations = [ operation ]
+    ; runs =
+        List.map snapshot.runs ~f:(fun execution ->
+          { execution with
+            status = "observing"
+          ; stages =
+              List.map execution.stages ~f:(fun stage -> { stage with status = Running })
+          })
+    }
+  in
+  let data =
+    { data with asic = Some snapshot; runs = [ Fs0_fixture.run_a, "observing" ] }
+  in
+  assert (run_has_producer data Fs0_fixture.run_a);
+  assert (not (run_has_producer data Fs0_fixture.run_b));
+  let frames glyph : Indicator.frames =
+    { dot = View.text glyph; line = View.text glyph }
+  in
+  List.iter Appearance.Icons.all ~f:(fun icons ->
+    let host = { host with appearance = { host.appearance with icons } } in
+    let render data tile frame width height =
+      tile_view ~indicator_frames:(frames frame) host data tile ~width ~height
+    in
+    let a = render data stage_tile "A" 100 16 |> plain_text in
+    let b = render data stage_tile "B" 100 16 |> plain_text in
+    assert (Bool.equal (not (String.equal a b)) (not (Appearance.Icons.equal icons None_)));
+    List.iter
+      [ []
+      ; [ { operation with run = Some Fs0_fixture.run_b } ]
+      ; [ { operation with state = "detached" } ]
+      ]
+      ~f:(fun operations ->
+        let data = { data with asic = Some { snapshot with operations } } in
+        assert (not (run_has_producer data Fs0_fixture.run_a));
+        assert (
+          String.equal
+            (render data stage_tile "A" 100 16 |> plain_text)
+            (render data stage_tile "B" 100 16 |> plain_text)));
+    List.iter
+      [ "completed"; "failed"; "detached"; "unknown"; "unavailable" ]
+      ~f:(fun status ->
+        let data =
+          { data with
+            asic =
+              Some
+                { snapshot with
+                  runs = List.map snapshot.runs ~f:(fun run -> { run with status })
+                }
+          }
+        in
+        assert (not (run_has_producer data Fs0_fixture.run_a)));
+    let selection : Asic.Selection.t =
+      { flow = "flow"
+      ; profile = "profile"
+      ; endpoint = "exact-endpoint"
+      ; assignments = []
+      }
+    in
+    let planned_run, _ = Planned_run.begin_plan Planned_run.empty selection in
+    let pending_host = { host with planned_run } in
+    let plan frame =
+      planned_view_rows ~indicator_frames:(frames frame) pending_host plan_tile ~width:100
+      |> View.vcat
+      |> plain_text
+    in
+    assert (
+      Bool.equal
+        (not (String.equal (plan "A") (plan "B")))
+        (not (Appearance.Icons.equal icons None_)));
+    assert (String.is_substring (plan "A") ~substring:"exact-endpoint");
+    List.iter
+      [ 0, 0; 1, 1; 32, 8; 100, 16 ]
+      ~f:(fun (width, height) ->
+        List.iter [ stage_tile; plan_tile ] ~f:(fun tile ->
+          let a = render data tile "A" width height
+          and b = render data tile "B" width height in
+          assert (View.width a = width && View.height a = height);
+          assert (View.width b = width && View.height b = height))))
+;;
+
+let%test_unit "generic job icons retain exact identity and completion vocabulary" =
+  let definition =
+    { P.Testing.definition with
+      id = "generic-job-icon-regression"
+    ; tiles =
+        List.map P.Testing.definition.tiles ~f:(fun tile ->
+          { tile with
+            presentation = { tile.presentation with compact_summary = Some false }
+          })
+    }
+  in
+  let host, data, find = refinement_fixture definition in
+  let tile = find "project-tests" in
+  let base = List.hd_exn Baseline_fixture.jobs in
+  let frames glyph : Indicator.frames =
+    { dot = View.text glyph; line = View.text glyph }
+  in
+  List.iter Appearance.Icons.all ~f:(fun icons ->
+    let host = { host with appearance = { host.appearance with icons } } in
+    List.iter Job.State.all ~f:(fun state ->
+      let job = { base with kind = { namespace = "dune"; name = "test" }; state } in
+      let data = { data with jobs = [ job ] } in
+      let render frame =
+        tile_view ~indicator_frames:(frames frame) host data tile ~width:140 ~height:16
+      in
+      let a = render "A" |> plain_text
+      and b = render "B" |> plain_text in
+      let animated =
+        List.mem [ Job.State.Starting; Running ] state ~equal:Job.State.equal
+        && not (Appearance.Icons.equal icons None_)
+      in
+      assert (Bool.equal (not (String.equal a b)) animated);
+      assert (String.is_substring a ~substring:(Job_id.to_string job.id));
+      assert (String.is_substring a ~substring:(Job.State.to_string state));
+      assert (String.is_substring a ~substring:"Case details / progress: unavailable");
+      assert (not (String.is_substring a ~substring:"Passed"));
+      List.iter
+        [ 0, 0; 1, 1; 32, 8 ]
+        ~f:(fun (width, height) ->
+          let view =
+            tile_view ~indicator_frames:(frames "A") host data tile ~width ~height
+          in
+          assert (View.width view = width && View.height view = height))))
 ;;
 
 let%test_unit "Overview renders four primary domains with shallow frames and bounded \
@@ -3070,16 +3998,26 @@ let%test_unit "actual utility and selector token images carry independent attrib
     View.text ~attrs:(Role.attrs stage_appearance role @ [ Attr.bg stage_bg ]) text
     |> ansi
   in
-  assert (String.equal (slice image ~x:0 ~width:6) (expected Selection "> [+] "));
-  assert (String.equal (slice image ~x:6 ~width:11) (expected Foreground "Synthesis: "));
-  assert (String.equal (slice image ~x:17 ~width:9) (expected Success "completed"));
+  let prefix = "> " ^ Indicator.text Ascii Completed ^ " " in
+  let prefix_width = cell_width prefix in
+  assert (String.equal (slice image ~x:0 ~width:prefix_width) (expected Selection prefix));
+  assert (
+    String.equal
+      (slice image ~x:prefix_width ~width:11)
+      (expected Foreground "Synthesis: "));
+  assert (
+    String.equal
+      (slice image ~x:(prefix_width + 11) ~width:9)
+      (expected Success "completed"));
   let detail = View.crop ~t:1 image in
   let label = strip.selected_line.label ^ ": " in
   assert (
-    String.equal (slice detail ~x:6 ~width:(cell_width label)) (expected Foreground label));
+    String.equal
+      (slice detail ~x:prefix_width ~width:(cell_width label))
+      (expected Foreground label));
   assert (
     String.equal
-      (slice detail ~x:(6 + cell_width label) ~width:9)
+      (slice detail ~x:(prefix_width + cell_width label) ~width:9)
       (expected Success "completed"));
   let run = { Fs0_fixture.run_a with id = "failed-running-identity" } in
   List.iter

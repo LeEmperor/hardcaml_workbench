@@ -33,6 +33,10 @@ let reset t ~workspace =
   Workspace.Mutation.Reset_arrangement { workspace; preset = t.id; tiles = specs t }
 ;;
 
+let restore t ~workspace =
+  Workspace.Mutation.Restore_default_layout { workspace; preset = t.id; tiles = specs t }
+;;
+
 let presentation t ~kind =
   List.find_map t.tiles ~f:(fun tile ->
     if String.equal kind tile.Common.kind then Some tile.presentation else None)
