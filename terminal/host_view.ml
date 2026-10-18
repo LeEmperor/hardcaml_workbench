@@ -1114,8 +1114,8 @@ let simulation_annotations host data tile =
   | Some pane ->
     (match pane with
      | Catalog ->
-       [ Simulation_view.row "d discover | n/p suite | j/k case | x toggle"
-       ; Simulation_view.row "a all | / filter | Enter launch | u accept"
+       [ Simulation_view.row ~hint:true "d discover | n/p suite | j/k case | x toggle"
+       ; Simulation_view.row ~hint:true "a all | / filter | Enter launch | u accept"
        ]
      | Artifacts ->
        let view = H.simulation host tile.id in
