@@ -194,12 +194,19 @@ let launch t =
 
 let rows t =
   let row = Simulation_view.row in
-  [ row "SIMULATION CATALOG — project scoped"
-  ; row
-      (Option.value_map
-         (disabled_reason t)
-         ~default:"Ready for explicit launch"
-         ~f:(fun reason -> "Launch disabled: " ^ reason))
+  let reason = disabled_reason t in
+  let readiness =
+    Option.value_map reason ~default:"Ready for explicit launch" ~f:(fun reason ->
+      "Launch disabled: " ^ reason)
+  in
+  [ row
+      ~spans:
+        [ Simulation_view.span
+            ~start:0
+            (if Option.is_none reason then Success else Warning)
+            readiness
+        ]
+      readiness
   ; row
       (Option.value_map (suite t) ~default:"Choose a suite" ~f:(fun s ->
          "Suite: " ^ s.id ^ " — " ^ s.label))
@@ -234,7 +241,9 @@ let rows t =
          then ""
          else " [" ^ String.concat ~sep:", " p.choices ^ "]")))
   @ [ row ("Selected cases: " ^ String.concat ~sep:", " t.selected)
-    ; row ("Captured discovery: " ^ Option.value t.captured_digest ~default:"none")
+    ; row
+        ("Captured discovery: "
+         ^ Option.value_map t.captured_digest ~default:"none" ~f:Overview_tiles.short_id)
     ]
   |> List.concat_map ~f:(fun r ->
     String.split_lines r.Simulation_view.text
@@ -243,6 +252,7 @@ let rows t =
         text = Artifact_view.safe text
       ; indicator = (if i = 0 then r.indicator else None)
       ; selected = i = 0 && r.selected
+      ; spans = (if i = 0 then r.spans else [])
       }))
 ;;
 
@@ -276,12 +286,30 @@ end
 
 let%test_unit "catalog captures exact subset defaults and digest; filter only browses" =
   let s = Test_data.suite in
-  let t = update empty (Test_data.snapshot [ s ]) in
+  let exact_digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" in
+  let t = update empty (Test_data.snapshot ~digest:exact_digest [ s ]) in
   let t = toggle_case t "directed" |> fun t -> set_filter t "rAnDoM" in
   assert (
     List.equal String.equal (List.map (visible_cases t) ~f:(fun c -> c.id)) [ "seeded" ]);
   let _, selected, digest = launch t |> Or_error.ok_exn in
-  assert (String.equal digest "d1");
+  assert (String.equal digest exact_digest);
+  assert (Option.equal String.equal t.digest (Some exact_digest));
+  assert (Option.equal String.equal t.captured_digest (Some exact_digest));
+  assert (
+    List.exists (rows t) ~f:(fun row ->
+      String.equal row.Simulation_view.text "Captured discovery: 012345...abcdef"));
+  (* Even a refresh with the same condensed label must invalidate the capture. *)
+  let changed_digest =
+    String.prefix exact_digest 10 ^ "changed" ^ String.suffix exact_digest 10
+  in
+  let refreshed = update t (Test_data.snapshot ~digest:changed_digest [ s ]) in
+  assert (
+    String.equal
+      (Overview_tiles.short_id changed_digest)
+      (Overview_tiles.short_id exact_digest));
+  assert (Or_error.is_error (launch refreshed));
+  let _, _, accepted_digest = launch (accept refreshed) |> Or_error.ok_exn in
+  assert (String.equal accepted_digest changed_digest);
   assert (List.equal String.equal selected.cases [ "seeded" ]);
   assert (String.equal selected.seed "42");
   assert (List.equal [%equal: string * string] selected.parameters [ "cycles", "100" ]);

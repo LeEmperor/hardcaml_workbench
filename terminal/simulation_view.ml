@@ -237,21 +237,72 @@ let progress (p : S.Progress.t) =
 
 let atom f x = Sexp.to_string_mach (f x)
 
+type tone =
+  | Success
+  | Warning
+  | Failure
+  | Running
+  | Muted
+
+type span =
+  { start : int
+  ; length : int
+  ; tone : tone
+  }
+
 type row =
   { text : string
   ; indicator : Indicator.t option
   ; value_start : int option
   ; hint : bool
   ; selected : bool
+  ; spans : span list
   }
 
 (** [selected] marks a navigator cursor for viewport following. It belongs only to the
     first physical line of a row; legacy rows default to [false]. *)
-let row ?indicator ?value_start ?(hint = false) ?(selected = false) text =
-  { text; indicator; value_start; hint; selected }
+let row ?indicator ?value_start ?(hint = false) ?(selected = false) ?(spans = []) text =
+  { text; indicator; value_start; hint; selected; spans }
 ;;
 
 let plain_rows texts = List.map texts ~f:(fun text -> row text)
+
+(* Offsets are display cells in sanitized text, independent of icon width. *)
+let text_width text =
+  Bonsai_term.View.width (Bonsai_term.View.text (Artifact_view.safe text))
+;;
+
+let span ~start tone text = { start; length = text_width text; tone }
+
+let lifecycle_tone : S.Lifecycle.t -> tone = function
+  | Queued | Cancelled | Interrupted -> Warning
+  | Running -> Running
+  | Finished -> Success
+;;
+
+let outcome_tone : S.Outcome.t -> tone = function
+  | Passed -> Success
+  | Failed -> Failure
+  | Incomplete -> Warning
+  | Unknown -> Muted
+;;
+
+let availability_tone : S.Artifact.Availability.t -> tone = function
+  | Available -> Success
+  | Missing | Changed -> Warning
+  | Rejected _ -> Failure
+;;
+
+let attempt_spans ~prefix lifecycle outcome =
+  let lifecycle_text = atom S.Lifecycle.sexp_of_t lifecycle in
+  let start = text_width prefix in
+  [ span ~start (lifecycle_tone lifecycle) lifecycle_text
+  ; span
+      ~start:(start + text_width lifecycle_text + 1)
+      (outcome_tone outcome)
+      (atom S.Outcome.sexp_of_t outcome)
+  ]
+;;
 
 let lifecycle_indicator : S.Lifecycle.t -> Indicator.t = function
   | Queued -> Pending
@@ -394,6 +445,7 @@ let annotated_rows t ~log_lines =
       ; value_start = (if i = 0 then row.value_start else None)
       ; hint = row.hint
       ; selected = i = 0 && row.selected
+      ; spans = (if i = 0 then row.spans else [])
       }))
 ;;
 

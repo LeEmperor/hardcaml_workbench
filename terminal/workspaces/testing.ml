@@ -34,19 +34,19 @@ let definition : Definition.t =
       Stack
         [ navigation_leaf
         ; Weighted_columns
-            [ ( 1
+            [ ( 2
               , Stack
                   [ leaf ~height:6 ~weight:0 "live-status"
                   ; leaf ~height:6 "project-tests"
                   ; leaf ~height:6 "execution"
                   ] )
-            ; ( 2
+            ; ( 3
               , Stack
                   [ leaf ~height:12 ~weight:2 "simulation-catalog"
                   ; leaf ~height:7 "simulation-attempts"
                   ; leaf ~height:7 "simulation-cases"
                   ] )
-            ; ( 2
+            ; ( 3
               , Stack
                   [ leaf ~height:12 ~weight:2 "simulation-detail"
                   ; leaf ~height:7 "simulation-artifacts"

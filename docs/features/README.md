@@ -141,6 +141,7 @@ needed; References. A dependency needs a reason, not just a list of IDs.
 | [WB-037](verification/WB-037-archived-replay.md) | Archived source/build/tool replay | FS2, FS1 | P3 | 34 | low |
 | [WB-038](verification/WB-038-acceptance-bridge.md) | Simulation-to-ASIC acceptance evidence bridge | FS2, FS1 | P3 | 21 | low |
 | [WB-062](verification/WB-062-submission-recovery.md) | Uncertain simulation submission/history recovery | FS2 | P2 | 13 | medium |
+| [WB-066](verification/WB-066-ocaml-provider-library.md) | Shared OCaml simulation provider library | FS2, FS3 | P2 | 21 | medium |
 
 ## Execution, storage and observability
 

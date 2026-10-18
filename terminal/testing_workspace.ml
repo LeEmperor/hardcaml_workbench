@@ -173,12 +173,27 @@ let receive t ~ticket ~selected operation response =
 let atom = Simulation_view.atom
 let row = Simulation_view.row
 
+let attempt_label id =
+  if String.equal (Overview_tiles.short_id id) id
+  then id
+  else
+    Overview_tiles.short_id
+      (Option.value (String.chop_prefix id ~prefix:"sim-") ~default:id)
+;;
+
 let artifact_details (a : S.Artifact.t) =
   [ row ("Selected artifact: " ^ a.id)
   ; row ("Artifact label: " ^ a.label)
   ; row ("Artifact attempt: " ^ a.attempt_id)
   ; row ("Artifact case: " ^ Option.value a.case_id ~default:"suite")
-  ; row ("Availability: " ^ atom S.Artifact.Availability.sexp_of_t a.availability)
+  ; row
+      ~spans:
+        [ Simulation_view.span
+            ~start:(Simulation_view.text_width "Availability: ")
+            (Simulation_view.availability_tone a.availability)
+            (atom S.Artifact.Availability.sexp_of_t a.availability)
+        ]
+      ("Availability: " ^ atom S.Artifact.Availability.sexp_of_t a.availability)
   ; row ("Kind: " ^ a.kind ^ "; media type: " ^ a.media_type)
   ; row ("SHA256: " ^ Option.value a.sha256 ~default:"unavailable")
   ; row ("Artifact bytes: " ^ Option.value_map a.size ~default:"unknown" ~f:Int.to_string)
@@ -188,6 +203,17 @@ let artifact_details (a : S.Artifact.t) =
 let detail_rows t (d : S.Attempt.t) =
   [ row
       ~indicator:(Simulation_view.attempt_indicator d.lifecycle d.outcome)
+      ~spans:
+        [ Simulation_view.span
+            ~start:0
+            (Simulation_view.outcome_tone d.outcome)
+            (atom S.Outcome.sexp_of_t d.outcome)
+        ; Simulation_view.span
+            ~start:
+              (Simulation_view.text_width (atom S.Outcome.sexp_of_t d.outcome ^ " / "))
+            (Simulation_view.lifecycle_tone d.lifecycle)
+            (atom S.Lifecycle.sexp_of_t d.lifecycle)
+        ]
       (atom S.Outcome.sexp_of_t d.outcome ^ " / " ^ atom S.Lifecycle.sexp_of_t d.lifecycle)
   ]
   @ List.concat_map d.cases ~f:(fun c ->
@@ -196,6 +222,7 @@ let detail_rows t (d : S.Attempt.t) =
     then
       [ row
           ~indicator:(Simulation_view.case_indicator ~lifecycle:d.lifecycle c.status)
+          ~value_start:(Simulation_view.text_width (c.case_id ^ ": "))
           (c.case_id ^ ": " ^ atom S.Case_status.sexp_of_t c.status)
       ]
       @ List.map (Option.to_list c.message) ~f:row
@@ -238,86 +265,94 @@ let rows t pane ~log_lines =
     match pane with
     | Catalog -> Simulation_catalog.rows t.catalog
     | Attempts ->
-      [ row
-          ?indicator:(if t.view.busy then Some Indicator.Running else None)
-          "ATTEMPTS — project scoped"
-      ]
+      (if t.view.busy then [ row ~indicator:Running "Loading simulation history" ] else [])
       @ List.map (Option.to_list t.view.error @ Option.to_list t.view.notice) ~f:row
       @ Option.value_map
           t.view.snapshot
           ~default:[ row "No simulation history loaded" ]
           ~f:(fun s ->
             List.map (Option.to_list s.history_error) ~f:row
-            @ List.map s.attempts ~f:(fun a ->
-              row
-                ~selected:(Option.equal String.equal t.view.attempt (Some a.id))
-                ~indicator:(Simulation_view.attempt_indicator a.lifecycle a.outcome)
-                ((if Option.equal String.equal t.view.attempt (Some a.id)
-                  then "> "
-                  else "  ")
-                 ^ a.id
-                 ^ " "
-                 ^ a.suite
-                 ^ " seed="
-                 ^ a.seed
-                 ^ " "
-                 ^ atom S.Lifecycle.sexp_of_t a.lifecycle
-                 ^ "/"
-                 ^ atom S.Outcome.sexp_of_t a.outcome)))
-    | Cases ->
-      [ row "CASES — selected attempt" ]
-      @ Option.value_map
-          detail
-          ~default:[ row "Select an attempt" ]
-          ~f:(fun d ->
-            List.map d.cases ~f:(fun c ->
+            @ List.concat_map s.attempts ~f:(fun a ->
               let prefix =
-                (if Option.equal String.equal t.view.case_id (Some c.case_id)
+                (if Option.equal String.equal t.view.attempt (Some a.id)
                  then "> "
                  else "  ")
-                ^ c.case_id
-                ^ ": "
+                ^ attempt_label a.id
+                ^ " "
               in
-              row
-                ~selected:(Option.equal String.equal t.view.case_id (Some c.case_id))
-                ~indicator:
-                  (Simulation_view.case_indicator ~lifecycle:d.lifecycle c.status)
-                ~value_start:
-                  (Bonsai_term.View.width
-                     (Bonsai_term.View.text (Artifact_view.safe prefix)))
-                (prefix ^ atom S.Case_status.sexp_of_t c.status)))
+              [ row
+                  ~selected:(Option.equal String.equal t.view.attempt (Some a.id))
+                  ~indicator:(Simulation_view.attempt_indicator a.lifecycle a.outcome)
+                  ~spans:(Simulation_view.attempt_spans ~prefix a.lifecycle a.outcome)
+                  (prefix
+                   ^ atom S.Lifecycle.sexp_of_t a.lifecycle
+                   ^ "/"
+                   ^ atom S.Outcome.sexp_of_t a.outcome)
+              ; row ("    " ^ a.suite ^ " · seed=" ^ a.seed)
+              ]))
+    | Cases ->
+      Option.value_map
+        detail
+        ~default:[ row "Select an attempt" ]
+        ~f:(fun d ->
+          List.map d.cases ~f:(fun c ->
+            let prefix =
+              (if Option.equal String.equal t.view.case_id (Some c.case_id)
+               then "> "
+               else "  ")
+              ^ c.case_id
+              ^ ": "
+            in
+            row
+              ~selected:(Option.equal String.equal t.view.case_id (Some c.case_id))
+              ~indicator:(Simulation_view.case_indicator ~lifecycle:d.lifecycle c.status)
+              ~value_start:
+                (Bonsai_term.View.width
+                   (Bonsai_term.View.text (Artifact_view.safe prefix)))
+              (prefix ^ atom S.Case_status.sexp_of_t c.status)))
     | Detail ->
       Option.value_map
         detail
         ~default:[ row "Select an attempt for outcome and captured inputs" ]
         ~f:(detail_rows t)
     | Artifacts ->
-      [ row "ARTIFACTS — all cases (full identity in Detail)" ]
-      @ Option.value_map
-          detail
-          ~default:[ row "Select an attempt" ]
-          ~f:(fun d ->
-            List.map d.artifacts ~f:(fun a ->
-              row
-                ~selected:(Option.equal String.equal t.selected_artifact (Some a.id))
-                ~indicator:Artifact
-                ((if Option.equal String.equal t.selected_artifact (Some a.id)
-                  then "> "
-                  else "  ")
-                 ^ a.label
-                 ^ " — "
-                 ^ Option.value a.case_id ~default:"suite"
-                 ^ " ["
-                 ^ atom S.Artifact.Availability.sexp_of_t a.availability
-                 ^ "]")))
+      Option.value_map
+        detail
+        ~default:[ row "Select an attempt" ]
+        ~f:(fun d ->
+          List.map d.artifacts ~f:(fun a ->
+            let prefix =
+              (if Option.equal String.equal t.selected_artifact (Some a.id)
+               then "> "
+               else "  ")
+              ^ a.label
+              ^ " — "
+              ^ Option.value a.case_id ~default:"suite"
+              ^ " ["
+            in
+            let availability = atom S.Artifact.Availability.sexp_of_t a.availability in
+            row
+              ~selected:(Option.equal String.equal t.selected_artifact (Some a.id))
+              ~indicator:Artifact
+              ~spans:
+                [ Simulation_view.span
+                    ~start:(Simulation_view.text_width prefix)
+                    (Simulation_view.availability_tone a.availability)
+                    availability
+                ]
+              (prefix ^ availability ^ "]")))
     | Logs ->
-      [ row ~indicator:Log "JOB LOG — historical logs may be unavailable" ]
-      @ Option.value_map
-          detail
-          ~default:[ row "Select an attempt" ]
-          ~f:(fun d ->
-            row ("Attempt: " ^ d.id ^ "; job: " ^ Job_id.to_string d.job)
-            :: List.map (log_lines d.job) ~f:row)
+      Option.value_map
+        detail
+        ~default:[ row "Select an attempt" ]
+        ~f:(fun d ->
+          row
+            ~spans:(Simulation_view.attempt_spans ~prefix:"" d.lifecycle d.outcome)
+            (atom S.Lifecycle.sexp_of_t d.lifecycle
+             ^ "/"
+             ^ atom S.Outcome.sexp_of_t d.outcome)
+          :: row ("Attempt: " ^ d.id ^ "; job: " ^ Job_id.to_string d.job)
+          :: List.map (log_lines d.job) ~f:row)
   in
   List.concat_map rows ~f:(fun r ->
     String.split_lines r.Simulation_view.text
@@ -327,6 +362,7 @@ let rows t pane ~log_lines =
       ; indicator = (if i = 0 then r.indicator else None)
       ; value_start = (if i = 0 then r.value_start else None)
       ; selected = i = 0 && r.selected
+      ; spans = (if i = 0 then r.spans else [])
       }))
 ;;
 
@@ -507,18 +543,20 @@ let%test_unit "cooperative rows keep facts typed full provenance and logs separa
     ~f:(fun substring -> assert (String.is_substring text ~substring));
   assert (not (String.is_substring text ~substring:"artifact-full-id"));
   let cases = rows t Cases ~log_lines:no_logs in
-  assert (Option.equal Poly.equal (List.nth_exn cases 1).indicator (Some Indicator.Failed));
-  assert (Option.is_some (List.nth_exn cases 1).value_start);
+  assert (Option.equal Poly.equal (List.nth_exn cases 0).indicator (Some Indicator.Failed));
+  assert (Option.is_some (List.nth_exn cases 0).value_start);
   let artifacts = rows t Artifacts ~log_lines:no_logs in
   assert (
-    Option.equal Poly.equal (List.nth_exn artifacts 1).indicator (Some Indicator.Artifact));
+    Option.equal Poly.equal (List.nth_exn artifacts 0).indicator (Some Indicator.Artifact));
   let logs =
     rows t Logs ~log_lines:(fun job ->
       assert (String.equal (Job_id.to_string job) "exact-job");
       [ "Passed Failed report artifact"; "\027[31muntrusted\027[0m" ])
   in
+  assert (String.equal (List.nth_exn logs 0).text "Finished/Failed");
   assert (String.equal (List.nth_exn logs 2).text "Passed Failed report artifact");
   assert (Option.is_none (List.nth_exn logs 2).indicator);
+  assert (List.is_empty (List.nth_exn logs 2).spans);
   assert (not (String.contains (List.nth_exn logs 3).text '\027'))
 ;;
 
@@ -578,13 +616,24 @@ let%test_unit "large navigators expose a unique typed cursor; artifact identity 
     assert (List.length rows = 1);
     (List.hd_exn rows).text
   in
-  assert (String.is_substring (only Attempts t) ~substring:"attempt-24-full-identity");
+  assert (String.equal (only Attempts t) "> attemp...entity Finished/Failed");
+  let navigator = rows t Attempts ~log_lines:(fun _ -> assert false) in
+  assert (List.length navigator = 2 * List.length attempts);
+  List.iteri navigator ~f:(fun i r ->
+    if i mod 2 = 0
+    then assert (Option.is_some r.indicator)
+    else (
+      assert (String.equal r.text "    suite · seed=7");
+      assert (not r.selected);
+      assert (Option.is_none r.indicator);
+      assert (List.is_empty r.spans)));
+  assert (Option.equal String.equal t.view.attempt (Some attempt.id));
   assert (String.equal (only Cases t) "> case-1023: Passed");
   assert (List.is_empty (selected Artifacts t));
   let t = select_artifact t "artifact-31-exact-id" in
   assert (String.equal (only Artifacts t) "> Evidence label");
   let navigator = rows t Artifacts ~log_lines:(fun _ -> assert false) in
-  assert (List.length navigator = 65);
+  assert (List.length navigator = 64);
   assert (
     List.for_all navigator ~f:(fun r ->
       not (String.is_substring r.text ~substring:"SHA256:")));
@@ -606,4 +655,50 @@ let%test_unit "large navigators expose a unique typed cursor; artifact identity 
   assert (Option.is_none (artifact (select_case t "case-0000")));
   assert (
     Option.is_none (artifact (set_view t { t.view with case_id = Some "case-0000" })))
+;;
+
+let%test_unit "compact attempt labels preserve short and non-ASCII identities" =
+  List.iter [ "sim-42"; "Passed-ID"; "simulation-試験-long-identity" ] ~f:(fun id ->
+    assert (String.equal (attempt_label id) id));
+  let id = "sim-3a91c2abcdef0123456789e84b" in
+  assert (String.equal (attempt_label id) "3a91c2...89e84b");
+  let attempt = { Test_data.attempt with id } in
+  let summary : S.Summary.t =
+    { id
+    ; job = attempt.job
+    ; suite = "controlled-fifo"
+    ; seed = "18446744073709551615"
+    ; created_at = attempt.created_at
+    ; parent = None
+    ; lifecycle = attempt.lifecycle
+    ; outcome = attempt.outcome
+    }
+  in
+  let snapshot =
+    { Test_data.snapshot with attempts = [ summary ]; detail = Some attempt }
+  in
+  let t =
+    set_view empty { Simulation_view.empty with snapshot = Some snapshot }
+    |> fun t -> select_attempt t id
+  in
+  let t = begin_request t in
+  let t =
+    receive t ~ticket:t.view.request ~selected:(Some id) (Observe id) (Ok snapshot)
+  in
+  let navigator = rows t Attempts ~log_lines:(fun _ -> assert false) in
+  assert (
+    List.equal
+      String.equal
+      (List.map navigator ~f:(fun r -> r.Simulation_view.text))
+      [ "> 3a91c2...89e84b Finished/Failed"
+      ; "    controlled-fifo · seed=18446744073709551615"
+      ]);
+  assert (List.hd_exn navigator).selected;
+  assert (not (List.last_exn navigator).selected);
+  assert (Option.equal String.equal t.view.attempt (Some id));
+  assert (String.equal (Option.value_exn (Simulation_view.detail t.view)).id id);
+  assert (
+    List.exists
+      (rows t Detail ~log_lines:(fun _ -> assert false))
+      ~f:(fun r -> String.equal r.text ("Attempt: " ^ id)))
 ;;

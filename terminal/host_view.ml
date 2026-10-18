@@ -1128,12 +1128,12 @@ let simulation_annotations host data tile =
     Simulation_view.annotated_rows (H.simulation host tile.id) ~log_lines:data.log_lines
 ;;
 
-let simulation_view_rows_with_selection ?indicator_frames host data tile ~width =
-  simulation_annotations host data tile
-  |> List.filter ~f:(fun row ->
-    (not row.Simulation_view.hint) || (H.policy host tile).hints)
+let annotated_view_rows ?indicator_frames host ~width annotations =
+  annotations
   |> List.concat_map
-       ~f:(fun { Simulation_view.text; indicator = kind; value_start; selected; _ } ->
+       ~f:
+         (fun
+           { Simulation_view.text; indicator = kind; value_start; selected; spans; _ } ->
          let role = Option.value_map kind ~default:Role.Foreground ~f:indicator_role in
          let icon =
            Option.value_map
@@ -1144,24 +1144,111 @@ let simulation_view_rows_with_selection ?indicator_frames host data tile ~width 
          let used = ref 0 in
          wrap_cells ~width:(width - View.width icon) text
          |> List.mapi ~f:(fun i text ->
-           let neutral_cells =
-             Option.value_map value_start ~default:(cell_width text) ~f:(fun start ->
-               Int.clamp_exn (start - !used) ~min:0 ~max:(cell_width text))
+           let length = cell_width text in
+           let offset = !used in
+           let boundaries =
+             0
+             :: length
+             :: (Option.to_list value_start
+                 @ List.concat_map spans ~f:(fun s -> [ s.start; s.start + s.length ])
+                 |> List.map ~f:(fun n -> Int.clamp_exn (n - offset) ~min:0 ~max:length))
+             |> List.dedup_and_sort ~compare:Int.compare
            in
-           used := !used + cell_width text;
-           let neutral = E.text (E.clip ~width:neutral_cells (E.plain text)) in
+           used := offset + length;
+           let painted =
+             List.zip_exn (List.drop_last_exn boundaries) (List.tl_exn boundaries)
+             |> List.map ~f:(fun (start, stop) ->
+               let position = offset + start in
+               let tone =
+                 List.find spans ~f:(fun s ->
+                   s.start <= position && position < s.start + s.length)
+               in
+               let role =
+                 match tone with
+                 | Some { tone = Success; _ } -> Role.Success
+                 | Some { tone = Warning; _ } -> Warning
+                 | Some { tone = Failure; _ } -> Failure
+                 | Some { tone = Running; _ } -> Running
+                 | Some { tone = Muted; _ } -> Muted
+                 | None ->
+                   if Option.value_map value_start ~default:false ~f:(fun n ->
+                        position >= n)
+                   then role
+                   else Foreground
+               in
+               View.text ~attrs:(Role.attrs host.appearance role) text
+               |> View.crop ~l:start
+               |> box ~width:(stop - start) ~height:1)
+             |> View.hcat
+           in
            let view =
              View.hcat
                [ (if i = 0
                   then icon
                   else View.rectangle ~width:(View.width icon) ~height:1 ())
-               ; View.text ~attrs:(Role.attrs host.appearance Foreground) neutral
-               ; View.text ~attrs:(Role.attrs host.appearance role) text
-                 |> View.crop ~l:neutral_cells
+               ; painted
                ]
              |> box ~width ~height:1
            in
            selected && i = 0, view))
+;;
+
+let simulation_view_rows_with_selection ?indicator_frames host data tile ~width =
+  simulation_annotations host data tile
+  |> List.filter ~f:(fun row ->
+    (not row.Simulation_view.hint) || (H.policy host tile).hints)
+  |> annotated_view_rows ?indicator_frames host ~width
+;;
+
+let execution_annotations host data (tile : W.Tile.t) =
+  let row = Simulation_view.row in
+  let local = H.local host tile.id in
+  let project_tests = String.equal tile.kind "project-tests" in
+  let jobs =
+    List.filter data.jobs ~f:(fun job ->
+      (not project_tests)
+      || (String.equal job.kind.namespace "dune" && String.equal job.kind.name "test"))
+  in
+  let selected job =
+    Option.equal String.equal local.cursor (Some (Job_id.to_string job.Job.id))
+  in
+  (if H.compact_summary host tile
+   then [ row "Process results only" ]
+   else
+     List.map
+       [ (if project_tests
+          then "Project tests (not ASIC-run scoped)"
+          else "Project execution attempts")
+       ; "Environment: " ^ data.environment
+       ; "Case details / progress: unavailable (generic command runner)"
+       ]
+       ~f:row)
+  @ (if (H.policy host tile).hints then [ row ~hint:true "b build | t test" ] else [])
+  @ Option.value_map (List.find jobs ~f:selected) ~default:[] ~f:(fun job ->
+    List.map (Presentation.job_outcome_lines job) ~f:row
+    @
+    if project_tests
+    then List.map ("ATTEMPT OUTPUT" :: List.take (data.log_lines job.id) 4) ~f:row
+    else [])
+  @ List.map jobs ~f:(fun job ->
+    let prefix =
+      (if selected job then ">" else " ")
+      ^ Overview_tiles.short_id (Job_id.to_string job.id)
+      ^ "  "
+    in
+    let status = Job.State.to_string job.state in
+    let tone : Simulation_view.tone =
+      match job.state with
+      | Complete -> Success
+      | Failed -> Failure
+      | Starting | Running -> Running
+      | Queued | Cancelled -> Warning
+    in
+    row
+      ~selected:(selected job)
+      ~indicator:(job_indicator job.state)
+      ~spans:[ Simulation_view.span ~start:(cell_width prefix) tone status ]
+      (prefix ^ status ^ "  " ^ Job.Kind.to_string job.kind))
 ;;
 
 let simulation_view_rows ?indicator_frames host data tile ~width =
@@ -1270,18 +1357,6 @@ let rows host data tile ~width ~height =
     Option.bind local.cursor ~f:(fun id ->
       List.find jobs ~f:(fun job -> String.equal (Job_id.to_string job.id) id))
   in
-  let job_rows =
-    List.map jobs ~f:(fun job ->
-      sprintf
-        "%s %s  %s  %s"
-        (if Option.value_map selected ~default:false ~f:(fun selected ->
-              Job_id.equal selected.id job.id)
-         then ">"
-         else " ")
-        (Job_id.to_string job.id)
-        (Job.State.to_string job.state)
-        (Job.Kind.to_string job.kind))
-  in
   let rows =
     match inspection_explorer host tile, artifact_inspector host tile with
     | Some view, _ -> Inspection_view.rows view ~width ~height
@@ -1306,28 +1381,8 @@ let rows host data tile ~width ~height =
          |> List.map ~f:(fun row -> row.Simulation_view.text)
          |> List.concat_map ~f:(wrap_cells ~width)
        | "execution" | "project-tests" ->
-         (if H.compact_summary host tile
-          then
-            [ (if String.equal tile.kind "project-tests"
-               then "Generic project tests"
-               else "Execution attempts")
-            ; "Process results only"
-            ; "b build | t test"
-            ]
-          else
-            [ (if String.equal tile.kind "project-tests"
-               then "Project tests (not ASIC-run scoped)"
-               else "Project execution attempts")
-            ; "Environment: " ^ data.environment
-            ; "Case details / progress: unavailable (generic command runner)"
-            ])
-         @ Option.value_map selected ~default:[] ~f:(fun job ->
-           Presentation.job_outcome_lines job
-           @
-           if String.equal tile.kind "project-tests"
-           then "ATTEMPT OUTPUT" :: List.take (data.log_lines job.id) 4
-           else [])
-         @ job_rows
+         execution_annotations host data tile
+         |> List.map ~f:(fun row -> row.Simulation_view.text)
        | "logs" ->
          [ "Project job output: "
            ^ Option.value local.cursor ~default:"select attempt with j/k"
@@ -1994,43 +2049,14 @@ let tile_view ?indicator_frames host data tile ~width ~height =
       |> View.vcat
       |> box ~width:body_width ~height:body_height)
     else if List.mem [ "execution"; "project-tests" ] tile.kind ~equal:String.equal
-    then (
-      let jobs =
-        List.filter data.jobs ~f:(fun job ->
-          (not (String.equal tile.kind "project-tests"))
-          || (String.equal job.kind.namespace "dune" && String.equal job.kind.name "test"))
-      in
-      List.mapi rows ~f:(fun i text ->
-        let index = i - (List.length rows - List.length jobs) in
-        match if index < 0 then None else List.nth jobs index with
-        | None -> lines ~appearance ~width:body_width ~height:1 [ text ]
-        | Some job ->
-          let kind = job_indicator job.state in
-          let role = indicator_role kind in
-          View.hcat
-            [ View.text
-                ~attrs:(Role.attrs appearance Foreground)
-                ((if Option.equal
-                       String.equal
-                       local.cursor
-                       (Some (Job_id.to_string job.id))
-                  then ">"
-                  else " ")
-                 ^ " "
-                 ^ Job_id.to_string job.id
-                 ^ "  ")
-            ; indicator_view ?indicator_frames appearance role kind
-            ; View.text
-                ~attrs:(Role.attrs appearance role)
-                (Job.State.to_string job.state)
-            ; View.text
-                ~attrs:(Role.attrs appearance Foreground)
-                ("  " ^ Job.Kind.to_string job.kind)
-            ]
-          |> box ~width:body_width ~height:1)
+    then
+      execution_annotations host data tile
+      |> annotated_view_rows ?indicator_frames host ~width:body_width
+      |> Fn.flip List.drop local.scroll
       |> Fn.flip List.take body_height
+      |> List.map ~f:snd
       |> View.vcat
-      |> box ~width:body_width ~height:body_height)
+      |> box ~width:body_width ~height:body_height
     else (
       match Timing_workspace.pane tile.kind, H.timing host tile with
       | Some pane, Some view ->
@@ -2847,7 +2873,7 @@ let%test_unit "cooperative Testing renderer keeps project scope and bounded pane
   let text =
     tile_view host data (find "project-tests") ~width:24 ~height:8 |> plain_text
   in
-  assert (String.is_substring text ~substring:"Generic project tests");
+  assert (not (String.is_substring text ~substring:"Generic project tests"));
   assert (String.is_substring text ~substring:"Process results only")
 ;;
 
@@ -3055,6 +3081,374 @@ let%test_unit "long cooperative lists follow typed wrapped cursors and respect m
       reconcile_simulation_viewports host data { Dimensions.width = 120; height = 40 }
     in
     assert ((H.local host tile.id).scroll = 17))
+;;
+
+let%test_unit "project command hints follow tile policy in compact and full images" =
+  List.iter [ "project-tests"; "execution" ] ~f:(fun kind ->
+    List.iter [ true; false ] ~f:(fun compact ->
+      let definition =
+        if compact
+        then P.Testing.definition
+        else { P.Testing.definition with id = "overview" }
+      in
+      let host, data, find = refinement_fixture definition in
+      let tile = find kind in
+      List.iter [ true; false ] ~f:(fun hints ->
+        let host =
+          H.set_local
+            host
+            tile.id
+            { (H.local host tile.id) with
+              presentation = { T.inherit_ with hints = Some hints }
+            }
+        in
+        let image = tile_view host data tile ~width:100 ~height:20 |> plain_text in
+        assert (Bool.equal hints (String.is_substring image ~substring:"b build | t test"));
+        assert (
+          String.is_substring
+            image
+            ~substring:
+              (if compact then "Process results only" else "Environment: fixture")))))
+;;
+
+let%test_unit "cooperative detail artifacts and logs paint typed values only" =
+  let host, data, find = refinement_fixture P.Testing.definition in
+  let host = { host with appearance = { host.appearance with icons = None_ } } in
+  let logs = [ "Passed Failed report artifact"; "Failed / Finished"; "case: Passed" ] in
+  let data = { data with log_lines = (fun _ -> logs) } in
+  let ansi view =
+    let buffer = Buffer.create 200 in
+    Notty.Render.to_buffer
+      buffer
+      Notty.Cap.ansi
+      (0, 0)
+      (View.width view, View.height view)
+      (View.Private.notty_image view);
+    Buffer.contents buffer
+  in
+  List.iter
+    [ Simulation.Artifact.Availability.Available, Role.Success
+    ; Missing, Warning
+    ; Changed, Warning
+    ; Rejected "Passed Failed", Failure
+    ]
+    ~f:(fun (availability, availability_role) ->
+      let artifact : Simulation.Artifact.t =
+        { id = "artifact"
+        ; attempt_id = "Failed-ID"
+        ; case_id = Some "Passed-case"
+        ; label = "Failed report"
+        ; kind = "report"
+        ; media_type = "text/plain"
+        ; size = None
+        ; sha256 = None
+        ; availability
+        }
+      in
+      List.iter
+        [ ( Simulation.Lifecycle.Finished
+          , Simulation.Outcome.Failed
+          , Role.Success
+          , Role.Failure )
+        ; Finished, Passed, Success, Success
+        ; Running, Unknown, Running, Muted
+        ; Interrupted, Incomplete, Warning, Warning
+        ]
+        ~f:(fun (lifecycle, outcome, lifecycle_role, outcome_role) ->
+          let attempt : Simulation.Attempt.t =
+            { id = "Failed-ID"
+            ; job = Job_id.of_string "Passed-job"
+            ; project_root = "/fixture"
+            ; created_at = "now"
+            ; parent = None
+            ; captured =
+                { selection =
+                    { suite = "suite"
+                    ; cases = []
+                    ; seed = "42"
+                    ; parameters = []
+                    ; asic_inputs = []
+                    }
+                ; discovery_digest = "digest"
+                ; provider_executable = "/provider"
+                ; provider_args = []
+                ; environment = Inherit_daemon
+                }
+            ; lifecycle
+            ; outcome
+            ; exit_code = None
+            ; diagnostic = Some "Passed Failed diagnostic"
+            ; progress = None
+            ; cases =
+                [ { case_id = "Passed-case"
+                  ; status = Failed
+                  ; message = Some "Passed message"
+                  ; progress = None
+                  }
+                ]
+            ; artifacts = [ artifact ]
+            ; next_sequence = 0
+            ; recent_events = []
+            }
+          in
+          let snapshot : Simulation.Snapshot.t =
+            { configured = true
+            ; discovery = None
+            ; discovery_digest = None
+            ; discovery_job = None
+            ; discovery_error = None
+            ; history_error = None
+            ; next_before = None
+            ; detail = Some attempt
+            ; byte_page = None
+            ; attempts = []
+            }
+          in
+          let host =
+            H.set_simulation
+              host
+              (find "simulation-detail").id
+              { Simulation_view.empty with
+                snapshot = Some snapshot
+              ; attempt = Some attempt.id
+              }
+            |> fun host ->
+            H.update_testing host (find "simulation-detail").id (fun state ->
+              Testing_workspace.select_artifact state artifact.id)
+          in
+          let life = Simulation_view.atom Simulation.Lifecycle.sexp_of_t lifecycle in
+          let result = Simulation_view.atom Simulation.Outcome.sexp_of_t outcome in
+          let available =
+            Simulation_view.atom Simulation.Artifact.Availability.sexp_of_t availability
+          in
+          let check kind text segments =
+            let source = simulation_annotations host data (find kind) in
+            let index =
+              List.findi_exn source ~f:(fun _ r ->
+                String.equal r.Simulation_view.text text)
+              |> fst
+            in
+            let expected =
+              List.concat_map segments ~f:(fun (text, role) ->
+                Overview_tiles.display_clusters text
+                |> List.map ~f:(fun text -> text, role))
+            in
+            List.iter [ 7; 120 ] ~f:(fun width ->
+              let images = simulation_view_rows host data (find kind) ~width in
+              let offset =
+                List.take source index
+                |> List.sum (module Int) ~f:(fun r ->
+                  List.length (wrap_cells ~width r.Simulation_view.text))
+              in
+              List.iteri expected ~f:(fun i (text, role) ->
+                let actual =
+                  List.nth_exn images (offset + (i / width))
+                  |> View.crop ~l:(i mod width)
+                  |> box ~width:1 ~height:1
+                in
+                let expected = View.text ~attrs:(Role.attrs host.appearance role) text in
+                assert (String.equal (ansi actual) (ansi expected))))
+          in
+          check
+            "simulation-detail"
+            (result ^ " / " ^ life)
+            [ result, outcome_role; " / ", Foreground; life, lifecycle_role ];
+          check
+            "simulation-detail"
+            "Passed-case: Failed"
+            [ "Passed-case: ", Foreground; "Failed", Failure ];
+          check
+            "simulation-detail"
+            "Passed Failed diagnostic"
+            [ "Passed Failed diagnostic", Foreground ];
+          check
+            "simulation-detail"
+            ("Availability: " ^ available)
+            [ "Availability: ", Foreground; available, availability_role ];
+          check
+            "simulation-detail"
+            "Attempt: Failed-ID"
+            [ "Attempt: Failed-ID", Foreground ];
+          check
+            "simulation-artifacts"
+            ("> Failed report — Passed-case [" ^ available ^ "]")
+            [ "> Failed report — Passed-case [", Foreground
+            ; available, availability_role
+            ; "]", Foreground
+            ];
+          check
+            "simulation-logs"
+            (life ^ "/" ^ result)
+            [ life, lifecycle_role; "/", Foreground; result, outcome_role ];
+          check
+            "simulation-logs"
+            "Attempt: Failed-ID; job: Passed-job"
+            [ "Attempt: Failed-ID; job: Passed-job", Foreground ];
+          let projected =
+            List.drop (simulation_annotations host data (find "simulation-logs")) 2
+          in
+          assert (
+            List.equal
+              String.equal
+              logs
+              (List.map projected ~f:(fun r -> r.Simulation_view.text)));
+          List.iter logs ~f:(fun text ->
+            check "simulation-logs" text [ text, Foreground ])))
+;;
+
+let%test_unit "Testing paints readiness and independent attempt facts in actual images" =
+  let host, data, find = refinement_fixture P.Testing.definition in
+  let suite : Simulation.Suite.t =
+    { id = "Failed-suite"
+    ; label = "Running label"
+    ; cases = [ { id = "case"; label = "Case" } ]
+    ; default_seed = "42"
+    ; parameters = []
+    }
+  in
+  let snapshot : Simulation.Snapshot.t =
+    { configured = true
+    ; discovery = Some { protocol_version = 1; suites = [ suite ] }
+    ; discovery_digest = Some "digest"
+    ; discovery_job = None
+    ; discovery_error = None
+    ; history_error = None
+    ; next_before = None
+    ; detail = None
+    ; byte_page = None
+    ; attempts = []
+    }
+  in
+  let ansi view =
+    let buffer = Buffer.create 200 in
+    Notty.Render.to_buffer
+      buffer
+      Notty.Cap.ansi
+      (0, 0)
+      (View.width view, View.height view)
+      (View.Private.notty_image view);
+    Buffer.contents buffer
+  in
+  List.iter Appearance.Icons.all ~f:(fun icons ->
+    let host = { host with appearance = { host.appearance with icons } } in
+    let token role text = View.text ~attrs:(Role.attrs host.appearance role) text in
+    let check_cell image ~x role text =
+      let actual = View.crop ~l:x image |> box ~width:1 ~height:1 in
+      assert (String.equal (ansi actual) (ansi (token role text)))
+    in
+    List.iter
+      [ ( Simulation.Lifecycle.Finished
+        , Simulation.Outcome.Passed
+        , Role.Success
+        , Role.Success )
+      ; Finished, Failed, Success, Failure
+      ; Running, Unknown, Running, Muted
+      ; Cancelled, Incomplete, Warning, Warning
+      ]
+      ~f:(fun (lifecycle, outcome, lifecycle_role, outcome_role) ->
+        let summary : Simulation.Summary.t =
+          { id = "Passed-ID"
+          ; job = Job_id.of_string "job"
+          ; suite = suite.id
+          ; seed = "42"
+          ; created_at = "now"
+          ; parent = None
+          ; lifecycle
+          ; outcome
+          }
+        in
+        let tile = find "simulation-attempts" in
+        let host =
+          H.set_simulation
+            host
+            tile.id
+            { Simulation_view.empty with
+              snapshot = Some { snapshot with attempts = [ summary ] }
+            ; attempt = Some summary.id
+            }
+        in
+        let prefix = "> Passed-ID " in
+        let lifecycle_text =
+          Simulation_view.atom Simulation.Lifecycle.sexp_of_t lifecycle
+        in
+        let outcome_text = Simulation_view.atom Simulation.Outcome.sexp_of_t outcome in
+        let expected =
+          [ prefix, Role.Foreground
+          ; lifecycle_text, lifecycle_role
+          ; "/", Foreground
+          ; outcome_text, outcome_role
+          ]
+          |> List.concat_map ~f:(fun (text, role) ->
+            String.to_list text |> List.map ~f:(fun c -> String.of_char c, role))
+        in
+        let icon_width = if Appearance.Icons.equal icons None_ then 0 else 2 in
+        let context = Overview_tiles.display_clusters "    Failed-suite · seed=42" in
+        List.iter [ 5; 11; 120 ] ~f:(fun width ->
+          let selected_rows = simulation_view_rows_with_selection host data tile ~width in
+          assert (List.count selected_rows ~f:fst = 1);
+          assert (fst (List.hd_exn selected_rows));
+          let rendered = List.map selected_rows ~f:snd in
+          let capacity = width - icon_width in
+          let first_height = (List.length expected + capacity - 1) / capacity in
+          assert (
+            List.length rendered
+            = first_height + ((List.length context + width - 1) / width));
+          List.iteri expected ~f:(fun i (text, role) ->
+            check_cell
+              (List.nth_exn rendered (i / capacity))
+              ~x:(icon_width + (i mod capacity))
+              role
+              text);
+          List.iteri context ~f:(fun i text ->
+            check_cell
+              (List.nth_exn rendered (first_height + (i / width)))
+              ~x:(i mod width)
+              Foreground
+              text);
+          if icon_width > 0
+          then (
+            let glyph =
+              match lifecycle, outcome, icons with
+              | Finished, Passed, Unicode -> "✓"
+              | Finished, Passed, _ -> "+"
+              | Finished, Failed, _ -> "!"
+              | Running, _, Unicode -> "⣷"
+              | Running, _, _ -> "|"
+              | Cancelled, _, Unicode -> "×"
+              | _ -> "x"
+            in
+            let role =
+              if Simulation.Outcome.equal outcome Failed
+              then Role.Failure
+              else lifecycle_role
+            in
+            let actual = List.hd_exn rendered |> box ~width:1 ~height:1 in
+            let expected =
+              View.text ~attrs:[ Attr.fg (Role.foreground host.appearance role) ] glyph
+            in
+            assert (String.equal (ansi actual) (ansi expected)))));
+    List.iter [ true; false ] ~f:(fun ready ->
+      let tile = find "simulation-catalog" in
+      let host =
+        H.set_simulation
+          host
+          tile.id
+          { Simulation_view.empty with
+            snapshot = Some { snapshot with configured = ready }
+          }
+      in
+      let expected =
+        if ready
+        then "Ready for explicit launch"
+        else "Launch disabled: No simulation provider configured"
+      in
+      let row =
+        simulation_view_rows host data tile ~width:120
+        |> List.find_exn ~f:(fun row ->
+          String.is_prefix (plain_text row) ~prefix:expected)
+      in
+      String.iteri expected ~f:(fun x c ->
+        check_cell row ~x (if ready then Success else Warning) (String.of_char c))))
 ;;
 
 let%test_unit "simulation annotations preserve typed rows, logs and terminal case fences" =
@@ -3320,7 +3714,10 @@ let%test_unit "generic job icons retain exact identity and completion vocabulary
         && not (Appearance.Icons.equal icons None_)
       in
       assert (Bool.equal (not (String.equal a b)) animated);
-      assert (String.is_substring a ~substring:(Job_id.to_string job.id));
+      assert (
+        String.is_substring
+          a
+          ~substring:(Overview_tiles.short_id (Job_id.to_string job.id)));
       assert (String.is_substring a ~substring:(Job.State.to_string state));
       assert (String.is_substring a ~substring:"Case details / progress: unavailable");
       assert (not (String.is_substring a ~substring:"Passed"));
@@ -3331,6 +3728,105 @@ let%test_unit "generic job icons retain exact identity and completion vocabulary
             tile_view ~indicator_frames:(frames "A") host data tile ~width ~height
           in
           assert (View.width view = width && View.height view = height))))
+;;
+
+let%test_unit "execution images paint typed states and condense only display identities" =
+  let host, data, find = refinement_fixture P.Testing.definition in
+  let id = "Failed-0123456789abcdef0123456789-Complete" in
+  let base = List.hd_exn Baseline_fixture.jobs in
+  let ansi view =
+    let buffer = Buffer.create 100 in
+    Notty.Render.to_buffer
+      buffer
+      Notty.Cap.ansi
+      (0, 0)
+      (View.width view, View.height view)
+      (View.Private.notty_image view);
+    Buffer.contents buffer
+  in
+  List.iter [ "execution"; "project-tests" ] ~f:(fun kind ->
+    let tile = find kind in
+    List.iter Appearance.Icons.all ~f:(fun icons ->
+      let host = { host with appearance = { host.appearance with icons } } in
+      List.iter Job.State.all ~f:(fun state ->
+        let job =
+          { base with
+            id = Job_id.of_string id
+          ; kind = { namespace = "dune"; name = "test" }
+          ; state
+          }
+        in
+        let data = { data with jobs = [ job ] } in
+        let host =
+          H.set_local host tile.id { (H.local host tile.id) with cursor = Some id }
+        in
+        let annotations = execution_annotations host data tile in
+        assert (List.last_exn annotations).selected;
+        assert (Option.equal String.equal (H.local host tile.id).cursor (Some id));
+        let commands =
+          H.catalog host ~project:None ~jobs:[ { job with state = Running } ]
+        in
+        assert (
+          List.exists commands ~f:(fun command ->
+            match command.H.action with
+            | Cancel actual -> Job_id.equal actual job.id
+            | _ -> false));
+        List.iter
+          [ 0; List.length annotations - 1 ]
+          ~f:(fun scroll ->
+            let host = H.set_local host tile.id { (H.local host tile.id) with scroll } in
+            let image = tile_view host data tile ~width:100 ~height:18 in
+            let text = plain_text image in
+            assert (String.is_substring text ~substring:(Overview_tiles.short_id id));
+            assert (not (String.is_substring text ~substring:id));
+            assert (String.is_substring text ~substring:(Job.Kind.to_string job.kind));
+            let status = Job.State.to_string state in
+            let role =
+              match state with
+              | Complete -> Role.Success
+              | Failed -> Failure
+              | Starting | Running -> Running
+              | Queued | Cancelled -> Warning
+            in
+            (* Find the status in the actual job row, not the selected-job summary. *)
+            let y =
+              List.find_exn
+                (List.init (View.height image) ~f:Fn.id)
+                ~f:(fun y ->
+                  let line =
+                    View.crop ~t:y image |> box ~width:100 ~height:1 |> plain_text
+                  in
+                  String.is_substring line ~substring:(Overview_tiles.short_id id))
+            in
+            let x =
+              let suffix = status ^ "  " ^ Job.Kind.to_string job.kind in
+              List.find_exn
+                (List.init (100 - String.length suffix) ~f:Fn.id)
+                ~f:(fun x ->
+                  String.equal
+                    (View.crop ~l:x ~t:y image
+                     |> box ~width:(String.length suffix) ~height:1
+                     |> plain_text)
+                    suffix)
+            in
+            let actual =
+              View.crop ~l:x ~t:y image |> box ~width:(String.length status) ~height:1
+            in
+            let prefix = ">" ^ Overview_tiles.short_id id ^ "  " in
+            let identity =
+              View.crop ~l:(x - String.length prefix) ~t:y image
+              |> box ~width:(String.length prefix) ~height:1
+            in
+            let neutral =
+              View.text ~attrs:(Role.attrs host.appearance Foreground) prefix
+              |> colored host.appearance Foreground
+            in
+            [%test_result: string] (ansi identity) ~expect:(ansi neutral);
+            let expected =
+              View.text ~attrs:(Role.attrs host.appearance role) status
+              |> colored host.appearance Foreground
+            in
+            [%test_result: string] (ansi actual) ~expect:(ansi expected)))))
 ;;
 
 let%test_unit "Overview renders four primary domains with shallow frames and bounded \
