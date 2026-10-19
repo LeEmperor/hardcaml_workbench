@@ -12,6 +12,12 @@ is verified, with its explicit owner visual-review gate still pending. See
 [the Testing guide](../testing_workspace.md). Their original points record estimates,
 not additional remaining implementation effort.
 
+**2026-10-18:** WB-028's bounded embedded VCD viewer is implemented and automatically
+verified (1,773 acceptance checks, including exact cursor/ruler rendering and a
+dedicated Waveforms workspace with Session, Signals, Waves, VCD picker and Logs
+tiles). Its status is partial for lazy loading and four-state graphical rendering;
+[controls and evidence](../testing_workspace.md#embedded-waveform-viewer).
+
 WB-066's separately packaged OCaml provider helpers and native executable adapters
 are **complete and owner-accepted (2026-10-19)**; tests remain independent of
 Workbench. See

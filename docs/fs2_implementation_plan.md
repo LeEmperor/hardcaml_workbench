@@ -1,5 +1,137 @@
 # FS2 — Structured simulation delivery
 
+## Activated WB-028 implementation — 2026-10-18
+
+### Waveforms workspace extension — active owner request
+
+Keep `w` as quick full-area inspection. Add `W` on a selected Testing VCD to open
+an actual dedicated Waveforms workspace, with independent Signals, Waves, VCD picker
+and Logs tiles. All signal names remain visible whether enabled or disabled. Global
+command-palette access must work in both quick inspection and workspace mode; do not
+let Space signal-toggle consume the palette prefix (use Enter/toggle command instead
+where required). Workspace actions preserve exact project/attempt/case/artifact/digest
+identity; selecting a different VCD explicitly retargets the coordinated tiles and
+associated logs. Missing/expired logs must be honest, not borrowed from a current job.
+
+Use existing workspace registry/persistence/layout and appearance machinery. The
+waveform workspace should remain usable after switching away/back and reopen with
+explicit unavailable state if retained data no longer exists. Separate signal picking
+from waveform rendering so disabled signals never disappear from the picker.
+
+Implementation ownership for this extension: Agent A owns workspace definitions,
+registry/host/view integration and publishes the tile/action contract; Agent B owns
+waveform_view and terminal/main integration (loading, keyboard/palette, `W`, pinned
+selection/logs). Agent C owns acceptance tests. A and B coordinate changes to shared
+host/view interfaces; no duplicate implementation. Initial builds disabled for A
+until contract handoff, then allocations A=4, B=8, C=4 (16 maximum); every Dune and
+nested build requires explicit bounded jobs. No mutative git operations. Coordinator
+owns docs and verification. Current state: implemented and automatically verified.
+350 combined acceptance checks passed, including exact-attempt logs, pin restoration,
+picker fencing and ordinary palette/workspace controls. Disabled names stay visible;
+Enter toggles and Space c c remains global. Subsequent missing-availability marker
+fix passed focused tests/build/lint. [Controls and evidence](testing_workspace.md#dedicated-waveforms-workspace).
+Existing delivery records below describe the initial quick-viewer implementation.
+
+Owner presentation refinements implemented: compact Session tile replaces the
+Waveforms global header; Signals is narrower and defaults to aligned inline values
+with a persisted Stacked option. Ctrl-Backspace/Ctrl-W word deletion works in filter
+editing. Idle controls use hint policy, hidden by default for Waveforms. Existing
+custom layouts require explicit Apply preset + Fit to add Session; tests verify
+preserved pins/custom state and no extra artifact load. Final evidence:
+`/tmp/opencode/wb028-accept-xkuv7752/report.json` (305 checks).
+
+Subsequent compact layout verified with 350 checks:
+`/tmp/opencode/wb028-accept-f4m244ea/report.json`. Session now sits above Signals in
+a 1:4 target left/right split (left minimum 24), Waves spans their combined height,
+signal columns use content width, and attempt IDs use first-four/last-four shortening.
+Owner manual appearance review is pending. Vertical cursor and absolute-time ruler
+are agreed next directions but **must wait for that review**; neither is implemented.
+
+### Cursor and absolute ruler — activated by owner
+
+The owner has now authorized implementing the cursor/ruler follow-up. Preserve the
+validated layout. Both quick viewing and the workspace Waves pane need a visible
+cursor column and adaptive absolute physical-time ruler. Use one exact integer
+tick-to-cell mapping shared with the installed Waveterm raster; no float-based loss
+of large timestamps. Highlight the cursor column without destroying wave glyphs,
+including an explicit off-screen direction when panning leaves it outside the plot.
+Compressed columns represent multiple ticks honestly while the exact cursor tick and
+inspected values remain unchanged. Major labels/minor marks must avoid overlap at
+narrow widths, work with declared timescale magnitude/unit, and stop at trace bounds.
+Ruler/cursor are data presentation, not idle hints, so quiet hints must not hide them.
+
+Agent B owns waveform_view integration and focused mapping/ruler tests; Agent C owns
+independent probe/PTY acceptance. Build allocations B=8, C=4, serial within each;
+coordinator does not compile concurrently. No mutative git commands. Acceptance:
+first/interior/last ticks, expanded and compressed scales, off-screen cursor, pan,
+zoom, resize, huge timestamps/non-unit timescales, all themes/presets and no glyph
+corruption or drift between cursor/value/ruler. Rebuild client/daemon/probe/exporter
+for the existing refresh workflow. Status: implemented and automatically verified.
+Shared `terminal/waveform_time.ml/.mli` provides exact scale, cell bounds, cursor
+position and physical-time/ruler formatting; both view surfaces use it. Full
+acceptance passed 1,773 checks at `/tmp/opencode/wb028-accept-2swfin7h/report.json`,
+including glyph-preserving cursor attrs, compressed cells, off-screen directions,
+adaptive labels, huge timestamps, all schemes/presets and prior workflow regressions.
+Builds/inline tests/lint/formatting and synthetic preset smoke passed. All four
+refresh binaries are rebuilt in `/tmp/opencode/wb028-accept-build`.
+
+This section governs the embedded-waveform extension in
+`/home/wayne/devel/jane/sim-artifacts`; historical FS2 allocations below do not apply
+to this extension. Design: [WB-028](features/verification/WB-028-waveform-viewer.md).
+
+Deliver a bounded retained-VCD viewer opened from Testing, using installed
+`hardcaml_waveterm` rendering where its API permits faithful integration. Investigate
+the actual installed API before choosing the conversion/rendering boundary. Preserve
+time units, hierarchy, buses and explicit unknown/high-impedance behavior; unsupported
+input must fail clearly rather than silently change meaning. No simulation reruns.
+
+The initial UI is a full-area investigation surface with return to the same Testing
+context. Capture exact project/attempt/case/artifact/digest at open, verify the existing
+byte transport before parsing, and fence stale asynchronous completions. Signal
+selection/filtering, cursor/value inspection, pan/zoom, resize and bounded loading are
+required. Keep external export/viewing available. Surver integration remains separate.
+
+### Ownership and resource rules
+
+- No git staging, commits, pushes, checkout/reset or authorship changes.
+- Coordinator owns docs, integration review and final checks.
+- Agent A owns new `terminal/waveform_data.ml` (and interface if useful): installed
+  library investigation, bounded VCD parsing/model/conversion and semantic tests.
+- Agent B owns new `terminal/waveform_view.ml`, terminal/main.ml and terminal/dune:
+  embedded rendering, full-area host integration, loading actions and UI controls.
+  Coordinate the data API with A using its interface/source; do not duplicate parsing.
+- Agent C owns new acceptance/probe files and any necessary test-only Dune stanza:
+  real VCD integration/interaction verification; coordinate stanza edits with B.
+- Agents initially perform implementation without running builds. Coordinator grants
+  build allocations explicitly. Total concurrent build/test jobs must be <=20;
+  all Dune commands require explicit `-j`, including nested script builds. Prefer
+  serial coordinator checks at `-j 10`; do not run full physical flows.
+- Preserve existing launcher edits and all unrelated work. No sibling repository
+  edits are expected; report a concrete need before expanding scope.
+
+### Acceptance and evidence
+
+Verify a real retained FIFO/native VCD, malformed/unsupported/oversized data, exact
+time/value navigation, alias/bus/X/Z behavior, responsive bounded rendering, selection
+changes during load, return-to-Testing and no accidental simulation side effects.
+Run focused inline tests and native terminal build/lint; add a practical PTY/probe
+check for the UI path where feasible. Record measured parsing/rendering costs and
+limits, commands/results, actual controls and remaining gaps before completion.
+
+Implementation status: bounded embedded slice implemented and automatically verified.
+139 combined semantic/probe/PTY checks passed after appearance/scale refinement;
+terminal inline tests, native builds,
+lint and formatting passed. Builds used separate -j 8 and -j 4 allocations (12 total).
+Delayed actual byte responses were delivered after closing/replacing the viewer;
+old completions neither reopened nor retargeted it. Narrow values/back controls were
+fixed and checked at 80x24, 120x40 and 180x55. No physical flow or sibling-repository
+changes were needed. [Controls, bounds and measurements](testing_workspace.md#embedded-waveform-viewer).
+Wide-terminal coverage now includes a filled 198-column plot at 230 columns, regular
+clock periods, all four color schemes and all five appearance presets. Compact
+metadata and exact identity inspection replace the original raw multi-line header.
+WB-028 remains partial for lazy loading and four-state graphical rendering; the
+bounded initial user workflow is implemented. Owner interactive review is pending.
+
 **Subsequent activated extension, 2026-10-17:** WB-034 genuine FIFO adoption,
 WB-032 test catalog and WB-063 cooperative Testing investigation are implemented
 and automatically verified. The shared coordination plan is

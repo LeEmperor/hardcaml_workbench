@@ -747,7 +747,7 @@ let evidence_attrs appearance : E.Role.t -> Attr.t list = function
 ;;
 
 let tile_run host tile =
-  if Testing_workspace.is_pane tile.W.Tile.kind
+  if Testing_workspace.is_pane tile.W.Tile.kind || P.Waveforms.is_pane tile.kind
   then None
   else
     Option.bind host.H.registry ~f:(fun registry ->
@@ -1366,6 +1366,32 @@ let rows host data tile ~width ~height =
        | "planned-run" ->
          planned_rows host tile ~width |> List.map ~f:(fun row -> row.Planned_run.text)
        | "run-selector" -> run_rows ()
+       | kind when P.Waveforms.is_pane kind ->
+         (match H.waveform_pin host tile.workspace with
+          | None ->
+            [ "No retained VCD selected" ]
+            @
+            if (H.policy host tile).hints
+            then
+              [ "In Testing, select a VCD and press W"; "Space c c: searchable commands" ]
+            else []
+          | Some pin
+            when P.Waveforms.equal_pane (Option.value_exn (P.Waveforms.pane kind)) Session
+            ->
+            [ Artifact_view.safe pin.project_key
+              ^ " · "
+              ^ Artifact_view.safe pin.artifact.label
+            ; "Attempt "
+              ^ Artifact_view.safe pin.artifact.attempt_id
+              ^ " · "
+              ^ Artifact_view.safe
+                  (Option.value pin.artifact.case_id ~default:"attempt artifact")
+            ]
+          | Some pin ->
+            [ "Pinned VCD: " ^ Artifact_view.safe pin.artifact.label
+            ; "Attempt: " ^ Artifact_view.safe pin.artifact.attempt_id
+            ; "Retained waveform data unavailable; reload exact pinned artifact"
+            ])
        | kind when Option.is_some (Timing_workspace.pane kind) ->
          (match Timing_workspace.pane kind, H.timing host tile with
           | Some pane, Some view ->
@@ -1618,7 +1644,9 @@ let timing_body appearance ~pane ~scroll ~width ~height (view : Timing_workspace
     |> colored appearance Foreground
 ;;
 
-let tile_view ?indicator_frames host data tile ~width ~height =
+(** The transport owner supplies waveform bodies to avoid a Host_view/Waveform_view
+    dependency cycle. The host retains frame, title, clipping and palette ownership. *)
+let tile_view ?indicator_frames ?render_pane host data tile ~width ~height =
   let appearance = host.H.appearance in
   let local = H.local host tile.W.Tile.id in
   let indicator_frames =
@@ -1634,7 +1662,7 @@ let tile_view ?indicator_frames host data tile ~width ~height =
     Option.value_map host.H.focus ~default:false ~f:(W.Tile_id.equal tile.id)
   in
   let binding =
-    if Testing_workspace.is_pane tile.kind
+    if Testing_workspace.is_pane tile.kind || P.Waveforms.is_pane tile.kind
     then "project"
     else (
       match tile.binding with
@@ -1683,6 +1711,8 @@ let tile_view ?indicator_frames host data tile ~width ~height =
           | "timing-paths" -> "timing · paths"
           | "timing-detail" -> "timing · selected path"
           | "timing-context" -> "timing · provenance"
+          | kind when P.Waveforms.is_pane kind ->
+            P.Waveforms.title (Option.value_exn (P.Waveforms.pane kind))
           | "run-selector" ->
             let total =
               List.count data.runs ~f:(fun (run, status) ->
@@ -2069,6 +2099,12 @@ let tile_view ?indicator_frames host data tile ~width ~height =
           view
       | _ -> body)
   in
+  let body =
+    Option.bind render_pane ~f:(fun render ->
+      render tile ~width:body_width ~height:body_height)
+    |> Option.value ~default:body
+    |> box ~width:body_width ~height:body_height
+  in
   let content = View.vcat (header @ [ body ]) in
   Panel.render
     appearance
@@ -2118,9 +2154,23 @@ end
 
 let show_global_header host =
   host.H.chrome
+  && (not
+        (Option.exists (H.active host) ~f:(fun workspace ->
+           Option.equal String.equal workspace.preset (Some P.Waveforms.definition.id))))
   && not
        (List.exists (H.tiles host) ~f:(fun tile ->
           String.equal tile.W.Tile.kind "live-status"))
+;;
+
+(** Waveforms uses the existing focused-tile hint policy, without changing global chrome
+    or another workspace's presentation. Notices and active-input status remain visible. *)
+let show_footer_hints host =
+  match H.active host with
+  | Some workspace
+    when Option.equal String.equal workspace.preset (Some P.Waveforms.definition.id) ->
+    Option.value_map (H.focused host) ~default:false ~f:(fun tile ->
+      (H.policy host tile).hints)
+  | _ -> true
 ;;
 
 (** The same outer and inner geometry is used by rendering and page navigation. *)
@@ -2400,6 +2450,7 @@ let inspection_viewport (dimensions : Dimensions.t) =
 
 let render_workspace
   ?indicator_frames
+  ?render_pane
   host
   data
   ({ Dimensions.width; height } as dimensions)
@@ -2448,7 +2499,14 @@ let render_workspace
         ]
     else
       List.map layout ~f:(fun (tile, (g : W.Geometry.t)) ->
-        tile_view ?indicator_frames host data tile ~width:g.width ~height:g.height
+        tile_view
+          ?indicator_frames
+          ?render_pane
+          host
+          data
+          tile
+          ~width:g.width
+          ~height:g.height
         |> View.pad ~l:g.x ~t:g.y)
       |> View.zcat
   in
@@ -2481,6 +2539,8 @@ let render_workspace
       ])
     else if not host.chrome
     then []
+    else if String.is_empty host.notice && (not compact) && not (show_footer_hints host)
+    then []
     else
       [ lines
           ~appearance
@@ -2491,7 +2551,10 @@ let render_workspace
              then host.notice
              else if compact
              then
-               "Compact: focused tile only | Tab: next tile | enlarge terminal for grid"
+               if show_footer_hints host
+               then
+                 "Compact: focused tile only | Tab: next tile | enlarge terminal for grid"
+               else "Compact: focused tile only"
              else
                "Space c c commands | Tab/Shift-Tab focus | j/k browse | Enter inspect | \
                 q exit")
@@ -2677,7 +2740,7 @@ let render_palette host dimensions background =
 
 (* A focused explorer covers the workspace. Do not construct the obscured tile images:
    those have different widths and would wrap the same large source a second time. *)
-let render ?indicator_frames host data dimensions =
+let render ?indicator_frames ?render_pane host data dimensions =
   let inspection_tile =
     match host.H.inspection_paste with
     | None -> H.focused host
@@ -2697,7 +2760,7 @@ let render ?indicator_frames host data dimensions =
         (Inspection_view.rows view ~width ~height)
       |> colored host.appearance Surface
       |> box ~width ~height
-    | None -> render_workspace ?indicator_frames host data dimensions
+    | None -> render_workspace ?indicator_frames ?render_pane host data dimensions
   in
   render_palette host dimensions background
 ;;
@@ -2779,6 +2842,119 @@ let refinement_fixture (definition : P.Definition.t) =
     List.find_exn (H.tiles host) ~f:(fun tile -> String.equal tile.W.Tile.kind kind)
   in
   host, data, find
+;;
+
+let%test_unit "Waveforms callback renders bounded independent bodies beneath host palette"
+  =
+  let host, data, find = refinement_fixture P.Waveforms.definition in
+  let signals = find "waveform-signals" in
+  assert (
+    Option.is_none (tile_run host { signals with binding = Pin_run Fs0_fixture.run_a }));
+  assert (
+    T.Binding.equal
+      (H.binding_kind { signals with binding = Pin_run Fs0_fixture.run_a })
+      Project);
+  let rendered = ref [] in
+  let render_pane (tile : W.Tile.t) ~width ~height =
+    if not (P.Waveforms.is_pane tile.kind)
+    then None
+    else (
+      rendered := (tile.kind, width, height) :: !rendered;
+      Some
+        (View.vcat
+           (List.init (height + 5) ~f:(fun _ ->
+              View.text ("BODY " ^ tile.kind ^ String.make width '!')))))
+  in
+  List.iter
+    [ 80, 24; 120, 40; 180, 55; 32, 8 ]
+    ~f:(fun (width, height) ->
+      let view = render ~render_pane host data { Dimensions.width; height } in
+      assert (View.width view = width && View.height view = height));
+  rendered := [];
+  let dimensions = { Dimensions.width = 120; height = 40 } in
+  let view = render ~render_pane host data dimensions in
+  assert (List.length !rendered = 5);
+  List.iter !rendered ~f:(fun (_, width, height) -> assert (width > 0 && height > 0));
+  let screen = plain_text view in
+  List.iter
+    [ "Session"; "Signals"; "Waves"; "VCD picker"; "Logs"; "BODY waveform-waves" ]
+    ~f:(fun label -> assert (String.is_substring screen ~substring:label));
+  let palette : H.palette =
+    { capture = Option.value_exn (H.capture host)
+    ; commands =
+        [ H.command
+            "waveforms.test"
+            "Waveforms palette sentinel"
+            "waveforms"
+            H.Toggle_chrome
+        ]
+    ; query = ""
+    ; index = 0
+    ; argument = None
+    }
+  in
+  let overlay =
+    render ~render_pane { host with palette = Some palette } data dimensions |> plain_text
+  in
+  assert (String.is_substring overlay ~substring:"Waveforms palette sentinel")
+;;
+
+let%test_unit "Waveforms banner and hints stay scoped with explicit local hint overrides" =
+  let host, data, find = refinement_fixture P.Waveforms.definition in
+  assert (not (show_global_header host));
+  let signals = find "waveform-signals" in
+  let session = find "waveform-session" in
+  assert (not (H.policy host signals).hints);
+  assert (not (H.policy host session).hints);
+  let host = { host with focus = Some signals.id; notice = "" } in
+  let screen host =
+    render host data { Dimensions.width = 120; height = 40 } |> plain_text
+  in
+  assert (not (show_footer_hints host));
+  assert (not (String.is_substring (screen host) ~substring:"j/k browse"));
+  assert (not (String.is_substring (screen host) ~substring:"Waveforms | run"));
+  assert (
+    String.is_substring
+      (screen { host with notice = "pinned load failed" })
+      ~substring:"pinned load failed");
+  let local = H.local host signals.id in
+  let enabled =
+    H.set_local
+      host
+      signals.id
+      { local with presentation = { local.presentation with hints = Some true } }
+  in
+  assert (show_footer_hints enabled);
+  assert (String.is_substring (screen enabled) ~substring:"j/k browse");
+  let legacy_registry = Option.value_exn host.registry in
+  let legacy_registry =
+    { legacy_registry with
+      tiles =
+        List.filter legacy_registry.tiles ~f:(fun tile ->
+          not (W.Tile_id.equal tile.id session.id))
+    }
+  in
+  let legacy = H.receive host legacy_registry in
+  assert (not (show_global_header legacy));
+  assert (not (H.policy legacy signals).hints);
+  let overview, overview_data, overview_find = refinement_fixture P.Overview.definition in
+  let live = overview_find "live-status" in
+  assert (H.policy overview live).hints;
+  assert (show_footer_hints overview);
+  let overview_registry = Option.value_exn overview.registry in
+  let overview_registry =
+    { overview_registry with
+      tiles =
+        List.filter overview_registry.tiles ~f:(fun tile ->
+          not (String.equal tile.kind "live-status"))
+    }
+  in
+  let overview = H.receive overview overview_registry in
+  assert (show_global_header overview);
+  assert (
+    String.is_substring
+      (render overview overview_data { Dimensions.width = 120; height = 40 } |> plain_text)
+      ~substring:"j/k browse")
 ;;
 
 let%test_unit "lifecycle icons do not turn readiness, ownership or completion into case \

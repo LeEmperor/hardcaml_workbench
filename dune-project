@@ -34,6 +34,8 @@
    async
    cohttp-async
    cryptokit
+   hardcaml
+   hardcaml_waveterm
    yojson
    (conf-python-3 :with-test)
    ; Repository development tools.

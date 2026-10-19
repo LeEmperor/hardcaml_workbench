@@ -25,6 +25,10 @@ module Simulation_view = Terminal_presentation.Simulation_view
 module Testing_workspace = Terminal_presentation.Testing_workspace
 module Simulation_catalog = Terminal_presentation.Simulation_catalog
 module Simulation_export = Terminal_presentation.Simulation_export
+module Waveform_data = Terminal_presentation.Waveform_data
+module Waveform_view = Terminal_presentation.Waveform_view
+module Waveform_preferences = Terminal_presentation.Waveform_preferences
+module Waveforms = Hardcaml_workbench_workspaces.Waveforms
 module Planned_run = Terminal_presentation.Planned_run
 module Stage_action = Terminal_presentation.Stage_action
 
@@ -32,6 +36,16 @@ let console_limit = 500
 let minimum_width = 68
 let minimum_height = 20
 let take_end values count = List.rev values |> Fn.flip List.take count |> List.rev
+
+let bounded_waveform_logs records =
+  List.rev records
+  |> List.fold ~init:([], 0) ~f:(fun (kept, bytes) record ->
+    let size = String.length record.V1.Read_log.Record.data in
+    if bytes + size > 128 * 1024 || List.length kept >= console_limit
+    then kept, 128 * 1024
+    else record :: kept, bytes + size)
+  |> fst
+;;
 
 type log_state =
   { mutable next_offset : int
@@ -53,6 +67,22 @@ type hierarchy_view =
   ; mutable expanded : String.Set.t
   ; mutable scroll : int
   ; mutable pane_scroll : int
+  }
+
+type waveform_runtime =
+  { pin : Waveforms.pin
+  ; token : unit ref
+  ; mutable epoch : unit ref
+  ; mutable view : Waveform_view.t
+  ; mutable loading : bool
+  ; mutable restore_navigation : bool
+  ; mutable artifacts : Simulation.Artifact.t list
+  ; mutable picker_index : int
+  ; mutable picker_status : string
+  ; mutable metadata_loaded : bool
+  ; mutable metadata_busy : bool
+  ; logs : log_state
+  ; mutable log_busy : bool
   }
 
 type session =
@@ -97,6 +127,19 @@ type session =
   ; mutable artifact_viewer : string option
   ; mutable artifact_binary_viewer : string option
   ; mutable artifact_export_busy : bool
+  ; mutable waveform : Waveform_view.t option
+  ; mutable waveform_visible : bool
+  ; mutable waveform_generation : int
+  ; mutable waveform_history : Waveform_view.t list
+  ; mutable waveform_workspaces : (string * waveform_runtime) list
+  ; mutable waveform_preferences_loaded : string option
+  ; mutable waveform_preferences_pending : Host.waveform_preferences option
+  ; mutable waveform_preferences_saved : string option
+  ; mutable waveform_preferences_failed : bool
+  ; mutable waveform_open_generation : int
+  ; mutable waveform_value_layout : Waveform_view.value_layout
+  ; mutable waveform_display_loaded : string option
+  ; mutable waveform_display_revision : int
   }
 
 let append_diagnostic file message =
@@ -266,6 +309,19 @@ let create_session
       ; artifact_viewer = None
       ; artifact_binary_viewer = None
       ; artifact_export_busy = false
+      ; waveform = None
+      ; waveform_visible = false
+      ; waveform_generation = 0
+      ; waveform_history = []
+      ; waveform_workspaces = []
+      ; waveform_preferences_loaded = None
+      ; waveform_preferences_pending = None
+      ; waveform_preferences_saved = None
+      ; waveform_preferences_failed = false
+      ; waveform_open_generation = 0
+      ; waveform_value_layout = Inline
+      ; waveform_display_loaded = None
+      ; waveform_display_revision = 0
       }
     in
     session)
@@ -595,6 +651,149 @@ let save_presentation_preferences session =
               error))
 ;;
 
+let apply_waveform_preferences session =
+  if Option.is_some session.host.registry
+  then (
+    Option.iter session.waveform_preferences_pending ~f:(fun saved ->
+      session.host <- Host.restore_waveform_preferences saved session.host);
+    session.waveform_preferences_pending <- None)
+;;
+
+let load_waveform_display_preferences session =
+  match Or_error.try_with (fun () -> preference_context session) with
+  | Error _ -> return ()
+  | Ok (project_key, state_directory) ->
+    if Option.equal String.equal session.waveform_display_loaded (Some project_key)
+    then return ()
+    else (
+      session.waveform_display_loaded <- Some project_key;
+      session.waveform_value_layout <- Inline;
+      let revision = session.waveform_display_revision in
+      let%map result =
+        In_thread.run (fun () ->
+          Or_error.try_with (fun () ->
+            Waveform_preferences.load ~state_directory ~project_key))
+      in
+      if session.waveform_display_revision = revision
+         && Option.equal String.equal session.waveform_display_loaded (Some project_key)
+         &&
+         match Or_error.try_with (fun () -> fst (preference_context session)) with
+         | Ok current -> String.equal current project_key
+         | Error _ -> false
+      then (
+        match result with
+        | Ok saved ->
+          session.waveform_value_layout
+          <- Option.value_map saved ~default:Waveform_view.Inline ~f:(fun saved ->
+               saved.Waveform_preferences.value_layout)
+        | Error e ->
+          presentation_preference_error
+            session
+            "Could not load waveform display preferences (file left untouched)"
+            e))
+;;
+
+let save_waveform_display_preferences session =
+  match Or_error.try_with (fun () -> preference_context session) with
+  | Error e ->
+    presentation_preference_error session "Could not save waveform display preferences" e;
+    return ()
+  | Ok (project_key, state_directory) ->
+    let saved = Waveform_preferences.create ~project_key session.waveform_value_layout in
+    let previous = session.preference_saves in
+    let finished = Ivar.create () in
+    session.preference_saves <- Ivar.read finished;
+    Monitor.protect
+      ~finally:(fun () ->
+        Ivar.fill_exn finished ();
+        return ())
+      (fun () ->
+        let%bind () = previous in
+        let%map result =
+          In_thread.run (fun () ->
+            Or_error.try_with (fun () -> Waveform_preferences.save ~state_directory saved))
+        in
+        match result with
+        | Ok () -> ()
+        | Error e ->
+          presentation_preference_error
+            session
+            "Could not save waveform display preferences"
+            e)
+;;
+
+let load_waveform_preferences session =
+  match Or_error.try_with (fun () -> preference_context session) with
+  | Error _ -> return ()
+  | Ok (project_key, state_directory) ->
+    if Option.equal String.equal session.waveform_preferences_loaded (Some project_key)
+    then return ()
+    else (
+      session.waveform_preferences_loaded <- Some project_key;
+      session.waveform_preferences_pending <- None;
+      session.waveform_preferences_saved <- None;
+      session.waveform_preferences_failed <- false;
+      let%map result =
+        In_thread.run (fun () ->
+          Or_error.try_with (fun () ->
+            Host.load_waveform_preferences ~state_directory ~project_key))
+      in
+      if Option.equal String.equal session.waveform_preferences_loaded (Some project_key)
+      then (
+        match result with
+        | Ok saved ->
+          session.waveform_preferences_pending <- saved;
+          session.waveform_preferences_saved
+          <- Option.map saved ~f:Host.encode_waveform_preferences
+        | Error e ->
+          session.waveform_preferences_failed <- true;
+          presentation_preference_error session "Could not load Waveforms pins" e))
+;;
+
+let save_waveform_preferences session =
+  match Or_error.try_with (fun () -> preference_context session) with
+  | Error _ -> return ()
+  | Ok (project_key, state_directory) ->
+    if session.waveform_preferences_failed
+       || Option.is_none session.host.registry
+       || not
+            (Option.equal
+               String.equal
+               session.waveform_preferences_loaded
+               (Some project_key))
+    then return ()
+    else (
+      let saved = Host.waveform_preferences ~project_key session.host in
+      let encoded = Host.encode_waveform_preferences saved in
+      if Option.is_none session.waveform_preferences_saved
+         && List.is_empty session.host.waveforms
+      then (
+        session.waveform_preferences_saved <- Some encoded;
+        return ())
+      else if Option.equal String.equal session.waveform_preferences_saved (Some encoded)
+      then return ()
+      else (
+        session.waveform_preferences_saved <- Some encoded;
+        let previous = session.preference_saves in
+        let finished = Ivar.create () in
+        session.preference_saves <- Ivar.read finished;
+        Monitor.protect
+          ~finally:(fun () ->
+            Ivar.fill_exn finished ();
+            return ())
+          (fun () ->
+            let%bind () = previous in
+            let%map result =
+              In_thread.run (fun () ->
+                Or_error.try_with (fun () ->
+                  Host.save_waveform_preferences ~state_directory saved))
+            in
+            match result with
+            | Ok () -> ()
+            | Error e ->
+              presentation_preference_error session "Could not save Waveforms pins" e)))
+;;
+
 let load_preferences session =
   if session.preferences_loaded || Option.is_none session.opened
   then return ()
@@ -850,6 +1049,8 @@ let workspace_request session operation =
         in
         session.host <- host;
         session.presentation_preferences <- pending;
+        apply_waveform_preferences session;
+        apply_waveform_preferences session;
         reconcile_synthesis session)
 ;;
 
@@ -1498,16 +1699,290 @@ let refresh_simulation session =
     let view = Host.simulation session.host tile.id in
     match view.attempt with
     | _ when view.busy -> return ()
-    | Some id -> simulation_request session tile.id (Observe id)
+    | Some id ->
+      (* Observe deliberately preserves a paged history list. Refresh the newest summary
+         page explicitly when not browsing older history, so another client/provider's new
+         attempts become discoverable without changing the selected attempt or the
+         independently pinned Waveforms investigation. *)
+      let%bind () =
+        if view.older then return () else simulation_request session tile.id Get
+      in
+      if Option.equal
+           String.equal
+           (Host.simulation session.host tile.id).attempt
+           (Some id)
+      then simulation_request session tile.id (Observe id)
+      else return ()
     | None when not view.older -> simulation_request session tile.id Get
     | None -> return ())
+;;
+
+let new_waveform_runtime pin token previous =
+  let view, restore_navigation =
+    match previous with
+    | Some old when Waveforms.equal_pin old.pin pin ->
+      Waveform_view.remember old.view, true
+    | _ ->
+      ( Waveform_view.create
+          ~project:(Project_id.to_string pin.Waveforms.project)
+          pin.artifact
+      , false )
+  in
+  { pin
+  ; token
+  ; epoch = ref ()
+  ; view
+  ; loading = false
+  ; restore_navigation
+  ; artifacts = []
+  ; picker_index = 0
+  ; picker_status = "Reading artifacts of pinned attempt"
+  ; metadata_loaded = false
+  ; metadata_busy = false
+  ; logs = { next_offset = 0; records = []; fetch = Presentation.Log_fetch.Not_requested }
+  ; log_busy = false
+  }
+;;
+
+let reconcile_waveform_workspaces session =
+  session.waveform_workspaces
+  <- List.map session.host.waveforms ~f:(fun (key, (token, pin)) ->
+       let previous =
+         List.Assoc.find session.waveform_workspaces key ~equal:String.equal
+       in
+       let rt =
+         match previous with
+         | Some old when phys_equal old.token token && Waveforms.equal_pin old.pin pin ->
+           old
+         | _ -> new_waveform_runtime pin token previous
+       in
+       key, rt)
+;;
+
+let waveform_current session workspace rt =
+  let epoch = rt.epoch in
+  let client = session.client
+  and instance_id = session.hello.instance_id in
+  let project = Option.map (current_project session) ~f:(fun p -> p.id) in
+  fun () ->
+    phys_equal epoch rt.epoch
+    && phys_equal client session.client
+    && V1.Daemon_instance_id.equal instance_id session.hello.instance_id
+    && Option.equal
+         Project_id.equal
+         project
+         (Option.map (current_project session) ~f:(fun p -> p.id))
+    && Option.value_map
+         (Host.waveform_identity session.host workspace)
+         ~default:false
+         ~f:(phys_equal rt.token)
+    && Option.value_map
+         (Host.waveform_pin session.host workspace)
+         ~default:false
+         ~f:(Waveforms.equal_pin rt.pin)
+    &&
+    match Or_error.try_with (fun () -> fst (preference_context session)) with
+    | Ok key -> String.equal key rt.pin.project_key
+    | Error _ -> false
+;;
+
+let read_waveform_bytes session artifact ~current =
+  match current_project session with
+  | None -> return (Or_error.error_string "Project unavailable")
+  | Some project ->
+    let client = session.client
+    and instance_id = session.hello.instance_id in
+    let parsed = ref None in
+    let%map result =
+      match Simulation_export.identity artifact with
+      | Error e -> return (Error e)
+      | Ok (size, _) when size > Waveform_data.default_limits.max_bytes ->
+        return
+          (Or_error.error_string "Embedded VCD limit: 8 MiB; export remains available")
+      | Ok _ when not (String.equal (Simulation_export.suffix artifact) ".vcd") ->
+        return (Or_error.error_string "Embedded viewer supports VCD only")
+      | Ok _ ->
+        Simulation_export.run
+          ~artifact
+          ~current
+          ~viewer:None
+          ~fetch:(fun ~offset ~limit ->
+            let%map r =
+              request session.diagnostics_file (fun () ->
+                Http.Client.simulation
+                  client
+                  { instance_id
+                  ; project = project.id
+                  ; operation =
+                      Read_artifact_bytes
+                        { attempt_id = artifact.attempt_id
+                        ; artifact_id = artifact.id
+                        ; sha256 = Option.value artifact.sha256 ~default:""
+                        ; offset
+                        ; limit
+                        }
+                  })
+            in
+            match r with
+            | Error e -> Or_error.error_string e
+            | Ok s ->
+              Or_error.of_option
+                s.byte_page
+                ~error:(Error.of_string "Missing waveform byte page"))
+          ~publish:(fun _ chunks ->
+            In_thread.run (fun () ->
+              let open Or_error.Let_syntax in
+              let%map data = Waveform_data.parse (String.concat chunks) in
+              parsed := Some data;
+              "verified embedded VCD"))
+          ~launch:(fun ~prog:_ ~args:_ -> return (Ok ()))
+    in
+    Result.bind result ~f:(fun _ ->
+      Or_error.of_option !parsed ~error:(Error.of_string "No parsed waveform"))
+;;
+
+let refresh_waveform_runtime session workspace rt =
+  let current = waveform_current session workspace rt in
+  if not (current ())
+  then (
+    rt.view
+    <- Waveform_view.receive
+         rt.view
+         (Or_error.error_string
+            "Pinned project context unavailable; reopen from its project");
+    rt.logs.fetch <- Error "Pinned project context unavailable")
+  else (
+    (match rt.view.loaded with
+     | Loading when not rt.loading ->
+       rt.loading <- true;
+       don't_wait_for
+         (let%map result = read_waveform_bytes session rt.pin.artifact ~current in
+          if current ()
+          then (
+            rt.loading <- false;
+            rt.view
+            <- Waveform_view.receive
+                 ~restore_navigation:rt.restore_navigation
+                 rt.view
+                 result;
+            (* At most four parsed workspace models. Keep navigation for evicted runtime
+               models; returning verifies bytes again. *)
+            let count = ref 0 in
+            List.iter session.waveform_workspaces ~f:(fun (_, other) ->
+              if not (phys_equal other rt)
+              then (
+                match other.view.loaded with
+                | Ready _ ->
+                  incr count;
+                  if !count > 3
+                  then (
+                    other.view <- Waveform_view.remember other.view;
+                    other.restore_navigation <- true)
+                | _ -> ()))))
+     | _ -> ());
+    if (not rt.metadata_loaded) && not rt.metadata_busy
+    then (
+      rt.metadata_busy <- true;
+      Option.iter (current_project session) ~f:(fun project ->
+        let client = session.client
+        and instance_id = session.hello.instance_id in
+        don't_wait_for
+          (let%map result =
+             request session.diagnostics_file (fun () ->
+               Http.Client.simulation
+                 client
+                 { instance_id
+                 ; project = project.id
+                 ; operation = Observe rt.pin.artifact.attempt_id
+                 })
+           in
+           if current ()
+           then (
+             rt.metadata_busy <- false;
+             rt.metadata_loaded <- true;
+             match result with
+             | Ok snapshot ->
+               (match snapshot.detail with
+                | Some detail when String.equal detail.id rt.pin.artifact.attempt_id ->
+                  rt.artifacts
+                  <- Waveform_view.picker_candidates ~attempt:detail.id detail.artifacts;
+                  rt.picker_index
+                  <- Waveform_view.picker_initial_index
+                       ~pinned:rt.pin.artifact
+                       rt.artifacts;
+                  rt.picker_status
+                  <- (if List.is_empty rt.artifacts
+                      then "No VCD artifacts in the pinned attempt"
+                      else "")
+                | _ ->
+                  rt.picker_status
+                  <- "Pinned attempt detail unavailable; artifact pin retained")
+             | Error e -> rt.picker_status <- "Pinned attempt artifacts unavailable: " ^ e))));
+    if not rt.log_busy
+    then (
+      match Waveforms.log_job rt.pin ~instance_id:session.hello.instance_id with
+      | Error e -> rt.logs.fetch <- Error ("Logs unavailable: " ^ Error.to_string_hum e)
+      | Ok job ->
+        if not (List.exists session.snapshot.jobs ~f:(fun j -> Job_id.equal j.id job))
+        then
+          rt.logs.fetch
+          <- Error "Pinned attempt job/log has expired; no current-job substitution"
+        else (
+          match rt.logs.fetch with
+          | Received { eof = true } | Error _ -> ()
+          | _ ->
+            rt.log_busy <- true;
+            rt.logs.fetch <- Fetching;
+            let client = session.client
+            and instance_id = session.hello.instance_id in
+            let offset = rt.logs.next_offset in
+            don't_wait_for
+              (let%map result =
+                 request session.diagnostics_file (fun () ->
+                   Http.Client.read_log
+                     client
+                     { instance_id
+                     ; job
+                     ; offset
+                     ; max_records = 128
+                     ; max_bytes = V1.max_log_bytes
+                     })
+               in
+               if current ()
+               then (
+                 rt.log_busy <- false;
+                 match result with
+                 | Error e ->
+                   rt.logs.fetch <- Error ("Pinned attempt logs unavailable: " ^ e)
+                 | Ok page when page.next_offset < offset ->
+                   rt.logs.fetch <- Error "Invalid pinned log page offset"
+                 | Ok page ->
+                   rt.logs.next_offset <- page.next_offset;
+                   rt.logs.records
+                   <- bounded_waveform_logs (rt.logs.records @ page.records);
+                   rt.logs.fetch <- Received { eof = page.eof })))))
+;;
+
+let refresh_waveforms session =
+  reconcile_waveform_workspaces session;
+  Option.iter (Host.active session.host) ~f:(fun workspace ->
+    Option.iter
+      (List.Assoc.find
+         session.waveform_workspaces
+         (Workspace.Workspace_id.to_string workspace.id)
+         ~equal:String.equal)
+      ~f:(refresh_waveform_runtime session workspace.id));
+  save_waveform_preferences session
 ;;
 
 let refresh_host session =
   let%bind () = load_preferences session in
   let%bind () = load_presentation_preferences session in
+  let%bind () = load_waveform_display_preferences session in
+  let%bind () = load_waveform_preferences session in
   let%bind () = workspace_request session Get in
   let%bind () = initialize_host_layout session in
+  let%bind () = refresh_waveforms session in
   let%bind () = refresh_simulation session in
   let%bind () = asic_request session Get in
   let%bind () =
@@ -2678,6 +3153,132 @@ let host_data session : Host_view.data =
   }
 ;;
 
+let waveform_pane session (tile : Workspace.Tile.t) ~width ~height =
+  Option.map (Waveforms.pane tile.kind) ~f:(fun pane ->
+    let appearance = session.host.appearance in
+    let hints = (Host.policy session.host tile).hints in
+    let lines ?(role = Host_view.Role.Foreground) rows =
+      Host_view.lines ~appearance ~role ~width ~height rows
+    in
+    match
+      List.Assoc.find
+        session.waveform_workspaces
+        (Workspace.Workspace_id.to_string tile.workspace)
+        ~equal:String.equal
+    with
+    | None ->
+      lines [ "No retained waveform pinned"; "Select a VCD in Testing and press W" ]
+    | Some rt ->
+      (match pane with
+       | Session ->
+         let project_label =
+           match Or_error.try_with (fun () -> Sexp.of_string rt.pin.project_key) with
+           | Ok (List (Atom root :: _)) -> Filename.basename root
+           | _ -> Project_id.to_string rt.pin.project
+         in
+         Waveform_view.render_session
+           ~appearance
+           ~hints
+           rt.view
+           ~project_label
+           ~width
+           ~height
+       | Signals ->
+         rt.view
+         <- Waveform_view.prepare_signals
+              ~value_layout:session.waveform_value_layout
+              rt.view
+              ~width;
+         Waveform_view.render_signals
+           ~appearance
+           ~hints
+           ~value_layout:session.waveform_value_layout
+           rt.view
+           ~width
+           ~height
+       | Waves ->
+         (match rt.view.identity_scroll with
+          | Some scroll ->
+            let rows =
+              Waveform_view.identity_lines rt.view ~width:(Int.max 1 width)
+              @ Artifact_view.wrap
+                  ~width:(Int.max 1 width)
+                  (Artifact_view.safe ("Project context " ^ rt.pin.project_key))
+              @ Artifact_view.wrap
+                  ~width:(Int.max 1 width)
+                  (Artifact_view.safe
+                     ("Captured logs "
+                      ^ Sexp.to_string_hum (Waveforms.sexp_of_log_source rt.pin.log)))
+            in
+            let visible = Int.max 1 (height - 1) in
+            let scroll = Int.min scroll (Int.max 0 (List.length rows - visible)) in
+            (if hints
+             then "Exact identity · Esc/i return · j/k scroll"
+             else "Exact identity · Esc/i return")
+            :: (List.drop rows scroll |> Fn.flip List.take visible)
+            |> lines
+          | None ->
+            rt.view <- Waveform_view.prepare_waves rt.view ~width;
+            Waveform_view.render_waves ~appearance ~hints rt.view ~width ~height)
+       | Picker ->
+         let visible = Int.max 1 (height - 2) in
+         let first = Int.max 0 (rt.picker_index - visible + 1) in
+         ([ "Pinned: "
+            ^ Waveform_view.shorten ~width:(Int.max 8 (width - 8)) rt.pin.artifact.label
+          ]
+          @ (List.drop rt.artifacts first
+             |> Fn.flip List.take visible
+             |> List.mapi ~f:(fun i a ->
+               sprintf
+                 "%s%s %s · %s"
+                 (if first + i = rt.picker_index then ">" else " ")
+                 (if Waveform_view.picker_matches_pin ~pinned:rt.pin.artifact a
+                  then "*"
+                  else " ")
+                 a.label
+                 (Option.value a.case_id ~default:"attempt")))
+          @
+          if not (String.is_empty rt.picker_status)
+          then [ rt.picker_status ]
+          else if hints
+          then [ "j/k browse · Enter retargets all panes" ]
+          else [])
+         |> lines
+       | Logs ->
+         let local = Host.local session.host tile.id in
+         let status =
+           match rt.logs.fetch with
+           | Not_requested -> "Pinned logs not yet requested"
+           | Fetching -> "Reading pinned attempt logs"
+           | Error e -> e
+           | Received { eof } ->
+             if List.is_empty rt.logs.records
+             then
+               if eof
+               then "Pinned job produced no stdout/stderr"
+               else "Waiting for pinned job output"
+             else if eof
+             then "End of retained pinned log"
+             else "Pinned log continues"
+         in
+         let rows =
+           rt.logs.records
+           |> Fn.flip take_end 128
+           |> List.concat_map ~f:(fun r -> String.split_lines r.V1.Read_log.Record.data)
+           |> List.concat_map ~f:(fun s ->
+             Artifact_view.wrap ~width:(Int.max 1 width) (Artifact_view.safe s))
+         in
+         let visible = Int.max 1 (height - 2) in
+         let offset =
+           if local.follow
+           then Int.max 0 (List.length rows - visible)
+           else Int.min local.scroll (Int.max 0 (List.length rows - visible))
+         in
+         ("Pinned attempt output" :: (List.drop rows offset |> Fn.flip List.take visible))
+         @ [ status ]
+         |> lines))
+;;
+
 let render ?indicator_frames session dimensions =
   let render_host () =
     session.last_dimensions <- Some dimensions;
@@ -2696,19 +3297,46 @@ let render ?indicator_frames session dimensions =
               (List.filter [ notice; session.host.notice ] ~f:(Fn.non String.is_empty))
         }
     in
-    Host_view.render ?indicator_frames host data dimensions
+    reconcile_waveform_workspaces session;
+    Host_view.render
+      ?indicator_frames
+      ~render_pane:(waveform_pane session)
+      host
+      data
+      dimensions
   in
-  match session.host.registry with
-  | None
-    when Option.is_some session.opened
-         && List.mem session.hello.capabilities "workspace" ~equal:String.equal ->
-    render_host ()
-  | None -> render_legacy session dimensions
-  | Some _
-    when Option.is_some session.hierarchy_view
-         || Option.is_some session.artifact_view
-         || session.show_connection_details -> render_legacy session dimensions
-  | Some _ -> render_host ()
+  match session.waveform_visible, session.waveform with
+  | true, Some view ->
+    session.last_dimensions <- Some dimensions;
+    let appearance = session.host.appearance in
+    let view =
+      Waveform_view.prepare_quick
+        ~appearance
+        ~value_layout:session.waveform_value_layout
+        view
+        dimensions
+    in
+    session.waveform <- Some view;
+    Host_view.render_palette
+      session.host
+      dimensions
+      (Waveform_view.render
+         ~appearance
+         ~value_layout:session.waveform_value_layout
+         view
+         dimensions)
+  | _ ->
+    (match session.host.registry with
+     | None
+       when Option.is_some session.opened
+            && List.mem session.hello.capabilities "workspace" ~equal:String.equal ->
+       render_host ()
+     | None -> render_legacy session dimensions
+     | Some _
+       when Option.is_some session.hierarchy_view
+            || Option.is_some session.artifact_view
+            || session.show_connection_details -> render_legacy session dimensions
+     | Some _ -> render_host ())
 ;;
 
 (* Baseline capture.
@@ -2760,6 +3388,19 @@ let session_of_baseline_fixture (fixture : Baseline_fixture.t) =
     ; artifact_viewer = None
     ; artifact_binary_viewer = None
     ; artifact_export_busy = false
+    ; waveform = None
+    ; waveform_visible = false
+    ; waveform_generation = 0
+    ; waveform_history = []
+    ; waveform_workspaces = []
+    ; waveform_preferences_loaded = None
+    ; waveform_preferences_pending = None
+    ; waveform_preferences_saved = None
+    ; waveform_preferences_failed = false
+    ; waveform_open_generation = 0
+    ; waveform_value_layout = Inline
+    ; waveform_display_loaded = None
+    ; waveform_display_revision = 0
     }
   in
   reconcile_selection session;
@@ -2841,11 +3482,62 @@ let key_is char = function
   | _ -> false
 ;;
 
+let active_waveform_runtime session =
+  Option.bind (Host.active session.host) ~f:(fun workspace ->
+    Option.map
+      (List.Assoc.find
+         session.waveform_workspaces
+         (Workspace.Workspace_id.to_string workspace.id)
+         ~equal:String.equal)
+      ~f:(fun rt -> workspace.id, rt))
+;;
+
+let waveform_context session =
+  if session.waveform_visible
+  then
+    Option.map session.waveform ~f:(fun v -> v, fun view -> session.waveform <- Some view)
+  else
+    Option.map (active_waveform_runtime session) ~f:(fun (_, rt) ->
+      rt.view, fun view -> rt.view <- view)
+;;
+
 let host_catalog session =
   Host.catalog
     session.host
     ~project:(current_project session)
     ~jobs:(project_jobs session)
+  @ Option.value_map (waveform_context session) ~default:[] ~f:(fun (view, _) ->
+    List.map
+      [ "toggle", "Toggle focused signal (Enter)"
+      ; "in", "Zoom in"
+      ; "out", "Zoom out"
+      ; "first", "First timestamp"
+      ; "last", "Last timestamp"
+      ; "identity", "Inspect exact identity"
+      ; "refresh", "Reload pinned bytes and artifact list"
+      ; "values-inline", "Signal values: Inline (aligned columns; default)"
+      ; "values-stacked", "Signal values: Stacked (two rows per signal)"
+      ; "back", "Return from quick inspection"
+      ]
+      ~f:(fun (id, title) ->
+        Host.command
+          ("waveform." ^ id)
+          ("Waveform: " ^ title)
+          "wave vcd cursor signal"
+          (Waveform_control (id, view.artifact)))
+    @ [ Host.command
+          "waveform.workspace"
+          "Waveform: Open dedicated Waveforms workspace"
+          "signals waves picker logs"
+          (Simulation_waveform_workspace view.artifact)
+      ])
+  @ Option.value_map (active_waveform_runtime session) ~default:[] ~f:(fun (_, rt) ->
+    List.map rt.artifacts ~f:(fun artifact ->
+      Host.command
+        ("waveform.pick." ^ artifact.id)
+        ("Waveform: Select VCD " ^ artifact.label)
+        "explicit retarget pinned attempt"
+        (Simulation_waveform_workspace artifact)))
   @ (match Host.focused session.host with
      | Some tile when Host.simulation_kind tile.kind ->
        let v = Host.simulation session.host tile.id in
@@ -2941,6 +3633,16 @@ let host_catalog session =
                ("Simulation: Open external viewer " ^ a.label)
                "trace waveform"
                (Simulation_export (a, true))
+           ; Host.command
+               ("simulation.waveform." ^ a.id)
+               ("Simulation: Open embedded waveform " ^ a.label)
+               "vcd wave retained full-area"
+               (Simulation_waveform a)
+           ; Host.command
+               ("simulation.waveform-workspace." ^ a.id)
+               ("Simulation: Open Waveforms workspace " ^ a.label)
+               "vcd dedicated signals waves picker logs"
+               (Simulation_waveform_workspace a)
            ]))
      | _ -> [])
   @ Option.value_map session.remembered_selection ~default:[] ~f:(fun selection ->
@@ -3195,6 +3897,259 @@ let open_timing_workspace session ~(run : Run_ref.t) ~stage =
   | _ -> return ()
 ;;
 
+let open_waveform session (artifact : Simulation.Artifact.t) =
+  match current_project session with
+  | None -> return ()
+  | Some project ->
+    let project_name = Project_id.to_string project.id in
+    (* Retain navigation for eight identities without retaining eight parsed traces. Only
+       the current viewer owns a model; revisiting another trace re-verifies its bytes
+       before restoring its navigation. *)
+    Option.iter session.waveform ~f:(fun view ->
+      match view.loaded with
+      | Ready _ ->
+        let saved = Waveform_view.remember view in
+        session.waveform_history
+        <- saved
+           :: List.filter session.waveform_history ~f:(fun previous ->
+             not (Waveform_view.same previous ~project:view.project view.artifact))
+           |> Fn.flip List.take 8
+      | _ -> ());
+    let saved =
+      List.find session.waveform_history ~f:(fun view ->
+        Waveform_view.same view ~project:project_name artifact)
+    in
+    let previous =
+      Option.filter session.waveform ~f:(fun v ->
+        Waveform_view.same v ~project:project_name artifact
+        &&
+        match v.loaded with
+        | Ready _ -> true
+        | _ -> false)
+    in
+    session.waveform_generation <- session.waveform_generation + 1;
+    let generation = session.waveform_generation in
+    let view =
+      Option.first_some previous saved
+      |> Option.value ~default:(Waveform_view.create ~project:project_name artifact)
+    in
+    session.waveform <- Some view;
+    session.waveform_visible <- true;
+    if Option.is_some previous
+    then return ()
+    else (
+      let client = session.client in
+      let instance_id = session.hello.instance_id in
+      let current () =
+        generation = session.waveform_generation
+        && session.waveform_visible
+        && phys_equal client session.client
+        && V1.Daemon_instance_id.equal instance_id session.hello.instance_id
+        && Option.value_map (current_project session) ~default:false ~f:(fun p ->
+          Project_id.equal p.id project.id)
+      in
+      let parsed = ref None in
+      let%map result =
+        match Simulation_export.identity artifact with
+        | Error e -> return (Error e)
+        | Ok (size, _) when size > Waveform_data.default_limits.max_bytes ->
+          return
+            (Or_error.error_string
+               "Embedded VCD limit: 8 MiB; use export/external viewer")
+        | Ok _ when not (String.equal (Simulation_export.suffix artifact) ".vcd") ->
+          return
+            (Or_error.error_string
+               "Embedded viewer supports VCD only; use export/external viewer")
+        | Ok _ ->
+          Simulation_export.run
+            ~artifact
+            ~current
+            ~viewer:None
+            ~fetch:(fun ~offset ~limit ->
+              let%map r =
+                request session.diagnostics_file (fun () ->
+                  Http.Client.simulation
+                    client
+                    { instance_id
+                    ; project = project.id
+                    ; operation =
+                        Read_artifact_bytes
+                          { attempt_id = artifact.attempt_id
+                          ; artifact_id = artifact.id
+                          ; sha256 = Option.value artifact.sha256 ~default:""
+                          ; offset
+                          ; limit
+                          }
+                    })
+              in
+              match r with
+              | Error e -> Or_error.error_string e
+              | Ok s ->
+                Or_error.of_option
+                  s.byte_page
+                  ~error:(Error.of_string "Missing simulation byte page"))
+            ~publish:(fun _ chunks ->
+              In_thread.run (fun () ->
+                let open Or_error.Let_syntax in
+                let%map data = Waveform_data.parse (String.concat chunks) in
+                parsed := Some data;
+                "embedded verified VCD"))
+            ~launch:(fun ~prog:_ ~args:_ -> return (Ok ()))
+      in
+      (* A closed/replaced viewer cannot be resurrected by an old request. The view's
+         frozen identity never follows the polling Testing selection. *)
+      if current ()
+      then (
+        let result =
+          Result.bind result ~f:(fun _ ->
+            Or_error.of_option !parsed ~error:(Error.of_string "No parsed waveform"))
+        in
+        let view = Option.value session.waveform ~default:view in
+        let received =
+          Waveform_view.receive ~restore_navigation:(Option.is_some saved) view result
+        in
+        session.waveform <- Some received)
+      else if generation = session.waveform_generation && session.waveform_visible
+      then
+        session.waveform
+        <- Some
+             (Waveform_view.receive
+                (Option.value session.waveform ~default:view)
+                (Or_error.error_string
+                   "Waveform load invalidated by project/connection change; return and \
+                    reopen")))
+;;
+
+let waveform_pin_for_artifact session (artifact : Simulation.Artifact.t) =
+  Or_error.try_with (fun () ->
+    let project = Option.value_exn (current_project session) in
+    let project_key, _ = preference_context session in
+    let existing =
+      Option.bind (active_waveform_runtime session) ~f:(fun (_, rt) ->
+        if String.equal rt.pin.project_key project_key
+           && String.equal rt.pin.artifact.attempt_id artifact.attempt_id
+           && List.exists
+                (rt.pin.artifact :: rt.artifacts)
+                ~f:(Simulation.Artifact.equal artifact)
+        then Some rt.pin.log
+        else None)
+    in
+    let observed =
+      Option.bind session.host.registry ~f:(fun registry ->
+        List.find_map registry.tiles ~f:(fun tile ->
+          if not (Host.simulation_kind tile.kind)
+          then None
+          else
+            Option.bind
+              (Simulation_view.detail (Host.simulation session.host tile.id))
+              ~f:(fun detail ->
+                if String.equal detail.id artifact.attempt_id
+                   && List.exists detail.artifacts ~f:(Simulation.Artifact.equal artifact)
+                then
+                  Some
+                    (Waveforms.Job
+                       { instance_id = session.hello.instance_id; job = detail.job })
+                else None)))
+    in
+    { Waveforms.project_key
+    ; project = project.id
+    ; artifact
+    ; log =
+        Option.first_some existing observed
+        |> Option.value
+             ~default:
+               (Unavailable
+                  "No exact observed attempt job was available when this artifact was \
+                   pinned")
+    })
+;;
+
+let open_waveform_workspace session artifact =
+  session.waveform_open_generation <- session.waveform_open_generation + 1;
+  let generation = session.waveform_open_generation in
+  (* Capture provenance before preference I/O or registry creation can yield. *)
+  match
+    ( waveform_pin_for_artifact session artifact
+    , session.host.registry
+    , Host.active session.host )
+  with
+  | Ok pin, Some before, Some active ->
+    let client = session.client
+    and instance_id = session.hello.instance_id in
+    let current () =
+      generation = session.waveform_open_generation
+      && phys_equal client session.client
+      && V1.Daemon_instance_id.equal instance_id session.hello.instance_id
+      && Option.equal Workspace.Workspace_id.equal session.host.active (Some active.id)
+      && (match Or_error.try_with (fun () -> fst (preference_context session)) with
+          | Ok key -> String.equal key pin.project_key
+          | Error _ -> false)
+      && Option.value_map session.host.registry ~default:false ~f:(fun registry ->
+        Workspace.Session_id.equal registry.session_id before.session_id)
+    in
+    let%bind () = load_waveform_preferences session in
+    if not (current ())
+    then return ()
+    else (
+      let%bind () =
+        if Option.is_some session.waveform_preferences_pending
+        then workspace_request session Get
+        else return ()
+      in
+      if not (current ())
+      then return ()
+      else (
+        let before = Option.value session.host.registry ~default:before in
+        let%bind target =
+          match Waveforms.find before with
+          | Some workspace -> return (Some workspace)
+          | None ->
+            let%map () =
+              mutate_workspace session (Waveforms.create ~window:active.window)
+            in
+            Option.bind session.host.registry ~f:(fun after ->
+              Waveforms.created ~before ~after)
+        in
+        match target with
+        | Some workspace when current () ->
+          session.host <- Host.set_waveform_pin session.host workspace.id pin;
+          session.waveform_preferences_failed <- false;
+          session.host <- Host.switch session.host workspace.id;
+          let has_session =
+            Option.value_map session.host.registry ~default:false ~f:(fun registry ->
+              List.exists registry.tiles ~f:(fun tile ->
+                Workspace.Workspace_id.equal tile.workspace workspace.id
+                && String.equal tile.kind (Waveforms.kind Session)))
+          in
+          if not has_session
+          then
+            session.host
+            <- { session.host with
+                 notice =
+                   "Session missing: Apply preset: Waveforms, then Layout: Fit tiles to \
+                    window (Unzoom if needed); custom layout retained"
+               };
+          session.waveform_visible <- false;
+          session.waveform_generation <- session.waveform_generation + 1;
+          reconcile_waveform_workspaces session;
+          let%bind () = save_waveform_preferences session in
+          refresh_waveforms session
+        | _ ->
+          session.host
+          <- { session.host with
+               notice =
+                 "Waveforms workspace creation was not acknowledged for the captured \
+                  registry; reopen explicitly"
+             };
+          return ()))
+  | Error error, _, _ ->
+    session.host <- { session.host with notice = Error.to_string_hum error };
+    return ()
+  | _ ->
+    session.host <- { session.host with notice = "Workspace registry is not ready" };
+    return ()
+;;
+
 let execute_host session captured action ~exit =
   let open Bonsai_term in
   let captured_client = session.client in
@@ -3311,6 +4266,58 @@ let execute_host session captured action ~exit =
                }
          };
       Effect.Ignore
+    | Simulation_waveform artifact -> async (fun () -> open_waveform session artifact)
+    | Simulation_waveform_workspace artifact ->
+      async (fun () -> open_waveform_workspace session artifact)
+    | Waveform_control (control, artifact) ->
+      (match waveform_context session with
+       | Some (view, set) when Simulation.Artifact.equal view.artifact artifact ->
+         (match control with
+          | "values-inline" | "values-stacked" ->
+            session.waveform_value_layout
+            <- (if String.equal control "values-inline" then Inline else Stacked);
+            session.waveform_display_revision <- session.waveform_display_revision + 1;
+            (match Or_error.try_with (fun () -> fst (preference_context session)) with
+             | Ok key -> session.waveform_display_loaded <- Some key
+             | Error _ -> ());
+            don't_wait_for (save_waveform_display_preferences session)
+          | "back" ->
+            session.waveform_visible <- false;
+            session.waveform_generation <- session.waveform_generation + 1
+          | "refresh" ->
+            if session.waveform_visible
+            then (
+              session.waveform_history
+              <- Waveform_view.remember view :: session.waveform_history
+                 |> Fn.flip List.take 8;
+              session.waveform <- None;
+              don't_wait_for (open_waveform session artifact))
+            else
+              Option.iter (active_waveform_runtime session) ~f:(fun (workspace, rt) ->
+                rt.epoch <- ref ();
+                rt.loading <- false;
+                rt.metadata_busy <- false;
+                rt.log_busy <- false;
+                rt.view <- Waveform_view.remember rt.view;
+                rt.restore_navigation <- true;
+                rt.metadata_loaded <- false;
+                rt.logs.fetch <- Not_requested;
+                refresh_waveform_runtime session workspace rt)
+          | _ ->
+            let key =
+              match control with
+              | "toggle" -> Waveform_view.Enter
+              | "in" -> Char '+'
+              | "out" -> Char '-'
+              | "first" -> Char 'g'
+              | "last" -> Char 'G'
+              | _ -> Char 'i'
+            in
+            set (Waveform_view.input view key))
+       | _ ->
+         session.host
+         <- { session.host with notice = "Waveform pin changed; reopen palette" });
+      Effect.Ignore
     | Simulation_export (artifact, open_viewer) ->
       let tile = Option.map (Host.focused session.host) ~f:(fun t -> t.id) in
       let identity = Option.map tile ~f:(Host.simulation_identity session.host) in
@@ -3421,6 +4428,8 @@ let execute_host session captured action ~exit =
         else return ())
     | Restore_default_layout_unavailable -> Effect.Ignore
     | Switch id ->
+      session.waveform_visible <- false;
+      session.waveform_generation <- session.waveform_generation + 1;
       session.host <- Host.switch session.host id;
       Effect.Ignore
     | Create_testing_workspace ->
@@ -4179,7 +5188,7 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
        when Option.exists (Host.focused session.host) ~f:(fun tile ->
               String.equal tile.kind "simulation-catalog") ->
        dispatch "simulation.catalog-accept"
-     | Some (Character (('e' | 'v') as key))
+     | Some (Character (('e' | 'v' | 'w' | 'W') as key))
        when Option.exists (Host.focused session.host) ~f:(fun tile ->
               String.equal tile.kind "simulation-artifacts") ->
        let tile = Option.value_exn (Host.focused session.host) in
@@ -4187,7 +5196,13 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
          (Testing_workspace.artifact (Host.testing_state session.host tile.id))
          ~f:(fun artifact ->
            dispatch
-             ((if Char.equal key 'e' then "simulation.export." else "simulation.viewer.")
+             ((if Char.equal key 'e'
+               then "simulation.export."
+               else if Char.equal key 'w'
+               then "simulation.waveform."
+               else if Char.equal key 'W'
+               then "simulation.waveform-workspace."
+               else "simulation.viewer.")
               ^ artifact.id))
      | Some (Character 'r')
        when Option.exists (Host.focused session.host) ~f:(fun tile ->
@@ -4543,9 +5558,133 @@ let host_handler_overlays session event ~exit =
   | _ -> host_handler_regular session event ~exit
 ;;
 
+let waveform_key event =
+  match Waveform_view.edit_key event with
+  | Some key -> Some key
+  | None ->
+    (match event with
+     | Bonsai_term.Event.Key_press { key = Arrow `Left; mods = [] } ->
+       Some Waveform_view.Left
+     | Key_press { key = Arrow `Right; mods = [] } -> Some Waveform_view.Right
+     | _ ->
+       (match Host.decode_event event with
+        | Some (Character c) -> Some (Waveform_view.Char c)
+        | Some Enter -> Some Enter
+        | Some Escape -> Some Escape
+        | Some Backspace -> Some Backspace
+        | Some Next -> Some Down
+        | Some Previous -> Some Up
+        | _ -> None))
+;;
+
 let host_handler session event ~exit =
   if Host.is_interrupt event
   then Some (exit ())
+  else if session.waveform_visible
+          || Option.exists (Host.focused session.host) ~f:(fun t ->
+            Waveforms.is_pane t.kind)
+  then (
+    let context = waveform_context session in
+    let editing_text =
+      Option.exists context ~f:(fun (view, _) -> Option.is_some view.editing)
+    in
+    let global =
+      Option.is_some session.host.palette
+      || session.host.prefix > 0
+      || session.host.paste
+      || Option.exists (Host.decode_event event) ~f:(function
+        | Character ' ' -> not editing_text
+        | Focus | Focus_previous | Paste_start | Paste_end -> true
+        | _ -> false)
+    in
+    if global
+    then host_handler_regular session event ~exit
+    else (
+      let key = waveform_key event in
+      match context with
+      | None -> host_handler_regular session event ~exit
+      | Some (view, set) ->
+        let modal = Option.is_some view.editing || Option.is_some view.identity_scroll in
+        if session.waveform_visible || modal
+        then (
+          (match key with
+           | Some (Escape | Char 'q') when not modal ->
+             session.waveform_visible <- false;
+             session.waveform_generation <- session.waveform_generation + 1
+           | Some key -> set (Waveform_view.input view key)
+           | None -> ());
+          Some Bonsai_term.Effect.Ignore)
+        else (
+          match Host.focused session.host, active_waveform_runtime session with
+          | Some tile, Some (workspace, rt) ->
+            (match Waveforms.pane tile.kind, key with
+             | Some Picker, Some (Char ('j' | 'k') | Down | Up) ->
+               let delta =
+                 match key with
+                 | Some (Char 'k' | Up) -> -1
+                 | _ -> 1
+               in
+               rt.picker_index
+               <- Int.max
+                    0
+                    (Int.min (List.length rt.artifacts - 1) (rt.picker_index + delta));
+               Some Bonsai_term.Effect.Ignore
+             | Some Picker, Some Enter ->
+               let current = waveform_current session workspace rt in
+               Some
+                 (Bonsai_term.Effect.of_deferred_thunk (fun () ->
+                    match List.nth rt.artifacts rt.picker_index with
+                    | Some artifact
+                      when current ()
+                           && Option.equal
+                                Workspace.Workspace_id.equal
+                                session.host.active
+                                (Some workspace) ->
+                      open_waveform_workspace session artifact
+                    | _ -> return ()))
+             | Some Logs, Some (Char ('j' | 'k' | 'G') | Down | Up) ->
+               let local = Host.local session.host tile.id in
+               let delta =
+                 match key with
+                 | Some (Char 'k' | Up) -> -1
+                 | _ -> 1
+               in
+               session.host
+               <- Host.set_local
+                    session.host
+                    tile.id
+                    { local with
+                      scroll = Int.max 0 (local.scroll + delta)
+                    ; follow =
+                        (match key with
+                         | Some (Char 'G') -> true
+                         | _ -> false)
+                    };
+               Some Bonsai_term.Effect.Ignore
+             | ( Some (Session | Signals | Waves)
+               , Some
+                   (( Char
+                        ( 'j'
+                        | 'k'
+                        | 'h'
+                        | 'l'
+                        | '['
+                        | ']'
+                        | '+'
+                        | '='
+                        | '-'
+                        | ':'
+                        | '/'
+                        | 'g'
+                        | 'G'
+                        | 'i'
+                        | '{'
+                        | '}' )
+                    | Up | Down | Left | Right | Enter | Escape ) as key) ) ->
+               set (Waveform_view.input view key);
+               Some Bonsai_term.Effect.Ignore
+             | _ -> host_handler_regular session event ~exit)
+          | _ -> host_handler_regular session event ~exit)))
   else (
     reconcile_synthesis session;
     match Host.route_inspection_filter_event session.host event with
@@ -4833,10 +5972,11 @@ let tui session ~exit ~dimensions graph =
     then exit ()
     else (
       let hosted =
-        if Option.is_some session.host.registry
-           && Option.is_none session.hierarchy_view
-           && Option.is_none session.artifact_view
-           && not session.show_connection_details
+        if session.waveform_visible
+           || (Option.is_some session.host.registry
+               && Option.is_none session.hierarchy_view
+               && Option.is_none session.artifact_view
+               && not session.show_connection_details)
         then host_handler session event ~exit
         else None
       in

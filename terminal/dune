@@ -33,7 +33,11 @@
   simulation_view
   simulation_catalog
   testing_workspace
-  simulation_export)
+  simulation_export
+  waveform_data
+  waveform_preferences
+  waveform_time
+  waveform_view)
  (libraries
   async
   core
@@ -44,7 +48,9 @@
   hardcaml_workbench_workspaces
   bonsai_term
   notty-community
-  cryptokit)
+  cryptokit
+  hardcaml
+  hardcaml_waveterm)
  (preprocess
   (pps ppx_jane))
  (inline_tests
@@ -55,6 +61,13 @@
  (name presentation_preferences_probe)
  (modules presentation_preferences_probe)
  (libraries core terminal_presentation hardcaml_workbench_protocol)
+ (preprocess
+  (pps ppx_jane)))
+
+(executable
+ (name waveform_probe)
+ (modules waveform_probe)
+ (libraries core terminal_presentation hardcaml hardcaml_waveterm)
  (preprocess
   (pps ppx_jane)))
 

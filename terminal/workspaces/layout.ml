@@ -190,8 +190,13 @@ let compute
   if List.is_empty kinds
   then Grid []
   else (
+    let layout =
+      if String.equal definition.id Waveforms.definition.id
+      then Waveforms.layout_for_width ~width ~gutter
+      else definition.layout
+    in
     let cells =
-      Option.bind (resolve ~min_height_for_index definition.layout kinds) ~f:(fun tree ->
+      Option.bind (resolve ~min_height_for_index layout kinds) ~f:(fun tree ->
         let w, h = min_size ~gutter tree in
         if width >= w && height >= h
         then Some (place ~gutter tree { G.x = 0; y = 0; width; height })

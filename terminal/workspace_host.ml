@@ -86,6 +86,9 @@ type action =
   | Simulation_case of W.Tile_id.t * string
   | Simulation_logs of W.Tile_id.t
   | Simulation_export of Simulation.Artifact.t * bool
+  | Simulation_waveform of Simulation.Artifact.t
+  | Simulation_waveform_workspace of Simulation.Artifact.t
+  | Waveform_control of string * Simulation.Artifact.t
   | Testing_launch of W.Tile_id.t * testing_launch
   | Testing_launch_unavailable of string
   | Testing_accept of W.Tile_id.t
@@ -143,6 +146,7 @@ type t =
   ; workspace_presentation : (string * T.overrides) list
   ; timing : (string * Timing_workspace.t) list
   ; testing : (string * (unit ref * string * Testing_workspace.t)) list
+  ; waveforms : (string * (unit ref * P.Waveforms.pin)) list
   ; planned_run : Planned_run.t
   ; stage_preparation : string option
   ; stage_generation : int
@@ -169,6 +173,7 @@ let empty =
   ; workspace_presentation = []
   ; timing = []
   ; testing = []
+  ; waveforms = []
   ; planned_run = Planned_run.empty
   ; stage_preparation = None
   ; stage_generation = 0
@@ -229,6 +234,151 @@ let set_local t id value =
   { t with
     locals = List.Assoc.add t.locals ~equal:String.equal (W.Tile_id.to_string id) value
   }
+;;
+
+let waveform_pin t workspace =
+  List.Assoc.find t.waveforms (W.Workspace_id.to_string workspace) ~equal:String.equal
+  |> Option.map ~f:snd
+;;
+
+let waveform_identity t workspace =
+  List.Assoc.find t.waveforms (W.Workspace_id.to_string workspace) ~equal:String.equal
+  |> Option.map ~f:fst
+;;
+
+let set_waveform_pin t workspace pin =
+  if not
+       (Option.exists t.registry ~f:(fun registry ->
+          List.exists registry.workspaces ~f:(fun w ->
+            W.Workspace_id.equal w.id workspace)
+          && not (List.is_empty (P.Waveforms.members registry workspace))))
+  then t
+  else if Option.equal P.Waveforms.equal_pin (waveform_pin t workspace) (Some pin)
+  then t
+  else
+    { t with
+      waveforms =
+        List.Assoc.add
+          t.waveforms
+          ~equal:String.equal
+          (W.Workspace_id.to_string workspace)
+          (ref (), pin)
+    }
+;;
+
+type waveform_preference =
+  { workspace : W.Workspace_id.t
+  ; members : (string * string) list
+  ; pin : P.Waveforms.pin
+  }
+[@@deriving sexp]
+
+type waveform_preferences =
+  { schema_version : int
+  ; project_key : string
+  ; session : W.Session_id.t option
+  ; pins : waveform_preference list
+  }
+[@@deriving sexp]
+
+let waveform_preferences ~project_key t =
+  { schema_version = 1
+  ; project_key
+  ; session = Option.map t.registry ~f:(fun registry -> registry.session_id)
+  ; pins =
+      Option.value_map t.registry ~default:[] ~f:(fun registry ->
+        List.filter_map registry.workspaces ~f:(fun workspace ->
+          Option.bind (waveform_pin t workspace.id) ~f:(fun pin ->
+            if not (String.equal pin.project_key project_key)
+            then None
+            else
+              Some
+                { workspace = workspace.id
+                ; members = P.Waveforms.members registry workspace.id
+                ; pin
+                })))
+  }
+;;
+
+(** Apply once after registry restoration. Membership and session fences prevent removed
+    or reused workspace/tile IDs from resurrecting an old pin. Parsed data/logs are never
+    restored as verified: the transport owner reloads the exact recorded artifact. *)
+let restore_waveform_preferences saved t =
+  match t.registry with
+  | Some registry
+    when Option.equal W.Session_id.equal saved.session (Some registry.session_id) ->
+    List.fold saved.pins ~init:t ~f:(fun t pref ->
+      let members = P.Waveforms.members registry pref.workspace in
+      if String.equal pref.pin.project_key saved.project_key
+         && (not (List.is_empty members))
+         && List.equal [%equal: string * string] pref.members members
+         && Option.is_none (waveform_pin t pref.workspace)
+      then set_waveform_pin t pref.workspace pref.pin
+      else t)
+  | _ -> t
+;;
+
+let decode_waveform_preferences ~project_key content =
+  if String.length content > 1024 * 1024
+  then failwith "Waveforms preference size limit exceeded";
+  let saved = waveform_preferences_of_sexp (Sexp.of_string content) in
+  if saved.schema_version <> 1 then failwith "Unsupported Waveforms preference schema";
+  if not (String.equal project_key saved.project_key)
+  then failwith "Waveforms preference project/environment mismatch";
+  if List.length saved.pins > 128 then failwith "Too many retained Waveforms pins";
+  if Option.is_none saved.session && not (List.is_empty saved.pins)
+  then failwith "Waveforms pins require a registry session";
+  if List.contains_dup saved.pins ~compare:(fun a b ->
+       W.Workspace_id.compare a.workspace b.workspace)
+  then failwith "Duplicate Waveforms workspace pin";
+  List.iter saved.pins ~f:(fun pref ->
+    if not (String.equal pref.pin.project_key project_key)
+    then failwith "Waveforms pin project/environment mismatch";
+    if List.is_empty pref.members || List.length pref.members > 256
+    then failwith "Invalid Waveforms pane membership";
+    if List.contains_dup pref.members ~compare:(fun (a, _) (b, _) -> String.compare a b)
+    then failwith "Duplicate Waveforms pane identity";
+    if not (List.for_all pref.members ~f:(fun (_, kind) -> P.Waveforms.is_pane kind))
+    then failwith "Unknown Waveforms pane kind");
+  saved
+;;
+
+let encode_waveform_preferences saved =
+  Sexp.to_string_hum (sexp_of_waveform_preferences saved) ^ "\n"
+;;
+
+let waveform_preferences_path ~state_directory ~project_key =
+  Filename.concat state_directory ("waveforms-" ^ Plain_rpc.digest project_key ^ ".sexp")
+;;
+
+(** Match existing terminal preference conventions: bounded files, same-directory atomic
+    rename, caller-owned I/O worker. Workspace layout remains authoritative in daemon. *)
+let load_waveform_preferences ~state_directory ~project_key =
+  let path = waveform_preferences_path ~state_directory ~project_key in
+  match Sys_unix.file_exists path with
+  | `No -> None
+  | `Unknown -> failwith ("Cannot inspect Waveforms preferences: " ^ path)
+  | `Yes ->
+    if Int64.((Core_unix.stat path).st_size > 1048576L)
+    then failwith "Waveforms preference size limit exceeded";
+    Some (decode_waveform_preferences ~project_key (In_channel.read_all path))
+;;
+
+let save_waveform_preferences ~state_directory saved =
+  let data = encode_waveform_preferences saved in
+  ignore
+    (decode_waveform_preferences ~project_key:saved.project_key data
+     : waveform_preferences);
+  Core_unix.mkdir_p state_directory ~perm:0o700;
+  let temp = Filename_unix.temp_file ~in_dir:state_directory ".waveforms-" ".tmp" in
+  Exn.protect
+    ~finally:(fun () ->
+      if Poly.equal (Sys_unix.file_exists temp) `Yes then Core_unix.unlink temp)
+    ~f:(fun () ->
+      Out_channel.write_all temp ~data;
+      Core_unix.rename
+        ~src:temp
+        ~dst:(waveform_preferences_path ~state_directory ~project_key:saved.project_key))
 ;;
 
 let simulation_tile t id =
@@ -608,6 +758,7 @@ let receive t (s : W.Snapshot.t) =
         ; workspace_presentation = []
         ; timing = []
         ; testing = []
+        ; waveforms = []
         ; palette = None
         ; prefix = 0
         ; editing_filter = false
@@ -701,6 +852,18 @@ let receive t (s : W.Snapshot.t) =
       ; timing
       ; workspace_focus
       ; workspace_presentation
+      ; waveforms =
+          List.filter t.waveforms ~f:(fun (id, _) ->
+            match t.registry with
+            | Some previous ->
+              List.exists s.workspaces ~f:(fun workspace ->
+                String.equal id (W.Workspace_id.to_string workspace.id)
+                && (not (List.is_empty (P.Waveforms.members s workspace.id)))
+                && List.equal
+                     [%equal: string * string]
+                     (P.Waveforms.members previous workspace.id)
+                     (P.Waveforms.members s workspace.id))
+            | None -> false)
       ; testing =
           List.filter t.testing ~f:(fun (id, _) ->
             let members registry =
@@ -755,6 +918,7 @@ let reconnect t ~replacement =
     ; testing =
         List.map t.testing ~f:(fun (id, (identity, scope, state)) ->
           id, (identity, scope, Testing_workspace.reconnect state))
+    ; waveforms = List.map t.waveforms ~f:(fun (id, (_, pin)) -> id, (ref (), pin))
     ; locals =
         List.map t.locals ~f:(fun (id, local) ->
           ( id
@@ -789,6 +953,7 @@ let reconnect t ~replacement =
     ; workspace_presentation = []
     ; timing = []
     ; testing = []
+    ; waveforms = []
     }
   else t
 ;;
@@ -1210,7 +1375,7 @@ let browse_workspaces t id ~delta =
   set_local t id { l with cursor; scroll = index }
 ;;
 
-let current t c =
+let current t (c : capture) =
   match capture t with
   | None -> false
   | Some now ->
@@ -1487,6 +1652,7 @@ let asic_cancel_commands (snapshot : Asic.Snapshot.t) =
 
 let project_scoped_kind kind =
   Testing_workspace.is_pane kind
+  || P.Waveforms.is_pane kind
   || List.mem
        [ "simulation"
        ; "execution"
@@ -1557,7 +1723,7 @@ let%test_unit "restore commands capture named definitions and stable current pre
     { (List.hd_exn registry.workspaces) with name = "Testing"; preset = Some "timing" }
   in
   let commands = restore_commands workspace in
-  assert (List.length commands = 4);
+  assert (List.length commands = List.length P.Presets.all + 1);
   List.iter P.Presets.all ~f:(fun definition ->
     let command =
       List.find_exn commands ~f:(fun command ->
@@ -1585,8 +1751,9 @@ let%test_unit "restore commands capture named definitions and stable current pre
     let commands = restore_commands { workspace with name = "Overview"; preset } in
     assert (Option.is_some (current commands).unavailable);
     assert (
-      List.for_all (List.take commands 3) ~f:(fun command ->
-        Option.is_none command.unavailable));
+      List.for_all
+        (List.take commands (List.length P.Presets.all))
+        ~f:(fun command -> Option.is_none command.unavailable));
     match (current commands).action with
     | Restore_default_layout_unavailable -> ()
     | _ -> assert false)
@@ -1947,7 +2114,7 @@ let policy t (tile : W.Tile.t) =
 ;;
 
 let binding_kind (tile : W.Tile.t) : T.Binding.t =
-  if Testing_workspace.is_pane tile.kind
+  if Testing_workspace.is_pane tile.kind || P.Waveforms.is_pane tile.kind
   then Project
   else (
     match tile.binding with
@@ -2112,8 +2279,8 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
             (if Option.is_none (definition w)
              then
                Some
-                 "Choose Apply preset: Overview, Timing or Testing for this custom \
-                  workspace"
+                 "Choose Apply preset: Overview, Timing, Testing or Waveforms for this \
+                  custom workspace"
              else None)
           "workspace.default-layout"
           "Apply default layout (add missing tiles)"
@@ -2155,6 +2322,11 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
         ; "simulation-cases"
         ; "simulation-detail"
         ; "simulation-artifacts"
+        ; "waveform-session"
+        ; "waveform-signals"
+        ; "waveform-waves"
+        ; "waveform-picker"
+        ; "waveform-logs"
         ; "simulation-logs"
         ; "logs"
         ; "timing"
@@ -4354,4 +4526,170 @@ let%test_unit "allocation selects only an unchanged captured context" =
     |> Option.value_exn
   in
   assert (Option.is_none (selection_after_allocation s target run))
+;;
+
+let%test_unit "Waveforms pins survive navigation and restore but reject reused identities"
+  =
+  let apply snapshot mutation =
+    W.apply
+      snapshot
+      (Mutate { expected_revision = snapshot.W.Snapshot.revision; mutation })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let before = W.initial ~session_id:(W.Session_id.of_string "waveform-pins") in
+  let registry =
+    apply before (P.Waveforms.create ~window:(List.hd_exn before.windows).id)
+  in
+  let workspace = Option.value_exn (P.Waveforms.find registry) in
+  let artifact : Simulation.Artifact.t =
+    { id = "trace"
+    ; attempt_id = "attempt"
+    ; case_id = Some "failed-case"
+    ; label = "retained trace"
+    ; kind = "waveform"
+    ; media_type = "text/x-vcd"
+    ; size = Some 40
+    ; sha256 = Some "exact-digest"
+    ; availability = Available
+    }
+  in
+  let pin : P.Waveforms.pin =
+    { project_key = "root/env"
+    ; project = Project_id.of_string "p"
+    ; artifact
+    ; log =
+        Job
+          { instance_id = V1.Daemon_instance_id.of_string "daemon"
+          ; job = Job_id.of_string "job"
+          }
+    }
+  in
+  let host = set_waveform_pin (receive empty registry) workspace.id pin in
+  let token host = Option.value_exn (waveform_identity host workspace.id) in
+  let identity = token host in
+  assert (phys_equal identity (token (set_waveform_pin host workspace.id pin)));
+  let host = switch (switch host workspace.id) (List.hd_exn before.workspaces).id in
+  assert (phys_equal identity (token host));
+  let changed =
+    set_waveform_pin
+      host
+      workspace.id
+      { pin with artifact = { artifact with id = "other" } }
+  in
+  assert (not (phys_equal identity (token changed)));
+  let again = set_waveform_pin changed workspace.id pin in
+  assert (not (phys_equal identity (token again)));
+  let same_transport = reconnect host ~replacement:false in
+  assert (
+    Option.equal
+      P.Waveforms.equal_pin
+      (waveform_pin same_transport workspace.id)
+      (Some pin));
+  assert (not (phys_equal identity (token same_transport)));
+  let saved = waveform_preferences ~project_key:pin.project_key host in
+  let data = encode_waveform_preferences saved in
+  let decoded = decode_waveform_preferences ~project_key:pin.project_key data in
+  let state_directory = Filename_unix.temp_dir ~perm:0o700 "waveform-preferences-" "" in
+  let path = waveform_preferences_path ~state_directory ~project_key:pin.project_key in
+  Exn.protect
+    ~finally:(fun () ->
+      if Poly.equal (Sys_unix.file_exists path) `Yes then Core_unix.unlink path;
+      Core_unix.rmdir state_directory)
+    ~f:(fun () ->
+      assert (
+        Option.is_none
+          (load_waveform_preferences ~state_directory ~project_key:pin.project_key));
+      save_waveform_preferences ~state_directory saved;
+      let loaded =
+        load_waveform_preferences ~state_directory ~project_key:pin.project_key
+        |> Option.value_exn
+      in
+      assert (String.equal data (encode_waveform_preferences loaded));
+      save_waveform_preferences ~state_directory { saved with pins = [] };
+      let loaded =
+        load_waveform_preferences ~state_directory ~project_key:pin.project_key
+        |> Option.value_exn
+      in
+      assert (List.is_empty loaded.pins));
+  let restored = restore_waveform_preferences decoded (receive empty registry) in
+  assert (
+    Option.equal P.Waveforms.equal_pin (waveform_pin restored workspace.id) (Some pin));
+  assert (not (phys_equal identity (token restored)));
+  let pane =
+    List.find_exn registry.tiles ~f:(fun tile ->
+      W.Workspace_id.equal tile.workspace workspace.id
+      && String.equal tile.kind (P.Waveforms.kind Signals))
+  in
+  let legacy_registry =
+    { registry with
+      tiles =
+        List.filter registry.tiles ~f:(fun tile ->
+          not (String.equal tile.kind (P.Waveforms.kind Session)))
+    }
+  in
+  let legacy_host = receive host legacy_registry in
+  assert (phys_equal identity (token legacy_host));
+  assert (
+    Option.equal
+      P.Waveforms.equal_pin
+      (waveform_pin
+         (restore_waveform_preferences decoded (receive empty legacy_registry))
+         workspace.id)
+      (Some pin));
+  let upgraded =
+    apply
+      legacy_registry
+      (P.Definition.apply P.Waveforms.definition ~workspace:workspace.id)
+  in
+  assert (phys_equal identity (token (receive legacy_host upgraded)));
+  assert (
+    Option.equal
+      P.Waveforms.equal_pin
+      (waveform_pin
+         (restore_waveform_preferences decoded (receive empty upgraded))
+         workspace.id)
+      (Some pin));
+  let hidden = apply registry (Set_tile_hidden { tile = pane.id; hidden = true }) in
+  assert (phys_equal identity (token (receive host hidden)));
+  let retyped =
+    { registry with
+      revision = registry.revision + 1
+    ; tiles =
+        List.map registry.tiles ~f:(fun tile ->
+          if W.Tile_id.equal tile.id pane.id then { tile with kind = "custom" } else tile)
+    }
+  in
+  assert (Option.is_none (waveform_pin (receive host retyped) workspace.id));
+  assert (
+    Option.is_none
+      (waveform_pin
+         (restore_waveform_preferences decoded (receive empty retyped))
+         workspace.id));
+  let replaced = { registry with session_id = W.Session_id.of_string "new-session" } in
+  assert (Option.is_none (waveform_pin (receive host replaced) workspace.id));
+  assert (
+    Option.is_none
+      (waveform_pin
+         (restore_waveform_preferences decoded (receive empty replaced))
+         workspace.id));
+  assert (
+    Result.is_error
+      (Or_error.try_with (fun () ->
+         decode_waveform_preferences ~project_key:"other/env" data)));
+  assert (
+    Result.is_error
+      (Or_error.try_with (fun () ->
+         decode_waveform_preferences
+           ~project_key:pin.project_key
+           (encode_waveform_preferences { saved with pins = saved.pins @ saved.pins }))));
+  let removed =
+    { registry with
+      revision = registry.revision + 1
+    ; workspaces = before.workspaces
+    ; tiles = before.tiles
+    }
+  in
+  assert (List.is_empty (receive host removed).waveforms);
+  assert (List.is_empty (reconnect host ~replacement:true).waveforms)
 ;;
