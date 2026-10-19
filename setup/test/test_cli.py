@@ -132,6 +132,34 @@ class InitializationTests(unittest.TestCase):
             target.unlink()
         self.assertEqual((self.root / "owned.txt").read_bytes(), b"user data\x00\n")
 
+    def test_discover_project_from_subdirectory(self):
+        deep = self.root / "src" / "rtl"
+        deep.mkdir(parents=True)
+        (deep / "dune").write_text("(library (name rtl))\n")
+        before = self.snapshot()
+        preview = self.invoke("--discover-project", "--dry-run", cwd=deep)
+        self.assertIn('(name "existing project")', preview.stdout)
+        self.assertIn(f"discovered project root {self.root.resolve()} ", preview.stderr)
+        self.assertEqual(self.snapshot(), before)
+        created = self.invoke("--discover-project", cwd=deep)
+        self.assertIn(str(self.root.resolve() / MANIFEST), created.stdout)
+        self.assertEqual((self.root / MANIFEST).read_text(), preview.stdout)
+        self.assertFalse((deep / MANIFEST).exists())
+
+    def test_discover_project_conflicts_and_no_marker(self):
+        result = self.invoke("--root", self.root, "--discover-project", success=False)
+        self.assertIn("cannot be combined", result.stderr)
+        result = self.invoke(success=False, cwd=self.root)
+        self.assertIn("--root DIR or --discover-project", result.stderr)
+        # TMPDIR may sit inside a Dune build tree; /tmp has no dune-project ancestor.
+        with tempfile.TemporaryDirectory(prefix="workbench-init-nomarker-", dir="/tmp") as plain:
+            (Path(plain) / "dune").write_text("")
+            result = self.invoke("--discover-project", "--dry-run", success=False, cwd=plain)
+            self.assertIn("no Dune project found", result.stderr)
+            self.assertIn("--root DIR", result.stderr)
+            self.assertEqual(sorted(p.name for p in Path(plain).iterdir()), ["dune"])
+        self.assertFalse((self.root / MANIFEST).exists())
+
     def test_symlink_root_uses_resolved_basename(self):
         link = self.base / "linked"
         link.symlink_to(self.root, target_is_directory=True)

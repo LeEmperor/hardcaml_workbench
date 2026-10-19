@@ -446,6 +446,74 @@ def terminal_integration(test, before, starters, header_id):
                       'Project tests (not ASIC-run scoped)'], ['project-tests'])
         test.check(parse(pref_file.read_text()) == stored,
                    'Polling preserves explicit header toggle after an existing preference load')
+
+        # WB-019: main-window and palette bottom hints hide independently, persist with
+        # the other presentation choices and are restorable by keyboard alone.
+        def hint_preferences(label, main, palette):
+            deadline = time.monotonic() + 10
+            expected = ('true' if main else 'false', 'true' if palette else 'false')
+            while True:
+                files = list((test.evidence / 'client-state').rglob('presentation-*.sexp'))
+                stored = parse(files[0].read_text()) if len(files) == 1 else None
+                if stored is not None and (optional_field(stored, 'main_hints'),
+                                           optional_field(stored, 'palette_hints')) == expected:
+                    break
+                require(time.monotonic() < deadline, label + ': hint preference save deadline')
+                terminal.drain(.1)
+            test.check(field(stored, 'schema_version') == '2'
+                       and field(stored, 'chrome') == 'true'
+                       and field(stored, 'tile_headers') == override,
+                       label + ': hint choices persist without altering chrome or headers')
+
+        def chord(key):
+            for k in (b' ', b'c', key):
+                terminal.key(k)
+
+        def palette_hints_shown(label, shown):
+            for k in (b' ', b'c', b'c'):
+                terminal.key(k)
+            hint = 'Enter run · Esc return'
+            terminal.wait('palette-' + label, ['COMMAND PALETTE', '> '] + ([hint] if shown else []),
+                          [] if shown else [hint])
+            terminal.key(b'\x1b')
+            terminal.wait('palette-closed-' + label, absent=['COMMAND PALETTE'])
+
+        chord(b'h')
+        terminal.wait('main-hints-hidden', absent=['Space c c commands'])
+        palette_hints_shown('main-hidden', True)
+        hint_preferences('main-hidden', False, True)
+        chord(b'p')
+        palette_hints_shown('all-hidden', False)
+        hint_preferences('all-hidden', False, False)
+        chord(b'h')
+        palette_hints_shown('palette-hidden', False)
+        hint_preferences('palette-hidden', True, False)
+        terminal.wait('main-hints-restored', ['Space c c commands'])
+        chord(b'h')
+        hint_preferences('all-hidden-again', False, False)
+        terminal.close()
+        terminals.clear()
+
+        # Fresh client: both hint areas stay hidden, and the keyboard restores each one.
+        terminal = Terminal(test, 'hints-restart')
+        terminals.append(terminal)
+        # With the footer hidden there is no ready marker: retry until the loaded
+        # registry lets the palette capture a target.
+        deadline = time.monotonic() + 20
+        while 'COMMAND PALETTE' not in terminal.drain(.5):
+            require(time.monotonic() < deadline, 'hints-restart: palette never opened')
+            terminal.key(b'\x1b')
+            for k in (b' ', b'c', b'c'):
+                terminal.key(k)
+        terminal.key(b'\x1b')
+        terminal.wait('restart-loaded', absent=['COMMAND PALETTE'])
+        palette_hints_shown('restart-all-hidden', False)
+        terminal.wait('restart-main-hidden', absent=['Space c c commands', 'Loading workspace...'])
+        chord(b'p')
+        palette_hints_shown('restart-palette-restored', True)
+        chord(b'h')
+        terminal.wait('restart-main-restored', ['Space c c commands'])
+        hint_preferences('restored', True, True)
         terminal.close()
         terminals.clear()
 

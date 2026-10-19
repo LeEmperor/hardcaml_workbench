@@ -73,6 +73,8 @@ type action =
   | Set_presentation of W.Tile_id.t * T.overrides
   | Resume_log
   | Toggle_chrome
+  | Toggle_main_hints
+  | Toggle_palette_hints
   | Set_appearance of Appearance.t
   | Set_layout_mode of layout_mode
   | Synthesis_mode of Synthesis_view.Mode.t
@@ -136,6 +138,8 @@ type t =
   ; paste : bool
   ; inspection_paste : W.Tile_id.t option
   ; chrome : bool
+  ; main_hints : bool
+  ; palette_hints : bool
   ; notice : string
   ; editing_filter : bool
   ; workspace_focus : (string * W.Tile_id.t option) list
@@ -163,6 +167,8 @@ let empty =
   ; paste = false
   ; inspection_paste = None
   ; chrome = true
+  ; main_hints = true
+  ; palette_hints = true
   ; notice = "Loading workspace registry"
   ; editing_filter = false
   ; workspace_focus = []
@@ -2203,6 +2209,18 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
     ; command "hierarchy.inspect" "Inspect hardware hierarchy" "tree" Inspect_hierarchy
     ; command "host.chrome" "Toggle host chrome" "header footer" Toggle_chrome
     ; command
+        "host.hints.main"
+        ((if t.main_hints then "Hide" else "Show")
+         ^ " main window control hints (Space c h)")
+        "toggle bottom footer keys help hints show restore"
+        Toggle_main_hints
+    ; command
+        "host.hints.palette"
+        ((if t.palette_hints then "Hide" else "Show")
+         ^ " command palette control hints (Space c p)")
+        "toggle bottom footer keys help hints show restore"
+        Toggle_palette_hints
+    ; command
         "layout.fit"
         "Layout: Fit tiles to window"
         "dashboard fill screen grid"
@@ -3057,6 +3075,18 @@ let input t event ~commands : t * effect =
               { capture; commands; query = ""; index = 0; argument = None })
           in
           { t with prefix = 0; palette }, No_effect
+        (* Hint chords stay available while every hint area is hidden; they route through
+           the same captured command path as the palette entries. *)
+        | Character (('h' | 'p') as key), 2 ->
+          let t = { t with prefix = 0 } in
+          (match capture t with
+           | None -> t, No_effect
+           | Some capture ->
+             ( t
+             , Execute
+                 ( capture
+                 , if Char.equal key 'h' then Toggle_main_hints else Toggle_palette_hints
+                 ) ))
         | Character '/', _ ->
           ( { t with
               editing_filter = true

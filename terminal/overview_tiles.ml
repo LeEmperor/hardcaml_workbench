@@ -42,6 +42,7 @@ module Role = struct
     | Success
     | Warning
     | Failure
+    | Emphasis
   [@@deriving compare, equal, sexp]
 end
 
@@ -54,6 +55,9 @@ type row =
   ; workspace : Workspace.Workspace_id.t option
   ; details : string list
   ; display_run : Run_ref.t option
+  ; emphasis : int
+  (** Leading bytes of [value] rendered with [Role.Emphasis]; [0] for none. The emphasized
+      text is part of [value], so state never depends on color alone. *)
   }
 
 let row
@@ -63,10 +67,11 @@ let row
   ?workspace
   ?(details = [])
   ?display_run
+  ?(emphasis = 0)
   label
   value
   =
-  { label; value; role; status; active; workspace; details; display_run }
+  { label; value; role; status; active; workspace; details; display_run; emphasis }
 ;;
 
 let status_role : Status.t -> Role.t = function
@@ -480,14 +485,18 @@ let status_rows
                 Workspace.Context_id.equal other.context context.id)
               > 1
          in
+         (* One label colon only: the binding state is a lowercase keyword that leads the
+            value, so it survives right-clipping before the context name does. *)
+         let keyword = if shared then "linked" else "own" in
          row
+           ~emphasis:(if shared then String.length keyword else 0)
            ~details:
              [ "Context: " ^ Workspace.Context_id.to_string context.id
              ; "Workspace: " ^ Workspace.Workspace_id.to_string w.id
              ; sprintf "Selection revision: %d" context.selection_revision
              ]
            "Context"
-           ((if shared then "Linked: " else "Independent: ") ^ context.name))
+           (keyword ^ (if shared then " to " else " ") ^ context.name))
   in
   [ row "Connection" (if String.is_empty connection then "not reported" else connection)
   ; row
@@ -527,37 +536,86 @@ let marker (appearance : Appearance.t) (row : row) =
     if row.active && not (Appearance.Icons.equal appearance.icons None_) then "> " else ""
 ;;
 
+let row_prefix ~appearance ~indent row =
+  indent
+  ^ (if row.active && Option.is_some row.status then "> " else "")
+  ^ marker appearance row
+;;
+
+(** Narrowest label kept when a checklist group shrinks to keep its status keywords whole:
+    two label cells plus an ellipsis. *)
+let min_label_cells = 3
+
+let fit_cells ~width text =
+  if cell_width text <= width
+  then text
+  else if width <= 0
+  then ""
+  else String.concat (take_cells ~width:(width - 1) (display_clusters text)) ^ "…"
+;;
+
+let aligned row = Option.is_some row.status && not (String.is_empty row.value)
+
+(** The display cell where status keywords start for the visible checklist group (rows
+    with a [status]). Prefixes are measured per row, so Off mode has no phantom icon cells
+    and the selection marker never pushes its keyword out of the column. When the width is
+    short, the column moves left (labels clip with an ellipsis) so the longest keyword
+    stays whole; it never moves past [min_label_cells] of label. [None] when nothing needs
+    aligning. *)
+let status_column ~appearance ~width ~indent rows =
+  match List.filter rows ~f:aligned with
+  | [] -> None
+  | group ->
+    let max_of f = List.fold group ~init:0 ~f:(fun acc row -> Int.max acc (f row)) in
+    let prefix row = cell_width (row_prefix ~appearance ~indent row) in
+    let natural = max_of (fun row -> prefix row + cell_width row.label + 2) in
+    let floor = max_of prefix + min_label_cells + 2 in
+    Some (Int.min natural (Int.max floor (width - max_of (fun r -> cell_width r.value))))
+;;
+
 (** Map roles to the host's theme, e.g. [Active -> Host_view.Role.Selection]. Full values
     and identity are available through [inspection_lines] before clipping. [title=None]
-    makes a headerless tile. No nested frame or background is imposed. *)
-let row_spans ~appearance ~width ~indent row =
-  let prefix =
-    indent
-    ^ (if row.active && Option.is_some row.status then "> " else "")
-    ^ marker appearance row
+    makes a headerless tile. [status_column] pads the label so the value starts at that
+    display cell. No nested frame or background is imposed. *)
+let row_spans ?status_column ~appearance ~width ~indent row =
+  let prefix = row_prefix ~appearance ~indent row in
+  let label =
+    match status_column with
+    | Some column when aligned row ->
+      let budget = column - cell_width prefix - 2 in
+      let label = fit_cells ~width:budget row.label in
+      label ^ ": " ^ String.make (Int.max 0 (budget - cell_width label)) ' '
+    | _ -> row.label ^ if String.is_empty row.value then "" else ": "
   in
-  let label = row.label ^ if String.is_empty row.value then "" else ": " in
   let value =
     Option.value_map row.display_run ~default:row.value ~f:(fun run ->
       fit_run_label ~width:(Int.max 0 (width - cell_width (prefix ^ label))) run)
   in
-  [ (if row.active then Role.Active else row.role), prefix
-  ; Role.Foreground, label
-  ; row.role, value
-  ]
+  let value =
+    let emphasis = Int.clamp_exn row.emphasis ~min:0 ~max:(String.length value) in
+    if emphasis = 0 || Option.is_some row.display_run
+    then [ row.role, value ]
+    else
+      [ Role.Emphasis, String.prefix value emphasis
+      ; row.role, String.drop_prefix value emphasis
+      ]
+  in
+  [ (if row.active then Role.Active else row.role), prefix; Role.Foreground, label ]
+  @ value
 ;;
 
 let render_row
   ?indicator_frames
   ?indicator_fg
   ?selected_bg
+  ?status_column
   ~appearance
   ~attrs
   ~width
   ~indent
   row
   =
-  let spans = row_spans ~appearance ~width ~indent row in
+  let spans = row_spans ?status_column ~appearance ~width ~indent row in
   View.hcat
     (List.mapi spans ~f:(fun i (role, text) ->
        let attrs =
@@ -620,6 +678,8 @@ let render
     | Comfortable when width >= 30 -> " "
     | Compact | Comfortable -> ""
   in
+  let rows = List.take rows (Int.max 0 (height - List.length heading)) in
+  let status_column = status_column ~appearance ~width ~indent rows in
   let content =
     List.map
       rows
@@ -628,12 +688,13 @@ let render
            ?indicator_frames
            ?indicator_fg
            ?selected_bg
+           ?status_column
            ~appearance
            ~attrs
            ~width
            ~indent)
   in
-  let view = View.vcat (List.take (heading @ content) height) in
+  let view = View.vcat (heading @ content) in
   let view =
     View.crop
       ~r:(Int.max 0 (View.width view - width))
@@ -1120,4 +1181,197 @@ let%test_unit "Session labels use actual cells and retain distinguishable hash s
   assert (cell_width (String.concat (List.map spans ~f:snd)) <= 32);
   assert (
     List.mem (inspection_lines rows) ("Run: " ^ run_identity run) ~equal:String.equal)
+;;
+
+let plain_lines view =
+  let buffer = Buffer.create 256 in
+  Notty.Render.to_buffer
+    buffer
+    Notty.Cap.dumb
+    (0, 0)
+    (View.width view, View.height view)
+    (View.Private.notty_image view);
+  Buffer.contents buffer
+  |> String.split_lines
+  |> List.map ~f:(fun line -> String.rstrip line)
+;;
+
+let%expect_test "checklist status keywords share a display-width column" =
+  let stage ?(active = false) label status =
+    row ~role:(status_role status) ~status ~active label (Status.label status)
+  in
+  let rows =
+    [ stage "Synthesis" Completed
+    ; stage ~active:true "Placement" Running
+    ; stage "CTS" Pending
+    ; stage "界é stage" Skipped
+    ; stage "Global routing" Not_requested
+    ; row ~role:Muted "Accept (agg.)" "pass"
+    ]
+  in
+  List.iter Appearance.Icons.all ~f:(fun icons ->
+    let appearance = { Appearance.default with icons; density = Compact } in
+    List.iter [ 40; 30; 22; 12 ] ~f:(fun width ->
+      printf "-- %s width %d\n" (Sexp.to_string (Appearance.Icons.sexp_of_t icons)) width;
+      render ~appearance ~attrs:(fun _ -> []) ~width ~height:(List.length rows) rows
+      |> plain_lines
+      |> List.iter ~f:print_endline));
+  (* Above the minimum useful width every keyword starts in one cell and stays whole. *)
+  List.iter Appearance.Icons.all ~f:(fun icons ->
+    let appearance = { Appearance.default with icons; density = Compact } in
+    List.iter
+      (List.init 40 ~f:(fun i -> i + 22))
+      ~f:(fun width ->
+        let starts =
+          List.filter rows ~f:aligned
+          |> List.map ~f:(fun row ->
+            let spans =
+              row_spans
+                ?status_column:(status_column ~appearance ~width ~indent:"" rows)
+                ~appearance
+                ~width
+                ~indent:""
+                row
+            in
+            assert (cell_width (String.concat (List.map spans ~f:snd)) <= width);
+            cell_width (String.concat (List.map (List.take spans 2) ~f:snd)))
+        in
+        assert (List.for_all starts ~f:(Int.equal (List.hd_exn starts)))));
+  [%expect
+    {|
+    -- None_ width 40
+    Synthesis:      completed
+    > Placement:    running
+    CTS:            pending
+    界é stage:      skipped
+    Global routing: not requested
+    Accept (agg.): pass
+    -- None_ width 30
+    Synthesis:      completed
+    > Placement:    running
+    CTS:            pending
+    界é stage:      skipped
+    Global routing: not requested
+    Accept (agg.): pass
+    -- None_ width 22
+    Synthe…: completed
+    > Plac…: running
+    CTS:     pending
+    界é st…: skipped
+    Global…: not requested
+    Accept (agg.): pass
+    -- None_ width 12
+    Synt…: compl
+    > Pl…: runni
+    CTS:   pendi
+    界é …: skipp
+    Glob…: not r
+    Accept (agg.
+    -- Ascii width 40
+    + Synthesis:      completed
+    > | Placement:    running
+    : CTS:            pending
+    - 界é stage:      skipped
+    . Global routing: not requested
+    Accept (agg.): pass
+    -- Ascii width 30
+    + Synthesis:     completed
+    > | Placement:   running
+    : CTS:           pending
+    - 界é stage:     skipped
+    . Global routi…: not requested
+    Accept (agg.): pass
+    -- Ascii width 22
+    + Synt…: completed
+    > | Pl…: running
+    : CTS:   pending
+    - 界é …: skipped
+    . Glob…: not requested
+    Accept (agg.): pass
+    -- Ascii width 12
+    + Synt…: com
+    > | Pl…: run
+    : CTS:   pen
+    - 界é …: ski
+    . Glob…: not
+    Accept (agg.
+    -- Unicode width 40
+    ✓ Synthesis:      completed
+    > ⣷ Placement:    running
+    ◷ CTS:            pending
+    ↷ 界é stage:      skipped
+    · Global routing: not requested
+    Accept (agg.): pass
+    -- Unicode width 30
+    ✓ Synthesis:     completed
+    > ⣷ Placement:   running
+    ◷ CTS:           pending
+    ↷ 界é stage:     skipped
+    · Global routi…: not requested
+    Accept (agg.): pass
+    -- Unicode width 22
+    ✓ Synt…: completed
+    > ⣷ Pl…: running
+    ◷ CTS:   pending
+    ↷ 界é …: skipped
+    · Glob…: not requested
+    Accept (agg.): pass
+    -- Unicode width 12
+    ✓ Synt…: com
+    > ⣷ Pl…: run
+    ◷ CTS:   pen
+    ↷ 界é …: ski
+    · Glob…: not
+    Accept (agg.
+    |}]
+;;
+
+let%expect_test "context linkage avoids nested colons and keeps names visible" =
+  let snapshot = Workspace.initial ~session_id:(Workspace.Session_id.of_string "s") in
+  let overview = (List.hd_exn snapshot.workspaces).id in
+  let independent = Workspace.apply_mutation snapshot (Make_independent overview) in
+  List.iter [ snapshot; independent ] ~f:(fun snapshot ->
+    let rows =
+      status_rows
+        ~snapshot
+        ~active_workspace:(Some overview)
+        ~project:None
+        ~selected_run:None
+        ~connection:"local"
+    in
+    let linkage = List.nth_exn rows 2 in
+    (* Exactly one label colon; only the linked keyword carries emphasis. *)
+    assert (
+      String.count (List.hd_exn (inspection_lines [ linkage ])) ~f:(Char.equal ':') = 1);
+    let emphasized =
+      row_spans ~appearance:Appearance.default ~width:40 ~indent:"" linkage
+      |> List.filter_map ~f:(fun (role, text) ->
+        Option.some_if (Role.equal role Emphasis) text)
+    in
+    assert (
+      List.equal
+        String.equal
+        emphasized
+        (if String.is_prefix linkage.value ~prefix:"linked" then [ "linked" ] else []));
+    List.iter Appearance.Icons.all ~f:(fun icons ->
+      let appearance = { Appearance.default with icons; density = Compact } in
+      List.iter [ 40; 24 ] ~f:(fun width ->
+        render ~appearance ~attrs:(fun _ -> []) ~width ~height:1 [ linkage ]
+        |> plain_lines
+        |> List.iter ~f:print_endline)));
+  [%expect
+    {|
+    Context: linked to Main
+    Context: linked to Main
+    Context: linked to Main
+    Context: linked to Main
+    Context: linked to Main
+    Context: linked to Main
+    Context: own Overview independent
+    Context: own Overview in
+    Context: own Overview independent
+    Context: own Overview in
+    Context: own Overview independent
+    Context: own Overview in
+    |}]
 ;;

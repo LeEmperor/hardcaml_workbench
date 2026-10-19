@@ -1,11 +1,15 @@
 (library
  (name hardcaml_workbench_setup)
- (modules initialization)
+ (modules initialization no_clobber project_discovery simulation_setup)
  (libraries
   core
   core_unix
   core_unix.filename_unix
-  hardcaml_workbench_project_integration)
+  core_unix.signal_unix
+  core_unix.sys_unix
+  hardcaml_workbench_adapters
+  hardcaml_workbench_project_integration
+  hardcaml_workbench_protocol)
  (preprocess
   (pps ppx_jane))
  (lint
@@ -15,6 +19,17 @@
  (name main)
  (modules main)
  (public_name hardcaml-workbench-init)
+ (package hardcaml_workbench)
+ (libraries core core_unix.command_unix hardcaml_workbench_setup)
+ (preprocess
+  (pps ppx_jane))
+ (lint
+  (pps ppx_js_style)))
+
+(executable
+ (name simulation_main)
+ (modules simulation_main)
+ (public_name hardcaml-workbench-simulation-setup)
  (package hardcaml_workbench)
  (libraries core core_unix.command_unix hardcaml_workbench_setup)
  (preprocess

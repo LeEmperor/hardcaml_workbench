@@ -138,6 +138,11 @@ exit waits for queued writes. Preferences use a separate versioned
 `${XDG_STATE_HOME:-$HOME/.local/state}/hardcaml-workbench/terminal/`, keyed by
 canonical project root and execution environment.
 
+Schema version 2 (WB-019) adds independent `main_hints` and `palette_hints` choices
+for the main-window and command-palette bottom hints, toggled by Space c h / Space c p
+(palette: "hints"). Version 1 files still load with both visible; the global chrome
+toggle is unchanged and still hides the footer regardless of these choices.
+
 Tile-header choices additionally match session, tile, workspace and view kind.
 Replacement sessions do not inherit stale tile preferences. Focus, scroll, filters,
 active workspace, run selection and provider data are not persisted in this file.

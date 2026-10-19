@@ -94,6 +94,7 @@
   core_unix.command_unix
   hardcaml_workbench_native_http
   hardcaml_workbench_protocol
+  hardcaml_workbench_setup
   notty-community
   terminal_presentation)
  (preprocess

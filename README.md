@@ -107,6 +107,13 @@ HARDCAML_WORKBENCH_DAEMON="$PWD/_build/default/daemon/main.exe" \
   --project-root /absolute/path/to/project --environment opam:PROJECT_SWITCH
 ```
 
+From anywhere inside a project, `--discover-project` replaces `--project-root` and
+opens the nearest ancestor containing a regular `dune-project` (the selected root is
+reported; an explicit `--project-root` never searches upward). Simulation provider
+configuration can be generated and checked (discovery only, no tests run) with
+`hardcaml-workbench-simulation-setup init|check`; see
+[WB-039](docs/features/project/WB-039-simulation-setup.md).
+
 Use the project's actual switch. `--environment inherited` means the daemon's
 startup environment, not necessarily the current client's shell. Add `--plain`
 for noninteractive use. The current `b`/`t` controls submit build/test; `q` exits

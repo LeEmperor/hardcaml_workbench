@@ -1,6 +1,6 @@
 (library
  (name test_initialization)
- (modules test_initialization)
+ (modules test_initialization test_project_discovery test_simulation_setup)
  (libraries
   core
   core_unix
@@ -16,3 +16,9 @@
  (deps test_cli.py)
  (action
   (run python3 %{dep:test_cli.py} %{exe:../main.exe})))
+
+(rule
+ (alias runtest)
+ (deps test_simulation_cli.py)
+ (action
+  (run python3 %{dep:test_simulation_cli.py} %{exe:../simulation_main.exe})))

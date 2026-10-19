@@ -114,7 +114,7 @@ def acceptance(t, check, http, runs, presets):
         check(label in full_runs.text(), 'Zoom preserves the complete distinguishable run label: ' + label)
     t.command('Unzoom workspace')
     stage_names = ['Synthesis', 'Floorplan', 'Placement', 'CTS', 'Routing', 'Signoff']
-    strip = [line for line in pane_body(overview_screen, 'stage checklist')
+    strip = [line for line in map(composition.status_text, pane_body(overview_screen, 'stage checklist'))
              if ': completed' in line and any(name in line for name in stage_names)]
     check(all(any(name + ': completed' in line for line in strip) for name in stage_names), 'Vertical checklist exposes all six explicit stage outcomes')
     check(all(sum(name + ': completed' in line for name in stage_names) == 1 for line in strip), 'One explicit stage per checklist row')

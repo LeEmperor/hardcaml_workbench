@@ -40,6 +40,14 @@ def require(ok, message):
         raise AssertionError(message)
 
 
+STATUS_PADDING = re.compile(r'(?<=\S:) {2,}(?=\S)')
+
+
+def status_text(text):
+    """Checklist keywords share a padded column (WB-001); oracles match `Label: status`."""
+    return STATUS_PADDING.sub(' ', text)
+
+
 def wait(predicate, label, timeout=20):
     deadline = time.monotonic() + timeout
     while True:
@@ -203,7 +211,7 @@ class Terminal:
         deadline = time.monotonic() + 12
         while True:
             screen = self.drain()
-            visible = screen.text().casefold()
+            visible = status_text(screen.text()).casefold()
             if all(s.casefold() in visible for s in expected) and all(s.casefold() not in visible for s in absent):
                 break
             if time.monotonic() > deadline:

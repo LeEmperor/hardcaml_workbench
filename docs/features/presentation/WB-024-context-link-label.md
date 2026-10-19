@@ -3,7 +3,7 @@ id: WB-024
 title: Context-link wording and semantic emphasis
 category: presentation
 feature_sets: [FS5]
-status: needs-triage
+status: delivered
 kind: defect
 priority: P2
 severity: S3
@@ -39,11 +39,11 @@ Changing linking semantics, context ownership, or run selection behavior.
 No context migration or new binding mechanism is required.
 
 ## Acceptance criteria
-- [ ] Record the surface currently showing `context: linked: main`.
-- [ ] Revised wording avoids nested colon labels and highlights the linked state.
-- [ ] Main and independent context names remain distinguishable at narrow widths.
-- [ ] Restrained/ASCII/Off modes retain readable state without relying on color.
-- [ ] The change never mutates context bindings or evidence selection.
+- [x] Record the surface currently showing `context: linked: main`.
+- [x] Revised wording avoids nested colon labels and highlights the linked state.
+- [x] Main and independent context names remain distinguishable at narrow widths.
+- [x] Restrained/ASCII/Off modes retain readable state without relying on color.
+- [x] The change never mutates context bindings or evidence selection.
 
 ## Dependencies
 Required: none; context binding and semantic styling already exist.
@@ -63,3 +63,44 @@ Preserve current compact presentation rather than adding a decorative badge row.
 - [Run contexts](../run_contexts.md)
 - [Appearance semantic roles](../appearance.md)
 - [Host renderer](../../../terminal/host_view.ml)
+
+## Delivery notes
+**Reproduced surface.** The Overview `live-status` (Session) tile's linkage row,
+built by `Overview_tiles.status_rows` and drawn by `Overview_tiles.render`. Captured
+before the change (any icon mode, 40 and 24 cells):
+
+```
+Context: Linked: Main
+Context: Independent: Overview independe     (40 cells)
+Context: Independent: Ov                     (24 cells)
+```
+
+**Wording (owner decision).** `Context: linked to <name>` for a shared context (Main,
+or any context shared by more than one workspace) and `Context: own <name>` for an
+independent one, e.g. `Context: linked to Main` and `Context: own Overview independent`.
+That leaves one label colon. The state keyword comes first in lowercase, so right-clipping
+removes the name before the state. At 24 cells the rows read `Context: linked to Main`
+and `Context: own Overview in`.
+
+**Emphasis.** The row has a new `emphasis` prefix (bytes of `value`). Only the `linked`
+keyword gets the new `Overview_tiles.Role.Emphasis`, which the host maps to `Focus`
+(bold accent). Restrained colour keeps the bold weight. ASCII and Off icon modes change
+nothing, because the state is spelled out in the text. The full value and details stay
+unchanged for inspection.
+
+**Not changed.** The global header (`<workspace> | run … | Linked: Main | …`) has no
+nested colon, and several PTY scripts and `docs/fs0_install_checks.md` pin it. If the
+vocabulary should match there too, that's a follow-up for WB-054 or the owner. Bindings,
+the registry and run selection are untouched. The edit is presentation-only, in the
+`status_rows` value construction.
+
+**Verification.** The expect test `context linkage avoids nested colons and keeps names
+visible` in `terminal/overview_tiles.ml` renders linked and independent rows in all
+three icon modes at 40 and 24 cells. It also asserts one label colon and that only
+`linked` carries `Emphasis`. Commands:
+`./scripts/with-switch.sh dune build -j20`, `./scripts/with-switch.sh dune runtest -j20`
+(all pass).
+The same PTY acceptance run as WB-001 (`test-overview-sidebar.py`,
+`test-checklist-launch-workflow.py`, `test-launch-stage-consistency.py`) passed with the
+new wording.
+

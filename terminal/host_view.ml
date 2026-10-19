@@ -725,6 +725,8 @@ let utility_attrs appearance : Overview_tiles.Role.t -> Attr.t list = function
   | Success -> Role.attrs appearance Success
   | Warning -> Role.attrs appearance Warning
   | Failure -> Role.attrs appearance Failure
+  (* Bold accent; Restrained keeps the bold weight, and the keyword is always text. *)
+  | Emphasis -> Role.attrs appearance Focus
 ;;
 
 let inspection_explorer host tile =
@@ -2173,6 +2175,15 @@ let show_footer_hints host =
   | _ -> true
 ;;
 
+(** The bottom row exists only while it has something to say. Hidden main-window hints
+    give their row back to the tiles; notices and active-input status still claim it, and
+    the existing global chrome toggle continues to suppress the footer entirely. *)
+let footer_row host =
+  host.H.paste
+  || host.editing_filter
+  || (host.chrome && (host.main_hints || not (String.is_empty host.notice)))
+;;
+
 (** The same outer and inner geometry is used by rendering and page navigation. *)
 let tile_layout host ({ Dimensions.width; height } : Dimensions.t) =
   let width = Int.max 1 width
@@ -2182,7 +2193,7 @@ let tile_layout host ({ Dimensions.width; height } : Dimensions.t) =
       1
       (height
        - (if show_global_header host then 1 else 0)
-       - if host.chrome || host.editing_filter || host.paste then 1 else 0)
+       - if footer_row host then 1 else 0)
   in
   let tiles = H.tiles host in
   let zoomed =
@@ -2539,7 +2550,8 @@ let render_workspace
       ])
     else if not host.chrome
     then []
-    else if String.is_empty host.notice && (not compact) && not (show_footer_hints host)
+    else if String.is_empty host.notice
+            && ((not host.main_hints) || ((not compact) && not (show_footer_hints host)))
     then []
     else
       [ lines
@@ -2597,8 +2609,14 @@ let render_palette host dimensions background =
     in
     let width = geometry.content_width in
     let height = geometry.content_height in
-    let footer_height = if height >= 3 then 1 else 0 in
-    let footer_gap = if height >= 5 then 1 else 0 in
+    (* Hidden palette hints return both the hint row and its separator to the result list;
+       a notice (e.g. an unavailable reason) still claims the row. *)
+    let footer_height =
+      if height >= 3 && (host.palette_hints || not (String.is_empty host.notice))
+      then 1
+      else 0
+    in
+    let footer_gap = if footer_height > 0 && height >= 5 then 1 else 0 in
     let heading_height = if geometry.border = 0 && height >= 4 then 1 else 0 in
     let prompt_rows =
       Int.max 1 (Int.min 3 (height - footer_height - footer_gap - heading_height))
@@ -4560,6 +4578,164 @@ let%test_unit "actual palette reserves a blank footer separator within its style
   assert (String.is_substring panel ~substring:"> palette-query▏");
   assert (String.is_substring panel ~substring:"Esc return");
   assert (String.is_substring panel ~substring:"╰─")
+;;
+
+let%test_unit "main-window and palette hints hide independently and reclaim rows" =
+  let base, data, _ = refinement_fixture P.Overview.definition in
+  let base = { base with notice = "" } in
+  let catalog = H.catalog base ~project:None ~jobs:[] in
+  let palette_for host index =
+    { H.capture = Option.value_exn (H.capture host)
+    ; commands = catalog
+    ; query = ""
+    ; index
+    ; argument = None
+    }
+  in
+  let panel_text host dimensions =
+    let image = render host data dimensions in
+    let bounds =
+      Palette_view.bounds ~width:dimensions.Dimensions.width ~height:dimensions.height
+    in
+    View.crop ~l:bounds.x ~t:bounds.y image
+    |> box ~width:bounds.width ~height:bounds.height
+    |> plain_text
+  in
+  let visible_titles text =
+    List.count catalog ~f:(fun command ->
+      String.is_substring text ~substring:(String.prefix command.title 20))
+  in
+  List.iter
+    [ { Dimensions.width = 120; height = 40 }
+    ; { width = 80; height = 24 }
+    ; { width = 44; height = 14 }
+    ; { width = 30; height = 9 }
+    ]
+    ~f:(fun dimensions ->
+      let shown_available, _, _ = tile_layout base dimensions in
+      let shown_panel =
+        panel_text { base with palette = Some (palette_for base 0) } dimensions
+      in
+      List.iter [ true; false ] ~f:(fun main_hints ->
+        List.iter [ true; false ] ~f:(fun palette_hints ->
+          let host = { base with main_hints; palette_hints } in
+          (* Main window: the hidden hint row is given back to the tiles, and every tile
+             (and therefore its focus marker) stays inside the reclaimed area. *)
+          let available, compact, layout = tile_layout host dimensions in
+          assert (available = shown_available + if main_hints then 0 else 1);
+          assert (not (List.is_empty layout));
+          List.iter layout ~f:(fun (_, (g : W.Geometry.t)) ->
+            assert (g.y + g.height <= available && g.x + g.width <= dimensions.width));
+          let screen = plain_text (render host data dimensions) in
+          let hint =
+            if compact then "Compact: focused tile only" else "Space c c commands"
+          in
+          assert (Bool.equal (String.is_substring screen ~substring:hint) main_hints);
+          (* Palette: independent of the main-window choice; hidden hints return the hint
+             row and its separator to the result list, and the last selection stays
+             visible. *)
+          let last = List.length catalog - 1 in
+          List.iter [ 0; last ] ~f:(fun index ->
+            let opened = { host with palette = Some (palette_for host index) } in
+            let panel = panel_text opened dimensions in
+            let other =
+              panel_text { opened with main_hints = not main_hints } dimensions
+            in
+            assert (String.equal panel other);
+            if dimensions.height >= 14
+            then (
+              assert (
+                Bool.equal
+                  (String.is_substring panel ~substring:"Tab/Shift-Tab ↑/↓")
+                  palette_hints);
+              assert (String.is_substring panel ~substring:"> "));
+            if index = 0 && dimensions.height >= 14
+            then
+              assert (
+                visible_titles panel
+                = visible_titles shown_panel + if palette_hints then 0 else 2));
+          (* A notice still claims the bottom row in both places. *)
+          let noticed = { host with notice = "Unavailable: fixture reason" } in
+          assert (fst3 (tile_layout noticed dimensions) = shown_available);
+          if dimensions.height >= 14
+          then (
+            assert (
+              String.is_substring
+                (plain_text (render noticed data dimensions))
+                ~substring:"Unavailable: fixture reason");
+            assert (
+              String.is_substring
+                (panel_text
+                   { noticed with palette = Some (palette_for noticed 0) }
+                   dimensions)
+                ~substring:"Unavailable: fixture reason")))));
+  (* The existing global chrome toggle is unchanged: it still suppresses the footer
+     regardless of the hint choices, and hint choices never touch it. *)
+  let dimensions = { Dimensions.width = 120; height = 40 } in
+  let chromeless = { base with chrome = false } in
+  List.iter [ true; false ] ~f:(fun main_hints ->
+    let host = { chromeless with main_hints } in
+    assert (fst3 (tile_layout host dimensions) = fst3 (tile_layout chromeless dimensions));
+    assert (
+      not
+        (String.is_substring
+           (plain_text (render host data dimensions))
+           ~substring:"Space c c commands")))
+;;
+
+let%test_unit "every hint area is restorable by keyboard while all are hidden" =
+  let base, _, _ = refinement_fixture P.Overview.definition in
+  let hidden = { base with main_hints = false; palette_hints = false; notice = "" } in
+  let catalog = H.catalog hidden ~project:None ~jobs:[] in
+  let step host event = fst (H.input host event ~commands:catalog) in
+  let chord key =
+    let host = step (step hidden (Character ' ')) (Character 'c') in
+    H.input host (Character key) ~commands:catalog
+  in
+  (match chord 'h' with
+   | after, Execute (_, Toggle_main_hints) ->
+     assert (after.prefix = 0 && Option.is_none after.palette)
+   | _ -> assert false);
+  (match chord 'p' with
+   | after, Execute (_, Toggle_palette_hints) ->
+     assert (after.prefix = 0 && Option.is_none after.palette)
+   | _ -> assert false);
+  (* The palette itself stays reachable and searchable; both restore commands are
+     discoverable, name their chord, and run from the captured target. *)
+  let opened =
+    step (step (step hidden (Character ' ')) (Character 'c')) (Character 'c')
+  in
+  let searched =
+    String.fold "hints" ~init:opened ~f:(fun host c -> step host (Character c))
+  in
+  let p = Option.value_exn searched.palette in
+  let ids = List.map (H.matches p) ~f:(fun command -> command.H.id) in
+  assert (List.mem ids "host.hints.main" ~equal:String.equal);
+  assert (List.mem ids "host.hints.palette" ~equal:String.equal);
+  List.iter catalog ~f:(fun command ->
+    match command.id with
+    | "host.hints.main" ->
+      assert (String.is_substring command.title ~substring:"Show main window");
+      assert (String.is_substring command.title ~substring:"Space c h")
+    | "host.hints.palette" ->
+      assert (String.is_substring command.title ~substring:"Show command palette");
+      assert (String.is_substring command.title ~substring:"Space c p")
+    | _ -> ());
+  let rec select host =
+    let p = Option.value_exn host.H.palette in
+    if String.equal (List.nth_exn (H.matches p) p.index).id "host.hints.palette"
+    then host
+    else select (step host Next)
+  in
+  (match H.input (select searched) Enter ~commands:catalog with
+   | after, Execute (_, Toggle_palette_hints) ->
+     assert (Option.is_none after.palette);
+     assert (Option.equal W.Tile_id.equal after.focus hidden.focus)
+   | _ -> assert false);
+  let dismissed = step searched Escape in
+  assert (Option.is_none dismissed.palette);
+  assert (Option.equal W.Tile_id.equal dismissed.focus hidden.focus);
+  assert ((not dismissed.main_hints) && not dismissed.palette_hints)
 ;;
 
 let%test_unit "selector width budget preserves useful IDs and aligns compact status" =

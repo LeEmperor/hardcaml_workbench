@@ -53,7 +53,7 @@ def acceptance(t, check, http, runs, presets):
     screen = t.capture('sidebar-overview-120x40', ['planned-run', 'empty:', 'Reported cells (agg.): 128',
         'Aggregate Setup slack: 0.42 ns', 'Check drc: pass', 'Acceptance (agg.): not_evaluated'])
     refinement.sidebar_geometry(screen, check)
-    stages = pane_body(screen, 'stage checklist')
+    stages = [composition.status_text(line) for line in pane_body(screen, 'stage checklist')]
     names = ['Synthesis', 'Floorplan', 'Placement', 'CTS', 'Routing', 'Signoff']
     check(all(sum(name + ': completed' in line for line in stages) == 1 for name in names),
           'All six explicit stages are visible as vertical checklist rows at120x40')

@@ -19,6 +19,8 @@ type t =
   ; appearance : Appearance.t
   ; layout_mode : Host.layout_mode
   ; chrome : bool
+  ; main_hints : bool option [@sexp.option]
+  ; palette_hints : bool option [@sexp.option]
   ; session : W.Session_id.t option
   ; tile_headers : tile_headers list
   }
@@ -30,12 +32,18 @@ let path ~state_directory ~project_key =
     ("presentation-" ^ Plain_rpc.digest project_key ^ ".sexp")
 ;;
 
+(* Schema 2 adds the independent main-window/palette hint choices (WB-019). Schema 1 files
+   remain readable: they predate the choices, so both hint areas stay visible. *)
+let schema_version = 2
+
 let capture ~project_key (host : Host.t) =
-  { schema_version = 1
+  { schema_version
   ; project_key
   ; appearance = host.appearance
   ; layout_mode = host.layout_mode
   ; chrome = host.chrome
+  ; main_hints = Some host.main_hints
+  ; palette_hints = Some host.palette_hints
   ; session = Option.map host.registry ~f:(fun registry -> registry.session_id)
   ; tile_headers =
       Option.value_map host.registry ~default:[] ~f:(fun registry ->
@@ -50,8 +58,10 @@ let decode ~project_key content =
   if String.length content > 64 * 1024
   then failwith "Terminal presentation preference size limit exceeded";
   let stored = t_of_sexp (Sexp.of_string content) in
-  if stored.schema_version <> 1
-  then failwith "Unsupported terminal presentation preference schema";
+  (match stored.schema_version, stored.main_hints, stored.palette_hints with
+   | 1, None, None | 2, Some _, Some _ -> ()
+   | (1 | 2), _, _ -> failwith "Terminal presentation hint fields do not match schema"
+   | _ -> failwith "Unsupported terminal presentation preference schema");
   if not (String.equal stored.project_key project_key)
   then failwith "Terminal presentation preference project/environment mismatch";
   if Option.is_none stored.session && not (List.is_empty stored.tile_headers)
@@ -93,6 +103,8 @@ let apply t (host : Host.t) =
       appearance = t.appearance
     ; layout_mode = t.layout_mode
     ; chrome = t.chrome
+    ; main_hints = Option.value t.main_hints ~default:true
+    ; palette_hints = Option.value t.palette_hints ~default:true
     }
 ;;
 
@@ -222,7 +234,14 @@ let%test_unit "strict schema validation and isolated identities" =
       Result.is_error (Or_error.try_with (fun () -> decode ~project_key:"root/env" value)))
   in
   rejects "(";
-  rejects (encode { stored with schema_version = 2 });
+  rejects (encode { stored with schema_version = 3 });
+  rejects (encode { stored with main_hints = None });
+  rejects (encode { stored with schema_version = 1 });
+  rejects
+    (String.substr_replace_first
+       (encode stored)
+       ~pattern:"(main_hints true)"
+       ~with_:"(main_hints maybe)");
   rejects (encode { stored with project_key = "root/other-env" });
   rejects (String.make ((64 * 1024) + 1) ' ');
   rejects "((unknown true))";
@@ -321,4 +340,37 @@ let%test_unit "catalog header/reset intent survives polling without replaying sp
       { Tile_presentation.inherit_ with header = Some true }
   in
   assert ((not save) && List.is_empty ignored.locals)
+;;
+
+let%test_unit "main-window and palette hints persist independently of global chrome" =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "hint-preferences") in
+  let base = Host.receive Host.empty registry in
+  List.iter [ true; false ] ~f:(fun chrome ->
+    List.iter [ true; false ] ~f:(fun main_hints ->
+      List.iter [ true; false ] ~f:(fun palette_hints ->
+        let host = { base with chrome; main_hints; palette_hints } in
+        let stored =
+          decode ~project_key:"root/env" (encode (capture ~project_key:"root/env" host))
+        in
+        let restored = apply stored (Host.receive Host.empty registry) in
+        assert (Bool.equal restored.chrome chrome);
+        assert (Bool.equal restored.main_hints main_hints);
+        assert (Bool.equal restored.palette_hints palette_hints))));
+  (* A schema 1 file (written before WB-019) keeps its chrome choice and shows hints. *)
+  let legacy =
+    { (capture ~project_key:"root/env" { base with chrome = false }) with
+      schema_version = 1
+    ; main_hints = None
+    ; palette_hints = None
+    }
+  in
+  let encoded = encode legacy in
+  assert (not (String.is_substring encoded ~substring:"hints"));
+  let restored =
+    apply
+      (decode ~project_key:"root/env" encoded)
+      { base with main_hints = false; palette_hints = false }
+  in
+  assert (not restored.chrome);
+  assert (restored.main_hints && restored.palette_hints)
 ;;

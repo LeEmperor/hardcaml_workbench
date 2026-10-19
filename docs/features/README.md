@@ -23,6 +23,15 @@ are **complete and owner-accepted (2026-10-19)**; tests remain independent of
 Workbench. See
 [native provider migration](../native_provider_plan.md).
 
+**2026-10-19:** WB-001 (aligned checklist status column), WB-019 (independently
+hideable main/palette hints, Space c h / Space c p), WB-024 (`Context: linked to Main`),
+WB-050 (opt-in `--discover-project` upward root discovery) and WB-039
+(`hardcaml-workbench-simulation-setup init|check`, discovery-only) are implemented and
+automatically verified; each ticket's Delivery notes record decisions and evidence.
+WB-001/019/024 await owner visual review. `test-frontend-refinement.py` and
+`test-terminal-indicators.py` fail identically on the prior HEAD (stale Overview and
+Testing-title expectations), independent of these changes.
+
 ## How this directory works
 
 - **WB-NNN** identifies one actionable feature/defect ticket; filenames and category

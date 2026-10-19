@@ -590,6 +590,8 @@ let load_presentation_preferences session =
                appearance = Appearance.default
              ; layout_mode = Fit
              ; chrome = true
+             ; main_hints = true
+             ; palette_hints = true
              ; locals = []
              };
         session.presentation_preferences_loaded <- Some project_key;
@@ -4896,6 +4898,28 @@ let execute_host session captured action ~exit =
     | Toggle_chrome ->
       session.host <- { session.host with chrome = not session.host.chrome };
       Effect.of_deferred_thunk (fun () -> save_presentation_preferences session)
+    | Toggle_main_hints ->
+      let main_hints = not session.host.main_hints in
+      session.host
+      <- { session.host with
+           main_hints
+         ; notice =
+             (if main_hints
+              then "Main window control hints shown"
+              else "Main window control hints hidden; Space c h restores")
+         };
+      Effect.of_deferred_thunk (fun () -> save_presentation_preferences session)
+    | Toggle_palette_hints ->
+      let palette_hints = not session.host.palette_hints in
+      session.host
+      <- { session.host with
+           palette_hints
+         ; notice =
+             (if palette_hints
+              then "Command palette control hints shown"
+              else "Command palette control hints hidden; Space c p restores")
+         };
+      Effect.of_deferred_thunk (fun () -> save_presentation_preferences session)
     | Set_appearance appearance ->
       session.host <- Host.set_appearance session.host appearance;
       Effect.of_deferred_thunk (fun () -> save_presentation_preferences session)
@@ -6759,6 +6783,14 @@ let command =
        flag "--connect" (optional string) ~doc:"URL attach without automatic startup"
      and project_root =
        flag "--project-root" (optional string) ~doc:"ROOT open a Dune project"
+     and discover_project =
+       flag
+         "--discover-project"
+         no_arg
+         ~doc:
+           " open the nearest ancestor of the current directory (symlinks resolved \
+            first) containing a regular dune-project; reports the root; not with \
+            --project-root"
      and environment =
        flag
          "--environment"
@@ -6887,25 +6919,44 @@ let command =
        capture_baseline_frames ~directory;
        return (Ok ())
      | None, None, None ->
-       run
-         ~endpoint
-         ~project_root
-         ~environment
-         ~plain
-         ~api
-         ~asic_operation
-         ~workspace_operation
-         ~wait_timeout_seconds
-         ~action
-         ~target
-         ~configuration
-         ~artifact
-         ~hierarchy
-         ~refresh_integration
-         ~wait
-         ~diagnostics_file
-         ~artifact_viewer
-         ~artifact_binary_viewer)
+       (match
+          Hardcaml_workbench_setup.Project_discovery.resolve
+            ~explicit:project_root
+            ~discover:discover_project
+            ~explicit_flag:"--project-root"
+            ~discover_flag:"--discover-project"
+        with
+        | Error message ->
+          fun () ->
+            if api
+            then
+              printf
+                "%s\n%!"
+                (Sexp.to_string_mach
+                   (Workspace.Response.sexp_of_t
+                      (Error (V1.Error.create Invalid_request message))));
+            return (Or_error.error_string message)
+        | Ok (project_root, note) ->
+          if not api then Option.iter note ~f:(eprintf "hardcaml-workbench: %s\n%!");
+          run
+            ~endpoint
+            ~project_root
+            ~environment
+            ~plain
+            ~api
+            ~asic_operation
+            ~workspace_operation
+            ~wait_timeout_seconds
+            ~action
+            ~target
+            ~configuration
+            ~artifact
+            ~hierarchy
+            ~refresh_integration
+            ~wait
+            ~diagnostics_file
+            ~artifact_viewer
+            ~artifact_binary_viewer))
 ;;
 
 let () = Command_unix.run command

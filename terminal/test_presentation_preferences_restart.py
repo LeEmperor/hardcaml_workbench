@@ -5,6 +5,7 @@ Also wired into the terminal runtest alias. Each probe invocation is a fresh pro
 """
 
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -15,8 +16,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="fs3-presentation-") as directory:
         state = pathlib.Path(directory) / "state"
 
-        def run(mode, path=state):
-            subprocess.run([probe, mode, str(path)], check=True)
+        def run(mode, path=state, *extra):
+            subprocess.run([probe, mode, str(path), *extra], check=True)
 
         run("missing")
         run("write")
@@ -36,7 +37,22 @@ def main():
         run("write")
         run("read")
 
-        unknown_version = original.replace(b"(schema_version 1)", b"(schema_version 99)")
+        # WB-019: every main/palette hint combination survives a fresh process,
+        # without disturbing the global chrome choice.
+        for combo in ("11", "10", "01", "00"):
+            run("hints-write", state, combo)
+            run("hints-read", state, combo)
+        # A schema 1 file written before the hint choices existed stays readable.
+        legacy = re.sub(
+            rb"\s*\((main|palette)_hints (true|false)\)", b"", files[0].read_bytes()
+        ).replace(b"(schema_version 2)", b"(schema_version 1)")
+        assert b"hints" not in legacy and b"(schema_version 1)" in legacy
+        files[0].write_bytes(legacy)
+        run("read-legacy")
+        run("write")
+        run("read")
+
+        unknown_version = original.replace(b"(schema_version 2)", b"(schema_version 99)")
         assert unknown_version != original
         for malformed in (b"(", unknown_version, b" " * 65537):
             files[0].write_bytes(malformed)

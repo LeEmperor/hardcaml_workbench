@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import signal
 import struct
@@ -236,7 +237,8 @@ def pty_check(base, client_path, http):
             text = fs0_screen.terminal_screen(bytes(transcript))
             # Skins may uppercase headings. Match presentation case-insensitively;
             # exact stage IDs/selections/statuses are independently fenced by HTTP.
-            visible = text.casefold()
+            # Checklist keywords share a padded column (WB-001).
+            visible = re.sub(r'(?<=\S:) {2,}(?=\S)', ' ', text).casefold()
             if all(s.casefold() in visible for s in expected) and all(s.casefold() not in visible for s in absent):
                 (base / ('pty-' + label + '.txt')).write_text(text)
                 (base / ('pty-' + label + '.ansi')).write_bytes(transcript)

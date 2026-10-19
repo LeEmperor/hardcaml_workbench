@@ -77,6 +77,7 @@ def row(screen, label):
     if label.startswith(('Synthesis:', 'Routing:', 'Signoff:')):
         left, top, right, bottom = sidebar.pane_rect(framed(screen), 'stage checklist')
         lines = [line[left:right] for line in lines[top + 1:bottom - 1]]
+    lines = [c.status_text(line) for line in lines]
     matches = [line for line in lines if label.casefold() in line.casefold()]
     require(len(matches) == 1, 'Exactly one visible lifecycle row for ' + label + ': ' + repr(matches))
     return matches[0]
