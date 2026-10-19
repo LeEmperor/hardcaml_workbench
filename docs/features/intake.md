@@ -72,6 +72,10 @@ ticket. No feature in this intake is activated for implementation by cataloging 
 
 ## Existing followups retained separately
 
+The later [WB-066 native-provider request](verification/WB-066-ocaml-provider-library.md)
+was added after this original intake, and is delivered and owner-accepted as of
+2026-10-19. It is not one of the 62 original entries or four followups below.
+
 These are not additional entries attributed to the owner's paste.
 
 | Ticket | Existing source and distinction |

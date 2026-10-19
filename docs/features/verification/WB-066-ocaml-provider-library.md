@@ -26,6 +26,12 @@ project test executables. The actual example's native generation is installed;
 existing tests/checkers acquire no Workbench dependency. The package is locally
 installable, not yet published to an external opam repository.
 
+**Owner acceptance, 2026-10-19:** after trying the native-provider workflow, the
+owner reported it works and requested closeout. WB-066 is **complete and accepted**.
+This manual confirmation complements the recorded automated equivalence, protocol,
+installer and private-daemon checks; it does not claim every suggested manual
+scenario was individually exercised.
+
 ## Request
 Move project simulation providers from Python to OCaml. Workbench publishes a small
 provider library that projects link against, so a project's
@@ -67,7 +73,7 @@ JSON string escaping is only safe for ASCII, as the contract warns.
 The implementation below is delivered with one deliberate refinement: seed-to-PRNG
 mapping stays in each project adapter rather than becoming a generic library
 policy. Exact existing mappings and all 64 bits are preserved and tested.
-- Publish a provider-facing opam package (working name `hardcaml_workbench_provider`)
+- Supply the separately installable opam package `hardcaml_workbench_provider`
   that depends only on `core`, `core_unix` and `ppx_jane`. It contains:
   - The provider-visible wire types: `Parameter`, `Case`, `Suite`, `Discovery`,
     `Selection`, `Asic_input` and its references, `Progress`, `Case_status`,
@@ -84,8 +90,8 @@ policy. Exact existing mappings and all 64 bits are preserved and tested.
     each one, writes it as one line and flushes it.
   - It maps the provider's exceptions or errors to a non-zero exit and a stderr
     message.
-   - Its typed helpers cover artifact paths under the artifact directory and running a child
-     simulator while forwarding its stdout lines.
+  - Its typed helpers cover artifact paths under the artifact directory and running
+    a child simulator while forwarding its stdout lines.
 - Port the FIFO provider in `hardcaml_asic_example` to an OCaml executable built with
   this library. Update its installer to copy the native provider instead of
   `provider.py`/`wire.py`, and write a config with an empty or simulator-only
@@ -105,23 +111,23 @@ policy. Exact existing mappings and all 64 bits are preserved and tested.
   currently shell out to a separate simulator. Projects may choose this later.
 
 ## Acceptance criteria
-1. A fresh project can build a provider with only the new package and its
+- [x] A fresh project can build a provider with only the new package and its
    core/core_unix/ppx_jane dependencies installed, without `hardcaml_workbench`.
-2. Daemon tests pass unchanged. A round-trip test proves that every moved type keeps
+- [x] Daemon tests pass unchanged. A round-trip test proves that every moved type keeps
    its prior sexp and bin_io encoding.
-3. The ported FIFO provider's discovery output equals the Python provider's catalog
+- [x] The ported FIFO provider's discovery output equals the Python provider's catalog
    once both are parsed.
-4. For the same request, the FIFO provider's event stream matches the Python one
+- [x] For the same request, the FIFO provider's event stream matches the Python one
    event for event after canonical sexp parsing. This covers directed, seeded,
    maximum-uint64 seed and `checker mismatch` runs.
-5. Both ported providers pass discovery and runs through the real daemon, and the
+- [x] Both ported providers pass discovery and runs through the real daemon, and the
    persisted attempt history and artifacts look the same as before the port.
-6. The runner refuses invalid requests (unknown case, duplicate case, non-canonical
+- [x] The runner refuses invalid requests (unknown case, duplicate case, non-canonical
    seed, unknown parameter choice, unexpected ASIC inputs) with a non-zero exit
    before it emits any event.
-7. The emitter cannot produce an event that `parse_event_line` would reject. A test
+- [x] The emitter cannot produce an event that `parse_event_line` would reject. A test
    covers non-ASCII and control characters in messages and labels.
-8. The FIFO installer refuses to mix a native provider with stale `provider.py`
+- [x] The FIFO installer refuses to mix a native provider with stale `provider.py`
    companions, and its config never references a Python interpreter.
 
 ## Dependencies
@@ -140,22 +146,19 @@ setup assistance could later default to a native provider path.
 
 Most of the uncertainty is in packaging. The OCaml port itself is small.
 
-## Assumptions and decisions needed
+## Resolved decisions and release boundaries
 
 Resolved for this delivery: package name `hardcaml_workbench_provider`; separate
 project-owned `test_provider.exe`; locally installed development SDK; existing
 `5.2.0+ox` toolchain. Broader compiler support and external package publication
-remain release work. The original alternatives below record intake assumptions.
-- **Default:** a separate opam package in this repository, released alongside
-  `hardcaml_workbench`. **Decision:** confirm the package name, and whether projects
-  pin it from the checkout or wait for it to be published.
-- **Default:** projects that do not want any Workbench dependency keep vendoring a
-  codec. The library is recommended, not required.
-- **Decision:** whether the FIFO provider stays a separate executable that shells out
-  to `fifo_sim.exe`, or `fifo_sim` links the runner and becomes the provider itself.
-  Defaulting to separate keeps the native report/stdout behavior unchanged.
-- **Assumption:** all projects build in the same `5.2.0+ox` switch as Workbench.
-  Supporting other OCaml versions would widen the test matrix.
+remain release work, not open acceptance gates for this delivery.
+- The package lives in this repository and can be installed independently; the
+  example has a persistent private SDK prefix for development builds.
+- The library is recommended, not required by the language-neutral FS2 contract.
+- The project-owned adapter launches the existing simulator executable. Tests and
+  checkers do not link Workbench or require a new test-authoring framework.
+- Verification used the existing `5.2.0+ox` switch. No broader compiler matrix or
+  external opam-repository publication is claimed.
 
 ## References
 - [Provider contract](../../fs2_simulation_contract.md)

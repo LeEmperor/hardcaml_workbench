@@ -8,6 +8,8 @@ Important independent slices include [WB-025 formal](verification/WB-025-formal-
 [WB-032 catalog UI](verification/WB-032-test-catalog.md),
 [WB-034 FIFO](verification/WB-034-fifo-adapter.md) and
 [WB-063 Testing composition](presentation/WB-063-testing-workspace.md).
+The later [WB-066 native provider library](verification/WB-066-ocaml-provider-library.md)
+is delivered and owner-accepted (2026-10-19).
 [FS2-F compatibility links](../backlog/fs2_followups.md) preserve existing references.
 Formal proof, test-seed sweeps and design/build sweeps have different input/outcome
 contracts; none silently changes the accepted structured-simulation milestone.
@@ -80,6 +82,13 @@ Shared run contexts (F10) govern ASIC evidence selection, not every local contro
 inside every tile. Test-attempt selection is a separate, typed view context.
 
 ## Structured simulation/regression adapters
+
+**Native adapter support delivered:** `hardcaml_workbench_provider` supplies shared
+FS2v1 wire types, validation and synchronous runner/event helpers. Project-owned
+`test_provider.exe` adapters launch independent simulator executables through their
+existing CLIs; user tests/checkers do not acquire Workbench dependencies. Real FIFO
+and counter adapters are migrated, with Python references retained for conformance.
+[Final implementation and acceptance](../native_provider_plan.md).
 
 - Project-declared suites/cases, seeds, parameters, durations and outcomes with
   explicit schema/capability discovery. Test semantics remain project-owned.

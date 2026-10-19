@@ -286,6 +286,9 @@ restart, installer and full normal checks pass. The owner-approved real native
 generation is installed with persistent backups; live daemon/state and physical
 evidence are preserved. [Plan and exact evidence](native_provider_plan.md).
 
+- [x] Owner manual workflow acceptance and WB-066 closeout, 2026-10-19. The owner
+  reported the native-provider workflow works and requested completion marking.
+
 ### Testing adoption/investigation cluster — 2026-10-17
 
 Activated WB-034, WB-032 and WB-063; [shared plan](testing_cluster_plan.md),

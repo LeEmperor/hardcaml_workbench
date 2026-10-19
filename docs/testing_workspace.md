@@ -3,6 +3,8 @@
 Implemented and automatically verified 2026-10-17 for WB-032, WB-034 and WB-063.
 Native provider migration (WB-066) delivered 2026-10-18; see
 [adapter boundary and verification](native_provider_plan.md).
+Owner confirmed the native-provider workflow works on 2026-10-19; WB-066 is
+complete and accepted.
 The actual `hardcaml_asic_example` now has a genuine project-owned FIFO Cyclesim
 provider. The Testing workspace exposes catalog, attempts, cases, result detail,
 artifacts and logs as coordinated panes. The original FS2 milestone remains closed;

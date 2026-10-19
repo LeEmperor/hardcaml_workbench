@@ -2,6 +2,11 @@
 
 Status: **implemented, verified and adopted**, 2026-10-18.
 
+**Accepted and closed, 2026-10-19:** the owner tried the native-provider workflow,
+reported it works, and requested documentation/ticket closeout. This is scoped
+human workflow acceptance alongside the automated evidence below, not a claim
+that every suggested manual scenario was individually exercised.
+
 ## Agreed boundary
 
 Tests remain project-owned standalone executables with project-defined arguments,
@@ -52,6 +57,7 @@ use `scripts/with-switch.sh`; installed switch APIs are authoritative.
   without modifying old generations or restarting live jobs.
 - [x] Counter example adoption and full normal build/format/lint/tests pass.
 - [x] Current guides and WB-066 status reflect actual evidence and limitations.
+- [x] Owner manual workflow acceptance and ticket closeout recorded.
 
 ## Results
 

@@ -13,7 +13,8 @@ is verified, with its explicit owner visual-review gate still pending. See
 not additional remaining implementation effort.
 
 WB-066's separately packaged OCaml provider helpers and native executable adapters
-are delivered and verified; tests remain independent of Workbench. See
+are **complete and owner-accepted (2026-10-19)**; tests remain independent of
+Workbench. See
 [native provider migration](../native_provider_plan.md).
 
 ## How this directory works
@@ -30,6 +31,9 @@ are delivered and verified; tests remain independent of Workbench. See
 - **WB-062–065** carry forward four existing followups (uncertain simulation
   submissions, Testing-workspace usability, generic job detail and ASIC lifecycle
   coverage). They are explicitly marked existing-backlog, not new owner requests.
+- **WB-066** records the subsequent native-provider request, now delivered and
+  accepted. The catalog contains **66 tickets**: 61 original distinct requests,
+  four retained followups and this later request.
 - [Dependency map](dependencies.md) explains cross-category sequencing. Required
   dependencies differ from related work; an existing delivered foundation is not
   an open blocker. Remaining older deferred ideas stay in [backlog](../backlog/README.md).

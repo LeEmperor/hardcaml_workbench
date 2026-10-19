@@ -158,6 +158,12 @@ test catalog (WB-034/WB-032), plus the implemented cooperative Testing investiga
 (WB-063; owner visual review pending). See [current controls/evidence](testing_workspace.md).
 This reuses simulation v1 and preserves the independent counter acceptance fixture.
 
+**Native-provider extension accepted, 2026-10-19:** WB-066 delivers a separately
+packaged OCaml protocol-helper library and project-owned `test_provider.exe`
+adapters for real FIFO and counter examples. Tests remain independent executables;
+FS2v1 is unchanged. Automated checks and owner workflow acceptance are complete.
+[Implementation and evidence](native_provider_plan.md).
+
 Extend FS0's generic test runner with project-declared suites, cases, seeds,
 structured progress/outcomes, targeted reruns and failure/trace artifacts. Rich
 adapters can proceed without ASIC for Cyclesim or ordinary RTL tests. Gate-level
