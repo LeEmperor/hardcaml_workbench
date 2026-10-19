@@ -3,7 +3,7 @@ id: WB-066
 title: Shared OCaml simulation provider library
 category: verification
 feature_sets: [FS2, FS3]
-status: proposed
+status: delivered
 kind: feature
 priority: P2
 severity: n/a
@@ -20,19 +20,25 @@ related: [WB-034, WB-039, WB-035]
 
 # WB-066 — Shared OCaml simulation provider library
 
+Delivered 2026-10-18. [Implementation, ownership boundary and final evidence](../../native_provider_plan.md).
+Both adapters remain separate `test_provider.exe` processes around independent
+project test executables. The actual example's native generation is installed;
+existing tests/checkers acquire no Workbench dependency. The package is locally
+installable, not yet published to an external opam repository.
+
 ## Request
 Move project simulation providers from Python to OCaml. Workbench publishes a small
 provider library that projects link against, so a project's
 `hardcaml-workbench-simulation.sexp` names a native provider executable instead of
 `python3 provider.py`.
 
-## Current baseline
+## Pre-implementation baseline (historical)
 The FS2 v1 provider contract is frozen and language-neutral: an absolute executable,
 prefix arguments, `discover`/`run` argv and LF-terminated S-expression events. The
 contract already notes that OCaml providers can emit
 `Simulation.Provider.Event.sexp_of_t |> Sexp.to_string_mach`.
 
-No project can do that today:
+At intake, projects could not directly link the private Workbench wire library:
 - The wire types live in `hardcaml_workbench_protocol` and the daemon's provider
   validators in `hardcaml_workbench_project_integration`. Neither library has a
   `public_name`, so neither is installed.
@@ -57,6 +63,10 @@ it was adapted from the protocol on 2026-10-17, and nothing detects drift after 
 JSON string escaping is only safe for ASCII, as the contract warns.
 
 ## Scope
+
+The implementation below is delivered with one deliberate refinement: seed-to-PRNG
+mapping stays in each project adapter rather than becoming a generic library
+policy. Exact existing mappings and all 64 bits are preserved and tested.
 - Publish a provider-facing opam package (working name `hardcaml_workbench_provider`)
   that depends only on `core`, `core_unix` and `ppx_jane`. It contains:
   - The provider-visible wire types: `Parameter`, `Case`, `Suite`, `Discovery`,
@@ -74,9 +84,8 @@ JSON string escaping is only safe for ASCII, as the contract warns.
     each one, writes it as one line and flushes it.
   - It maps the provider's exceptions or errors to a non-zero exit and a stderr
     message.
-  - Its typed helpers cover what providers repeat: the four-word little-endian seed
-    split, artifact paths under the artifact directory, and running a child
-    simulator while forwarding its stdout lines.
+   - Its typed helpers cover artifact paths under the artifact directory and running a child
+     simulator while forwarding its stdout lines.
 - Port the FIFO provider in `hardcaml_asic_example` to an OCaml executable built with
   this library. Update its installer to copy the native provider instead of
   `provider.py`/`wire.py`, and write a config with an empty or simulator-only
@@ -132,6 +141,11 @@ setup assistance could later default to a native provider path.
 Most of the uncertainty is in packaging. The OCaml port itself is small.
 
 ## Assumptions and decisions needed
+
+Resolved for this delivery: package name `hardcaml_workbench_provider`; separate
+project-owned `test_provider.exe`; locally installed development SDK; existing
+`5.2.0+ox` toolchain. Broader compiler support and external package publication
+remain release work. The original alternatives below record intake assumptions.
 - **Default:** a separate opam package in this repository, released alongside
   `hardcaml_workbench`. **Decision:** confirm the package name, and whether projects
   pin it from the checkout or wait for it to be published.

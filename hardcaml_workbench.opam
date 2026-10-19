@@ -12,6 +12,7 @@ depends: [
   "dune" {>= "3.22"}
   "ocaml" {>= "5.1"}
   "core"
+  "hardcaml_workbench_provider"
   "ppx_jane"
   "core_unix"
   "bonsai"

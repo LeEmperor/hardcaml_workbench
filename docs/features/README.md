@@ -12,6 +12,10 @@ is verified, with its explicit owner visual-review gate still pending. See
 [the Testing guide](../testing_workspace.md). Their original points record estimates,
 not additional remaining implementation effort.
 
+WB-066's separately packaged OCaml provider helpers and native executable adapters
+are delivered and verified; tests remain independent of Workbench. See
+[native provider migration](../native_provider_plan.md).
+
 ## How this directory works
 
 - **WB-NNN** identifies one actionable feature/defect ticket; filenames and category

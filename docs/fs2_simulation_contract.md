@@ -1,10 +1,23 @@
 # FS2 simulation v1 — frozen initial interface
 
-Published 2026-10-16. `protocol/simulation.ml` is the wire type source of truth.
+Published 2026-10-16. Provider-visible types now live in `provider/wire.ml`,
+re-exported by `protocol/simulation.ml`; application RPC/history types remain there.
 The daemon endpoint, supervisor integration, terminal experience and real Cyclesim
 provider are implemented and verified; see [controls and acceptance](fs2_acceptance.md).
 
 ## Configuration and process invocation
+
+**Native OCaml adapter support delivered 2026-10-18:** the separately packaged
+`hardcaml_workbench_provider` library exposes `Wire`, `Validation` and synchronous
+`Runner` helpers. It is recommended for OCaml adapters, not required by this
+language-neutral contract. Only the project-owned `test_provider.exe` links it;
+standalone test executables, arguments, reports and checkers remain project-owned.
+The daemon consumes the same wire types and pure validators. Frozen sexp/bin_io
+conformance tests guard the extraction; the FS2v1 interface is unchanged.
+See [public API](../provider/README.md) and [migration evidence](native_provider_plan.md).
+
+For a native adapter, `provider_executable` names its absolute installed executable
+and `provider_args` may be empty. The Python configuration below remains valid.
 
 Opt-in root file `hardcaml-workbench-simulation.sexp`, independent of the generic
 manifest and ASIC config. All five fields are required; unknown fields are errors:

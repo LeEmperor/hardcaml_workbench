@@ -1,5 +1,12 @@
 # Real ASIC example demo and black-theme polish
 
+**Native simulation provider, 2026-10-18:** the actual example now names a persistent
+OCaml `test_provider.exe` that launches the existing standalone FIFO simulator.
+The ASIC provider and physical results are unchanged. Provider adoption does not
+require a daemon restart; explicitly discover again in Catalog before launching
+with the changed configuration. Saved simulation attempts remain inspectable.
+See [WB-066 implementation/evidence](native_provider_plan.md).
+
 **Latest binary refresh, 2026-10-18:** default-layout restoration, cooperative
 Testing/catalog, integrated FS3 and native activity/icon daemon/client/exporter
 copies are prepared. Receipt:

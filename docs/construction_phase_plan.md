@@ -276,6 +276,16 @@ with immediate local input/completion redraw after the Escape-latency followup.
 
 ## M4 — Rich evidence and live acceptance (FS1/FS2)
 
+### Native project provider adapters — 2026-10-18
+
+WB-066 delivered: separate public provider package with shared FS2v1 types and
+validators, synchronous runner, native project-owned `test_provider.exe` wrappers
+for real FIFO and counter examples. Standalone simulator/checker implementations
+remain independent. Frozen encoding, native/Python equivalence, private HTTP and
+restart, installer and full normal checks pass. The owner-approved real native
+generation is installed with persistent backups; live daemon/state and physical
+evidence are preserved. [Plan and exact evidence](native_provider_plan.md).
+
 ### Testing adoption/investigation cluster — 2026-10-17
 
 Activated WB-034, WB-032 and WB-063; [shared plan](testing_cluster_plan.md),
