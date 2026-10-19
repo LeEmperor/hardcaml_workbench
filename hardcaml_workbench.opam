@@ -21,6 +21,8 @@ depends: [
   "async"
   "cohttp-async"
   "cryptokit"
+  "hardcaml"
+  "hardcaml_waveterm"
   "yojson"
   "conf-python-3" {with-test}
   "ppx_js_style" {with-dev-setup}

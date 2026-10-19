@@ -4,6 +4,222 @@ open Hardcaml_workbench_workspaces
 
 let kinds d = List.map d.Definition.tiles ~f:(fun t -> t.Common.kind)
 
+let%test_unit "Waveforms is explicit, atomic, durable and identified by preset" =
+  let module F = Waveforms in
+  let before =
+    Workspace.initial ~session_id:(Workspace.Session_id.of_string "waveforms")
+  in
+  let apply snapshot operation =
+    Workspace.apply snapshot operation |> Result.ok |> Option.value_exn
+  in
+  let initialized = apply before Presets.bootstrap in
+  assert (Option.is_none (F.find initialized));
+  assert (List.length Presets.all = List.length Presets.starters + 1);
+  let after =
+    apply
+      initialized
+      (Mutate
+         { expected_revision = initialized.revision
+         ; mutation = F.create ~window:(List.hd_exn initialized.windows).id
+         })
+  in
+  let workspace = Option.value_exn (F.created ~before:initialized ~after) in
+  assert (after.revision = initialized.revision + 1);
+  assert (Option.is_none (F.created ~before:after ~after));
+  assert (
+    Option.is_none
+      (F.created
+         ~before
+         ~after:{ after with session_id = Workspace.Session_id.of_string "other" }));
+  let renamed =
+    apply
+      after
+      (Mutate
+         { expected_revision = after.revision
+         ; mutation = Rename_workspace { workspace = workspace.id; name = "Pinned FIFO" }
+         })
+  in
+  let restored = Workspace.Snapshot.t_of_sexp (Workspace.Snapshot.sexp_of_t renamed) in
+  assert (
+    Workspace.Workspace_id.equal (Option.value_exn (F.find restored)).id workspace.id);
+  let actual =
+    List.filter restored.tiles ~f:(fun tile ->
+      Workspace.Workspace_id.equal tile.workspace workspace.id)
+  in
+  assert (
+    List.equal
+      String.equal
+      (List.map actual ~f:(fun tile -> tile.kind))
+      (kinds F.definition));
+  assert (List.length (F.members restored workspace.id) = 4);
+  Workspace.export_template restored workspace.id
+  |> Result.ok
+  |> Option.value_exn
+  |> Workspace_template.validate
+  |> Or_error.ok_exn
+;;
+
+let%test_unit "Waveforms Session stacks over Signals beside full-height Waves without \
+               overlaps"
+  =
+  let d = Waveforms.definition in
+  List.iter
+    [ 80, 22; 120, 38; 230, 53 ]
+    ~f:(fun (width, height) ->
+      match Layout.compute d ~width ~height ~kinds:(kinds d) with
+      | Compact -> assert false
+      | Grid cells ->
+        assert (List.length cells = 6);
+        let navigation = List.hd_exn cells in
+        assert (
+          navigation.x = 0
+          && navigation.y = 0
+          && navigation.width = width
+          && navigation.height = 1);
+        let session = List.nth_exn cells 1 in
+        assert (
+          session.x = 0
+          && session.y = 1
+          && session.width = Int.max 24 (width / 5)
+          && session.height = 4);
+        let signals = List.nth_exn cells 2
+        and waves = List.nth_exn cells 3 in
+        assert (signals.x = session.x && signals.width = session.width);
+        assert (waves.x = session.x + session.width && waves.y = session.y);
+        assert (signals.y = session.y + session.height);
+        assert (signals.width >= 24 && waves.width >= signals.width);
+        assert (waves.width = width - session.width);
+        assert (waves.height = session.height + signals.height);
+        let picker = List.nth_exn cells 4
+        and logs = List.nth_exn cells 5 in
+        assert (picker.y >= signals.y + signals.height);
+        assert (picker.y = waves.y + waves.height);
+        assert (logs.y = picker.y && logs.x = picker.x + picker.width);
+        assert (picker.height >= 6 && logs.height >= 6);
+        assert (picker.width >= 24 && logs.width >= 24);
+        List.iteri cells ~f:(fun i (a : Workspace.Geometry.t) ->
+          assert (a.x >= 0 && a.y >= 0 && a.width >= 24 && a.height >= 1);
+          assert (a.x + a.width <= width && a.y + a.height <= height);
+          List.iter
+            (List.drop cells (i + 1))
+            ~f:(fun b ->
+              assert (
+                a.x + a.width <= b.x
+                || b.x + b.width <= a.x
+                || a.y + a.height <= b.y
+                || b.y + b.height <= a.y))))
+;;
+
+let%test_unit "Waveforms Session upgrade is explicit additive and preserves custom \
+               arrangement"
+  =
+  let module W = Workspace in
+  let before = W.initial ~session_id:(W.Session_id.of_string "session-upgrade") in
+  let apply snapshot mutation =
+    W.apply
+      snapshot
+      (Mutate { expected_revision = snapshot.W.Snapshot.revision; mutation })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let template = Definition.template Waveforms.definition in
+  let template =
+    { template with
+      views =
+        List.filter template.views ~f:(fun view ->
+          not (String.equal view.kind (Waveforms.kind Session)))
+    }
+  in
+  let legacy =
+    apply
+      before
+      (Instantiate_template { window = (List.hd_exn before.windows).id; template })
+  in
+  let workspace = Option.value_exn (Waveforms.find legacy) in
+  let signals =
+    List.find_exn legacy.tiles ~f:(fun tile ->
+      W.Workspace_id.equal tile.workspace workspace.id
+      && String.equal tile.kind (Waveforms.kind Signals))
+  in
+  let legacy =
+    apply
+      legacy
+      (Resize_tile
+         { tile = signals.id; geometry = { x = 9; y = 7; width = 44; height = 15 } })
+  in
+  let legacy = apply legacy (Set_tile_hidden { tile = signals.id; hidden = true }) in
+  let legacy =
+    apply
+      legacy
+      (Create_tile
+         { workspace = workspace.id
+         ; kind = "custom-extra"
+         ; geometry = signals.requested_geometry
+         })
+  in
+  let legacy =
+    apply
+      legacy
+      (Set_zoom { workspace = workspace.id; tile = Some (List.last_exn legacy.tiles).id })
+  in
+  let upgraded =
+    apply legacy (Definition.apply Waveforms.definition ~workspace:workspace.id)
+  in
+  assert (List.length upgraded.tiles = List.length legacy.tiles + 1);
+  List.iter legacy.tiles ~f:(fun tile ->
+    assert (W.Tile.equal tile (W.tile upgraded tile.id)));
+  assert (List.equal W.Context.equal legacy.contexts upgraded.contexts);
+  assert (
+    W.Arrangement.equal
+      (W.workspace legacy workspace.id)
+      (W.workspace upgraded workspace.id));
+  assert (
+    List.equal
+      [%equal: string * string]
+      (Waveforms.members legacy workspace.id)
+      (Waveforms.members upgraded workspace.id));
+  let session = List.last_exn upgraded.tiles in
+  assert (String.equal session.kind (Waveforms.kind Session));
+  assert (session.requested_geometry.height = 4 && not session.hidden);
+  let restored =
+    apply upgraded (Definition.restore Waveforms.definition ~workspace:workspace.id)
+  in
+  assert (Option.is_none (W.workspace restored workspace.id).zoomed_tile);
+  assert (not (W.tile restored signals.id).hidden);
+  assert (W.tile restored (List.last_exn legacy.tiles).id).hidden
+;;
+
+let%test_unit "Waveforms log provenance rejects another daemon instance" =
+  let module F = Waveforms in
+  let instance_id = V1.Daemon_instance_id.of_string "original" in
+  let artifact : Simulation.Artifact.t =
+    { id = "vcd"
+    ; attempt_id = "attempt"
+    ; case_id = Some "case"
+    ; label = "trace"
+    ; kind = "waveform"
+    ; media_type = "text/x-vcd"
+    ; size = Some 10
+    ; sha256 = Some "digest"
+    ; availability = Available
+    }
+  in
+  let job = Job_id.of_string "job-1" in
+  let pin : F.pin =
+    { project_key = "/project/env"
+    ; project = Project_id.of_string "project"
+    ; artifact
+    ; log = Job { instance_id; job }
+    }
+  in
+  assert (Job_id.equal job (F.log_job pin ~instance_id |> Or_error.ok_exn));
+  assert (
+    Result.is_error
+      (F.log_job pin ~instance_id:(V1.Daemon_instance_id.of_string "replacement")));
+  assert (
+    Result.is_error (F.log_job { pin with log = Unavailable "expired" } ~instance_id))
+;;
+
 let%test_unit "cooperative Testing is bounded, readable and project scoped" =
   let d = Testing.definition in
   assert (not (List.mem (kinds d) "run-selector" ~equal:String.equal));

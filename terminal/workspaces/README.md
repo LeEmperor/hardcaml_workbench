@@ -6,7 +6,7 @@ execution column. Investigation selection is client/workspace-local, not ASIC Ma
 the legacy `simulation` tile remains independently usable. Preset Apply preserves
 old extras rather than silently removing them. [Controls/evidence](../../docs/testing_workspace.md).
 
-Start with `overview.ml`, `timing.ml`, or `testing.ml` to change a workspace's
+Start with `overview.ml`, `timing.ml`, `testing.ml`, or `waveforms.ml` to change a workspace's
 default tile membership and Fit composition. Shared tile defaults and the small
 `Stack` / `Columns` / `Weighted_columns` / `Narrow` / `Leaf` vocabulary live in `common.ml`.
 
@@ -58,3 +58,46 @@ requested geometry. `Definition.template` supplies the same definitions to CLI
 daemon operation, even after a CLI import has advanced registry revision. Legacy
 saved arrangements are never mistaken for incomplete bootstrap. Custom layouts
 honor generic Fit as well as requested-size mode. See [FS3 adoption](../../docs/fs3_adoption.md).
+
+## Waveforms integration contract
+
+`Waveforms.definition` registers stable preset ID `waveforms`, with four independent
+tiles: `waveform-signals`, `waveform-waves`, `waveform-picker`, `waveform-logs`, plus
+the existing workspace tabs. Signals and Waves share the upper band; VCD picker and
+Logs share the lower band. All use normal host layout, focus, hiding, zoom and
+appearance. `Presets.all` is the complete catalog; `Presets.starters` remains the
+three automatic startup definitions. Waveforms is instantiated explicitly.
+
+`Waveforms.create ~window` returns one `Instantiate_template` registry mutation.
+Submit through the normal daemon transport, await acknowledgement, then identify
+the result with `Waveforms.created ~before ~after`. The helper rejects replacement
+sessions and ambiguous multiple creations. `Waveforms.find` locates an existing
+workspace by stable preset ID even after rename. Never infer identity from its name.
+
+`Waveforms.pin` stores exact project key/ID and full retained artifact identity,
+including attempt, optional case and digest. Log provenance is either an explicit
+unavailable reason or **daemon instance plus job ID**. `Waveforms.log_job` refuses
+another daemon instance; a failed/expired read must remain unavailable.
+
+`Workspace_host.set_waveform_pin` coordinates the workspace's panes. Its
+`waveform_identity` lifetime token fences pending artifact/log requests. Retargeting
+or reconnecting rotates the token; an equal pin and workspace switching preserve it.
+Pane removal/move/retyping or replacement sessions prune pins; hide/zoom/resize
+preserve them. Parsed waveform state stays with the transport/render owner, keyed
+by workspace and lifetime, avoiding a dependency on the waveform renderer here.
+
+The daemon persists actual workspace/layout state. Exact artifact pins are stored
+separately using `Workspace_host.waveform_preferences` and
+`save_waveform_preferences ~state_directory` in a bounded atomic terminal sidecar
+`waveforms-<project-key-digest>.sexp`, following terminal preference conventions.
+Load on the I/O worker and call `restore_waveform_preferences` **once after the first
+registry receipt**. Restoration checks project/environment, registry session and
+exact pane membership; it does not restore parsed data or logs as verified. Save
+after explicit retargeting and pruning. Reload the exact retained artifact, showing
+unavailable if it has expired; never silently use the current Testing selection.
+
+`Host_view.render ?render_pane` accepts a callback
+`Workspace.Tile.t -> width:int -> height:int -> Bonsai_term.View.t option`. Dimensions
+are the actual body viewport. The host supplies titles/frames/padding, clips the
+body, and overlays the global palette last. Main supplies the callback closing over
+waveform state, so `Host_view` never imports `Waveform_view` (which uses host roles).

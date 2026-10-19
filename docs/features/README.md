@@ -12,6 +12,12 @@ is verified, with its explicit owner visual-review gate still pending. See
 [the Testing guide](../testing_workspace.md). Their original points record estimates,
 not additional remaining implementation effort.
 
+**2026-10-18:** WB-028's bounded embedded VCD viewer is implemented and automatically
+verified (1,773 acceptance checks, including exact cursor/ruler rendering and a dedicated Waveforms workspace with
+Session, Signals, Waves, VCD picker and Logs tiles).
+Its status is partial for lazy loading and
+four-state graphical rendering; [controls and evidence](../testing_workspace.md#embedded-waveform-viewer).
+
 ## How this directory works
 
 - **WB-NNN** identifies one actionable feature/defect ticket; filenames and category

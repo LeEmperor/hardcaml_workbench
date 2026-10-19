@@ -1,13 +1,14 @@
 open! Core
 
-let all = [ Overview.definition; Timing.definition; Testing.definition ]
+let starters = [ Overview.definition; Timing.definition; Testing.definition ]
+let all = starters @ [ Waveforms.definition ]
 let find id = List.find all ~f:(fun d -> String.equal d.Definition.id id)
 
 (** Safe after Get, after import, on reconnect, and concurrently from multiple clients.
     The service atomically persists both defaults and their completion marker. *)
 let bootstrap =
   Hardcaml_workbench_protocol.Workspace.Operation.Bootstrap
-    (List.map all ~f:Definition.template)
+    (List.map starters ~f:Definition.template)
 ;;
 
 let for_arrangement (w : Hardcaml_workbench_protocol.Workspace.Arrangement.t) =

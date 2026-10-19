@@ -1,6 +1,6 @@
 (library
  (name hardcaml_workbench_workspaces)
- (modules common definition layout overview timing testing presets)
+ (modules common definition layout overview timing testing waveforms presets)
  (libraries core hardcaml_workbench_protocol)
  (preprocess
   (pps ppx_jane)))
