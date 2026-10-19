@@ -1,6 +1,6 @@
 (library
  (name hardcaml_workbench_protocol)
- (libraries core)
+ (libraries core hardcaml_workbench_provider)
  (preprocess
   (pps ppx_jane))
  (inline_tests)

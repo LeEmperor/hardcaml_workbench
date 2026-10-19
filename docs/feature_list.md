@@ -3,9 +3,10 @@
 ## Actionable ticket catalog
 
 The owner's current requests now have **one Markdown file per feature**, grouped
-in [the WB ticket catalog](features/README.md). It contains **65 tickets**: 61 distinct
-features from 62 intake entries (one duplicate merged), plus four explicitly sourced
-existing followups. Each has tags, status, priority, defect severity where relevant,
+in [the WB ticket catalog](features/README.md). It contains **66 tickets**: 61 distinct
+features from 62 intake entries (one duplicate merged), four explicitly sourced
+existing followups, and the later WB-066 native-provider request. Each has tags,
+status, priority, defect severity where relevant,
 original size label, estimated size/points/confidence, acceptance criteria,
 dependencies and open decisions.
 
@@ -21,7 +22,7 @@ estimates; epic estimates exclude separately ticketed prerequisites.
 | [Workspaces](features/README.md#workspaces-input-and-configuration) |7 | Mouse/hotkeys, layout/window files, editing, template picker and attachment |
 | [Project adoption](features/README.md#project-adoption-and-design-scope) |10 | Build/bundle state, hierarchy/IP scope, files, setup and discovery |
 | [Evidence](features/README.md#evidence-and-hardware-investigation) |9 | Refresh/timestamps, Timing triage, comparisons, graphics, mappings and power |
-| [Verification](features/README.md#verification-and-simulation) |10 | Formal, waveforms, catalogs, sweeps, adapters, replay and acceptance |
+| [Verification](features/README.md#verification-and-simulation) |11 | Formal, waveforms, catalogs, sweeps, adapters, native provider helpers, replay and acceptance |
 | [Infrastructure](features/README.md#execution-storage-and-observability) |9 | Process view, metrics, logs, streaming, budgets, responsiveness and coverage |
 | [Integrations](features/README.md#external-providers-and-clients) |3 | Vivado, Ches and Git/Mercurial |
 | [Exploration](features/README.md#design-space-exploration) |2 | Design/build sweeping and Quick-Harn comparative editing |
@@ -32,6 +33,11 @@ is further icon expansion over the native indicators already delivered in the
 current tree, not a request to implement those foundations again.
 
 ## Architectural areas and delivered baseline
+
+**Native-provider closeout, 2026-10-19:** WB-066 is complete and owner-accepted.
+The separately packaged OCaml helper library and project-owned native adapters
+preserve independent test executables and the FS2v1 contract.
+[Implementation and evidence](native_provider_plan.md).
 
 Updated 2026-10-17 against current source and FS0/FS1/FS2/FS3 evidence. **FS0 Demos A–C
 and FS1's adopted-evidence functional scope are delivered with explicit limits;

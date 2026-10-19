@@ -13,10 +13,15 @@ is verified, with its explicit owner visual-review gate still pending. See
 not additional remaining implementation effort.
 
 **2026-10-18:** WB-028's bounded embedded VCD viewer is implemented and automatically
-verified (1,773 acceptance checks, including exact cursor/ruler rendering and a dedicated Waveforms workspace with
-Session, Signals, Waves, VCD picker and Logs tiles).
-Its status is partial for lazy loading and
-four-state graphical rendering; [controls and evidence](../testing_workspace.md#embedded-waveform-viewer).
+verified (1,773 acceptance checks, including exact cursor/ruler rendering and a
+dedicated Waveforms workspace with Session, Signals, Waves, VCD picker and Logs
+tiles). Its status is partial for lazy loading and four-state graphical rendering;
+[controls and evidence](../testing_workspace.md#embedded-waveform-viewer).
+
+WB-066's separately packaged OCaml provider helpers and native executable adapters
+are **complete and owner-accepted (2026-10-19)**; tests remain independent of
+Workbench. See
+[native provider migration](../native_provider_plan.md).
 
 ## How this directory works
 
@@ -32,6 +37,9 @@ four-state graphical rendering; [controls and evidence](../testing_workspace.md#
 - **WB-062–065** carry forward four existing followups (uncertain simulation
   submissions, Testing-workspace usability, generic job detail and ASIC lifecycle
   coverage). They are explicitly marked existing-backlog, not new owner requests.
+- **WB-066** records the subsequent native-provider request, now delivered and
+  accepted. The catalog contains **66 tickets**: 61 original distinct requests,
+  four retained followups and this later request.
 - [Dependency map](dependencies.md) explains cross-category sequencing. Required
   dependencies differ from related work; an existing delivered foundation is not
   an open blocker. Remaining older deferred ideas stay in [backlog](../backlog/README.md).
@@ -147,6 +155,7 @@ needed; References. A dependency needs a reason, not just a list of IDs.
 | [WB-037](verification/WB-037-archived-replay.md) | Archived source/build/tool replay | FS2, FS1 | P3 | 34 | low |
 | [WB-038](verification/WB-038-acceptance-bridge.md) | Simulation-to-ASIC acceptance evidence bridge | FS2, FS1 | P3 | 21 | low |
 | [WB-062](verification/WB-062-submission-recovery.md) | Uncertain simulation submission/history recovery | FS2 | P2 | 13 | medium |
+| [WB-066](verification/WB-066-ocaml-provider-library.md) | Shared OCaml simulation provider library | FS2, FS3 | P2 | 21 | medium |
 
 ## Execution, storage and observability
 

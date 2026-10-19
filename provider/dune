@@ -1,0 +1,6 @@
+(library
+ (name hardcaml_workbench_provider)
+ (public_name hardcaml_workbench_provider)
+ (libraries core core_unix)
+ (preprocess
+  (pps ppx_jane)))

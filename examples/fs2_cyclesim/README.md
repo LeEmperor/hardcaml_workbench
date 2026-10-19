@@ -1,10 +1,11 @@
 # FS2 real Cyclesim provider
 
 This is an independent, PDK-free Dune project. It needs the selected OCaml switch's
-`core`, `ppx_jane`, and `hardcaml` packages, plus Python 3 (standard library only).
+`core`, `ppx_jane`, `hardcaml`, and `hardcaml_workbench_provider` packages.
 It does not depend on the ASIC example, ASIC provider, physical tools, or the
-Workbench backend. The protocol wrapper uses the in-repository ASCII fixture codec
-at `scripts/fixtures/fs2_wire.py`; keep the checkout available when using it.
+Workbench backend. `test_provider.exe` links only Core and the public provider
+library, and launches the separate, unchanged `counter.exe` hardware checker.
+The Python adapter and fixture codec remain independent conformance references.
 
 ## Build and prove the actual hardware simulation
 
@@ -14,9 +15,9 @@ From the Workbench checkout:
 ls /tmp/opencode
 scripts/with-switch.sh dune build \
   --root "$PWD/examples/fs2_cyclesim" \
-  --build-dir /tmp/opencode/fs2-build-provider -j 6 counter.exe
+  --build-dir /tmp/opencode/native-provider-acceptance -j 6 counter.exe test_provider.exe
 python3 scripts/test-fs2-provider.py \
-  --counter /tmp/opencode/fs2-build-provider/default/counter.exe
+  --counter /tmp/opencode/native-provider-acceptance/default/counter.exe
 ```
 
 The proof retains requests, event streams, stdout/stderr, reports, VCDs and hashes
@@ -30,13 +31,12 @@ VCD headers contain a date; deterministic replay compares the signal data body.
 ## Configure any project root
 
 Create `hardcaml-workbench-simulation.sexp` in your project. Substitute the actual
-absolute checkout/Python paths; no build is performed by the provider or daemon:
+absolute prebuilt executable paths; no build is performed by the provider or daemon:
 
 ```sexp
 ((schema_version 1)
- (provider_executable /usr/bin/python3)
- (provider_args (/absolute/checkout/examples/fs2_cyclesim/provider.py
-                 --counter /tmp/opencode/fs2-build-provider/default/counter.exe))
+ (provider_executable /absolute/install/test_provider.exe)
+ (provider_args (--counter /absolute/install/counter.exe))
  (discovery_timeout_seconds 10)
  (run_timeout_seconds 90))
 ```
@@ -57,6 +57,38 @@ nonzero exit and an incomplete structured stream. Every case emits live flushed
 progress, a closed actual VCD, a closed check report, and an explicit result.
 Full uint64 seeds are converted to the same signed 64-bit LCG bit pattern without
 floating-point conversion. ASIC references are empty for this project-only demo.
+
+`--counter PATH` is optional when `counter.exe` is installed beside the provider.
+Only the adapter depends on the provider package; the simulator does not.
+For a private package installation, build with
+`OCAMLPATH=/tmp/opencode/native-provider-prefix/lib scripts/with-switch.sh dune build ...`.
+Discovery and run require no Python or Workbench checkout after installation.
+
+## Native migration equivalence acceptance
+
+The following harness takes **prebuilt** executables, never builds or installs, and
+creates private projects/configs and daemon state. Both Python adapters/codecs stay
+as independently parsed references. Substitute the actual prebuilt FIFO paths:
+
+```sh
+scripts/with-switch.sh python3 scripts/test-native-provider.py \
+  --counter-provider /tmp/opencode/native-provider-acceptance/default/test_provider.exe \
+  --counter /tmp/opencode/native-provider-acceptance/default/counter.exe \
+  --fifo-provider /absolute/prebuilt/test_provider.exe \
+  --fifo-simulator /absolute/prebuilt/fifo_sim.exe \
+  --daemon /absolute/prebuilt/daemon/main.exe
+```
+
+Omit `--daemon` for standalone equivalence. `--fifo-root` selects the sibling
+checkout containing the independent Python reference. `--evidence` names a new
+directory; the default is a fresh `/tmp/opencode/native-provider-*` directory.
+Use `--only counter` or `--only fifo` for staged checks; only that adapter's
+executable flags are required in this mode.
+It compares parsed discovery and every event for full suites and individual cases,
+zero/max-uint64 seeds and real injected checker failures, then compares report
+bytes and all VCD bytes except the date stanza. Invalid native selections must
+exit nonzero before any event/artifact. HTTP mode checks captured selections,
+paged artifact bytes/digests and persisted attempts after a private daemon restart.
 
 ## Native HTTP and terminal PTY acceptance
 

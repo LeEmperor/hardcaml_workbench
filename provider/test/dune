@@ -1,0 +1,19 @@
+(executable
+ (name fixture)
+ (modules fixture)
+ (libraries core hardcaml_workbench_provider)
+ (preprocess
+  (pps ppx_jane)))
+
+(test
+ (name conformance)
+ (modules conformance frozen_wire)
+ (libraries core hardcaml_workbench_provider)
+ (preprocess
+  (pps ppx_jane)))
+
+(rule
+ (alias runtest)
+ (deps runner_test.py)
+ (action
+  (run python3 %{dep:runner_test.py} %{exe:fixture.exe})))

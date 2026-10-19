@@ -20,8 +20,9 @@
   (ocaml
    (>= 5.1))
   ; Portable shared protocol and application code.
-  core
-  ppx_jane
+   core
+   hardcaml_workbench_provider
+   ppx_jane
    ; Native daemon, backend, and adapters.
    core_unix
    bonsai
@@ -41,6 +42,17 @@
   (ppx_js_style :with-dev-setup)
   (ocamlformat :with-dev-setup)
    (ocaml-lsp-server :with-dev-setup)))
+
+(package
+ (name hardcaml_workbench_provider)
+ (synopsis "Synchronous FS2 simulation provider adapter library")
+ (description "Shared FS2 wire types, validation and synchronous provider plumbing.")
+  (depends
+   (ocaml (>= 5.1))
+   core
+   core_unix
+   ppx_jane
+   (conf-python-3 :with-test)))
 
 (package
  (name hardcaml_workbench_web)

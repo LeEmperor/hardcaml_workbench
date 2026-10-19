@@ -250,10 +250,12 @@ let%test_unit "cooperative Testing is bounded, readable and project scoped" =
               cells
               (List.findi_exn (kinds d) ~f:(fun _ k -> String.equal kind k) |> fst)
           in
-          assert ((cell "live-status").width <= width / 4);
+          assert ((cell "live-status").width = width / 4);
+          assert ((cell "simulation-catalog").width = (width * 5 / 8) - (width / 4));
+          assert ((cell "simulation-detail").width = width - (width * 5 / 8));
           List.iter [ "simulation-catalog"; "simulation-detail" ] ~f:(fun kind ->
             let g = cell kind in
-            assert (g.width >= 48 && g.height >= 12));
+            assert (g.width >= 45 && g.height >= 12));
           List.iter
             [ "simulation-attempts"
             ; "simulation-cases"

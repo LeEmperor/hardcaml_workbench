@@ -1,6 +1,10 @@
 # Testing catalog and cooperative investigation
 
 Implemented and automatically verified 2026-10-17 for WB-032, WB-034 and WB-063.
+Native provider migration (WB-066) delivered 2026-10-18; see
+[adapter boundary and verification](native_provider_plan.md).
+Owner confirmed the native-provider workflow works on 2026-10-19; WB-066 is
+complete and accepted.
 The actual `hardcaml_asic_example` now has a genuine project-owned FIFO Cyclesim
 provider. The Testing workspace exposes catalog, attempts, cases, result detail,
 artifacts and logs as coordinated panes. The original FS2 milestone remains closed;
@@ -359,11 +363,14 @@ for the same executable/toolchain, not claimed as archived-build reproducibility
 Persistent generation:
 
 ```text
-hardcaml_asic_example/.dev/fifo-simulation/af97d67d923441a0a654e27b6afd728f/
+hardcaml_asic_example/.dev/fifo-simulation/4158d5b458804b8a8428bc28862e5a49/
   fifo_sim.exe
-  provider.py
-  wire.py
+  test_provider.exe
 ```
+
+Only `test_provider.exe` links the shared provider library; the simulator/checker
+retains its standalone executable interface. Python adapters remain source-level
+conformance references. The former installed Python generation is preserved.
 
 Root configuration is `hardcaml-workbench-simulation.sexp`; installation ownership
 is `.dev/fifo-simulation-install.json`. Discovery/run never build or install.
