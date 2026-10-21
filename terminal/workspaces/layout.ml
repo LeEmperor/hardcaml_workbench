@@ -17,13 +17,12 @@ let rec min_size ?(gutter = 0) = function
   | Cell (_, w, h, _) -> w, h
   | Narrow tree -> min_size ~gutter tree
   | Weighted_columns children ->
-    let sum = List.sum (module Int) children ~f:fst in
-    let unit_width, height =
-      List.fold children ~init:(0, 0) ~f:(fun (u, h) (weight, child) ->
+    let width, height =
+      List.fold children ~init:(0, 0) ~f:(fun (u, h) (_, child) ->
         let w, ch = min_size ~gutter child in
-        Int.max u ((w + weight - 1) / weight), Int.max h ch)
+        u + w, Int.max h ch)
     in
-    (unit_width * sum) + (gutter * (List.length children - 1)), height
+    width + (gutter * (List.length children - 1)), height
   | Stack children ->
     let sizes = List.map children ~f:(min_size ~gutter) in
     List.fold
@@ -54,12 +53,35 @@ let rec place ?(gutter = 0) tree (g : G.t) =
   | Narrow tree -> place ~gutter tree g
   | Weighted_columns children ->
     let total = g.width - (gutter * (List.length children - 1)) in
-    let sum = List.sum (module Int) children ~f:fst in
-    let _, _, cells =
-      List.fold children ~init:(0, 0, []) ~f:(fun (offset, used, cells) (w, child) ->
-        let width = (total * (used + w) / sum) - (total * used / sum) in
+    (* Ratios describe full width; clamp undersized columns at their minima and
+       redistribute the remainder. This is shared policy, including custom trees. *)
+    let rec allocate available children =
+      let sum = List.sum (module Int) children ~f:(fun (_, w, _) -> w) in
+      let fixed, flexible =
+        List.partition_tf children ~f:(fun (_, w, child) ->
+          available * w / Int.max 1 sum < fst (min_size ~gutter child))
+      in
+      if List.is_empty fixed
+      then (
+        let _, sizes =
+          List.fold children ~init:(0, []) ~f:(fun (used, sizes) (i, w, _) ->
+            ( used + w
+            , (i, (available * (used + w) / sum) - (available * used / sum)) :: sizes ))
+        in
+        sizes)
+      else (
+        let fixed =
+          List.map fixed ~f:(fun (i, _, child) -> i, fst (min_size ~gutter child))
+        in
+        fixed @ allocate (available - List.sum (module Int) fixed ~f:snd) flexible)
+    in
+    let sizes =
+      allocate total (List.mapi children ~f:(fun i (w, child) -> i, w, child))
+    in
+    let _, cells =
+      List.foldi children ~init:(0, []) ~f:(fun i (offset, cells) (_, child) ->
+        let width = List.Assoc.find_exn sizes i ~equal:Int.equal in
         ( offset + width + gutter
-        , used + w
         , cells @ place ~gutter child { g with x = g.x + offset; width } ))
     in
     cells
@@ -190,11 +212,7 @@ let compute
   if List.is_empty kinds
   then Grid []
   else (
-    let layout =
-      if String.equal definition.id Waveforms.definition.id
-      then Waveforms.layout_for_width ~width ~gutter
-      else definition.layout
-    in
+    let layout = definition.layout in
     let cells =
       Option.bind (resolve ~min_height_for_index layout kinds) ~f:(fun tree ->
         let w, h = min_size ~gutter tree in

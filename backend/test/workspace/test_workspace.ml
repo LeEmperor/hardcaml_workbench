@@ -294,9 +294,172 @@ let persistence () =
       require (W.Snapshot.equal before after) "Failed save advanced the read cache")
 ;;
 
+let composition_persistence () =
+  let module C = Workspace_config in
+  let definition : C.Definition.t =
+    C.definition_of_template
+      ~key:"custom"
+      (Workspace_template.starter "Custom" [ "logs"; "logs" ])
+    |> Or_error.ok_exn
+  in
+  let definition : C.Definition.t =
+    { definition with
+      layout =
+        Some
+          (Columns
+             [ Leaf { tile = "tile-1"; min_width = 12; min_height = 3; weight = 1 }
+             ; Leaf { tile = "tile-2"; min_width = 12; min_height = 3; weight = 1 }
+             ])
+    }
+  in
+  let config : C.Resolved.t =
+    { version = C.version
+    ; id = "persisted-composition"
+    ; definitions = [ definition ]
+    ; windows =
+        List.map [ "one"; "two" ] ~f:(fun key ->
+          { C.Window.key
+          ; name = "Window"
+          ; workspaces =
+              [ { C.Instance.key = "desk"; name = "Desk"; definition = Custom "custom" } ]
+          })
+    }
+  in
+  let state_dir = Filename_unix.temp_dir "workspace-composition-" "" in
+  Monitor.protect
+    ~finally:(fun () -> In_thread.run (fun () -> remove_tree state_dir))
+    (fun () ->
+      let project_key = "/composition|environment" in
+      let service = Service.create ~state_dir in
+      let handle service operation = Service.handle service ~project_key operation in
+      (* Get persists placeholders; a fresh service can still initialize them. *)
+      let%bind (_ : W.Snapshot.t) = handle service Get >>| ok in
+      let service = Service.create ~state_dir in
+      let first = handle service (Initialize_config config) in
+      let second =
+        handle service (Initialize_config { config with id = "losing-initializer" })
+      in
+      let%bind first = first >>| ok in
+      let%bind second = second >>| ok in
+      require (W.Snapshot.equal first second) "Second initializer replaced the winner";
+      require (List.length first.windows = 2) "Composition not initialized atomically";
+      let p = List.hd_exn first.config_workspaces in
+      let tile = snd (List.hd_exn p.tiles) in
+      let%bind edited =
+        handle
+          service
+          (Mutate
+             { expected_revision = first.revision
+             ; mutation =
+                 Set_tile_binding { tile; binding = Pin_run (run "retained-pin") }
+             })
+        >>| ok
+      in
+      let operation : W.Operation.t =
+        Mutate { expected_revision = edited.revision; mutation = Apply_config config }
+      in
+      let a = handle service operation in
+      let b = handle service operation in
+      let%bind applied = a >>| ok in
+      let%bind rejected = b in
+      expect_error Conflict rejected;
+      require
+        (List.equal W.Tile.equal edited.tiles applied.tiles)
+        "Reapply changed live tiles";
+      (* The new service receives no configuration or source filename. *)
+      let%bind restored = handle (Service.create ~state_dir) Get >>| ok in
+      require
+        (W.Snapshot.equal applied restored)
+        "Restart lost composition provenance/policy";
+      require
+        (C.Definition.equal
+           (List.hd_exn restored.config_workspaces).definition
+           definition)
+        "Custom layout did not survive restart";
+      let%bind applied =
+        handle
+          service
+          (Mutate
+             { expected_revision = applied.revision
+             ; mutation =
+                 Restore_default_layout
+                   { workspace = p.workspace
+                   ; preset = "overview"
+                   ; tiles = [ "logs", { x = 0; y = 0; width = 80; height = 12 } ]
+                   }
+             })
+        >>| ok
+      in
+      let%bind restored = handle (Service.create ~state_dir) Get >>| ok in
+      require
+        (W.Snapshot.equal applied restored)
+        "Restart lost restored preset or detached config policy";
+      require
+        (List.hd_exn restored.config_workspaces).policy_detached
+        "Restart reattached obsolete configured layout/presentation";
+      let%bind repeated =
+        handle
+          service
+          (Mutate { expected_revision = applied.revision; mutation = Apply_config config })
+        >>| ok
+      in
+      require
+        (W.Snapshot.equal { applied with revision = repeated.revision } repeated)
+        "Reapply after Restore duplicated identity or reattached config policy";
+      let applied = repeated in
+      let bad = { config with id = "bad id" } in
+      let%bind rejected =
+        handle
+          service
+          (Mutate { expected_revision = applied.revision; mutation = Apply_config bad })
+      in
+      expect_error Invalid_request rejected;
+      let%bind unchanged = handle service Get >>| ok in
+      require (W.Snapshot.equal applied unchanged) "Invalid apply published state";
+      let%bind () =
+        In_thread.run (fun () ->
+          let p = List.hd_exn applied.config_workspaces in
+          let stored : Service.Stored.t =
+            { schema_version = W.schema_version
+            ; project_key
+            ; snapshot = { applied with config_workspaces = [ { p with tiles = [] } ] }
+            }
+          in
+          Out_channel.write_all
+            (Service.snapshot_path service ~project_key)
+            ~data:(Sexp.to_string (Service.Stored.sexp_of_t stored)))
+      in
+      let%bind rejected = handle (Service.create ~state_dir) (Initialize_config config) in
+      expect_error Invalid_request rejected;
+      (* A failed composition save cannot leak windows, mappings, or revision. *)
+      let failure_dir = Filename.concat state_dir "failed-composition" in
+      let failure_service = Service.create ~state_dir:failure_dir in
+      let%bind before = handle failure_service Get >>| ok in
+      let%bind () =
+        In_thread.run (fun () ->
+          remove_tree failure_dir;
+          Out_channel.write_all failure_dir ~data:"blocks directory creation")
+      in
+      let%bind rejected = handle failure_service (Initialize_config config) in
+      expect_error Internal_failure rejected;
+      let%bind after = handle failure_service Get >>| ok in
+      require (W.Snapshot.equal before after) "Failed initialize published composition";
+      let%bind rejected =
+        handle
+          failure_service
+          (Mutate { expected_revision = before.revision; mutation = Apply_config config })
+      in
+      expect_error Internal_failure rejected;
+      let%map after = handle failure_service Get >>| ok in
+      require
+        (W.Snapshot.equal before after)
+        "Failed additive apply published composition")
+;;
+
 let run_tests () =
   pure_transitions ();
-  persistence ()
+  let%bind () = persistence () in
+  composition_persistence ()
 ;;
 
 let () =

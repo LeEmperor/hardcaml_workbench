@@ -239,6 +239,48 @@ class Terminal:
         self.key(b'\x1b[A' * 100)
         self.key(b'\r')
 
+    def focus_view(self, view, limit=32):
+        """Observe the focused-view breadcrumb; never infer focus from visible panes."""
+        for _ in range(limit):
+            screen = self.drain()
+            footer = screen.lines()[-1].casefold()
+            if re.search(r'(?<![\w-])' + re.escape(view.casefold()) + r'(?=\s*(?:[›>]|$))', footer):
+                self.save('focused-' + view.replace(' ', '-'), screen)
+                return screen
+            self.key(b'\t')
+        self.save('focus-' + view.replace(' ', '-') + '-failure', self.drain())
+        raise AssertionError('Could not focus view through real Tab navigation: ' + view)
+
+    def wait_active_workspace(self, registry, workspace, label):
+        """Check exact saved navigation identity independently of clipped tab labels."""
+        expected_members = sorted((field(tile, 'id'), field(tile, 'kind'))
+            for tile in field(registry, 'tiles') if field(tile, 'workspace') == workspace)
+        directory = self.base / 'client-state/hardcaml-workbench/terminal'
+        deadline = time.monotonic() + 12
+        while True:
+            for path in directory.glob('navigation-*.sexp'):
+                try:
+                    navigation = parse(path.read_text())
+                except (OSError, ValueError, IndexError):
+                    continue
+                if (field(navigation, 'session') != field(registry, 'session_id') or
+                        field(navigation, 'active') != [workspace]):
+                    continue
+                saved = next((w for w in field(navigation, 'workspaces')
+                              if field(w, 'id') == workspace), None)
+                if saved is None:
+                    continue
+                members = sorted((field(member, 'tile'), field(member, 'kind'))
+                                 for member in field(saved, 'members'))
+                if members == expected_members and all(tile in dict(members) for tile in field(saved, 'focus')):
+                    (self.base / (label + '-navigation.json')).write_text(json.dumps(
+                        dict(source=str(path), expected_workspace=workspace, navigation=navigation), indent=2))
+                    return navigation
+            if time.monotonic() >= deadline:
+                self.save(label + '-navigation-failure', self.drain())
+                raise AssertionError(label + ': saved active workspace/session/membership did not match ' + workspace)
+            self.drain(.1)
+
     def close(self):
         try:
             self.save('last-screen', Screen(bytes(self.data), self.width, self.height))
@@ -456,10 +498,12 @@ def full_acceptance(t, check, http, runs, presets):
             for kind, geometry in specs:
                 tile = next(tile for tile in field(snapshot, 'tiles') if field(tile, 'workspace') == wid and field(tile, 'kind') == kind)
                 check(field(tile, 'requested_geometry') == geometry, 'Actual palette Reset restores exported geometry: ' + kind)
-    t.capture('preset-renamed-reset', ['Renamed dashboard', 'Reported cells (agg.)', 'PIN'])
+    t.capture('preset-renamed-reset', ['Reported cells (agg.)', 'PIN'])
+    t.wait_active_workspace(snapshot, wid, 'preset-renamed-reset')
+    check(True, 'Renamed Overview remains the exact active workspace despite clipped navigation labels')
 
 
-def run(args, acceptance=full_acceptance, extra_runs=(3, 4, 5, 6), startup_check=None):
+def run(args, acceptance=full_acceptance, extra_runs=(3, 4, 5, 6), startup_check=None, focused=False):
     base = demo.prepare(args.evidence, manual=True, delay=.05)
     print('Evidence: ' + str(base), flush=True)
     # Six real registered synthetic observations make the four-row selector
@@ -477,6 +521,7 @@ def run(args, acceptance=full_acceptance, extra_runs=(3, 4, 5, 6), startup_check
     demo.provider.save(base / 'manifest.json', manifest)
     for name in ('home', 'config', 'client-state', 'discovery'): (base / name).mkdir()
     result = dict(status='failed', checks=[], evidence=str(base), palette_only=args.palette_only,
+                  scope='focused' if focused else 'full',
                   harness=getattr(args, 'harness', 'frontend composition'),
                   related_evidence=getattr(args, 'related_evidence', []),
                   binaries={str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in (args.client, args.daemon, args.preset_export)})
@@ -496,7 +541,7 @@ def run(args, acceptance=full_acceptance, extra_runs=(3, 4, 5, 6), startup_check
         terminal = Terminal(base, args, url)
         startup = terminal.capture('startup-120x40', ['Overview', 'Reported cells (agg.)'])
         if startup_check is not None: startup_check(terminal, check, http, startup)
-        if not args.palette_only:
+        if not args.palette_only and not focused:
             def selector_count(screen):
                 lines = screen.lines()
                 top = next(y for y, line in enumerate(lines) if 'runs ' in line.casefold() and '╭' in line)
@@ -508,19 +553,31 @@ def run(args, acceptance=full_acceptance, extra_runs=(3, 4, 5, 6), startup_check
             check(selector_count(startup) == 4, 'Overview sidebar run selector shows exactly four of six registered runs by default')
             check('WORKSPACES' not in startup.text() and '[PROJECT' not in startup.text(), 'Default navigation has quiet title/project chrome')
             registry = http.rpc(domain='workspace')
+            terminal.focus_view('run selector')
             terminal.command('Run selector: More visible rows (+1)')
             expanded = terminal.capture('selector-five-rows', ['Runs 5/6'])
             check(selector_count(expanded) == 5, 'Focused selector row control exposes fifth run')
             terminal.command('Reset presentation overrides (inherit)')
             reset = terminal.capture('selector-four-inherited', ['Runs 4/6'])
             check(selector_count(reset) == 4 and http.rpc(domain='workspace') == registry, 'Selector reset inherits four rows without semantic mutation')
-        palette_acceptance(terminal, check, http)
+        if not focused:
+            palette_acceptance(terminal, check, http)
         final_title = 'Overview' if args.palette_only else (acceptance(terminal, check, http, runs, presets) or 'Renamed dashboard')
+        if not focused:
+            final_registry = http.rpc(domain='workspace')
+            final_workspaces = [w for w in field(final_registry, 'workspaces') if field(w, 'name') == final_title]
+            require(len(final_workspaces) == 1, 'Final workspace name must resolve to one known live identity')
+            final_workspace = field(final_workspaces[0], 'id')
+            terminal.wait_active_workspace(final_registry, final_workspace, 'final-workspace')
         terminal.close(); terminal = None
         # New clients ensure resizing does not confuse the terminal reconstruction.
-        for width, height in ((80, 24), (120, 40), (180, 55)):
+        for width, height in (() if focused else ((80, 24), (120, 40), (180, 55))):
             terminal = Terminal(base, args, url, width, height)
-            terminal.capture(f'overview-{width}x{height}', ['Compact: focused tile only'] if width == 80 else [final_title])
+            terminal.capture(f'overview-{width}x{height}',
+                             ['Compact: focused tile only'] if width == 80 else ['Reported cells (agg.)'])
+            terminal.wait_active_workspace(final_registry, final_workspace, f'overview-{width}x{height}')
+            check(http.rpc(domain='workspace') == final_registry,
+                  f'{width}x{height} client restores exact active workspace and rendered content without registry mutation')
             terminal.open_palette('ap col')
             terminal.capture(f'overlay-{width}x{height}', ['COMMAND PALETTE', 'Color'])
             terminal.key(b'\x1b')

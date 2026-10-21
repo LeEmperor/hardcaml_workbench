@@ -121,8 +121,34 @@ def exercise(test):
         terminal.wait('startup', ['Space c c commands'], ['Loading workspace...'], ready=True)
         test.check(counts() == dict(discover=0, run=0) and jobs() == [],
                    'First frontend startup performs no provider discovery or jobs')
-        terminal.palette('Create Testing workspace')
-        terminal.wait('testing', ['simulation-catalog', 'simulation-artifacts'])
+        # Fresh startup already instantiates the stock Testing definition. Wait
+        # for that atomic initialization instead of fuzzy-matching an obsolete
+        # Create shortcut and accidentally adding another same-name workspace.
+        deadline = time.monotonic() + 20
+        while True:
+            startup_registry = test.workspace()
+            if field(startup_registry, 'defaults_initialized') == 'true':
+                break
+            require(time.monotonic() < deadline, 'Canonical workspace startup did not complete')
+            terminal.drain(.1)
+        required_panes = {'simulation-catalog', 'simulation-attempts', 'simulation-cases',
+                          'simulation-detail', 'simulation-artifacts', 'simulation-logs'}
+        testing = [workspace for workspace in field(startup_registry, 'workspaces')
+                   if required_panes.issubset({field(tile, 'kind')
+                       for tile in field(startup_registry, 'tiles')
+                       if field(tile, 'workspace') == field(workspace, 'id') and
+                       field(tile, 'hidden') == 'false'})]
+        test.check(len(testing) == 1 and field(startup_registry, 'configuration_pending') == 'false',
+                   'Canonical startup supplies exactly one actual cooperative Testing workspace')
+        testing = testing[0]
+        testing_name = field(testing, 'name')
+        require(sum(field(w, 'name') == testing_name for w in field(startup_registry, 'workspaces')) == 1,
+                'Testing navigation title must uniquely identify the canonical instance')
+        testing_tab = '[%d %s]' % (field(startup_registry, 'workspaces').index(testing) + 1, testing_name)
+        terminal.palette('Switch to ' + testing_name)
+        terminal.wait('testing', [testing_tab, 'simulation-catalog', 'simulation-artifacts'])
+        test.check(test.workspace() == startup_registry,
+                   'Opening existing Testing performs no registry mutation or duplicate workspace creation')
         terminal.focus_catalog()
         terminal.palette('Simulation: Discover suites explicitly')
         terminal.wait('catalog', ['reconnect-case', 'fixture'])
@@ -178,7 +204,7 @@ def exercise(test):
         terminal = Terminal(test, 'second-client')
         # No input at all to the second client: only drain the actual PTY output.
         painted_identity(terminal.wait('restored-no-input',
-            ['[3 Testing]', 'Ready for explicit launch', 'simulation-catalog', 'simulation-artifacts', *selected],
+            [testing_tab, 'Ready for explicit launch', 'simulation-catalog', 'simulation-artifacts', *selected],
             ['Loading workspace...', 'Select an attempt'], ready=True), 'Second client without input')
         terminal.drain(2.5)
         terminal.wait('restored-after-poll', selected)
@@ -192,7 +218,7 @@ def exercise(test):
         test.check(restored == detail, 'Exact retained attempt and artifact evidence remain unchanged')
         test.check(not (test.evidence / 'forbidden-tools.jsonl').exists(), 'No forbidden toolchain or EDA executable invoked')
         test.result.update(status='passed', daemon_pid=daemon_pid, instance=instance,
-            attempt=aid, artifact=artifact, counts=counts(),
+            attempt=aid, artifact=artifact, counts=counts(), testing_workspace=field(testing, 'id'),
             limitation='Timing retained-index attachment not exercised by this simulation-only fixture')
     finally:
         if terminal:

@@ -415,8 +415,8 @@ def pty_acceptance(args, evidence, fixture, check):
             if time.monotonic() > deadline:
                 raise AssertionError('native shared workspace bootstrap did not complete')
             terminal.drain(.1)
-        # Protocol Bootstrap populates its two original placeholders; the native
-        # explicit Testing action adds the third starter for this bare fixture.
+        # Native startup consumes the canonical stock window composition. The
+        # explicit Testing action also supports older saved two-workspace sessions.
         check(not any(field(w, 'preset') == ['waveforms'] for w in field(initial_registry, 'workspaces')),
               'ordinary startup never creates an empty Waveforms workspace')
         has_testing = any(field(w, 'preset') == ['testing'] for w in field(initial_registry, 'workspaces'))

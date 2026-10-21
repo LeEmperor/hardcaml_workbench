@@ -45,6 +45,9 @@ simulation tile and independent counter fixture remain supported.
 
 ## Documentation
 
+- [Compose your own windows and workspaces](docs/workspace_configuration.md) — shared
+  stock/user specification, editable examples, atomic apply and built-in recovery.
+
 - [Execution durations](docs/execution_durations.md) — stage/run and simulation elapsed
   times in Overview and Testing, availability limits, and linked-context theme colors.
 - [Lazy Timing details and cache configuration](docs/timing_cache_and_duration_alignment_plan.md)

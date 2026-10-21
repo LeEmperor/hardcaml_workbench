@@ -331,13 +331,36 @@ def native(base, args):
         check(len(attempts(client)) == 2 and len(runs()) == 2, 'fresh full seed creates exactly two representative attempts')
         layout = client.rpc(domain='workspace')
         presets = demo.workspace_presets(args.preset_export)
+        starter_mappings = field(layout, 'config_workspaces')
+        starter_windows = field(layout, 'config_windows')
+        expected_instances = [(field(window, 'key'), field(instance, 'key'),
+                               field(instance, 'definition'))
+                              for window in field(presets.config, 'windows')
+                              for instance in field(window, 'workspaces')]
+        check(field(layout, 'defaults_initialized') == 'true' and
+              field(layout, 'configuration_pending') == 'false' and
+              [(field(p, 'window_key'), field(p, 'workspace_key'), field(p, 'reference'))
+               for p in starter_mappings] == expected_instances and
+              {field(p, 'workspace') for p in starter_mappings} ==
+              {field(w, 'id') for w in field(layout, 'workspaces')},
+              'fresh seed initializes exactly the canonical three workspace instances and their provenance')
         for identity in ('overview', 'timing', 'testing'):
             workspaces = [w for w in field(layout, 'workspaces') if field(w, 'preset') == [identity]]
             check(len(workspaces) == 1, 'one stable ' + identity + ' workspace')
-            kinds = [field(t, 'kind') for t in field(layout, 'tiles')
+            definition = next(d for d in field(presets.config, 'definitions')
+                              if field(d, 'key') == identity)
+            policy = next(p for p in starter_mappings
+                          if field(p, 'workspace') == field(workspaces[0], 'id'))
+            tiles = [t for t in field(layout, 'tiles')
                      if field(t, 'workspace') == field(workspaces[0], 'id')]
-            check(sorted(kinds) == sorted(field(t, 'kind') for t in field(presets[identity], 'tiles')),
-                  identity + ' populated from exported OCaml definition')
+            views = [[['kind', field(t, 'kind')], ['hidden', field(t, 'hidden')],
+                      ['geometry', field(t, 'requested_geometry')]] for t in tiles]
+            check(views == field(field(definition, 'template'), 'views') and
+                  field(policy, 'definition') == definition and
+                  field(policy, 'policy_detached') == 'false' and
+                  field(policy, 'tiles') == [[field(spec, 'key'), field(tile, 'id')]
+                                           for spec, tile in zip(field(definition, 'tiles'), tiles)],
+                  identity + ' preserves exact canonical views, frozen policy and tile-key identities')
         legacy = Client(url, base / 'legacy-upgrade/project', switch=demo.switch_name())
         legacy_layout = legacy.rpc(domain='workspace')
         legacy_layout = legacy.mutate(legacy_layout,
@@ -412,6 +435,9 @@ def native(base, args):
               'reseed preserves custom-name workspace and exact extra tile geometry/pin')
         check(next(c for c in field(after, 'contexts') if field(c, 'id') == context_id) == saved_context,
               'reseed preserves retained user context/selection revision')
+        check(field(after, 'config_workspaces') == starter_mappings and
+              field(after, 'config_windows') == starter_windows,
+              'reseed preserves all three canonical starter mappings and frozen policies despite user rename/extras')
         check({field(a, 'id') for a in attempts(client)} == before_ids,
               'repeated full seed creates no duplicate attempts')
         cleared = mutate('(Select_run (workspace %s) (context %s) (expected_selection_revision %s) (run ()))' % (
@@ -426,9 +452,32 @@ def native(base, args):
             attempts(client)
             details(client, pass_id)
         if not args.skip_pty:
+            navigation_files = list((base / 'client-state/hardcaml-workbench/terminal').glob('navigation-*.sexp'))
+            require(len(navigation_files) == 1, 'Exactly one private project navigation sidecar')
+            navigation = parse(navigation_files[0].read_text())
+            active = field(navigation, 'active')[0]
+            saved_workspace = next(w for w in field(cleared_after, 'workspaces') if field(w, 'id') == active)
+            saved_view = next(w for w in field(navigation, 'workspaces') if field(w, 'id') == active)
+            check(field(saved_workspace, 'name') == 'Legacy simulation' and
+                  any(field(tile, 'id') in field(saved_view, 'focus') and
+                      field(tile, 'workspace') == active and field(tile, 'kind') == 'simulation'
+                      for tile in field(cleared_after, 'tiles')),
+                  'Saved navigation records the actual last active Legacy workspace and simulation focus')
+            provider.save(base / 'restart-navigation.json', navigation)
             terminal = Terminal(base, args, client)
             try:
-                terminal.capture('restart', ['Overview', 'My retained tests'])
+                terminal.capture('restart-restored-navigation', ['Legacy simulation',
+                    'Structured simulation', 'Space c c commands'])
+                check(True, 'Client restart restores the saved Legacy workspace and focused simulation view')
+                terminal.palette('Switch to My retained tests')
+                terminal.capture('restart-retained-testing', ['My retained tests',
+                    'simulation-catalog', 'simulation-attempts', 'simulation-cases',
+                    'simulation-detail', 'simulation-artifacts', 'simulation-logs',
+                    'Suite: synthetic-checks', 'seeded-pattern', '[Available]'])
+                retained = client.rpc(domain='workspace')
+                check(field(retained, 'config_workspaces') == starter_mappings and
+                      next(t for t in field(retained, 'tiles') if field(t, 'id') == extra) == preserved,
+                      'Explicit post-restart Testing navigation preserves frozen starter policy and exact extra pin/geometry')
             finally:
                 terminal.close()
         check(calls() == before_calls, 'Get/Observe/navigation/client restart launches no provider processes')
@@ -437,6 +486,10 @@ def native(base, args):
         daemon.wait(timeout=15)
         daemon, url = start()
         client, _ = demo.seed(base, url, args.preset_export)
+        restarted = client.rpc(domain='workspace')
+        check(field(restarted, 'config_workspaces') == starter_mappings and
+              field(restarted, 'config_windows') == starter_windows,
+              'daemon restart and reseed retain exact canonical starter provenance and tile identities')
         check({field(a, 'id') for a in attempts(client)} == before_ids and len(runs()) == len(before_ids),
               'daemon restart and reseed preserve reservations without replay')
         result.update(status='passed', url=url, attempts=attempts(client), receipts=receipts)
@@ -466,7 +519,19 @@ def terminal_checks(base, args, client, pass_id, fail_id, check):
         terminal.palette('Switch to Timing')
         terminal.capture('timing', ['Timing', 'Session', 'Timing · Paths', 'Timing · Provenance'])
         terminal.palette('Switch to Testing')
-        terminal.capture('testing', ['Testing', 'Session', 'SIMULATION CATALOG', 'ATTEMPTS', 'CASES', 'ARTIFACTS'])
+        terminal.capture('testing', ['Testing', 'session', 'project-tests', 'execution',
+            'simulation-catalog', 'simulation-attempts', 'simulation-cases',
+            'simulation-detail', 'simulation-artifacts', 'simulation-logs',
+            'Suite: synthetic-checks', 'Finished/Passed', 'Finished/Failed',
+            'seeded-pattern: Passed', 'injected-mismatch: Failed', '[Available]', '[stdout]'])
+        terminal.focus_simulation()
+        terminal.palette('Simulation: Reopen ' + pass_id + ' synthetic-checks')
+        terminal.palette('Simulation: Select case seeded-pattern')
+        terminal.capture('testing-cooperative-selected-case', ['simulation-cases',
+            '> seeded-pattern: Passed', 'simulation-detail', 'Passed / Finished',
+            'simulation-artifacts', '[Available]', 'simulation-logs', '[stdout]'])
+        check({field(a, 'id') for a in attempts(client)} == before,
+              'Cooperative Testing reopen/case selection updates real panes without allocating attempts')
         terminal.palette('Switch to Legacy simulation')
         terminal.capture('legacy-testing', ['Structured simulation', 'seed=314159', 'seed=42'])
         terminal.focus_simulation()
@@ -503,11 +568,18 @@ def terminal_checks(base, args, client, pass_id, fail_id, check):
         terminal.close()
     terminal = Terminal(base, args, client, width=180, height=55)
     try:
+        # Navigation preferences intentionally restore the previous active desk;
+        # select Overview explicitly before asserting its larger-viewport content.
+        terminal.capture('restored-navigation-large', ['Space c c commands'])
+        terminal.palette('Switch to Overview')
         terminal.capture('overview-large', ['Overview', 'Testing', 'Session'])
         terminal.palette('Switch to Timing')
         terminal.capture('timing-large', ['Session', 'Timing · Paths', 'Timing · Provenance'])
         terminal.palette('Switch to Testing')
-        terminal.capture('testing-large', ['Session', 'SIMULATION CATALOG', 'ATTEMPTS', 'ARTIFACTS'])
+        terminal.capture('testing-large', ['session', 'project-tests', 'execution',
+            'simulation-catalog', 'simulation-attempts', 'simulation-cases',
+            'simulation-detail', 'simulation-artifacts', 'simulation-logs',
+            'Suite: synthetic-checks', 'seeded-pattern', '[Available]', '[stdout]'])
         terminal.palette('Switch to Legacy simulation')
         terminal.capture('legacy-testing-large', ['Structured simulation', 'synthetic-checks'])
         terminal.focus_simulation()

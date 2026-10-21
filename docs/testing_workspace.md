@@ -60,8 +60,8 @@ generic tests    attempts         artifacts
 execution        cases            selected attempt job logs
 ```
 
-The compact utility column is one fifth of the width; the two investigation
-columns share the rest. Cases and artifacts refer to the selected simulation
+The compact utility column and two investigation columns use **2:3:3** width
+weights from `terminal/workspaces/stock.sexp`. Cases and artifacts refer to the selected simulation
 attempt, not the ASIC run selected in Overview. Full IDs and captured provenance
 remain inspectable in Detail. The artifact list prioritizes labels/case ownership;
 selecting an artifact exposes its exact ID, bytes, digest and media type in Detail.

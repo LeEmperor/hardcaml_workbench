@@ -586,12 +586,16 @@ def exercise(test):
                'New registry explicitly awaits shared-definition bootstrap')
     current = initial
     starters = {}
-    for kind, count in [('generic', 4), ('asic', 9), ('overview', 11), ('timing', 6), ('testing', 10)]:
+    stock = parse(test.command(test.args.workspace_cli, ['config', 'export', 'stock'], 'canonical-stock'))
+    canonical = {field(d, 'key'): field(d, 'template') for d in field(stock, 'definitions')}
+    for kind in ['generic', 'asic', *canonical]:
         text = test.command(test.args.workspace_cli, ['starter', kind], 'starter-' + kind)
         template = parse(text)
         starters[kind] = template
-        test.check(field(template, 'version') == '1' and len(field(template, 'views')) == count,
-                   kind + ' offline starter has expected version and view count')
+        test.check(field(template, 'version') == '1' and
+                   (template == canonical[kind] if kind in canonical else
+                    len(field(template, 'views')) == {'generic': 4, 'asic': 9}[kind]),
+                   kind + ' offline starter matches canonical spec or intentional v1 compatibility template')
         if kind == 'testing':
             test.check([field(view, 'kind') for view in field(template, 'views')] ==
                        ['workspace-tabs', 'live-status', 'project-tests', 'execution',
@@ -604,7 +608,7 @@ def exercise(test):
         exported = test.cli('export', [created], 'export-' + kind)
         expected = portable(template, kind + ' imported')
         test.check(parse(exported) == expected, kind + ' export contains exactly portable layout fields')
-        if kind in ('overview', 'timing', 'testing'):
+        if kind in canonical:
             current = test.mutate(current, ['Rename_workspace', ['workspace', created], ['name', kind + ' renamed']])
             renamed = parse(test.cli('export', [created], 'export-renamed-' + kind))
             test.check(renamed == portable(template, kind + ' renamed') and field(renamed, 'preset') == [kind],

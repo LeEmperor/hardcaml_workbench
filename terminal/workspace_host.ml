@@ -2079,6 +2079,69 @@ let evidence_runs t =
 
 let definition = P.Presets.for_arrangement
 
+let provenance t workspace =
+  Option.bind t.registry ~f:(fun registry ->
+    List.find registry.config_workspaces ~f:(fun p ->
+      W.Workspace_id.equal p.workspace workspace
+      && (not p.policy_detached)
+      &&
+      match p.reference, (W.workspace registry workspace).preset with
+      | Custom _, None -> true
+      | Builtin key, Some preset -> String.equal key preset
+      | _ -> false))
+;;
+
+let render_definition t (workspace : W.Arrangement.t) =
+  match provenance t workspace.id with
+  | Some p -> Some (P.Definition.of_spec p.definition)
+  | None -> definition workspace
+;;
+
+let configured_tile (p : W.Config_workspace.t) (tile : W.Tile.t) =
+  List.find_map p.tiles ~f:(fun (key, id) ->
+    if W.Tile_id.equal id tile.id && W.Workspace_id.equal p.workspace tile.workspace
+    then
+      List.find_map
+        (List.zip_exn p.definition.tiles p.definition.template.views)
+        ~f:(fun (keyed, view) ->
+          if String.equal keyed.Workspace_config.Tile.key key
+             && String.equal view.Workspace_template.View.kind tile.kind
+          then Some keyed
+          else None)
+    else None)
+;;
+
+(** Runtime identities, never display order or kind, select configured leaves. Extra tiles
+    use an unclaimable label and remain visible through the normal extras path. *)
+let layout_keys t (tiles : W.Tile.t list) =
+  let claimed = Hash_set.create (module String) in
+  List.map tiles ~f:(fun tile ->
+    let key =
+      match provenance t tile.workspace with
+      | Some p -> Option.map (configured_tile p tile) ~f:(fun keyed -> keyed.key)
+      | None ->
+        (* Legacy builtin instances have no authoring IDs. Adapt their first visible
+           occurrences by kind; the stock author is still free to choose any keys. *)
+        Option.bind t.registry ~f:(fun registry ->
+          let workspace = W.workspace registry tile.workspace in
+          Option.bind workspace.preset ~f:(fun preset ->
+            P.Presets.builtins preset
+            |> Result.ok
+            |> Option.bind ~f:(fun d ->
+              List.find_map
+                (List.zip_exn d.tiles d.template.views)
+                ~f:(fun (keyed, view) ->
+                  let claim = W.Workspace_id.to_string tile.workspace ^ ":" ^ keyed.key in
+                  if String.equal view.Workspace_template.View.kind tile.kind
+                     && not (Hash_set.mem claimed claim)
+                  then (
+                    Hash_set.add claimed claim;
+                    Some keyed.Workspace_config.Tile.key)
+                  else None))))
+    in
+    Option.value key ~default:("extra:" ^ W.Tile_id.to_string tile.id))
+;;
+
 let restore_commands (workspace : W.Arrangement.t) =
   let make ?unavailable id title action =
     command ?unavailable id title "restore default preset layout hide extras fit" action
@@ -2093,8 +2156,9 @@ let restore_commands (workspace : W.Arrangement.t) =
           (if Option.is_none (definition workspace)
            then
              Some
-               "Unknown/custom preset; choose Restore default layout: Overview, Timing \
-                or Testing"
+               "No built-in preset for this workspace; create a built-in workspace or \
+                explicitly select a named built-in Restore (not a reset to custom \
+                defaults)"
            else None)
         "workspace.restore-default-layout"
         "Restore default layout (current preset; hide extras)"
@@ -2258,7 +2322,6 @@ let matching_timing ?workspace:expected_workspace (registry : W.Snapshot.t) ~run
       expected_workspace
       ~default:true
       ~f:(W.Workspace_id.equal workspace.id)
-    && Option.equal String.equal workspace.preset (Some "timing")
     && Option.value_map workspace.zoomed_tile ~default:true ~f:(fun id ->
       List.exists registry.tiles ~f:(fun tile ->
         W.Tile_id.equal tile.id id
@@ -2269,17 +2332,14 @@ let matching_timing ?workspace:expected_workspace (registry : W.Snapshot.t) ~run
             W.Workspace_id.equal tile.workspace workspace.id
             && String.equal tile.kind "timing-paths")
         in
-        List.is_empty paths || List.exists paths ~f:(fun tile -> not tile.hidden))
-    && Option.equal
-         Run_ref.equal
-         (W.context registry workspace.context).selected_run
-         (Some run)
+        List.exists paths ~f:(fun tile -> not tile.hidden))
     && List.for_all registry.tiles ~f:(fun tile ->
       (not (W.Workspace_id.equal tile.workspace workspace.id))
+      || Option.is_none (Timing_workspace.pane tile.kind)
       ||
-      match tile.binding with
-      | Follow -> true
-      | Pin_run pinned -> Run_ref.equal pinned run))
+      match W.resolve_tile registry tile.id with
+      | Ok reference -> Option.equal Run_ref.equal reference.run (Some run)
+      | Error _ -> false))
 ;;
 
 let%test_unit "Timing exact-run reuse preserves pins and independent investigations" =
@@ -2448,11 +2508,17 @@ let preset_presentation (p : P.Common.presentation) : T.overrides =
 
 (** Neutral composition modes are sparse preset policy, independent of chrome. *)
 let composition_policy t (tile : W.Tile.t) =
-  Option.bind t.registry ~f:(fun registry ->
-    List.find registry.workspaces ~f:(fun w -> W.Workspace_id.equal w.id tile.workspace))
-  |> Option.bind ~f:definition
-  |> Option.bind ~f:(fun d -> P.Definition.presentation d ~kind:tile.kind)
-  |> Option.value ~default:P.Common.inherit_presentation
+  let presentation =
+    match provenance t tile.workspace with
+    | Some p -> Option.bind (configured_tile p tile) ~f:(fun keyed -> keyed.presentation)
+    | None ->
+      Option.bind t.registry ~f:(fun registry ->
+        List.find registry.workspaces ~f:(fun w ->
+          W.Workspace_id.equal w.id tile.workspace))
+      |> Option.bind ~f:definition
+      |> Option.bind ~f:(fun d -> P.Definition.presentation d ~kind:tile.kind)
+  in
+  Option.value presentation ~default:P.Common.inherit_presentation
 ;;
 
 let compact_summary t tile =
@@ -2461,6 +2527,99 @@ let compact_summary t tile =
 
 let horizontal_stages t tile =
   Option.value (composition_policy t tile).horizontal_stages ~default:false
+;;
+
+let%test_unit "persisted config keys survive reorder, hide and duplicate tile kinds" =
+  let config =
+    P.Presets.custom_example () |> Or_error.ok_exn |> P.Presets.resolve |> Or_error.ok_exn
+  in
+  let registry = W.initial ~session_id:(W.Session_id.of_string "keyed-layout") in
+  let registry =
+    W.apply registry (Initialize_config config) |> Result.ok |> Option.value_exn
+  in
+  let workspace = List.hd_exn registry.workspaces in
+  let p = List.hd_exn registry.config_workspaces in
+  let tile key = W.tile registry (List.Assoc.find_exn p.tiles key ~equal:String.equal) in
+  let left = tile "left"
+  and right = tile "right" in
+  let host = receive empty registry in
+  assert (compact_summary host left);
+  assert (not (compact_summary host right));
+  assert (Option.equal Int.equal (composition_policy host right).padding (Some 1));
+  assert (Option.equal Int.equal (composition_policy host left).padding None);
+  assert (List.equal String.equal (layout_keys host [ right; left ]) [ "right"; "left" ]);
+  let registry =
+    { registry with
+      tiles =
+        List.rev_map registry.tiles ~f:(fun tile ->
+          if W.Tile_id.equal tile.id left.id then { tile with hidden = true } else tile)
+    }
+  in
+  let restored = W.Snapshot.t_of_sexp (W.Snapshot.sexp_of_t registry) in
+  let host = receive empty restored in
+  assert (List.equal String.equal (layout_keys host (tiles host)) [ "right"; "choose" ]);
+  assert (Option.is_some (render_definition host workspace));
+  assert (compact_summary host left)
+;;
+
+let%test_unit "moved and retyped config tiles remain extras rather than claiming keys" =
+  let config =
+    P.Presets.custom_example () |> Or_error.ok_exn |> P.Presets.resolve |> Or_error.ok_exn
+  in
+  let window = List.hd_exn config.windows in
+  let instance = List.hd_exn window.workspaces in
+  let config =
+    { config with
+      windows =
+        [ { window with workspaces = [ instance; { instance with key = "second" } ] } ]
+    }
+  in
+  let initial = W.initial ~session_id:(W.Session_id.of_string "moved-key-layout") in
+  let registry =
+    W.apply initial (Initialize_config config) |> Result.ok |> Option.value_exn
+  in
+  let origin = List.hd_exn registry.config_workspaces
+  and target = List.last_exn registry.workspaces in
+  let left =
+    W.tile registry (List.Assoc.find_exn origin.tiles "left" ~equal:String.equal)
+  in
+  let moved =
+    W.apply
+      registry
+      (Mutate
+         { expected_revision = registry.revision
+         ; mutation = Move_tile { tile = left.id; workspace = target.id }
+         })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let host = receive empty moved in
+  let moved_left = W.tile moved left.id in
+  assert (not (compact_summary host moved_left));
+  assert (
+    List.equal
+      String.equal
+      (layout_keys host [ moved_left ])
+      [ "extra:" ^ W.Tile_id.to_string left.id ]);
+  (* Retyping an original identity must not retain the original kind's leaf or defaults. *)
+  let retyped =
+    { registry with
+      tiles =
+        List.map registry.tiles ~f:(fun tile ->
+          if W.Tile_id.equal tile.id left.id then { tile with kind = "timing" } else tile)
+    }
+  in
+  let host = receive empty retyped in
+  let tile = W.tile retyped left.id in
+  assert (not (compact_summary host tile));
+  assert (
+    List.equal
+      String.equal
+      (layout_keys host [ tile ])
+      [ "extra:" ^ W.Tile_id.to_string tile.id ]);
+  (* Returning an unchanged tile to its origin legitimately recovers the same key. *)
+  assert (
+    List.equal String.equal (layout_keys (receive empty registry) [ left ]) [ "left" ])
 ;;
 
 (** Presentation preferences are client-local, keyed by stable workspace/tile IDs. They
@@ -2481,15 +2640,7 @@ let policy t (tile : W.Tile.t) =
       T.apply density_defaults { T.navigation with frame = Some false; padding = Some 0 }
     else density_defaults
   in
-  let workspace =
-    Option.bind t.registry ~f:(fun registry ->
-      List.find registry.workspaces ~f:(fun w -> W.Workspace_id.equal w.id tile.workspace))
-  in
-  let defaults =
-    Option.bind workspace ~f:definition
-    |> Option.bind ~f:(fun d -> P.Definition.presentation d ~kind:tile.kind)
-    |> Option.value_map ~default:T.inherit_ ~f:preset_presentation
-  in
+  let defaults = preset_presentation (composition_policy t tile) in
   (* Compiled kind/preset settings are defaults. Every explicit client setting wins over
      them, with workspace and tile overrides becoming more specific. *)
   let app = T.apply (T.apply base defaults) t.presentation in
@@ -2651,14 +2802,21 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
     let geometry : W.Geometry.t = { x = 0; y = 0; width = 40; height = 10 } in
     base
     @ restore_commands w
+    @ List.map P.Presets.all ~f:(fun d ->
+      mutation
+        ("workspace.create-builtin." ^ d.P.Definition.id)
+        ("Create built-in workspace: " ^ d.name)
+        (W.Mutation.Instantiate_template
+           { window = w.window
+           ; template = (P.Presets.builtins d.id |> Or_error.ok_exn).template
+           }))
     @ List.map s.workspaces ~f:(fun w ->
       command
         ("workspace." ^ W.Workspace_id.to_string w.id)
         ("Switch to " ^ w.name)
         "workspace navigation tabs"
         (Switch w.id))
-    @ (if List.exists s.workspaces ~f:(fun w ->
-            Option.equal String.equal w.preset (Some "testing"))
+    @ (if List.exists s.tiles ~f:(fun tile -> Testing_workspace.is_pane tile.kind)
        then []
        else
          [ command
@@ -4576,10 +4734,20 @@ let%test_unit "overview utilities and explicit Testing creation are available ad
   assert (project_scoped_kind "planned-run");
   assert (List.exists commands ~f:(fun c -> String.equal c.id "tile.add.planned-run"));
   assert (List.exists commands ~f:(fun c -> String.equal c.id "workspace.create-testing"));
-  let testing =
-    { (List.last_exn s.workspaces) with name = "Renamed tests"; preset = Some "testing" }
-  in
+  (* A preset label without panes is not a Testing capability. *)
+  let testing = { (List.last_exn s.workspaces) with preset = Some "testing" } in
   let s = { s with workspaces = [ List.hd_exn s.workspaces; testing ] } in
+  assert (
+    List.exists
+      (catalog (receive host s) ~project:None ~jobs:[])
+      ~f:(fun c -> String.equal c.id "workspace.create-testing"));
+  let s =
+    { s with
+      workspaces = List.map s.workspaces ~f:(fun w -> { w with preset = None })
+    ; tiles =
+        { (List.hd_exn s.tiles) with kind = "simulation-detail" } :: List.tl_exn s.tiles
+    }
+  in
   assert (
     not
       (List.exists
@@ -5609,4 +5777,308 @@ let%test_unit "Waveforms pins survive navigation and restore but reject reused i
   in
   assert (List.is_empty (receive host removed).waveforms);
   assert (List.is_empty (reconnect host ~replacement:true).waveforms)
+;;
+
+let%test_unit "custom-only sessions can create every builtin without replacing custom \
+               tiles"
+  =
+  let config =
+    P.Presets.custom_example () |> Or_error.ok_exn |> P.Presets.resolve |> Or_error.ok_exn
+  in
+  let initial = W.initial ~session_id:(W.Session_id.of_string "builtin-recovery") in
+  let registry =
+    W.apply initial (Initialize_config config) |> Result.ok |> Option.value_exn
+  in
+  let host = receive empty registry in
+  let commands = catalog host ~project:None ~jobs:[] in
+  let current_restore =
+    List.find_exn commands ~f:(fun c ->
+      String.equal c.id "workspace.restore-default-layout")
+  in
+  assert (Option.is_some current_restore.unavailable);
+  List.iter P.Presets.all ~f:(fun d ->
+    let command =
+      List.find_exn commands ~f:(fun c ->
+        String.equal c.id ("workspace.create-builtin." ^ d.P.Definition.id))
+    in
+    match command.action with
+    | Registry mutation ->
+      let created =
+        W.apply registry (Mutate { expected_revision = registry.revision; mutation })
+        |> Result.ok
+        |> Option.value_exn
+      in
+      assert (List.length created.workspaces = List.length registry.workspaces + 1);
+      List.iter registry.tiles ~f:(fun tile ->
+        assert (W.Tile.equal tile (W.tile created tile.id)));
+      let builtin = List.last_exn created.workspaces in
+      assert (Option.equal String.equal builtin.preset (Some d.id));
+      assert (Option.is_some (render_definition (receive host created) builtin))
+    | _ -> assert false)
+;;
+
+let%test_unit "named builtin Restore from custom explicitly replaces policy without \
+               rebinding"
+  =
+  let config =
+    P.Presets.custom_example () |> Or_error.ok_exn |> P.Presets.resolve |> Or_error.ok_exn
+  in
+  let initial = W.initial ~session_id:(W.Session_id.of_string "custom-named-restore") in
+  let registry =
+    W.apply initial (Initialize_config config) |> Result.ok |> Option.value_exn
+  in
+  let workspace = List.hd_exn registry.workspaces in
+  let host = receive empty registry in
+  let custom = List.hd_exn registry.config_workspaces in
+  let left =
+    W.tile registry (List.Assoc.find_exn custom.tiles "left" ~equal:String.equal)
+  in
+  assert (compact_summary host left);
+  let command =
+    List.find_exn (restore_commands workspace) ~f:(fun c ->
+      String.equal c.id "workspace.restore-default-layout.timing")
+  in
+  match command.action with
+  | Restore_default_layout (id, d) ->
+    let restored =
+      W.apply
+        registry
+        (Mutate
+           { expected_revision = registry.revision
+           ; mutation = P.Definition.restore d ~workspace:id
+           })
+      |> Result.ok
+      |> Option.value_exn
+    in
+    let host = receive host restored in
+    assert (Option.is_none (provenance host id));
+    assert (
+      String.equal
+        (Option.value_exn (render_definition host (W.workspace restored id))).id
+        "timing");
+    assert (not (compact_summary host (W.tile restored left.id)));
+    List.iter registry.tiles ~f:(fun tile ->
+      assert (W.Binding.equal tile.binding (W.tile restored tile.id).binding));
+    assert (List.equal W.Context.equal registry.contexts restored.contexts)
+  | _ -> assert false
+;;
+
+let%test_unit "same-builtin Restore detaches frozen policy across restart and additive \
+               apply"
+  =
+  let stock = P.Presets.builtins "timing" |> Or_error.ok_exn in
+  let archived : Workspace_config.Definition.t =
+    { stock with
+      tiles =
+        List.map stock.tiles ~f:(fun tile ->
+          if String.equal tile.Workspace_config.Tile.key "timing-paths"
+          then
+            { Workspace_config.Tile.key = "archived-paths"
+            ; presentation =
+                Some
+                  { Workspace_config.Presentation.inherit_defaults with
+                    compact_summary = Some true
+                  }
+            }
+          else tile)
+    ; layout =
+        Some
+          (Leaf { tile = "archived-paths"; min_width = 24; min_height = 6; weight = 1 })
+    }
+  in
+  let config : Workspace_config.Resolved.t =
+    { version = Workspace_config.version
+    ; id = "archived-stock"
+    ; definitions = [ archived ]
+    ; windows =
+        [ { key = "main"
+          ; name = "Main"
+          ; workspaces =
+              [ { key = "timing"; name = "Timing"; definition = Builtin "timing" } ]
+          }
+        ]
+    }
+  in
+  let initial = W.initial ~session_id:(W.Session_id.of_string "same-builtin-restore") in
+  let registry =
+    W.apply initial (Initialize_config config) |> Result.ok |> Option.value_exn
+  in
+  let p = List.hd_exn registry.config_workspaces in
+  let path =
+    W.tile registry (List.Assoc.find_exn p.tiles "archived-paths" ~equal:String.equal)
+  in
+  let host = receive empty registry in
+  assert (compact_summary host path);
+  assert (List.equal String.equal (layout_keys host [ path ]) [ "archived-paths" ]);
+  let restored =
+    W.apply
+      registry
+      (Mutate
+         { expected_revision = registry.revision
+         ; mutation = P.Definition.restore P.Timing.definition ~workspace:p.workspace
+         })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let check snapshot =
+    let retained = List.hd_exn snapshot.W.Snapshot.config_workspaces in
+    assert retained.policy_detached;
+    assert (List.equal [%equal: string * W.Tile_id.t] retained.tiles p.tiles);
+    assert (Workspace_config.Definition.equal retained.definition archived);
+    let host = receive empty snapshot in
+    let path = W.tile snapshot path.id in
+    assert (Option.is_none (provenance host p.workspace));
+    assert (not (compact_summary host path));
+    assert (List.equal String.equal (layout_keys host [ path ]) [ "timing-paths" ]);
+    let definition =
+      render_definition host (W.workspace snapshot p.workspace) |> Option.value_exn
+    in
+    assert (
+      Sexp.equal
+        (P.Common.sexp_of_tree definition.layout)
+        (P.Common.sexp_of_tree P.Timing.definition.layout))
+  in
+  check restored;
+  check (W.Snapshot.t_of_sexp (W.Snapshot.sexp_of_t restored));
+  let reapplied =
+    W.apply
+      restored
+      (Mutate { expected_revision = restored.revision; mutation = Apply_config config })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  assert (List.length reapplied.tiles = List.length restored.tiles);
+  check reapplied
+;;
+
+let%test_unit "mixed spec restores domain navigation and hierarchy without builtin \
+               identity"
+  =
+  let config =
+    P.Presets.custom_example () |> Or_error.ok_exn |> P.Presets.resolve |> Or_error.ok_exn
+  in
+  let kinds =
+    [ "hierarchy"
+    ; "simulation-catalog"
+    ; "simulation-detail"
+    ; "timing-paths"
+    ; "timing-detail"
+    ; "stage-checklist"
+    ; "synthesis"
+    ]
+  in
+  let config =
+    { config with
+      definitions =
+        List.map config.definitions ~f:(fun definition ->
+          { definition with
+            template =
+              { definition.template with
+                preset = None
+              ; views =
+                  List.map kinds ~f:(fun kind ->
+                    { Workspace_template.View.kind
+                    ; hidden = false
+                    ; geometry = { x = 0; y = 0; width = 80; height = 12 }
+                    })
+              }
+          ; tiles =
+              List.map kinds ~f:(fun kind ->
+                { Workspace_config.Tile.key = kind
+                ; presentation =
+                    Some
+                      { Workspace_config.Presentation.inherit_defaults with
+                        hints = Some false
+                      }
+                })
+          ; layout = None
+          })
+    }
+  in
+  let registry = W.initial ~session_id:(W.Session_id.of_string "mixed-spec-navigation") in
+  let registry =
+    W.apply registry (Initialize_config config) |> Result.ok |> Option.value_exn
+  in
+  let workspace = List.hd_exn registry.workspaces in
+  let apply registry mutation =
+    W.apply
+      registry
+      (Mutate { expected_revision = registry.W.Snapshot.revision; mutation })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let context = W.context registry workspace.context in
+  let registry =
+    apply
+      registry
+      (Select_run
+         { workspace = workspace.id
+         ; context = context.id
+         ; expected_selection_revision = context.selection_revision
+         ; run = Some Fs0_fixture.run_a
+         })
+  in
+  let find kind =
+    List.find_exn registry.tiles ~f:(fun tile -> String.equal tile.kind kind)
+  in
+  let synthesis = find "synthesis" in
+  let registry =
+    apply
+      registry
+      (Set_tile_binding { tile = synthesis.id; binding = Pin_run Fs0_fixture.run_b })
+  in
+  assert (Option.is_none workspace.preset);
+  assert (Option.is_some (matching_timing registry ~run:Fs0_fixture.run_a));
+  let paths = find "timing-paths" in
+  let catalog_tile = find "simulation-catalog" in
+  let hierarchy_tile = find "hierarchy" in
+  let host = receive empty registry in
+  let host = establish_testing_scope host catalog_tile.id ~scope:"mixed-project" in
+  let host =
+    update_testing host catalog_tile.id (fun state ->
+      Testing_workspace.select_attempt state "chosen-attempt")
+  in
+  let host =
+    set_timing
+      host
+      paths
+      { (Timing_workspace.create ~generation:0 ~run:Fs0_fixture.run_a ~stage:"routing") with
+        filter = "endpoint/Q"
+      }
+  in
+  let saved =
+    navigation_preferences ~project_key:"mixed-project" host |> Option.value_exn
+  in
+  let restored =
+    W.Snapshot.t_of_sexp (W.Snapshot.sexp_of_t registry)
+    |> receive empty
+    |> restore_navigation_selections saved ~scope:"mixed-project"
+  in
+  assert (
+    Option.equal
+      String.equal
+      (simulation restored (find "simulation-detail").id).attempt
+      (Some "chosen-attempt"));
+  let timing = Option.value_exn (timing restored (find "timing-detail")) in
+  assert (String.equal timing.stage "routing" && String.equal timing.filter "endpoint/Q");
+  let restored = { restored with focus = Some hierarchy_tile.id } in
+  assert (not (policy restored hierarchy_tile).hints);
+  let restored, _ =
+    set_presentation restored hierarchy_tile.id { T.inherit_ with hints = Some true }
+  in
+  assert (policy restored hierarchy_tile).hints;
+  (match snd (input restored (Character 'r') ~commands:[]) with
+   | Execute (_, Load_hierarchy id) -> assert (W.Tile_id.equal id hierarchy_tile.id)
+   | _ -> assert false);
+  let commands = catalog restored ~project:None ~jobs:[] in
+  assert (
+    List.exists commands ~f:(fun command ->
+      String.equal command.id "hierarchy.load-current"));
+  let no_paths =
+    { registry with
+      tiles =
+        List.filter registry.tiles ~f:(fun tile -> not (W.Tile_id.equal tile.id paths.id))
+    }
+  in
+  assert (Option.is_none (matching_timing no_paths ~run:Fs0_fixture.run_a))
 ;;

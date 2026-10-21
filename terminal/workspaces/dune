@@ -1,9 +1,36 @@
 (library
  (name hardcaml_workbench_workspaces)
- (modules common definition layout overview timing testing waveforms presets)
+ (modules
+  common
+  definition
+  stock_data
+  custom_data
+  stock
+  layout
+  overview
+  timing
+  testing
+  waveforms
+  presets)
  (libraries core hardcaml_workbench_protocol)
  (preprocess
   (pps ppx_jane)))
+
+(rule
+ (target stock_data.ml)
+ (deps stock.sexp)
+ (action
+  (with-stdout-to
+   %{target}
+   (echo "let text = {stock|" %{read:stock.sexp} "|stock}"))))
+
+(rule
+ (target custom_data.ml)
+ (deps custom.sexp)
+ (action
+  (with-stdout-to
+   %{target}
+   (echo "let text = {example|" %{read:custom.sexp} "|example}"))))
 
 (executable
  (name export_presets)

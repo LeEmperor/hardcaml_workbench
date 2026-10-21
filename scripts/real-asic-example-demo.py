@@ -272,10 +272,21 @@ def seed(base, url, receipt_dir=None):
         summary = next(s for s in field(snap, 'summaries') if field(s, 'run') == run)
         require(field(summary, 'cell_count') == ['673'] and field(summary, 'freshness') == 'Validated',
                 'Real synthesis summary was not validated')
-        # Public exported layout definitions; preserve user workspaces on reconnect.
+        # Consume the same complete startup composition as the native client. An
+        # existing session wins; legacy unfinished bootstrap uses exported templates.
+        config = parse(subprocess.run([str(base / 'bin/preset-export'), '--workspace-config'],
+                                      check=True, capture_output=True, text=True, timeout=15).stdout)
+        save(receipts / 'workspace-config.json', config)
+        ws = client.rpc('(Initialize_config %s)' % sexp(config), domain='workspace')
+        if field(ws, 'defaults_initialized') == 'false':
+            definitions = {field(d, 'key'): d for d in field(config, 'definitions')}
+            templates = [field(definitions[field(w, 'definition')[1]], 'template')
+                         for window in field(config, 'windows')
+                         for w in field(window, 'workspaces')]
+            ws = client.rpc('(Bootstrap %s)' % sexp(templates), domain='workspace')
+        # Add defaults to legacy preset instances without resetting user geometry.
         presets = parse(subprocess.run([str(base / 'bin/preset-export')], check=True,
                                       capture_output=True, text=True, timeout=15).stdout)
-        ws = client.rpc(domain='workspace')
         for arrangement in field(ws, 'workspaces'):
             definition = next((p for p in presets if [field(p, 'id')] == field(arrangement, 'preset')), None)
             if definition is not None and field(arrangement, 'preset') in (['overview'], ['timing']):
