@@ -101,7 +101,13 @@ type session =
   ; mutable selected_artifact : Artifact_id.t option
   ; mutable artifact_view : artifact_view option
   ; mutable hierarchy_view : hierarchy_view option
+  ; mutable hierarchy_intent : unit ref
   ; hierarchy_errors : string Artifact_id.Table.t
+  ; hierarchy_reads :
+      (string
+      * (Terminal_presentation.Hierarchy_view.evidence, string) Result.t Deferred.t)
+        list
+        ref
   ; logs : log_state Job_id.Table.t
   ; mutable status : string
   ; mutable polling : bool
@@ -284,7 +290,9 @@ let create_session
       ; selected_artifact = None
       ; artifact_view = None
       ; hierarchy_view = None
+      ; hierarchy_intent = ref ()
       ; hierarchy_errors = Artifact_id.Table.create ()
+      ; hierarchy_reads = ref []
       ; logs = Job_id.Table.create ()
       ; status = "connected"
       ; polling = false
@@ -2425,7 +2433,159 @@ let hierarchy_children children parent =
   Hashtbl.find children parent |> Option.value ~default:[]
 ;;
 
+(* One transport owner for both inspector and tile consumers. Keep all in-flight reads and
+   at most sixteen completed immutable evidence values. Errors retry. *)
+let read_hierarchy_shared session (job : Job.t) (artifact : Artifact.t) =
+  let instance_id = session.hello.instance_id in
+  let key =
+    Sexp.to_string_mach
+      [%sexp
+        (instance_id : V1.Daemon_instance_id.t)
+        , (artifact.project : Project_id.t)
+        , (artifact.id : Artifact_id.t)]
+  in
+  match List.Assoc.find !(session.hierarchy_reads) key ~equal:String.equal with
+  | Some response -> response
+  | None
+    when List.count !(session.hierarchy_reads) ~f:(fun (_, d) ->
+           not (Deferred.is_determined d))
+         >= 16 ->
+    return (Error "Hierarchy reader busy (16 in-flight artifacts); retry with r")
+  | None ->
+    let response =
+      let%map response =
+        request session.diagnostics_file (fun () ->
+          Http.Client.read_hierarchy
+            session.client
+            { instance_id; artifact = artifact.id })
+      in
+      Result.bind response ~f:(fun payload ->
+        let h = payload.V1.Read_hierarchy.Payload.hierarchy in
+        if Artifact_id.equal h.artifact artifact.id
+           && Project_id.equal h.project artifact.project
+           && Job_id.equal h.generating_job job.id
+        then Ok (Terminal_presentation.Hierarchy_view.evidence h)
+        else Error "Hierarchy response identity did not match request")
+    in
+    let pending, completed =
+      List.partition_tf !(session.hierarchy_reads) ~f:(fun (_, d) ->
+        not (Deferred.is_determined d))
+    in
+    session.hierarchy_reads := ((key, response) :: pending) @ List.take completed 15;
+    upon response (fun result ->
+      (match result with
+       | Ok _ -> ()
+       | Error _ ->
+         session.hierarchy_reads
+         := List.Assoc.remove !(session.hierarchy_reads) key ~equal:String.equal);
+      let pending, completed =
+        List.partition_tf !(session.hierarchy_reads) ~f:(fun (_, d) ->
+          not (Deferred.is_determined d))
+      in
+      session.hierarchy_reads := pending @ List.take completed 16);
+    response
+;;
+
+let load_tile_hierarchy session id =
+  let local = Host.local session.host id in
+  let ticket = ref () in
+  let instance = session.hello.instance_id in
+  let project = Option.map (current_project session) ~f:(fun p -> p.Project.id) in
+  let finish hierarchy status =
+    let now = Host.local session.host id in
+    if Host.hierarchy_request_current
+         session.host
+         id
+         ~identity:local.identity
+         ~request:ticket
+       && V1.Daemon_instance_id.equal instance session.hello.instance_id
+       && Option.equal
+            Project_id.equal
+            project
+            (Option.map (current_project session) ~f:(fun p -> p.Project.id))
+    then
+      session.host
+      <- Host.set_local
+           session.host
+           id
+           { now with
+             hierarchy = Option.first_some hierarchy now.hierarchy
+           ; hierarchy_status = status
+           }
+  in
+  session.host
+  <- Host.set_local
+       session.host
+       id
+       { local with
+         hierarchy_request = ticket
+       ; hierarchy_status = "Loading current hierarchy…"
+       };
+  match current_generation session with
+  | None ->
+    finish
+      None
+      "Missing hierarchy: generate RTL for selected target/configuration, then r";
+    return ()
+  | Some job when not (Job.State.equal job.state Complete) ->
+    finish
+      None
+      ("Hierarchy "
+       ^ Job.State.to_string job.state
+       ^ " in "
+       ^ Job_id.to_string job.id
+       ^ "; wait or generate RTL, then r");
+    return ()
+  | Some job ->
+    (match hierarchy_artifact_for_job session job with
+     | None ->
+       finish
+         None
+         "Unsupported: completed generation has no structured hierarchy; generate with a \
+          supporting provider, then r";
+       return ()
+     | Some artifact ->
+       let%map response = read_hierarchy_shared session job artifact in
+       (match response with
+        | Error message -> finish None ("Hierarchy read error: " ^ message ^ "; r retries")
+        | Ok evidence ->
+          finish
+            (Some (Terminal_presentation.Hierarchy_view.create evidence))
+            "Loaded hierarchy; r loads current selection"))
+;;
+
+let detail_tile_hierarchy session id =
+  session.hierarchy_intent <- ref ();
+  Option.iter (Host.local session.host id).hierarchy ~f:(fun view ->
+    let module V = Terminal_presentation.Hierarchy_view in
+    let hierarchy = V.hierarchy view in
+    let nodes, children = index_hierarchy hierarchy in
+    let expanded =
+      List.fold
+        (V.visible view)
+        ~init:(String.Set.singleton hierarchy.root)
+        ~f:(fun expanded (_, node) ->
+          Option.value_map
+            node.Hierarchy.Node.parent
+            ~default:expanded
+            ~f:(Set.add expanded))
+    in
+    session.hierarchy_view
+    <- Some
+         { hierarchy
+         ; nodes
+         ; children
+         ; selected_key = V.selected_key view
+         ; expanded
+         ; scroll = 0
+         ; pane_scroll = 0
+         });
+  return ()
+;;
+
 let inspect_hierarchy session =
+  let intent = ref () in
+  session.hierarchy_intent <- intent;
   match hierarchy_candidate session with
   | None ->
     session.status <- "no RTL generation result is available for hierarchy inspection";
@@ -2456,22 +2616,28 @@ let inspect_hierarchy session =
         | _ ->
           let requested_instance = session.hello.instance_id in
           session.status <- "fetching hierarchy for " ^ Job_id.to_string job.id ^ "...";
-          let%map response =
-            request session.diagnostics_file (fun () ->
-              Http.Client.read_hierarchy
-                session.client
-                { instance_id = requested_instance; artifact = artifact.id })
+          let requested_project =
+            Option.map (current_project session) ~f:(fun p -> p.Project.id)
           in
+          let%map response = read_hierarchy_shared session job artifact in
           if not
-               (V1.Daemon_instance_id.equal requested_instance session.hello.instance_id)
+               (V1.Daemon_instance_id.equal requested_instance session.hello.instance_id
+                && phys_equal intent session.hierarchy_intent
+                && Option.equal
+                     Project_id.equal
+                     requested_project
+                     (Option.map (current_project session) ~f:(fun p -> p.Project.id)))
           then ()
           else (
             match response with
             | Error message ->
               Hashtbl.set session.hierarchy_errors ~key:artifact.id ~data:message;
               session.status <- "hierarchy retrieval failed: " ^ message
-            | Ok payload ->
-              let hierarchy = payload.hierarchy in
+            | Ok evidence ->
+              let hierarchy =
+                Terminal_presentation.Hierarchy_view.hierarchy
+                  (Terminal_presentation.Hierarchy_view.create evidence)
+              in
               if not
                    (Artifact_id.equal hierarchy.artifact artifact.id
                     && Job_id.equal hierarchy.generating_job job.id)
@@ -2725,11 +2891,13 @@ let hierarchy_status_lines session =
 let hierarchy_view_lines session view ~height =
   let hierarchy = view.hierarchy in
   let current =
-    State.hierarchy_is_current
-      hierarchy
-      ~latest:(current_generation session)
-      ~target:session.selected_target
-      ~configuration:session.selected_configuration
+    Option.exists (current_project session) ~f:(fun p ->
+      Project_id.equal p.id hierarchy.project)
+    && State.hierarchy_is_current
+         hierarchy
+         ~latest:(current_generation session)
+         ~target:session.selected_target
+         ~configuration:session.selected_configuration
   in
   let project = current_project session in
   let target =
@@ -2752,12 +2920,11 @@ let hierarchy_view_lines session view ~height =
     List.findi visible ~f:(fun _ (_, node) -> String.equal node.key view.selected_key)
     |> Option.value_map ~default:0 ~f:fst
   in
-  let tree_height = Int.max 1 (height - 13) in
-  if selected_index < view.scroll
-  then view.scroll <- selected_index
-  else if selected_index >= view.scroll + tree_height
-  then view.scroll <- selected_index - tree_height + 1;
-  let tree =
+  let tree ~tree_height =
+    if selected_index < view.scroll
+    then view.scroll <- selected_index
+    else if selected_index >= view.scroll + tree_height
+    then view.scroll <- selected_index - tree_height + 1;
     visible
     |> Fn.flip List.drop view.scroll
     |> Fn.flip List.take tree_height
@@ -2807,13 +2974,33 @@ let hierarchy_view_lines session view ~height =
       ; "Signals/source: unavailable in structural hierarchy"
       ]
   in
-  let lines =
+  let header =
     [ sprintf "HARDWARE HIERARCHY [%s]" (if current then "current" else "historical")
     ; sprintf "Result: job %s" (Job_id.to_string hierarchy.generating_job)
     ; sprintf "Target: %s" target
     ; sprintf "Configuration: %s" configuration
-    ; sprintf "Tree [%d/%d]" view.scroll (Int.max 0 (List.length visible - tree_height))
+    ; "Artifact: " ^ Artifact_id.to_string hierarchy.artifact
+    ; "Project: " ^ Project_id.to_string hierarchy.project
+    ; "Exact target/configuration: "
+      ^ Target_id.to_string hierarchy.target
+      ^ " / "
+      ^ Configuration_id.to_string hierarchy.configuration
+    ; "Tested top / DUT: unknown (no provider association)"
+    ; "Provenance: " ^ Sexp.to_string_mach (Provenance.sexp_of_t hierarchy.provenance)
+    ; "RTL artifacts: "
+      ^ String.concat
+          ~sep:", "
+          (List.map hierarchy.rtl_artifacts ~f:Artifact_id.to_string)
     ]
+  in
+  (* Reserve the actual provenance and selected-node rows. On short screens retain one
+     tree row; existing pane scrolling reaches every remaining detail row. *)
+  let tree_height = Int.max 1 (height - List.length header - 1 - List.length inspector) in
+  let tree = tree ~tree_height in
+  let lines =
+    header
+    @ [ sprintf "Tree [%d/%d]" view.scroll (Int.max 0 (List.length visible - tree_height))
+      ]
     @ tree
     @ inspector
   in
@@ -3154,6 +3341,67 @@ let host_data session : Host_view.data =
   }
 ;;
 
+let hierarchy_pane session (tile : Workspace.Tile.t) ~width ~height =
+  if not (String.equal tile.kind "hierarchy")
+  then None
+  else
+    let module V = Terminal_presentation.Hierarchy_view in
+    let local = Host.local session.host tile.id in
+    let header, tree =
+      match local.hierarchy with
+      | None ->
+        ( [ "HIERARCHY — not loaded"; local.hierarchy_status; "Tested top / DUT: unknown" ]
+        , [] )
+      | Some view ->
+        let h = V.hierarchy view in
+        let current =
+          Option.exists (current_project session) ~f:(fun p ->
+            Project_id.equal p.id h.project)
+          && State.hierarchy_is_current
+               h
+               ~latest:(current_generation session)
+               ~target:session.selected_target
+               ~configuration:session.selected_configuration
+        in
+        let top =
+          List.find h.nodes ~f:(fun n -> String.equal n.key h.root)
+          |> Option.value_map ~default:"unknown" ~f:(fun n -> n.circuit_name)
+        in
+        ( [ "HIERARCHY [" ^ (if current then "current" else "historical") ^ "] Top: " ^ top
+          ; "Job: "
+            ^ Host_view.fit_label
+                ~width:(Int.max 4 ((width - 17) / 2))
+                (Job_id.to_string h.generating_job)
+            ^ " Artifact: "
+            ^ Host_view.fit_label
+                ~width:(Int.max 4 ((width - 17) / 2))
+                (Artifact_id.to_string h.artifact)
+          ; "Target/config: "
+            ^ Target_id.to_string h.target
+            ^ " / "
+            ^ Configuration_id.to_string h.configuration
+          ; "DUT: unknown | " ^ local.hierarchy_status
+          ]
+        , V.rows view ~height:(Int.max 1 (height - 5)) )
+    in
+    let hints =
+      if (Host.policy session.host tile).hints
+      then [ "j/k ↑↓ browse | Enter expand | i detail | r load current" ]
+      else []
+    in
+    let rows =
+      if height <= 3
+      then List.take header 1 @ if List.is_empty tree then List.drop header 1 else tree
+      else header @ tree @ hints
+    in
+    Some
+      (Host_view.lines
+         ~appearance:session.host.appearance
+         ~width
+         ~height
+         (List.map rows ~f:Terminal_presentation.Artifact_view.safe))
+;;
+
 let waveform_pane session (tile : Workspace.Tile.t) ~width ~height =
   Option.map (Waveforms.pane tile.kind) ~f:(fun pane ->
     let appearance = session.host.appearance in
@@ -3302,7 +3550,10 @@ let render ?(now = Time_ns.now ()) ?indicator_frames session dimensions =
     Host_view.render
       ~now
       ?indicator_frames
-      ~render_pane:(waveform_pane session)
+      ~render_pane:(fun tile ~width ~height ->
+        match hierarchy_pane session tile ~width ~height with
+        | Some pane -> Some pane
+        | None -> waveform_pane session tile ~width ~height)
       host
       data
       dimensions
@@ -3365,7 +3616,9 @@ let session_of_baseline_fixture (fixture : Baseline_fixture.t) =
     ; selected_artifact = fixture.selected_artifact
     ; artifact_view = None
     ; hierarchy_view = None
+    ; hierarchy_intent = ref ()
     ; hierarchy_errors = Artifact_id.Table.create ()
+    ; hierarchy_reads = ref []
     ; logs = Job_id.Table.create ()
     ; status = fixture.status
     ; polling = false
@@ -4566,6 +4819,8 @@ let execute_host session captured action ~exit =
         Effect.Ignore)
     | Inspect_artifact -> async (fun () -> inspect_artifact session)
     | Inspect_hierarchy -> async (fun () -> inspect_hierarchy session)
+    | Load_hierarchy id -> async (fun () -> load_tile_hierarchy session id)
+    | Hierarchy_detail id -> async (fun () -> detail_tile_hierarchy session id)
     | Discover_asic -> async (fun () -> asic_request session Discover)
     | Prepare_stage (stage, run) ->
       let remembered = session.remembered_selection in
@@ -5125,7 +5380,7 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
   let input = Host.decode_event event in
   let workspace_navigation =
     Option.exists (Host.focused session.host) ~f:(fun tile ->
-      String.equal tile.kind "workspace-tabs")
+      String.equal tile.kind "workspace-tabs" || String.equal tile.kind "hierarchy")
     && Option.exists input ~f:(function
       | Host.Character ('j' | 'k') | Next | Previous | Enter -> true
       | _ -> false)

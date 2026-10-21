@@ -24,6 +24,7 @@
   timing_workspace
   presentation
   state
+  hierarchy_view
   workspace_host
   evidence_activity
   palette_search

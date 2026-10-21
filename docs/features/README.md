@@ -63,6 +63,12 @@ not claimed. WB-048 remains delivered.
 
 ## How this directory works
 
+**2026-10-21:** WB-007's opt-in hierarchy tile is **delivered** at the
+implementation/automated-validation level. Independent trees, shared reads,
+current/historical provenance and exact-node inspector handoff pass native HTTP/PTY
+acceptance. Tested DUT remains explicitly unknown. See
+[controls, receipts and verification limits](../hierarchy_tile.md).
+
 - **WB-NNN** identifies one actionable feature/defect ticket; filenames and category
   placement do not change its identity. Each ticket has its own Markdown file.
 - **F01–F12** remain architectural area specifications in this directory's root.

@@ -770,8 +770,8 @@ let utility_rows ?(now = Time_ns.now ()) host data tile =
                 [ Overview_tiles.row ~role:Warning "Observation error" error ])
             else [])
          @ (if H.compact_summary host tile && not local.utility_detail
-             then Overview_tiles.checklist_rows ~compact:true ~stages ~aggregate:facts ()
-             else stages @ facts)
+            then Overview_tiles.checklist_rows ~compact:true ~stages ~aggregate:facts ()
+            else stages @ facts)
          @ interaction)
     | _ -> None)
 ;;
@@ -809,7 +809,9 @@ let evidence_attrs appearance : E.Role.t -> Attr.t list = function
 ;;
 
 let tile_run host tile =
-  if Testing_workspace.is_pane tile.W.Tile.kind || P.Waveforms.is_pane tile.kind
+  if Testing_workspace.is_pane tile.W.Tile.kind
+     || P.Waveforms.is_pane tile.kind
+     || String.equal tile.kind "hierarchy"
   then None
   else
     Option.bind host.H.registry ~f:(fun registry ->
@@ -1436,6 +1438,10 @@ let rows host data tile ~width ~height =
     | None, Some view -> Artifact_view.rows view ~width ~height
     | None, None ->
       (match tile.kind with
+       | "hierarchy" ->
+         [ local.hierarchy_status; "Tested top / DUT: unknown" ]
+         @ Option.value_map local.hierarchy ~default:[] ~f:(fun view ->
+           Hierarchy_view.rows view ~height)
        | "planned-run" ->
          planned_rows host tile ~width |> List.map ~f:(fun row -> row.Planned_run.text)
        | "run-selector" -> run_rows ()
@@ -1745,7 +1751,9 @@ let tile_view
     Option.value_map host.H.focus ~default:false ~f:(W.Tile_id.equal tile.id)
   in
   let binding =
-    if Testing_workspace.is_pane tile.kind || P.Waveforms.is_pane tile.kind
+    if Testing_workspace.is_pane tile.kind
+       || P.Waveforms.is_pane tile.kind
+       || String.equal tile.kind "hierarchy"
     then "project"
     else (
       match tile.binding with
@@ -2007,7 +2015,7 @@ let tile_view
          |> lines ~appearance ~width:body_width ~height:body_height
        | Some rows
          when String.equal tile.kind "stage-checklist"
-               && Option.value horizontal_stages ~default:(H.horizontal_stages host tile)
+              && Option.value horizontal_stages ~default:(H.horizontal_stages host tile)
               && Option.is_some (tile_run host tile) ->
          let run = Option.value_exn (tile_run host tile) in
          let stages = Overview_tiles.observed_stages ~asic:data.asic ~run in
@@ -3105,6 +3113,29 @@ let refinement_fixture (definition : P.Definition.t) =
   host, data, find
 ;;
 
+let%test_unit "hierarchy unavailable presentation is nonempty and clips small panes" =
+  let host, data, find = refinement_fixture P.Overview.definition in
+  let tile = { (find "stage-checklist") with kind = "hierarchy" } in
+  let registry = Option.value_exn host.registry in
+  let host =
+    H.receive
+      host
+      { registry with
+        tiles =
+          List.map registry.tiles ~f:(fun t ->
+            if W.Tile_id.equal t.id tile.id then tile else t)
+      }
+  in
+  let text = tile_view host data tile ~width:100 ~height:8 |> plain_text in
+  assert (String.is_substring text ~substring:"No hierarchy loaded");
+  assert (String.is_substring text ~substring:"unknown");
+  List.iter
+    [ 1, 1; 4, 2; 20, 4 ]
+    ~f:(fun (width, height) ->
+      let image = tile_view host data tile ~width ~height in
+      assert (View.width image <= width && View.height image <= height))
+;;
+
 let%test_unit "stopped exact-run observation qualifies actual checklist layouts" =
   let host, data, find = refinement_fixture P.Overview.definition in
   let tile = find "stage-checklist" in
@@ -3139,7 +3170,8 @@ let%test_unit "stopped exact-run observation qualifies actual checklist layouts"
   check host ~horizontal_stages:true ();
   let registry = Option.value_exn host.registry in
   let vertical =
-    H.receive host
+    H.receive
+      host
       { registry with
         workspaces = List.map registry.workspaces ~f:(fun w -> { w with preset = None })
       }
@@ -3151,7 +3183,13 @@ let%test_unit "stopped exact-run observation qualifies actual checklist layouts"
   in
   assert (contains (render detail data tile) error);
   let operation kind state run error : Asic.Pending.t =
-    { key = "test-observation"; kind; state; run = Some run; error; activity = Unreported }
+    { key = "test-observation"
+    ; kind
+    ; state
+    ; run = Some run
+    ; error
+    ; activity = Unreported
+    }
   in
   let with_state ?(error = None) ?(stages = (List.hd_exn runs).stages) operations =
     { data with
@@ -3165,29 +3203,41 @@ let%test_unit "stopped exact-run observation qualifies actual checklist layouts"
   in
   let failed = operation "observe" "failed" Fs0_fixture.run_a (Some "reader lost") in
   let cancelled = { failed with state = "cancelled" } in
-  List.iter [ failed; cancelled; { failed with kind = "run" } ] ~f:(fun failure ->
-    assert (contains (render host (with_state [ failure ]) tile) observation_qualifier));
+  List.iter
+    [ failed; cancelled; { failed with kind = "run" } ]
+    ~f:(fun failure ->
+      assert (contains (render host (with_state [ failure ]) tile) observation_qualifier));
   List.iter
     [ with_state []
     ; with_state [ { failed with kind = "refresh" } ]
     ; with_state [ { failed with run = Some Fs0_fixture.run_b } ]
-    ; with_state [ { failed with run = Some { Fs0_fixture.run_a with backend = Backend_id.of_string "other" } } ]
+    ; with_state
+        [ { failed with
+            run = Some { Fs0_fixture.run_a with backend = Backend_id.of_string "other" }
+          }
+        ]
     ; with_state ~error:(Some "unrelated provider error") []
-    ; with_state ~error:(Some error)
+    ; with_state
+        ~error:(Some error)
         [ failed; { failed with state = "executing"; error = None } ]
-    ; with_state ~error:(Some error)
+    ; with_state
+        ~error:(Some error)
         [ failed; { failed with kind = "run"; state = "executing"; error = None } ]
-    ; with_state ~error:(Some error)
-        ~stages:(List.map (List.hd_exn runs).stages ~f:(fun s -> { s with status = Completed }))
+    ; with_state
+        ~error:(Some error)
+        ~stages:
+          (List.map (List.hd_exn runs).stages ~f:(fun s -> { s with status = Completed }))
         [ failed ]
     ]
-    ~f:(fun data ->
-      assert (not (contains (render host data tile) observation_qualifier)));
+    ~f:(fun data -> assert (not (contains (render host data tile) observation_qualifier)));
   let pinned = { tile with binding = Pin_run Fs0_fixture.run_b } in
   let pinned_host =
-    H.receive host
+    H.receive
+      host
       { registry with
-        tiles = List.map registry.tiles ~f:(fun t -> if W.Tile_id.equal t.id tile.id then pinned else t)
+        tiles =
+          List.map registry.tiles ~f:(fun t ->
+            if W.Tile_id.equal t.id tile.id then pinned else t)
       }
   in
   assert (not (contains (render pinned_host data pinned) observation_qualifier));
@@ -3203,7 +3253,8 @@ let%test_unit "stopped exact-run observation qualifies actual checklist layouts"
     |> Option.value_exn
   in
   let retained_host =
-    H.receive host
+    H.receive
+      host
       { selected_elsewhere with
         tiles =
           List.map selected_elsewhere.tiles ~f:(fun t ->
