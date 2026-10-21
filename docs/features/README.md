@@ -63,6 +63,12 @@ not claimed. WB-048 remains delivered.
 
 ## How this directory works
 
+**2026-10-21:** WB-007's opt-in hierarchy tile is **delivered** at the
+implementation/automated-validation level. Independent trees, shared reads,
+current/historical provenance and exact-node inspector handoff pass native HTTP/PTY
+acceptance. Tested DUT remains explicitly unknown. See
+[controls, receipts and verification limits](../hierarchy_tile.md).
+
 **2026-10-21 Testing closure:** the owner's approval after the Attempts-pane tab-switch
 fix satisfies WB-063's remaining visual/workflow gate; it is now delivered and
 closed/accepted. Reconnect selection/defaults and retained-catalog reuse are included

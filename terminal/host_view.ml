@@ -822,7 +822,9 @@ let evidence_attrs appearance : E.Role.t -> Attr.t list = function
 ;;
 
 let tile_run host tile =
-  if Testing_workspace.is_pane tile.W.Tile.kind || P.Waveforms.is_pane tile.kind
+  if Testing_workspace.is_pane tile.W.Tile.kind
+     || P.Waveforms.is_pane tile.kind
+     || String.equal tile.kind "hierarchy"
   then None
   else
     Option.bind host.H.registry ~f:(fun registry ->
@@ -1449,6 +1451,10 @@ let rows host data tile ~width ~height =
     | None, Some view -> Artifact_view.rows view ~width ~height
     | None, None ->
       (match tile.kind with
+       | "hierarchy" ->
+         [ local.hierarchy_status; "Tested top / DUT: unknown" ]
+         @ Option.value_map local.hierarchy ~default:[] ~f:(fun view ->
+           Hierarchy_view.rows view ~height)
        | "planned-run" ->
          planned_rows host tile ~width |> List.map ~f:(fun row -> row.Planned_run.text)
        | "run-selector" -> run_rows ()
@@ -1758,7 +1764,9 @@ let tile_view
     Option.value_map host.H.focus ~default:false ~f:(W.Tile_id.equal tile.id)
   in
   let binding =
-    if Testing_workspace.is_pane tile.kind || P.Waveforms.is_pane tile.kind
+    if Testing_workspace.is_pane tile.kind
+       || P.Waveforms.is_pane tile.kind
+       || String.equal tile.kind "hierarchy"
     then "project"
     else (
       match tile.binding with
@@ -3123,6 +3131,29 @@ let refinement_fixture (definition : P.Definition.t) =
     List.find_exn (H.tiles host) ~f:(fun tile -> String.equal tile.W.Tile.kind kind)
   in
   host, data, find
+;;
+
+let%test_unit "hierarchy unavailable presentation is nonempty and clips small panes" =
+  let host, data, find = refinement_fixture P.Overview.definition in
+  let tile = { (find "stage-checklist") with kind = "hierarchy" } in
+  let registry = Option.value_exn host.registry in
+  let host =
+    H.receive
+      host
+      { registry with
+        tiles =
+          List.map registry.tiles ~f:(fun t ->
+            if W.Tile_id.equal t.id tile.id then tile else t)
+      }
+  in
+  let text = tile_view host data tile ~width:100 ~height:8 |> plain_text in
+  assert (String.is_substring text ~substring:"No hierarchy loaded");
+  assert (String.is_substring text ~substring:"unknown");
+  List.iter
+    [ 1, 1; 4, 2; 20, 4 ]
+    ~f:(fun (width, height) ->
+      let image = tile_view host data tile ~width ~height in
+      assert (View.width image <= width && View.height image <= height))
 ;;
 
 let%test_unit "stopped exact-run observation qualifies actual checklist layouts" =

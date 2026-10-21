@@ -33,6 +33,7 @@ Project/provider commands remain useful without the application.
 | [Checklist preparation and launch](checklist_launch_workflow.md) | Restored real j/k/r preparation, on-demand capability discovery, visible Launch availability and exact input capture |
 | [Synthetic flow demo](synthetic_flow.md) | Launch populated Overview/Timing workspaces and operate a simulated flow through the real daemon, without EDA |
 | [Synthesis inspection](synthesis_inspection.md) | FS1/F06 cell table, filter/sort, row detail and evidence controls |
+| [Hierarchy tile](hierarchy_tile.md) / [implementation plan](hierarchy_tile_plan.md) | WB-007 controls, shared evidence, independent browsing, agent work packages and acceptance |
 | [FS1 acceptance](fs1_acceptance.md) | Aggregate timing/resources/checks, declared-clock context, finalization import, real physical/acceptance/cancellation evidence and remaining scope |
 | [Finalization and artifacts](fs1_lifecycle_and_artifacts.md) | Workbench-owned collect/accept, live phases, cancel/reconnect, bounded report paging and explicit external text export |
 | [FS1 investigation](fs1_investigation.md) | Completed adopted-evidence scope: paths, measured clocks, physical/routing tables, binary handoff, verified provider generation and activation |

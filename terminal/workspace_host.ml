@@ -24,6 +24,9 @@ type local =
   ; inspection : Inspection_view.t option
   ; inspection_generation : int
   ; simulation : Simulation_view.t
+  ; hierarchy : Hierarchy_view.t option
+  ; hierarchy_request : unit ref
+  ; hierarchy_status : string
   }
 
 type layout_mode =
@@ -54,6 +57,8 @@ type action =
   | Generate_rtl of Target_id.t * Configuration_id.t
   | Inspect_artifact
   | Inspect_hierarchy
+  | Load_hierarchy of W.Tile_id.t
+  | Hierarchy_detail of W.Tile_id.t
   | Discover_asic
   | Asic of Asic.Operation.t
   | Edit_plan of string * string
@@ -213,6 +218,10 @@ let default_local =
   ; inspection = None
   ; inspection_generation = 0
   ; simulation = Simulation_view.empty
+  ; hierarchy = None
+  ; hierarchy_request = ref ()
+  ; hierarchy_status =
+      "No hierarchy loaded; r loads current selection (generate RTL first if missing)"
   }
 ;;
 
@@ -249,6 +258,11 @@ let set_local t id value =
   { t with
     locals = List.Assoc.add t.locals ~equal:String.equal (W.Tile_id.to_string id) value
   }
+;;
+
+let hierarchy_request_current t id ~identity ~request =
+  let l = local t id in
+  phys_equal l.identity identity && phys_equal l.hierarchy_request request
 ;;
 
 let waveform_pin t workspace =
@@ -960,6 +974,7 @@ let reconnect t ~replacement =
                   ; transport_error = None
                   })
             ; inspection_generation = local.inspection_generation + 1
+            ; hierarchy_request = ref ()
             ; inspection = Option.map local.inspection ~f:invalidate_inspection
             ; simulation =
                 { local.simulation with
@@ -1096,6 +1111,44 @@ let%test_unit "local tile state survives refresh but not replacement identities"
   let readded = receive removed { registry with revision = registry.revision + 1 } in
   assert (String.is_empty (local readded tile.id).filter);
   assert (not (phys_equal (local readded tile.id).identity (local host tile.id).identity))
+;;
+
+let%test_unit "hierarchy read receipts reject superseding loads, removal, retyping and \
+               reconnect"
+  =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "hierarchy-receipts") in
+  let tile = List.hd_exn registry.tiles in
+  let registry =
+    { registry with
+      tiles =
+        List.map registry.tiles ~f:(fun t ->
+          if W.Tile_id.equal t.id tile.id then { t with kind = "hierarchy" } else t)
+    }
+  in
+  let host = receive empty registry in
+  let l = local host tile.id in
+  let host = set_local host tile.id l in
+  let accepts host =
+    hierarchy_request_current
+      host
+      tile.id
+      ~identity:l.identity
+      ~request:l.hierarchy_request
+  in
+  assert (accepts (receive host { registry with revision = registry.revision + 1 }));
+  assert (not (accepts (set_local host tile.id { l with hierarchy_request = ref () })));
+  assert (not (accepts (reconnect host ~replacement:false)));
+  let removed = receive host { registry with tiles = [] } in
+  assert (not (accepts removed));
+  assert (not (accepts (receive removed registry)));
+  let retyped =
+    receive
+      host
+      { registry with
+        tiles = List.map registry.tiles ~f:(fun t -> { t with kind = "logs" })
+      }
+  in
+  assert (not (accepts retyped))
 ;;
 
 let%test_unit "same-session reconnect retains browsing and rejects old response tickets" =
@@ -1991,6 +2044,7 @@ let project_scoped_kind kind =
   || P.Waveforms.is_pane kind
   || List.mem
        [ "simulation"
+       ; "hierarchy"
        ; "execution"
        ; "project-tests"
        ; "logs"
@@ -2451,7 +2505,9 @@ let policy t (tile : W.Tile.t) =
 ;;
 
 let binding_kind (tile : W.Tile.t) : T.Binding.t =
-  if Testing_workspace.is_pane tile.kind || P.Waveforms.is_pane tile.kind
+  if Testing_workspace.is_pane tile.kind
+     || P.Waveforms.is_pane tile.kind
+     || String.equal tile.kind "hierarchy"
   then Project
   else (
     match tile.binding with
@@ -2654,6 +2710,7 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
       ])
     @ List.map
         [ "live-status"
+        ; "hierarchy"
         ; "workspace-tabs"
         ; "stage-checklist"
         ; "planned-run"
@@ -2702,58 +2759,73 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
       let id = tile.id in
       let g = tile.requested_geometry in
       let run = Result.ok (W.resolve_tile s id) |> Option.bind ~f:(fun r -> r.run) in
-      [ mutation
-          "tile.hide"
-          "Hide focused tile"
-          (Set_tile_hidden { tile = id; hidden = true })
-      ; mutation
-          "tile.zoom"
-          "Zoom focused tile"
-          (Set_zoom { workspace = w.id; tile = Some id })
-      ; mutation
-          "tile.follow"
-          "Unpin tile (follow context)"
-          (Set_tile_binding { tile = id; binding = Follow })
-      ; command
-          ?unavailable:
-            (if project_scoped_kind tile.kind || String.equal tile.kind "run-selector"
-             then Some "This tile does not display run-scoped evidence"
-             else if Option.is_none run
-             then Some "No selected run to pin"
-             else None)
-          "tile.pin"
-          "Pin tile to selected run (live reference)"
-          "reference"
-          (Registry
-             (Set_tile_binding
-                { tile = id
-                ; binding =
-                    Option.value_map run ~default:W.Binding.Follow ~f:(fun r -> Pin_run r)
-                }))
-      ; mutation
-          "tile.wider"
-          "Resize tile wider"
-          (Resize_tile { tile = id; geometry = { g with width = g.width + 8 } })
-      ; mutation
-          "tile.narrower"
-          "Resize tile narrower"
-          (Resize_tile
-             { tile = id; geometry = { g with width = Int.max 8 (g.width - 8) } })
-      ; mutation
-          "tile.taller"
-          "Resize tile taller"
-          (Resize_tile { tile = id; geometry = { g with height = g.height + 4 } })
-      ; mutation
-          "tile.shorter"
-          "Resize tile shorter"
-          (Resize_tile
-             { tile = id; geometry = { g with height = Int.max 3 (g.height - 4) } })
-      ; mutation
-          "tile.last"
-          "Reorder tile to end"
-          (Reorder_tile { tile = id; before = None })
-      ; command "logs.follow" "Resume log follow" "tail" Resume_log
-      ]
+      (if String.equal tile.kind "hierarchy"
+       then
+         [ command
+             "hierarchy.load-current"
+             "Load current hierarchy"
+             "reload tree"
+             (Load_hierarchy id)
+         ; command
+             "hierarchy.detail"
+             "Inspect hierarchy tile node"
+             "ports metadata"
+             (Hierarchy_detail id)
+         ]
+       else [])
+      @ [ mutation
+            "tile.hide"
+            "Hide focused tile"
+            (Set_tile_hidden { tile = id; hidden = true })
+        ; mutation
+            "tile.zoom"
+            "Zoom focused tile"
+            (Set_zoom { workspace = w.id; tile = Some id })
+        ; mutation
+            "tile.follow"
+            "Unpin tile (follow context)"
+            (Set_tile_binding { tile = id; binding = Follow })
+        ; command
+            ?unavailable:
+              (if project_scoped_kind tile.kind || String.equal tile.kind "run-selector"
+               then Some "This tile does not display run-scoped evidence"
+               else if Option.is_none run
+               then Some "No selected run to pin"
+               else None)
+            "tile.pin"
+            "Pin tile to selected run (live reference)"
+            "reference"
+            (Registry
+               (Set_tile_binding
+                  { tile = id
+                  ; binding =
+                      Option.value_map run ~default:W.Binding.Follow ~f:(fun r ->
+                        Pin_run r)
+                  }))
+        ; mutation
+            "tile.wider"
+            "Resize tile wider"
+            (Resize_tile { tile = id; geometry = { g with width = g.width + 8 } })
+        ; mutation
+            "tile.narrower"
+            "Resize tile narrower"
+            (Resize_tile
+               { tile = id; geometry = { g with width = Int.max 8 (g.width - 8) } })
+        ; mutation
+            "tile.taller"
+            "Resize tile taller"
+            (Resize_tile { tile = id; geometry = { g with height = g.height + 4 } })
+        ; mutation
+            "tile.shorter"
+            "Resize tile shorter"
+            (Resize_tile
+               { tile = id; geometry = { g with height = Int.max 3 (g.height - 4) } })
+        ; mutation
+            "tile.last"
+            "Reorder tile to end"
+            (Reorder_tile { tile = id; before = None })
+        ; command "logs.follow" "Resume log follow" "tail" Resume_log
+        ]
       @ presentation_commands t tile
       @ (if not (String.equal tile.kind "synthesis")
          then []
@@ -3773,6 +3845,31 @@ let input t event ~commands : t * effect =
           in
           { t with prefix = 0 }, No_effect
         | Character ' ', _ -> { t with prefix = 1 }, No_effect
+        | (Character ('j' | 'k' | 'r' | 'i') | Next | Previous | Enter), 0
+          when Option.exists (focused t) ~f:(fun tile ->
+                 String.equal tile.kind "hierarchy") ->
+          let tile = Option.value_exn (focused t) in
+          let l = local t tile.id in
+          (match event with
+           | Character ('r' | 'i') ->
+             (match capture t with
+              | None -> t, No_effect
+              | Some capture ->
+                ( t
+                , Execute
+                    ( capture
+                    , if Poly.equal event (Character 'r')
+                      then Load_hierarchy tile.id
+                      else Hierarchy_detail tile.id ) ))
+           | _ ->
+             let hierarchy =
+               Option.map l.hierarchy ~f:(fun view ->
+                 match event with
+                 | Enter -> Hierarchy_view.toggle view
+                 | Character 'k' | Previous -> Hierarchy_view.move view (-1)
+                 | _ -> Hierarchy_view.move view 1)
+             in
+             set_local t tile.id { l with hierarchy }, No_effect)
         | Character 'c', 1 -> { t with prefix = 2 }, No_effect
         | Character 'c', 2 ->
           let palette =
@@ -3914,6 +4011,70 @@ let input t event ~commands : t * effect =
            | Some capture -> t, Execute (capture, testing_launch_action t tile.id))
         | Enter, _ -> { t with prefix = 0 }, Activate
         | _, _ -> { t with prefix = 0 }, No_effect))
+;;
+
+let%test_unit "hierarchy controls are focused, local and yield to palette and prefix" =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "hierarchy-controls") in
+  let first = List.hd_exn registry.tiles in
+  let second =
+    { first with id = W.Tile_id.of_string "hierarchy-second"; kind = "hierarchy" }
+  in
+  let registry =
+    { registry with
+      tiles =
+        [ { first with kind = "hierarchy"; binding = Pin_run Fs0_fixture.run_a }; second ]
+    }
+  in
+  let host = receive empty registry in
+  let evidence = Hierarchy_view.evidence Baseline_fixture.hierarchy in
+  let host =
+    List.fold [ first.id; second.id ] ~init:host ~f:(fun host id ->
+      set_local
+        host
+        id
+        { (local host id) with hierarchy = Some (Hierarchy_view.create evidence) })
+  in
+  let key host id =
+    Hierarchy_view.selected_key (Option.value_exn (local host id).hierarchy)
+  in
+  let initial = key host first.id in
+  let moved, effect = input host Next ~commands:[] in
+  (match effect with
+   | No_effect -> ()
+   | _ -> assert false);
+  assert (not (String.equal (key moved first.id) initial));
+  assert (String.equal (key moved second.id) initial);
+  let prefixed, _ = input { host with prefix = 1 } Next ~commands:[] in
+  assert (String.equal (key prefixed first.id) initial);
+  let palette =
+    { capture = Option.value_exn (capture host)
+    ; commands = []
+    ; query = ""
+    ; index = 0
+    ; argument = None
+    }
+  in
+  let modal, _ =
+    input { host with palette = Some palette } (Character 'j') ~commands:[]
+  in
+  assert (String.equal (key modal first.id) initial);
+  List.iter [ Character 'r'; Character 'i' ] ~f:(fun event ->
+    match snd (input host event ~commands:[]) with
+    | Execute (_, Load_hierarchy id) -> assert (W.Tile_id.equal id first.id)
+    | Execute (_, Hierarchy_detail id) -> assert (W.Tile_id.equal id first.id)
+    | _ -> assert false);
+  let commands = catalog host ~project:None ~jobs:[] in
+  assert (project_scoped_kind "hierarchy");
+  assert (List.is_empty (evidence_runs host));
+  assert (T.Binding.equal (binding_kind (Option.value_exn (focused host))) Project);
+  let pin = List.find_exn commands ~f:(fun c -> String.equal c.id "tile.pin") in
+  assert (
+    Option.equal
+      String.equal
+      pin.unavailable
+      (Some "This tile does not display run-scoped evidence"));
+  assert (List.exists commands ~f:(fun c -> String.equal c.title "Add hierarchy tile"));
+  assert (List.exists commands ~f:(fun c -> String.equal c.title "Load current hierarchy"))
 ;;
 
 let%test_unit "catalog reducer browses filters and captures subset without launching" =
