@@ -119,6 +119,36 @@ module Tile = struct
   [@@deriving bin_io, compare, equal, sexp]
 end
 
+module Config_window = struct
+  type t =
+    { config_id : string
+    ; window_key : string
+    ; window : Window_id.t
+    }
+  [@@deriving bin_io, compare, equal, sexp]
+end
+
+module Config_workspace = struct
+  (** Definition policy is frozen on first application. Additive reapply appends new tile
+      keys/defaults, but never rewrites existing policy or live state. Mappings describe
+      origin, even when users move a workspace or tile elsewhere. [policy_detached] is set
+      by explicit built-in Restore, including Restore of the same preset. Clients must
+      ignore frozen layout/presentation when it is true and use the live arrangement's
+      preset instead. Identity/key mappings remain authoritative for deduplication;
+      additive apply never reattaches policy. *)
+  type t =
+    { config_id : string
+    ; window_key : string
+    ; workspace_key : string
+    ; workspace : Workspace_id.t
+    ; reference : Workspace_config.Reference.t
+    ; definition : Workspace_config.Definition.t
+    ; tiles : (string * Tile_id.t) list
+    ; policy_detached : bool [@sexp.default false]
+    }
+  [@@deriving bin_io, compare, equal, sexp]
+end
+
 module Snapshot = struct
   type t =
     { schema_version : int
@@ -134,6 +164,9 @@ module Snapshot = struct
            revision-zero arrangements. Only [initial] explicitly opts into caller-supplied
            defaults. *)
     ; defaults_initialized : bool [@sexp.default true]
+    ; configuration_pending : bool [@sexp.default false]
+    ; config_windows : Config_window.t list [@sexp.default []]
+    ; config_workspaces : Config_workspace.t list [@sexp.default []]
     }
   [@@deriving bin_io, compare, equal, sexp]
 end
@@ -217,6 +250,7 @@ module Mutation = struct
         ; preset : string
         ; tiles : (string * Geometry.t) list
         }
+    | Apply_config of Workspace_config.Resolved.t
   [@@deriving bin_io, compare, equal, sexp]
 end
 
@@ -225,7 +259,13 @@ module Operation = struct
       requires [Get] and deliberate retry; it must not silently retarget selection.
       [Bootstrap] is instead an atomic initialize-once operation: it needs no captured
       revision, advances revision once on completion, and subsequent calls are no-ops.
-      Callers supply portable definitions; this protocol has no renderer dependency. *)
+      [Initialize_config] atomically replaces only untouched [Get] placeholders; all
+      accepted mutations and Bootstrap consume that opportunity. Existing and legacy
+      sessions win. Even no-op initialization validates the supplied config.
+      [Mutate (Apply_config ...)] is revision-checked additive application: origin keys
+      deduplicate objects even after live moves/renames. Existing references, policy and
+      live edits win; only missing keys are instantiated. Removed keys remain live.
+      Callers supply portable definitions; no renderer dependency. *)
   type t =
     | Get
     | Bootstrap of Workspace_template.t list
@@ -233,6 +273,7 @@ module Operation = struct
         { expected_revision : int
         ; mutation : Mutation.t
         }
+    | Initialize_config of Workspace_config.Resolved.t
   [@@deriving bin_io, compare, equal, sexp]
 end
 
@@ -302,6 +343,12 @@ let valid_template template =
   | Error error -> reject Invalid_request (Error.to_string_hum error)
 ;;
 
+let valid_resolved config =
+  match Workspace_config.Resolved.encode config with
+  | Ok _ -> ()
+  | Error error -> reject Invalid_request (Error.to_string_hum error)
+;;
+
 let validate (s : Snapshot.t) =
   protect (fun () ->
     require (s.schema_version = schema_version) "Unsupported workspace snapshot schema";
@@ -344,7 +391,57 @@ let validate (s : Snapshot.t) =
        | Follow -> ()
        | Pin_run run -> valid_run run);
       ignore (workspace s t.workspace : Arrangement.t);
-      valid_geometry t.requested_geometry))
+      valid_geometry t.requested_geometry);
+    unique
+      (List.map s.config_windows ~f:(fun p ->
+         Sexp.to_string [%sexp (p.config_id : string), (p.window_key : string)]));
+    unique (List.map s.config_windows ~f:(fun p -> Window_id.to_string p.window));
+    List.iter s.config_windows ~f:(fun p ->
+      require
+        (Workspace_config.valid_key p.config_id && Workspace_config.valid_key p.window_key)
+        "Invalid configuration window provenance";
+      ignore (window s p.window : Window.t));
+    unique
+      (List.map s.config_workspaces ~f:(fun p ->
+         Sexp.to_string
+           [%sexp
+             (p.config_id : string), (p.window_key : string), (p.workspace_key : string)]));
+    unique (List.map s.config_workspaces ~f:(fun p -> Workspace_id.to_string p.workspace));
+    unique
+      (List.concat_map s.config_workspaces ~f:(fun p ->
+         List.map p.tiles ~f:(fun (_, id) -> Tile_id.to_string id)));
+    List.iter s.config_workspaces ~f:(fun p ->
+      require
+        (Workspace_config.valid_key p.workspace_key)
+        "Invalid workspace authoring key";
+      require
+        (List.exists s.config_windows ~f:(fun w ->
+           String.equal w.config_id p.config_id && String.equal w.window_key p.window_key))
+        "Missing configuration window provenance";
+      ignore (workspace s p.workspace : Arrangement.t);
+      let key, builtin =
+        match p.reference with
+        | Builtin key -> key, true
+        | Custom key -> key, false
+      in
+      require
+        (String.equal key p.definition.key
+         && Bool.equal builtin (Workspace_config.is_builtin key)
+         && Option.equal
+              String.equal
+              p.definition.template.preset
+              (if builtin then Some key else None))
+        "Invalid definition provenance";
+      (match Workspace_config.validate_definition p.definition with
+       | Ok () -> ()
+       | Error error -> reject Invalid_request (Error.to_string_hum error));
+      require
+        (List.equal
+           String.equal
+           (List.map p.tiles ~f:fst)
+           (List.map p.definition.tiles ~f:(fun t -> t.Workspace_config.Tile.key)))
+        "Definition tile mapping mismatch";
+      List.iter p.tiles ~f:(fun (_, id) -> ignore (tile s id : Tile.t))))
 ;;
 
 (** Pure initial template. The caller supplies a globally unique session seed, once, and
@@ -377,6 +474,9 @@ let initial ~session_id : Snapshot.t =
   ; session_id
   ; revision = 0
   ; defaults_initialized = false
+  ; configuration_pending = true
+  ; config_windows = []
+  ; config_workspaces = []
   ; next_id = 7
   ; main_context
   ; contexts =
@@ -456,8 +556,151 @@ let export_template ?name (s : Snapshot.t) id =
       template))
 ;;
 
+let apply_config (s : Snapshot.t) (config : Workspace_config.Resolved.t) =
+  valid_resolved config;
+  List.fold config.windows ~init:s ~f:(fun s configured_window ->
+    let window_id, s =
+      match
+        List.find s.config_windows ~f:(fun p ->
+          String.equal p.config_id config.id
+          && String.equal p.window_key configured_window.key)
+      with
+      | Some p -> p.window, s
+      | None ->
+        let fresh, s = allocate s "window" in
+        let id = Window_id.of_string fresh in
+        ( id
+        , { s with
+            windows = s.windows @ [ { Window.id; name = configured_window.name } ]
+          ; config_windows =
+              s.config_windows
+              @ [ { Config_window.config_id = config.id
+                  ; window_key = configured_window.key
+                  ; window = id
+                  }
+                ]
+          } )
+    in
+    List.fold configured_window.workspaces ~init:s ~f:(fun s instance ->
+      let definition_key =
+        match instance.Workspace_config.Instance.definition with
+        | Builtin key | Custom key -> key
+      in
+      let definition =
+        List.find_exn config.definitions ~f:(fun d ->
+          String.equal d.Workspace_config.Definition.key definition_key)
+      in
+      let existing =
+        List.find s.config_workspaces ~f:(fun p ->
+          String.equal p.config_id config.id
+          && String.equal p.window_key configured_window.key
+          && String.equal p.workspace_key instance.key)
+      in
+      let provenance, s =
+        match existing with
+        | Some p ->
+          (* Changing the reference under an existing key is a reset request, not additive
+             application. Keep the original instance in its entirety. *)
+          p, s
+        | None ->
+          let fresh, s = allocate s "workspace" in
+          let id = Workspace_id.of_string fresh in
+          ( { Config_workspace.config_id = config.id
+            ; window_key = configured_window.key
+            ; workspace_key = instance.key
+            ; workspace = id
+            ; reference = instance.definition
+            ; definition =
+                { definition with
+                  tiles = []
+                ; template = { definition.template with views = [] }
+                ; layout = None
+                }
+            ; tiles = []
+            ; policy_detached = false
+            }
+          , { s with
+              workspaces =
+                s.workspaces
+                @ [ { Arrangement.id
+                    ; window = window_id
+                    ; name = instance.name
+                    ; context = s.main_context
+                    ; binding_revision = s.revision
+                    ; zoomed_tile = None
+                    ; preset = definition.template.preset
+                    }
+                  ]
+            } )
+      in
+      let compatible =
+        Workspace_config.Reference.equal provenance.reference instance.definition
+      in
+      let provenance, s =
+        if not compatible
+        then provenance, s
+        else
+          List.fold
+            (List.zip_exn definition.tiles definition.template.views)
+            ~init:(provenance, s)
+            ~f:(fun (p, s) (keyed, view) ->
+              if List.Assoc.mem
+                   p.tiles
+                   keyed.Workspace_config.Tile.key
+                   ~equal:String.equal
+              then p, s
+              else (
+                let fresh, s = allocate s "tile" in
+                let id = Tile_id.of_string fresh in
+                let g = view.Workspace_template.View.geometry in
+                ( { p with
+                    tiles = p.tiles @ [ keyed.key, id ]
+                  ; definition =
+                      { p.definition with
+                        tiles = p.definition.tiles @ [ keyed ]
+                      ; template =
+                          { p.definition.template with
+                            views = p.definition.template.views @ [ view ]
+                          }
+                      }
+                  }
+                , { s with
+                    tiles =
+                      s.tiles
+                      @ [ { Tile.id
+                          ; workspace = p.workspace
+                          ; kind = view.kind
+                          ; binding = Follow
+                          ; hidden = view.hidden
+                          ; requested_geometry =
+                              { x = g.x; y = g.y; width = g.width; height = g.height }
+                          }
+                        ]
+                  } )))
+      in
+      let provenance =
+        if Option.is_none existing
+        then
+          { provenance with
+            definition = { provenance.definition with layout = definition.layout }
+          }
+        else provenance
+      in
+      { s with
+        config_workspaces =
+          (match existing with
+           | None -> s.config_workspaces @ [ provenance ]
+           | Some _ ->
+             List.map s.config_workspaces ~f:(fun p ->
+               if Workspace_id.equal p.workspace provenance.workspace
+               then provenance
+               else p))
+      }))
+;;
+
 let apply_mutation (s : Snapshot.t) (mutation : Mutation.t) =
   match mutation with
+  | Apply_config config -> apply_config { s with defaults_initialized = true } config
   | Select_run { workspace = id; context = context_id; expected_selection_revision; run }
     ->
     let w = workspace s id in
@@ -659,7 +902,12 @@ let apply_mutation (s : Snapshot.t) (mutation : Mutation.t) =
     in
     let s =
       { s with
-        tiles =
+        config_workspaces =
+          List.map s.config_workspaces ~f:(fun p ->
+            if Workspace_id.equal p.workspace id
+            then { p with policy_detached = true }
+            else p)
+      ; tiles =
           List.map s.tiles ~f:(fun t ->
             if Workspace_id.equal t.workspace id
                && not (List.mem claimed t.id ~equal:Tile_id.equal)
@@ -725,6 +973,31 @@ let apply (s : Snapshot.t) (operation : Operation.t) : Response.t =
     protect (fun () ->
       match operation with
       | Get -> s
+      | Initialize_config config ->
+        valid_resolved config;
+        if not s.configuration_pending
+        then s
+        else (
+          let prototype = initial ~session_id:s.session_id in
+          require
+            (Snapshot.equal s { prototype with revision = s.revision })
+            "Configuration initialization requires untouched initial placeholders";
+          require (s.revision < Int.max_value) "Snapshot revision exhausted";
+          let next =
+            apply_config
+              { s with
+                windows = []
+              ; workspaces = []
+              ; tiles = []
+              ; defaults_initialized = true
+              ; configuration_pending = false
+              ; revision = s.revision + 1
+              }
+              config
+          in
+          match validate next with
+          | Ok () -> next
+          | Error error -> raise (Invalid_state error))
       | Bootstrap _ when s.defaults_initialized -> s
       | Bootstrap templates ->
         (* Only the two original arrangements are bootstrap targets. Imports and other
@@ -744,7 +1017,13 @@ let apply (s : Snapshot.t) (operation : Operation.t) : Response.t =
             original, template)
         in
         require (s.revision < Int.max_value) "Snapshot revision exhausted";
-        let next = { s with revision = s.revision + 1; defaults_initialized = true } in
+        let next =
+          { s with
+            revision = s.revision + 1
+          ; defaults_initialized = true
+          ; configuration_pending = false
+          }
+        in
         let next =
           List.fold defaults ~init:next ~f:(fun s (original, template) ->
             match
@@ -800,7 +1079,11 @@ let apply (s : Snapshot.t) (operation : Operation.t) : Response.t =
         if expected_revision <> s.revision
         then reject Conflict "Stale workspace snapshot revision";
         require (s.revision < Int.max_value) "Snapshot revision exhausted";
-        let next = apply_mutation { s with revision = s.revision + 1 } mutation in
+        let next =
+          apply_mutation
+            { s with revision = s.revision + 1; configuration_pending = false }
+            mutation
+        in
         (match validate next with
          | Ok () -> next
          | Error error -> raise (Invalid_state error))))

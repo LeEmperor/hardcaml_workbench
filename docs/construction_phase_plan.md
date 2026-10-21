@@ -578,6 +578,26 @@ Synthesis area/check counters are now projected into the current summary.
 
 ## M5 — Multi-window polish and adoption (FS3)
 
+### User-authored window/workspace composition — 2026-10-21
+
+[Implementation plan](workspace_configuration_plan.md). Owner-authorized scope uses
+one shared specification for stock and user layouts, including responsive trees.
+
+- [x] A1: portable bounded schema, keyed tile references and validation.
+- [x] A2: atomic initialization/additive apply and persisted resolved definitions.
+- [x] A3: canonical stock/example files and shared catalog/layout integration.
+- [x] B1/B2: explicit CLI and terminal configuration entrypoints.
+- [x] B3: integrated protocol/backend/native CLI and terminal verification.
+- [x] C: [user workflow, compatibility/extension guidance and evidence](workspace_configuration.md).
+
+Native receipts: `workspace-config-zbzojw2o`, `fs3-adoption-574hfszu`, and
+`default-layout-restore-gekveke6` under `/tmp/opencode/` (each `result.json`).
+Targeted tests, native builds and lint pass; full format check has pre-existing
+untouched ASIC/waveform differences recorded in the guide.
+
+At most three general implementation agents; builds run centrally with `-j20`.
+No Git staging, commits or pushes are authorized.
+
 ### Explicit default-layout recovery — 2026-10-18
 
 [Shared plan](default_layout_restore_plan.md), [controls/evidence](default_layout_restore.md).

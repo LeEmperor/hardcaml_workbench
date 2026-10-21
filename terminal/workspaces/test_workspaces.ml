@@ -4,6 +4,116 @@ open Hardcaml_workbench_workspaces
 
 let kinds d = List.map d.Definition.tiles ~f:(fun t -> t.Common.kind)
 
+let%test_unit "fresh startup initializes the stock window spec before legacy bootstrap" =
+  let module W = Workspace in
+  let initial = W.initial ~session_id:(W.Session_id.of_string "stock-startup") in
+  let operation = Presets.startup_operation initial |> Option.value_exn in
+  (match operation with
+   | Initialize_config config ->
+     assert (Workspace_config.equal config Presets.stock_config)
+   | _ -> assert false);
+  let initialized = W.apply initial operation |> Result.ok |> Option.value_exn in
+  let expected =
+    List.concat_map Presets.stock_config.windows ~f:(fun w ->
+      List.map w.Workspace_config.Window.workspaces ~f:(fun instance -> instance.name))
+  in
+  assert (
+    List.equal
+      String.equal
+      expected
+      (List.map initialized.workspaces ~f:(fun w -> w.name)));
+  assert (
+    List.length initialized.config_windows = List.length Presets.stock_config.windows);
+  assert (Option.is_none (Presets.startup_operation initialized));
+  let custom =
+    Presets.custom_example () |> Or_error.ok_exn |> Presets.resolve |> Or_error.ok_exn
+  in
+  (match Presets.startup_operation ~selected:custom initial with
+   | Some (Initialize_config config) -> assert (Workspace_config.equal config custom)
+   | _ -> assert false);
+  (* Supplying a different config at reconnect does not replay it. *)
+  assert (Option.is_none (Presets.startup_operation ~selected:custom initialized));
+  let edited_legacy = { initial with configuration_pending = false } in
+  assert (
+    Option.equal
+      W.Operation.equal
+      (Presets.startup_operation edited_legacy)
+      (Some Presets.bootstrap))
+;;
+
+let%test_unit "complete stock spec roundtrips and is accepted as startup input" =
+  let text = Presets.export_config () |> Or_error.ok_exn in
+  let actual = Workspace_config.Resolved.decode text |> Or_error.ok_exn in
+  assert (Workspace_config.equal actual Presets.stock_config);
+  let resolved =
+    Presets.decode text |> Or_error.ok_exn |> Presets.resolve |> Or_error.ok_exn
+  in
+  List.iter Workspace_config.builtin_ids ~f:(fun key ->
+    let stock = Presets.builtins key |> Or_error.ok_exn in
+    Workspace_config.validate_definition stock |> Or_error.ok_exn;
+    let wrapper =
+      List.find_exn Presets.all ~f:(fun d -> String.equal d.Definition.id key)
+    in
+    assert (Workspace_template.equal (Definition.template wrapper) stock.template);
+    assert (List.length wrapper.tiles = List.length stock.tiles));
+  assert (List.length resolved.windows = 1);
+  assert (List.length (List.hd_exn resolved.windows).workspaces = 2);
+  assert (Result.is_error (Presets.builtins "not-a-builtin"));
+  (* An exported stock definition cannot be silently edited under a reserved ID. *)
+  let changed =
+    { actual with
+      definitions =
+        List.map actual.definitions ~f:(fun d ->
+          { d with template = { d.template with name = "Shadow" } })
+    }
+  in
+  let changed = Workspace_config.Resolved.encode changed |> Or_error.ok_exn in
+  assert (Result.is_error (Presets.decode changed))
+;;
+
+let%test_unit "custom spec addresses duplicate kinds by keys and uses bounded fallback" =
+  let config =
+    Presets.custom_example () |> Or_error.ok_exn |> Presets.resolve |> Or_error.ok_exn
+  in
+  let spec = List.hd_exn config.definitions in
+  let d = Definition.of_spec spec in
+  let keys = List.map spec.tiles ~f:(fun t -> t.Workspace_config.Tile.key) in
+  assert (List.equal String.equal (kinds d) [ "run-selector"; "synthesis"; "synthesis" ]);
+  (match Layout.compute d ~width:100 ~height:30 ~kinds:keys with
+   | Compact -> assert false
+   | Grid cells ->
+     (* Right is the second synthesis, deliberately placed before Left. *)
+     assert ((List.nth_exn cells 2).x < (List.nth_exn cells 1).x));
+  (match Layout.compute d ~width:10 ~height:3 ~kinds:keys with
+   | Compact -> ()
+   | Grid _ -> assert false);
+  (match Layout.compute d ~width:100 ~height:45 ~kinds:[ "right"; "extra:tile" ] with
+   | Compact -> assert false
+   | Grid cells -> assert (List.length cells = 2));
+  let left = List.nth_exn spec.tiles 1
+  and right = List.nth_exn spec.tiles 2 in
+  assert (Option.is_some left.presentation && Option.is_some right.presentation);
+  assert (Option.is_none (Option.value_exn right.presentation).compact_summary)
+;;
+
+let%test_unit "Overview identity cannot override a supplied shared-spec tree" =
+  let stock = Presets.builtins "overview" |> Or_error.ok_exn in
+  let leaf tile : Workspace_config.Tree.t =
+    Leaf { tile; min_width = 24; min_height = 6; weight = 1 }
+  in
+  let spec = { stock with layout = Some (Columns [ leaf "timing"; leaf "synthesis" ]) } in
+  let definition = Definition.of_spec spec in
+  let compute definition =
+    Layout.compute definition ~width:100 ~height:20 ~kinds:[ "synthesis"; "timing" ]
+  in
+  match compute definition, compute { definition with id = "custom-overview" } with
+  | Grid [ synthesis; timing ], Grid renamed ->
+    assert (synthesis.x = 50 && synthesis.width = 50);
+    assert (timing.x = 0 && timing.width = 50);
+    assert (List.equal Workspace.Geometry.equal [ synthesis; timing ] renamed)
+  | _ -> assert false
+;;
+
 let%test_unit "Waveforms is explicit, atomic, durable and identified by preset" =
   let module F = Waveforms in
   let before =
@@ -14,7 +124,10 @@ let%test_unit "Waveforms is explicit, atomic, durable and identified by preset" 
   in
   let initialized = apply before Presets.bootstrap in
   assert (Option.is_none (F.find initialized));
-  assert (List.length Presets.all = List.length Presets.starters + 1);
+  assert (
+    not
+      (List.exists Presets.starters ~f:(fun d ->
+         String.equal d.Definition.id F.definition.id)));
   let after =
     apply
       initialized

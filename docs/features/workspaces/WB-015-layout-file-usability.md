@@ -3,7 +3,7 @@ id: WB-015
 title: Human-friendly workspace layout files
 category: workspaces
 feature_sets: [FS3, FS5]
-status: partial
+status: delivered
 kind: enhancement
 priority: P1
 severity: n/a
@@ -25,12 +25,17 @@ Make workspace layouts easy to edit in files, with a clear source of truth.
 Requested size: **Ticket**. Build on current preset/template formats and definitions.
 
 ## Current baseline
+Delivered 2026-10-21: stock and custom configurations share the same versioned
+specification, including responsive trees and sparse presentation. Native CLI
+export/validate/apply and terminal initialization are documented in the
+[authoring guide](../../workspace_configuration.md), with exact verification evidence.
+
 Central OCaml workspace definitions feed client/demo and starter exports. Versioned
 sexp templates already support export/import/clone, preset identity, ordered views,
 hidden state and geometry. Live identities/bindings stay in the daemon registry.
 One-step [built-in default restoration](../../default_layout_restore.md) is also
-delivered; the editable-file workflow/diagnostics in this ticket remain additional
-scope, not work implicitly completed by that recovery command.
+delivered. The editable-file workflow is now delivered separately from that recovery
+command; automatic reload and reset-to-config remain follow-ons.
 
 ## Scope
 - Improve readable layout examples, validation diagnostics and edit/apply workflow.
@@ -42,11 +47,11 @@ Arbitrary free placement, hotkey configuration, or moving live session identitie
 into portable templates. Appearance changes must not silently reapply geometry.
 
 ## Acceptance criteria
-- [ ] A user exports, edits and imports a named arrangement using documented files.
-- [ ] Explain exactly when file edits take effect and what remains live session state.
-- [ ] Preset identity, view order, visibility and requested geometry round-trip honestly.
-- [ ] Invalid/unsupported files fail clearly without partial registry changes.
-- [ ] No duplicate source of truth or hidden preset refill overwrites user arrangements.
+- [x] A user exports, edits and imports a named arrangement using documented files.
+- [x] Explain exactly when file edits take effect and what remains live session state.
+- [x] Preset identity, view order, visibility and requested geometry round-trip honestly.
+- [x] Invalid/unsupported files fail clearly without partial registry changes.
+- [x] No duplicate source of truth or hidden preset refill overwrites user arrangements.
 
 ## Dependencies
 Required: none; definitions, template codec and atomic registry mutations are delivered.
@@ -60,10 +65,11 @@ Eight incremental points cover a human-editable workflow, diagnostics and source
 truth clarification on delivered formats, excluding a new layout renderer or engine.
 
 ## Assumptions and decisions needed
-Decide whether first delivery is explicit import/apply or includes reload-in-place.
+First delivery uses explicit import/additive apply, not reload-in-place.
 Keep requested layout data separate from effective terminal-size clamping.
 
 ## References
+- [User-composable windows/workspaces: implementation plan](../../workspace_configuration_plan.md)
 - [Delivered template format/workflow](../../fs3_adoption.md#workspace-templates)
 - [Template codec](../../../protocol/workspace_template.ml)
 - [Workspace contract](../workspaces_and_layouts.md)

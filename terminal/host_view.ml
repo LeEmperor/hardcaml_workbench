@@ -770,8 +770,8 @@ let utility_rows ?(now = Time_ns.now ()) host data tile =
                 [ Overview_tiles.row ~role:Warning "Observation error" error ])
             else [])
          @ (if H.compact_summary host tile && not local.utility_detail
-             then Overview_tiles.checklist_rows ~compact:true ~stages ~aggregate:facts ()
-             else stages @ facts)
+            then Overview_tiles.checklist_rows ~compact:true ~stages ~aggregate:facts ()
+            else stages @ facts)
          @ interaction)
     | _ -> None)
 ;;
@@ -2007,7 +2007,7 @@ let tile_view
          |> lines ~appearance ~width:body_width ~height:body_height
        | Some rows
          when String.equal tile.kind "stage-checklist"
-               && Option.value horizontal_stages ~default:(H.horizontal_stages host tile)
+              && Option.value horizontal_stages ~default:(H.horizontal_stages host tile)
               && Option.is_some (tile_run host tile) ->
          let run = Option.value_exn (tile_run host tile) in
          let stages = Overview_tiles.observed_stages ~asic:data.asic ~run in
@@ -2347,19 +2347,21 @@ let tile_layout host ({ Dimensions.width; height } : Dimensions.t) =
     Option.value_map (H.active host) ~default:false ~f:(fun w ->
       Option.is_some w.zoomed_tile)
   in
-  let definition = Option.bind (H.active host) ~f:H.definition in
+  let definition = Option.bind (H.active host) ~f:(H.render_definition host) in
   let layout_mode = host.layout_mode in
   let fit =
     match definition with
     | Some definition ->
-      let kinds = List.map tiles ~f:(fun tile -> tile.W.Tile.kind) in
+      let kinds = H.layout_keys host tiles in
       let tree = P.Layout.resolve definition.layout kinds in
       let spare =
         Option.value_map tree ~default:0 ~f:(fun tree ->
           Int.max 0 (available - snd (P.Layout.min_size tree)))
       in
       let selector_count =
-        Int.max 1 (List.count kinds ~f:(String.equal "run-selector"))
+        Int.max
+          1
+          (List.count tiles ~f:(fun tile -> String.equal tile.W.Tile.kind "run-selector"))
       in
       let rec minimum i = function
         | P.Layout.Cell (index, _, height, _) -> if i = index then height else 0
@@ -2400,7 +2402,7 @@ let tile_layout host ({ Dimensions.width; height } : Dimensions.t) =
            definition
            ~width
            ~height:available
-           ~kinds:(List.map tiles ~f:(fun tile -> tile.W.Tile.kind))
+           ~kinds
        with
        | Grid cells -> Fit_layout.Grid cells
        | Compact -> Fit_layout.Compact)
@@ -3139,7 +3141,8 @@ let%test_unit "stopped exact-run observation qualifies actual checklist layouts"
   check host ~horizontal_stages:true ();
   let registry = Option.value_exn host.registry in
   let vertical =
-    H.receive host
+    H.receive
+      host
       { registry with
         workspaces = List.map registry.workspaces ~f:(fun w -> { w with preset = None })
       }
@@ -3151,7 +3154,13 @@ let%test_unit "stopped exact-run observation qualifies actual checklist layouts"
   in
   assert (contains (render detail data tile) error);
   let operation kind state run error : Asic.Pending.t =
-    { key = "test-observation"; kind; state; run = Some run; error; activity = Unreported }
+    { key = "test-observation"
+    ; kind
+    ; state
+    ; run = Some run
+    ; error
+    ; activity = Unreported
+    }
   in
   let with_state ?(error = None) ?(stages = (List.hd_exn runs).stages) operations =
     { data with
@@ -3165,29 +3174,41 @@ let%test_unit "stopped exact-run observation qualifies actual checklist layouts"
   in
   let failed = operation "observe" "failed" Fs0_fixture.run_a (Some "reader lost") in
   let cancelled = { failed with state = "cancelled" } in
-  List.iter [ failed; cancelled; { failed with kind = "run" } ] ~f:(fun failure ->
-    assert (contains (render host (with_state [ failure ]) tile) observation_qualifier));
+  List.iter
+    [ failed; cancelled; { failed with kind = "run" } ]
+    ~f:(fun failure ->
+      assert (contains (render host (with_state [ failure ]) tile) observation_qualifier));
   List.iter
     [ with_state []
     ; with_state [ { failed with kind = "refresh" } ]
     ; with_state [ { failed with run = Some Fs0_fixture.run_b } ]
-    ; with_state [ { failed with run = Some { Fs0_fixture.run_a with backend = Backend_id.of_string "other" } } ]
+    ; with_state
+        [ { failed with
+            run = Some { Fs0_fixture.run_a with backend = Backend_id.of_string "other" }
+          }
+        ]
     ; with_state ~error:(Some "unrelated provider error") []
-    ; with_state ~error:(Some error)
+    ; with_state
+        ~error:(Some error)
         [ failed; { failed with state = "executing"; error = None } ]
-    ; with_state ~error:(Some error)
+    ; with_state
+        ~error:(Some error)
         [ failed; { failed with kind = "run"; state = "executing"; error = None } ]
-    ; with_state ~error:(Some error)
-        ~stages:(List.map (List.hd_exn runs).stages ~f:(fun s -> { s with status = Completed }))
+    ; with_state
+        ~error:(Some error)
+        ~stages:
+          (List.map (List.hd_exn runs).stages ~f:(fun s -> { s with status = Completed }))
         [ failed ]
     ]
-    ~f:(fun data ->
-      assert (not (contains (render host data tile) observation_qualifier)));
+    ~f:(fun data -> assert (not (contains (render host data tile) observation_qualifier)));
   let pinned = { tile with binding = Pin_run Fs0_fixture.run_b } in
   let pinned_host =
-    H.receive host
+    H.receive
+      host
       { registry with
-        tiles = List.map registry.tiles ~f:(fun t -> if W.Tile_id.equal t.id tile.id then pinned else t)
+        tiles =
+          List.map registry.tiles ~f:(fun t ->
+            if W.Tile_id.equal t.id tile.id then pinned else t)
       }
   in
   assert (not (contains (render pinned_host data pinned) observation_qualifier));
@@ -3203,7 +3224,8 @@ let%test_unit "stopped exact-run observation qualifies actual checklist layouts"
     |> Option.value_exn
   in
   let retained_host =
-    H.receive host
+    H.receive
+      host
       { selected_elsewhere with
         tiles =
           List.map selected_elsewhere.tiles ~f:(fun t ->

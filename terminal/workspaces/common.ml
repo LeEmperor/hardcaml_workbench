@@ -3,7 +3,7 @@ open Hardcaml_workbench_protocol
 
 (** Sparse, terminal-independent presentation defaults. [None] inherits app policy. These
     never create providers, change binding, or carry backend evidence. *)
-type presentation =
+type presentation = Workspace_config.Presentation.t =
   { title : bool option
   ; binding_badge : string option
   ; run_reference : bool option
@@ -24,19 +24,7 @@ type tile =
   }
 [@@deriving sexp]
 
-let inherit_presentation =
-  { title = None
-  ; binding_badge = None
-  ; run_reference = None
-  ; freshness = None
-  ; hints = None
-  ; frame = None
-  ; padding = None
-  ; visible_rows = None
-  ; compact_summary = None
-  ; horizontal_stages = None
-  }
-;;
+let inherit_presentation = Workspace_config.Presentation.inherit_defaults
 
 let tile ?(width = 80) ?(height = 10) ?(presentation = inherit_presentation) kind =
   { kind; geometry = { Workspace.Geometry.x = 0; y = 0; width; height }; presentation }

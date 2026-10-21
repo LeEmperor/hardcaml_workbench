@@ -1,5 +1,9 @@
 # FS3 — Existing-project setup and reusable workspaces
 
+For full window/workspace compositions with responsive layout trees, see the
+[shared stock/user configuration guide](workspace_configuration.md). The portable
+template workflow below remains supported and deliberately excludes custom trees.
+
 **Default-layout recovery added 2026-10-18:** use **Restore default layout: Overview /
 Timing / Testing (hide extras)** to show the built-in membership, hide accidental
 extras, restore geometry, clear zoom and select Fit in one acknowledged operation.

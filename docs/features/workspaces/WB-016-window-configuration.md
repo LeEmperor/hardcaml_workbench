@@ -3,7 +3,7 @@ id: WB-016
 title: Full window configuration files
 category: workspaces
 feature_sets: [FS3]
-status: needs-design
+status: delivered
 kind: enhancement
 priority: P2
 severity: n/a
@@ -25,6 +25,11 @@ Support full compositional window configuration: windows, their workspaces and
 session restoration. Original requested size: **“Med Feaure”** (owner typo retained).
 
 ## Current baseline
+Delivered 2026-10-21: versioned multi-window configuration, atomic fresh initialization
+and additive application, stable authoring keys and persisted resolved definitions.
+Stock window/workspace layouts use the same specification. See the
+[authoring guide and native evidence](../../workspace_configuration.md).
+
 The daemon owns session/window/workspace/tile identities and autosaved restoration.
 Portable templates and CLI import/clone exist, but contain layout data rather than
 live IDs, run selections or pins. Multi-monitor adoption remains additional scope.
@@ -39,11 +44,11 @@ Live terminal attachment, cross-window movement or OS monitor orchestration.
 WB-047 owns attachment; this ticket must not require it to validate configuration.
 
 ## Acceptance criteria
-- [ ] A file describes multiple named window/workspace compositions without live IDs.
-- [ ] First creation and restart/restore have explicit, nonduplicating precedence rules.
-- [ ] Existing session modifications are not silently replaced by startup defaults.
-- [ ] Invalid references/configuration fail clearly without partial composition.
-- [ ] Context/binding defaults and local presentation versus registry state are documented.
+- [x] A file describes multiple named window/workspace compositions without live IDs.
+- [x] First creation and restart/restore have explicit, nonduplicating precedence rules.
+- [x] Existing session modifications are not silently replaced by startup defaults.
+- [x] Invalid references/configuration fail clearly without partial composition.
+- [x] Context/binding defaults and local presentation versus registry state are documented.
 
 ## Dependencies
 Required: none; registry, templates and session restoration already exist.
@@ -57,10 +62,12 @@ Thirteen incremental points cover composition schema, validation and restoration
 policy integration, excluding separate live attachment and layout-engine work.
 
 ## Assumptions and decisions needed
-Agree file precedence, named-window matching and explicit reapply/reset semantics.
+Saved state wins; explicit client-read paths initialize fresh sessions only. Reapply
+adds missing keys and preserves edits/policy. Reset-to-config remains a follow-on.
 Configuration is declarative composition, not a second authoritative live registry.
 
 ## References
+- [User-composable windows/workspaces: implementation plan](../../workspace_configuration_plan.md)
 - [Window vocabulary and ownership](../workspaces_and_layouts.md)
 - [Existing template exclusions](../../fs3_adoption.md#workspace-templates)
 - [Protocol registry](../../../protocol/workspace.ml)

@@ -110,6 +110,7 @@ type session =
   ; mutable show_connection_details : bool
   ; mutable connection_details_scroll : int
   ; mutable host : Host.t
+  ; mutable workspace_config : Workspace_config.Resolved.t option
   ; mutable registry_busy : bool
   ; mutable asic : Asic.Snapshot.t option
   ; mutable asic_request_id : int
@@ -293,6 +294,7 @@ let create_session
       ; show_connection_details = false
       ; connection_details_scroll = 0
       ; host = Host.empty
+      ; workspace_config = None
       ; registry_busy = false
       ; asic = None
       ; asic_request_id = 0
@@ -1567,10 +1569,15 @@ let add_default_tiles session (registry : Workspace.Snapshot.t) workspace =
 ;;
 
 let initialize_host_layout session =
-  match session.host.registry with
-  | Some registry when not registry.defaults_initialized ->
-    workspace_request session Hardcaml_workbench_workspaces.Presets.bootstrap
-  | _ -> return ()
+  let operation =
+    Option.bind session.host.registry ~f:(fun snapshot ->
+      Hardcaml_workbench_workspaces.Presets.startup_operation
+        ?selected:session.workspace_config
+        snapshot)
+  in
+  match operation with
+  | Some operation -> workspace_request session operation
+  | None -> return ()
 ;;
 
 let simulation_request session tile_id (operation : Simulation.Operation.t) =
@@ -3374,6 +3381,7 @@ let session_of_baseline_fixture (fixture : Baseline_fixture.t) =
     ; show_connection_details = fixture.show_connection_details
     ; connection_details_scroll = 0
     ; host = Host.empty
+    ; workspace_config = None
     ; registry_busy = false
     ; asic = None
     ; asic_request_id = 0
@@ -4464,10 +4472,12 @@ let execute_host session captured action ~exit =
           let%bind () =
             mutate_workspace
               session
-              (Create_workspace
+              (Instantiate_template
                  { window = active.window
-                 ; name = "Testing"
-                 ; context = registry.main_context
+                 ; template =
+                     (Hardcaml_workbench_workspaces.Presets.builtins "testing"
+                      |> Or_error.ok_exn)
+                       .template
                  })
           in
           (match session.host.registry with
@@ -4475,21 +4485,15 @@ let execute_host session captured action ~exit =
              when Workspace.Session_id.equal current.session_id registry.session_id ->
              (match
                 List.find current.workspaces ~f:(fun w ->
-                  String.equal w.name "Testing"
+                  Option.equal String.equal w.preset (Some "testing")
                   && not
                        (List.exists registry.workspaces ~f:(fun old ->
                           Workspace.Workspace_id.equal old.id w.id)))
               with
               | None -> return ()
               | Some workspace ->
-                let%map () =
-                  mutate_workspace
-                    session
-                    (Hardcaml_workbench_workspaces.Definition.apply
-                       Hardcaml_workbench_workspaces.Testing.definition
-                       ~workspace:workspace.id)
-                in
-                session.host <- Host.switch session.host workspace.id)
+                session.host <- Host.switch session.host workspace.id;
+                return ())
            | _ -> return ())
         | _ -> return ())
     | Apply_default_layout ->
@@ -6416,6 +6420,7 @@ let parse_action = function
 
 let run_legacy
   ~endpoint
+  ~workspace_config
   ~project_root
   ~environment
   ~plain
@@ -6484,9 +6489,17 @@ let run_legacy
       match created with
       | Error message -> return (Or_error.error_string message)
       | Ok session ->
+        session.workspace_config <- workspace_config;
         session.artifact_viewer <- artifact_viewer;
         session.artifact_binary_viewer <- artifact_binary_viewer;
         reconcile_selection session;
+        let%bind () =
+          if Option.is_some workspace_config
+          then (
+            let%bind () = workspace_request session Get in
+            initialize_host_layout session)
+          else return ()
+        in
         if plain || not (Core_unix.isatty Core_unix.stdout)
         then (
           print_opened session;
@@ -6615,6 +6628,7 @@ let run_plain_workspace session operation =
 
 let run
   ~endpoint
+  ~workspace_config
   ~project_root
   ~environment
   ~plain
@@ -6647,7 +6661,9 @@ let run
   let has_operation =
     Option.is_some asic_operation || Option.is_some workspace_operation
   in
-  if not has_operation
+  if Option.is_some workspace_config && Option.is_none project_root
+  then fail "--workspace-config requires --project-root or --discover-project"
+  else if not has_operation
   then
     if api
     then fail "--api requires --asic-operation or --workspace-operation"
@@ -6656,6 +6672,7 @@ let run
     else
       run_legacy
         ~endpoint
+        ~workspace_config
         ~project_root
         ~environment
         ~plain
@@ -6670,6 +6687,8 @@ let run
         ~artifact_viewer
         ~artifact_binary_viewer
         ()
+  else if Option.is_some workspace_config
+  then fail "--workspace-config is a startup option; omit typed operations"
   else if List.count
             [ Option.is_some asic_operation
             ; Option.is_some workspace_operation
@@ -6754,6 +6773,26 @@ let command =
        flag "--connect" (optional string) ~doc:"URL attach without automatic startup"
      and project_root =
        flag "--project-root" (optional string) ~doc:"ROOT open a Dune project"
+     and workspace_config =
+       flag
+         "--workspace-config"
+         (optional
+            (Command.Arg_type.create (fun path ->
+               let text =
+                 In_channel.with_file path ~f:(fun channel ->
+                   let buffer = Buffer.create 4096 in
+                   match
+                     In_channel.input_buffer
+                       channel
+                       buffer
+                       ~len:(Workspace_config.max_encoded_bytes + 1)
+                   with
+                   | Some () -> failwith "Workspace configuration exceeds 4 MiB"
+                   | None -> Buffer.contents buffer)
+               in
+               let module P = Hardcaml_workbench_workspaces.Presets in
+               P.decode text |> Or_error.bind ~f:P.resolve |> Or_error.ok_exn)))
+         ~doc:"FILE read a workspace spec on this client; initialize fresh sessions once"
      and discover_project =
        flag
          "--discover-project"
@@ -6911,6 +6950,7 @@ let command =
           if not api then Option.iter note ~f:(eprintf "hardcaml-workbench: %s\n%!");
           run
             ~endpoint
+            ~workspace_config
             ~project_root
             ~environment
             ~plain

@@ -265,7 +265,12 @@ def preserved_preferences(test, before, after, label):
 
 
 def assert_restore(test, before, after, wid, template):
-    """Independent first-unclaimed occurrence oracle, including hidden tiles."""
+    """Independent occurrence and targeted policy-detachment oracle.
+
+    Derive every allowed provenance change from the pre-Restore snapshot, never
+    from the returned policy/definitions/mappings. Unconfigured targets must not
+    acquire provenance; already-detached targets must retain it exactly.
+    """
     expected = copy.deepcopy(before)
     old_tiles = tiles(before, wid)
     claimed, missing = {}, []
@@ -303,8 +308,20 @@ def assert_restore(test, before, after, wid, template):
     expected = fs3.replace_field(expected, 'tiles', actual_tiles)
     expected = fs3.replace_field(expected, 'revision', str(int(field(before, 'revision')) + 1))
     expected = fs3.replace_field(expected, 'next_id', str(int(field(before, 'next_id')) + len(missing)))
+    old_provenance = field(before, 'config_workspaces')
+    require(sum(field(p, 'workspace') == wid for p in old_provenance) <= 1,
+            'Restore fixture must have at most one provenance record per workspace')
+    expected_provenance = [
+        fs3.replace_field(p, 'policy_detached', 'true')
+        if field(p, 'workspace') == wid else copy.deepcopy(p)
+        for p in old_provenance]
+    test.check(field(after, 'config_workspaces') == expected_provenance,
+               'Restore detaches only target frozen policy; config keys, definitions, tile mappings, '
+               'record order and all non-target provenance remain exact unchanged')
+    expected = fs3.replace_field(expected, 'config_workspaces', expected_provenance)
     test.check(after == expected,
-               'Exactly one CAS revision clears target zoom/preset; all other workspace/context/run fields are exact unchanged')
+               'Exactly one CAS revision restores target preset, clears zoom and detaches its config policy; '
+               'all other snapshot fields are exact unchanged')
     return added
 
 
@@ -501,7 +518,7 @@ def exercise(test):
         count = len(proxy.events)
         terminal.palette('Restore default layout (current preset', dispatch=False)
         disabled = terminal.wait('unknown-disabled', ['COMMAND PALETTE'])
-        test.check('Unknown/custom preset' in disabled,
+        test.check('No built-in preset' in disabled,
                    'Unknown current-preset restore displays an explicit disabled reason')
         terminal.key(b'\r')
         terminal.drain(.5)

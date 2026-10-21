@@ -1,6 +1,5 @@
 open! Core
 open Hardcaml_workbench_protocol
-open Common
 module W = Workspace
 
 type pane =
@@ -64,58 +63,12 @@ let log_job pin ~instance_id =
   | Unavailable reason -> Or_error.error_string reason
 ;;
 
-let layout ~sidebar_weight ~waves_weight =
-  Stack
-    [ navigation_leaf
-    ; Weighted_columns
-        [ ( sidebar_weight
-          , Stack
-              [ leaf ~height:4 ~weight:0 (kind Session)
-              ; leaf ~height:10 ~weight:3 (kind Signals)
-              ] )
-        ; waves_weight, leaf ~height:14 ~weight:3 (kind Waves)
-        ]
-    ; Columns [ leaf ~height:6 (kind Picker); leaf ~height:6 (kind Logs) ]
-    ]
-;;
-
-(** Prefer a fifth of the width for metadata/signals, retaining readable 24-cell panes on
-    narrow terminals. Pixel weights express this clamp using the shared weighted layout
-    engine without changing any other preset's sizing policy. *)
-let layout_for_width ~width ~gutter =
-  let available = width - gutter in
-  if available < 48
-  then layout ~sidebar_weight:1 ~waves_weight:4
-  else (
-    let sidebar = Int.max 24 (available / 5) in
-    layout ~sidebar_weight:sidebar ~waves_weight:(available - sidebar))
-;;
-
-let definition : Definition.t =
-  let pane_tile pane =
-    tile
-      ~height:(if equal_pane pane Session then 4 else 10)
-      ~presentation:
-        { inherit_presentation with
-          title = Some true
-        ; run_reference = Some false
-        ; binding_badge = Some "hidden"
-        ; padding = Some 0
-        ; hints = Some false
-        }
-      (kind pane)
-  in
-  { id = "waveforms"
-  ; name = "Waveforms"
-  ; tiles = navigation :: List.map [ Session; Signals; Waves; Picker; Logs ] ~f:pane_tile
-  ; layout = layout ~sidebar_weight:1 ~waves_weight:4
-  }
-;;
+let definition = Definition.of_spec (Stock.find "waveforms")
 
 (** Waveforms is explicit, not a bootstrap starter. Template instantiation allocates a
     real daemon-owned workspace and its tiles in one revision. *)
 let create ~window =
-  W.Mutation.Instantiate_template { window; template = Definition.template definition }
+  W.Mutation.Instantiate_template { window; template = (Stock.find "waveforms").template }
 ;;
 
 let find (registry : W.Snapshot.t) =

@@ -1,5 +1,11 @@
 # Workspace composition, palette and tile presentation
 
+**2026-10-21 update:** stock membership, presentation and responsive trees now live
+in `terminal/workspaces/stock.sexp`, using the same versioned specification as user
+files. The OCaml preset modules are compatibility projections. Start with the
+[current configuration guide](workspace_configuration.md); the OCaml authoring
+examples below document the earlier implementation.
+
 Implemented and verified 2026-10-16. This is the frontend follow-on to the
 aesthetics merge and completed FS2 milestone. The shared implementation plan is
 [frontend_composition_plan.md](frontend_composition_plan.md).

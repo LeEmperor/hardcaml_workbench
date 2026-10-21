@@ -65,6 +65,11 @@ let read_snapshot t ~project_key =
 ;;
 
 let save_snapshot t ~project_key snapshot =
+  (* Includes embedded resolved definitions and provenance: never serialize a partially
+     valid composition, even through a direct persistence caller. *)
+  (match Workspace.validate snapshot with
+   | Ok () -> ()
+   | Error error -> raise_s [%message "Invalid workspace snapshot" (error : V1.Error.t)]);
   Core_unix.mkdir_p t.state_dir ~perm:0o700;
   let path = snapshot_path t ~project_key in
   (* A temp file in the same directory guarantees rename stays on one filesystem. *)
