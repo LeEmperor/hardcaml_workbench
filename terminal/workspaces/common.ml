@@ -30,33 +30,9 @@ let tile ?(width = 80) ?(height = 10) ?(presentation = inherit_presentation) kin
   { kind; geometry = { Workspace.Geometry.x = 0; y = 0; width; height }; presentation }
 ;;
 
-let navigation =
-  tile
-    ~height:1
-    ~presentation:
-      { inherit_presentation with
-        title = Some false
-      ; binding_badge = Some "hidden"
-      ; hints = Some false
-      ; frame = Some false
-      ; padding = Some 0
-      }
-    "workspace-tabs"
-;;
-
-let session = tile ~width:28 ~height:7 "live-status"
-
-let selector =
-  tile
-    ~height:7
-    ~presentation:{ inherit_presentation with visible_rows = Some 4 }
-    "run-selector"
-;;
-
-let checklist = tile ~width:28 ~height:10 "stage-checklist"
-
-(** Composable slicing tree. A leaf claims the first unclaimed occurrence of its kind.
-    Remaining duplicate/custom tiles are placed as extras, never discarded. *)
+(** Renderer projection of the shared slicing tree. Leaf labels are authoring keys for
+    configured workspaces, kinds for legacy arrangements. Stock policy lives exclusively
+    in [stock.sexp]; remaining duplicate/custom tiles are placed as extras. *)
 type tree =
   | Leaf of
       { kind : string
@@ -69,22 +45,3 @@ type tree =
   | Weighted_columns of (int * tree) list
   | Narrow of tree
 [@@deriving sexp]
-
-let leaf ?(height = 6) ?(weight = 1) kind =
-  Leaf { kind; min_width = 24; min_height = height; weight }
-;;
-
-let navigation_leaf = leaf ~height:1 ~weight:0 "workspace-tabs"
-let session_leaf = leaf ~height:7 ~weight:0 "live-status"
-let selector_leaf = leaf ~height:7 ~weight:0 "run-selector"
-let checklist_leaf = leaf ~height:9 "stage-checklist"
-
-let shell ~sidebar ~evidence =
-  Stack
-    [ navigation_leaf
-    ; Columns
-        [ Narrow (Stack (session_leaf :: sidebar))
-        ; Stack [ selector_leaf; Stack evidence ]
-        ]
-    ]
-;;

@@ -19,6 +19,7 @@ Project/provider commands remain useful without the application.
 | [FS3 adoption](fs3_adoption.md) | Existing-project initializer, portable workspace templates and persistent presentation preferences |
 | [User-composable workspace plan](workspace_configuration_plan.md) | Agent-sized implementation and verification for shared stock/user window and workspace definitions |
 | [Compose windows and workspaces](workspace_configuration.md) | Export stock examples, author keyed tile layouts, initialize/apply configuration and recover built-ins |
+| [Post-merge composition audit](workspace_post_merge_audit.md) | Reconciliation of hierarchy, Testing/Timing/Overview and reconnect features with the shared specification |
 | [Restore default layout](default_layout_restore.md) |One-step recovery: show defaults, hide extras, restore sizes, clear zoom and select Fit while preserving evidence/pins |
 | [Provider integration](fs0_provider_integration.md) | Implemented public API, configuration, cache and supervision limits |
 | [Terminal host](fs0_terminal.md) / [Execution module](fs0_execution_module.md) | Current UI controls and daemon-routed generic execution boundary |

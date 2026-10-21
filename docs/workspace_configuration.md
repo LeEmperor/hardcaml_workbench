@@ -11,6 +11,10 @@ example: a run selector and two synthesis tiles, with independent presentation a
 layout keys. Existing tile implementations remain compiled application features;
 configurations compose them without writing OCaml.
 
+The [post-merge audit](workspace_post_merge_audit.md) verifies merged hierarchy,
+Testing/Timing/Overview and reconnect features against this structure, including
+custom mixed workspaces and preservation of authored layouts during investigation.
+
 ## Export, edit and validate
 
 With the native commands installed:
@@ -119,7 +123,7 @@ data to the daemon. No daemon access to the client pathname is required.
 
 - A fresh session receives the entire composition in one atomic operation.
 - Without a selected file, fresh startup uses the window composition in `stock.sexp`
-  (currently Overview and Timing). Testing and Waveforms remain available to create.
+  (currently Overview, Timing and Testing). Waveforms remains available to create.
 - Existing sessions win over startup configuration, including sessions edited before
   the first terminal attaches. Legacy unfinished bootstrap remains supported.
 - Live identities, context/run selections, pins, geometry and visibility are saved

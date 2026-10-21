@@ -107,6 +107,7 @@ def acceptance(t, check, http, runs, presets):
     selector_y = pane_rect(overview_screen, 'runs')[1]
     check(selector_y > session_y, 'Run list is vertical beneath Session')
     # A narrow sidebar clips presentation, so zoom to verify full opaque labels.
+    t.focus_view('run selector')
     t.command('Zoom focused tile')
     full_runs = t.capture('sidebar-run-identity-zoom', ['synthetic-long-distinguishable-run-reference-3-suffix'])
     for number in (3, 4):
@@ -138,6 +139,7 @@ def acceptance(t, check, http, runs, presets):
     t.key(b'\x1b')
 
     # Selector row-cap changes must increase its real viewport, not merely metadata.
+    t.focus_view('run selector')
     before_expand = t.capture('selector-height-before')
     t.command('Run selector: More visible rows (+1)')
     t.capture('selector-five-row-cap', ['5/6'])
@@ -263,6 +265,12 @@ def acceptance(t, check, http, runs, presets):
     t.resize(120, 40)
     t.capture('refinement-timing-polished-final-120x40', ['Timing · Paths', 'Timing · Selected path', 'Timing · Provenance', 'signoff: completed'])
     t.resize(180, 55)
+    reuse_before = snapshot()
+    t.command('Inspect timing paths ' + field(runs[0], 'id'))
+    t.capture('timing-reopen-retains-detail-intent', ['Filter: clk:reg0 -> reg7',
+              'Slack: 0.42 ns', 'Path: SYNTHETIC setup path clk:reg0 -> reg7'])
+    check(snapshot() == reuse_before,
+          'Reopening compatible Timing retains selected detail/filter intent without any registry mutation')
 
     # Preserve an explicit pin in the existing Timing arrangement. Opening another
     # captured run must make an independent investigation instead of rebinding it.
@@ -276,6 +284,15 @@ def acceptance(t, check, http, runs, presets):
     def opened_independent():
         current = snapshot()
         new = [w for w in field(current, 'workspaces') if field(w, 'id') not in {field(w, 'id') for w in field(prior, 'workspaces')}]
+        timing_template = next(field(d, 'template') for d in field(presets.config, 'definitions')
+                               if field(d, 'key') == 'timing')
+        for workspace in new:
+            views = [[['kind', field(tile, 'kind')], ['hidden', field(tile, 'hidden')],
+                      ['geometry', field(tile, 'requested_geometry')]]
+                     for tile in field(current, 'tiles')
+                     if field(tile, 'workspace') == field(workspace, 'id')]
+            require(views == field(timing_template, 'views'),
+                    'New captured-run Timing must publish complete canonical membership atomically')
         return current if any(field(w, 'preset') == ['timing'] and any(field(c, 'id') == field(w, 'context') and field(c, 'selected_run') == [runs[1]] for c in field(current, 'contexts')) for w in new) else None
     after = wait(opened_independent, 'fully initialized independent captured-run Timing arrangement')
     t.capture('timing-independent-run-b', ['Timing · Paths', 'Timing · Selected path', 'Timing · Provenance', 'Run: ' + field(runs[1], 'id')])
@@ -304,14 +321,34 @@ def acceptance(t, check, http, runs, presets):
         t.key(b'\x1b')
         t.capture('fs1-' + domain + '-restored', ['Timing · Paths', 'Timing · Provenance'], ['INSPECT ' + domain])
 
-    # WB-054: explicit close is advertised, keyboard-reachable over the explorer, and
-    # returns to the same composed workspace; with nothing open it explains why.
+    # WB-054: closing an explorer returns to the retained Timing reader below it.
+    # Establish that reader explicitly; closing the overlay must not close both.
+    t.focus_view('timing paths')
+    t.key(b'\r')
+    retained_detail = t.capture('wb054-retained-timing-precondition',
+        ['Timing · Selected path', 'No tool report or binary layout is claimed.'])
+    retained_path = pane_body(retained_detail, 'Timing · Selected path')[0]
     before_close = snapshot()
     t.command('Inspect clocks ' + field(runs[0], 'id'))
     t.capture('wb054-explorer-help', ['INSPECT clocks', 'Space c x close'])
     t.key(b' '); t.key(b'c'); t.key(b'x')
-    t.capture('wb054-explorer-closed', ['Timing · Paths', 'Timing · Provenance'], ['INSPECT clocks'])
+    restored_detail = t.capture('wb054-explorer-closed',
+        ['Timing · Paths', 'Timing · Provenance', 'No tool report or binary layout is claimed.'],
+        ['INSPECT clocks'])
     check(snapshot() == before_close, 'Space c x closes the explorer without changing selection, bindings or registry')
+    check(pane_body(restored_detail, 'Timing · Selected path')[0] == retained_path,
+          'Closing the clocks overlay preserves the underlying exact selected Timing detail')
+    # Close the retained reader as a separate contextual action. Only then is the
+    # disabled reason valid; merely returning from an overlay keeps detail open.
+    t.command('Close inspector (Space c x)')
+    closed_detail = t.capture('wb054-timing-reader-closed',
+        ['Closed path detail; focus returned to timing · paths (selection kept)',
+         'Enter to load selected path detail (read-only)'])
+    check(snapshot() == before_close and
+          pane_body(closed_detail, 'Timing · Selected path')[0] == retained_path and
+          not any('No tool report or binary layout is claimed.' in line
+                  for line in pane_body(closed_detail, 'Timing · Selected path')),
+          'Closing the retained Timing reader preserves selected row, pins, contexts and registry')
     t.open_palette('Close inspector')
     t.capture('wb054-close-unavailable', ['Close inspector (Space c x)', 'no inspector open on the focused tile'])
     t.key(b'\x1b')
@@ -324,9 +361,133 @@ def acceptance(t, check, http, runs, presets):
     t.resize(240, 80)
     t.capture('refinement-overview-240x80', ['Reported cells (agg.)', 'placement', 'routing', 'checks', 'finalization'])
     t.resize(120, 40)
-    t.capture('refinement-overview-final', ['Overview', 'Reported cells (agg.)'])
+    t.capture('refinement-overview-final', ['Reported cells (agg.)', 'stage checklist', 'planned-run'])
+    t.wait_active_workspace(snapshot(), overview_id, 'refinement-overview-final')
+    check(True, 'Final resized panes belong to the exact active Overview identity, independent of tab viewport')
+    # A paths-only custom definition is a compatible Timing destination. Opening
+    # it must not silently add built-in panes or replace its frozen custom policy.
+    timing_definition = next(d for d in field(presets.config, 'definitions')
+                             if field(d, 'key') == 'timing')
+    paths_view = next(v for v in field(field(timing_definition, 'template'), 'views')
+                      if field(v, 'kind') == 'timing-paths')
+    custom = [['key', 'custom-paths'], ['template', [['version', '1'],
+        ['name', 'Custom captured paths'], ['preset', []], ['views', [paths_view]]]],
+        ['tiles', [[['key', 'kept-paths']]]], ['layout', [['Leaf', ['tile', 'kept-paths'],
+            ['min_width', '24'], ['min_height', '8'], ['weight', '1']]]]]
+    instance = [['key', 'paths'], ['name', 'Custom captured paths'],
+                ['definition', ['Custom', 'custom-paths']]]
+    window = [['key', 'custom'], ['name', 'Custom timing window'], ['workspaces', [instance]]]
+    config = [['version', '1'], ['id', 'custom-timing-reuse'],
+              ['definitions', [custom]], ['windows', [window]]]
+    mutate('(Apply_config %s)' % sexp(config))
+    custom_registry = snapshot()
+    custom_workspace = next(w for w in field(custom_registry, 'workspaces')
+                            if field(w, 'name') == 'Custom captured paths')
+    custom_tile = next(tile for tile in field(custom_registry, 'tiles')
+                       if field(tile, 'workspace') == field(custom_workspace, 'id'))
+    mutate('(Set_tile_binding (tile %s) (binding (Pin_run %s)))' %
+           (sexp(field(custom_tile, 'id')), sexp(runs[0])))
+    # The stock workspace is intentionally ineligible. The independent view still
+    # resolves run B, so only the custom view matches A.
+    for tile in field(custom_registry, 'tiles'):
+        if (field(tile, 'workspace') == field(existing_timing, 'id') and
+                field(tile, 'kind') == 'timing-paths'):
+            mutate('(Set_tile_hidden (tile %s) (hidden true))' % sexp(field(tile, 'id')))
+    custom_before = snapshot()
+    t.command('Inspect timing paths ' + field(runs[0], 'id'))
+    t.capture('custom-timing-reused-without-builtin-apply', ['Timing · Paths', '12 paths'],
+              ['Timing · Selected path', 'Timing · Provenance'])
+    check(snapshot() == custom_before,
+          'Inspect reuses custom Timing without changing revision, membership, pins, contexts or frozen policy')
+    check(producers() == producers_before and len(plans()) == len(plans_before) + 1,
+          'Custom Timing reuse and hydration issue no planner or producer actions')
+    t.command('Switch to Overview')
+    t.capture('overview-after-custom-timing', ['Reported cells (agg.)', 'stage checklist', 'planned-run'])
+    t.wait_active_workspace(snapshot(), overview_id, 'overview-after-custom-timing')
     (t.base / 'provider-calls-final.json').write_text(json.dumps(calls(), indent=2))
     return 'Overview'
+
+
+def timing_reuse_acceptance(t, check, http, runs, presets):
+    """Focused native Timing regression, independent of presentation preflights."""
+    def snapshot(): return http.rpc(domain='workspace')
+    def mutate(operation): return http.mutate(snapshot(), operation)
+    def producers_and_plans():
+        calls = [json.loads(line)['argv'] for line in
+                 (t.base / 'project/provider-calls.jsonl').read_text().splitlines()]
+        return [a for a in calls if a[:2] in (['flow', 'run'], ['flow', 'plan']) or a[:1] == ['finalize']]
+
+    jobs_before = producers_and_plans()
+    definition = next(d for d in field(presets.config, 'definitions') if field(d, 'key') == 'timing')
+    template = field(definition, 'template')
+    paths_view = next(v for v in field(template, 'views') if field(v, 'kind') == 'timing-paths')
+    custom = [['key', 'custom-paths'], ['template', [['version', '1'],
+        ['name', 'Custom captured paths'], ['preset', []], ['views', [paths_view]]]],
+        ['tiles', [[['key', 'kept-paths']]]], ['layout', [['Leaf', ['tile', 'kept-paths'],
+            ['min_width', '24'], ['min_height', '8'], ['weight', '1']]]]]
+    instance = [['key', 'paths'], ['name', 'Custom captured paths'],
+                ['definition', ['Custom', 'custom-paths']]]
+    window = [['key', 'custom'], ['name', 'Custom timing window'], ['workspaces', [instance]]]
+    config = [['version', '1'], ['id', 'focused-timing-reuse'],
+              ['definitions', [custom]], ['windows', [window]]]
+    mutate('(Apply_config %s)' % sexp(config))
+    configured = snapshot()
+    workspace = next(w for w in field(configured, 'workspaces') if field(w, 'name') == 'Custom captured paths')
+    paths = next(tile for tile in field(configured, 'tiles') if field(tile, 'workspace') == field(workspace, 'id'))
+    mutate('(Set_tile_binding (tile %s) (binding (Pin_run %s)))' %
+           (sexp(field(paths, 'id')), sexp(runs[0])))
+    for tile in field(configured, 'tiles'):
+        if field(tile, 'kind') == 'timing-paths' and field(tile, 'id') != field(paths, 'id'):
+            mutate('(Set_tile_hidden (tile %s) (hidden true))' % sexp(field(tile, 'id')))
+    before_reuse = snapshot()
+    t.command('Inspect timing paths ' + field(runs[0], 'id'))
+    t.capture('focused-custom-timing-reused', ['Timing · Paths', '12 paths'],
+              ['Timing · Selected path', 'Timing · Provenance'])
+    check(snapshot() == before_reuse,
+          'Custom paths-only reuse preserves exact registry revision, policy, tile keys, pin and contexts')
+
+    # A conflicting pin must cause complete canonical creation, never rebinding
+    # either the custom workspace or the shared Main context.
+    before_create = snapshot()
+    t.command('Inspect timing paths ' + field(runs[1], 'id'))
+    def created_investigation():
+        current = snapshot()
+        new = [w for w in field(current, 'workspaces')
+               if field(w, 'id') not in {field(old, 'id') for old in field(before_create, 'workspaces')}]
+        for w in new:
+            views = [[['kind', field(tile, 'kind')], ['hidden', field(tile, 'hidden')],
+                      ['geometry', field(tile, 'requested_geometry')]]
+                     for tile in field(current, 'tiles') if field(tile, 'workspace') == field(w, 'id')]
+            require(views == field(template, 'views'), 'New Timing membership must be canonical at first observation')
+        if len(new) == 1:
+            context = next(c for c in field(current, 'contexts') if field(c, 'id') == field(new[0], 'context'))
+            if field(context, 'selected_run') == [runs[1]]:
+                return current, new[0], context
+        return None
+    after, investigation, context = wait(created_investigation, 'canonical independent Timing investigation')
+    check(field(investigation, 'preset') == ['timing'] and
+          field(context, 'id') != field(after, 'main_context') and
+          all(old in field(after, 'contexts') for old in field(before_create, 'contexts')) and
+          all(old in field(after, 'tiles') for old in field(before_create, 'tiles')) and
+          field(after, 'config_workspaces') == field(before_create, 'config_workspaces'),
+          'Conflicting custom pin creates independent canonical Timing while preserving all existing contexts, tiles and policy')
+    t.resize(180, 55)
+    t.capture('focused-canonical-timing-created', ['Timing · Paths', 'Timing · Selected path', 'Timing · Provenance', '12 paths'])
+    t.focus_view('timing paths')
+    t.key(b'/'); t.key(b'clk:reg0 -> reg7'); t.key(b'\r'); t.key(b'\r')
+    detail = wait(lambda: next((d for d in field(http.rpc(wait=False), 'inspection_details')
+        if field(d, 'run') == runs[1] and field(d, 'stage') == 'signoff' and
+        field(d, 'row_id') == 'synthetic-timing-signoff' and field(d, 'text')), None),
+        'exact selected detail for focused Timing regression')
+    expected = ['1 paths', 'Filter: clk:reg0 -> reg7', field(detail, 'text').splitlines()[0]]
+    t.capture('focused-timing-selected-detail', expected)
+    before_reopen = snapshot()
+    t.command('Inspect timing paths ' + field(runs[1], 'id'))
+    t.capture('focused-timing-reopen-retains-detail-intent', expected)
+    check(snapshot() == before_reopen,
+          'Hydrated Timing reopen retains selected path/filter/detail intent without registry mutation')
+    check(producers_and_plans() == jobs_before, 'Focused Timing creation, reuse and hydration launch no planner or producer')
+    return field(investigation, 'name')
 
 
 def main():
@@ -334,6 +495,8 @@ def main():
     for name in ('daemon', 'client', 'preset-export'): parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--evidence', type=Path)
     parser.add_argument('--timeout', type=int, default=300)
+    parser.add_argument('--timing-only', action='store_true',
+                        help='run native Timing creation/custom reuse/detail-intent regression without unrelated presentation preflights')
     args = parser.parse_args()
     args.palette_only = False
     args.harness = 'frontend refinement'
@@ -350,6 +513,10 @@ def main():
         screen = t.capture('selector-only-two-registered-runs', ['Runs 2/2 (cap 4)'])
         check(sum('asic/' in line for line in pane_body(screen, 'runs')) == 2, 'With only two registered runs, selector labels and renders 2/2 instead of claiming four visible runs')
     try:
+        if args.timing_only:
+            args.harness = 'focused Timing creation and custom reuse'
+            composition.run(args, acceptance=timing_reuse_acceptance, extra_runs=(), focused=True)
+            return
         two = argparse.Namespace(**vars(args))
         two.evidence = args.evidence.with_name(args.evidence.name + '-two-runs')
         two.palette_only = True

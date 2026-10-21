@@ -87,19 +87,21 @@ or focused-tile fallback without changing saved geometry or membership.
 FS3 portable templates carry the stable preset ID alongside exact membership and
 requested geometry. `Definition.template` supplies the same definitions to CLI
 `starter overview|timing|testing`; imports do not fill/reset sparse arrangements.
-`Presets.bootstrap` initializes fresh Overview/Timing through a single idempotent
-daemon operation, even after a CLI import has advanced registry revision. Legacy
+Fresh startup uses `Initialize_config` with the Overview/Timing/Testing window in
+`stock.sexp`. `Presets.bootstrap` completes only unfinished legacy Overview/Timing
+placeholders through a single idempotent daemon operation, even after a CLI import
+has advanced registry revision. It does not add Testing to existing sessions. Legacy
 saved arrangements are never mistaken for incomplete bootstrap. Custom layouts
 honor generic Fit as well as requested-size mode. See [FS3 adoption](../../docs/fs3_adoption.md).
 
 ## Waveforms integration contract
 
-`Waveforms.definition` registers stable preset ID `waveforms`, with four independent
-tiles: `waveform-signals`, `waveform-waves`, `waveform-picker`, `waveform-logs`, plus
+`Waveforms.definition` registers stable preset ID `waveforms`, with five independent
+tiles: `waveform-session`, `waveform-signals`, `waveform-waves`, `waveform-picker`, `waveform-logs`, plus
 the existing workspace tabs. Signals and Waves share the upper band; VCD picker and
 Logs share the lower band. All use normal host layout, focus, hiding, zoom and
 appearance. `Presets.all` is the complete catalog; `Presets.starters` remains the
-Overview/Timing startup definitions from `stock.sexp`. Testing and Waveforms are
+Overview/Timing/Testing startup definitions from `stock.sexp`. Waveforms is
 instantiated explicitly.
 
 `Waveforms.create ~window` returns one `Instantiate_template` registry mutation.
@@ -135,3 +137,32 @@ unavailable if it has expired; never silently use the current Testing selection.
 are the actual body viewport. The host supplies titles/frames/padding, clips the
 body, and overlays the global palette last. Main supplies the callback closing over
 waveform state, so `Host_view` never imports `Waveform_view` (which uses host roles).
+
+## Post-merge catalog audit (2026-10-21)
+
+Compared against merged oxcaml `471419a`, including its compiled workspace definitions:
+
+- Overview retains the one-third Session/Runs/checklist/plan sidebar and six compact
+  domain summaries; Timing retains its Session/Runs row and Paths/Detail/Context tree.
+  Four-row Runs defaults and the vertical compact checklist are in the shared spec.
+- Testing retains all six cooperative simulation panes and the compact project-only
+  utility column at the delivered **2:3:3** widths. The guide now reflects those
+  merged source proportions.
+- Restored Testing to the canonical default window, matching the three starters in
+  `471419a:terminal/workspaces/presets.ml` (introduced before Waveforms and explicitly
+  retained in `994cc85`). Existing saved compositions are not replayed or upgraded.
+- Hierarchy remains opt-in as delivered in `471419a` and documented in
+  `docs/hierarchy_tile.md`. Any user definition can compose the `hierarchy` kind using
+  the same template/tile/tree schema; it needs no new preset or authoring format.
+- The duration alignment/cache work (`58f3dfc`, and
+  `docs/timing_cache_and_duration_alignment_plan.md`) changes rendering and demand,
+  not preset membership. It introduces no separate duration tile or layout policy.
+- Removed unused hardcoded stock helpers and the obsolete shell from `common.ml`;
+  its types and generic tile constructor remain renderer/test compatibility helpers.
+  Stock policy is solely in `stock.sexp`, including Waveforms' 1:4 width clamp.
+
+Regression coverage in `test_workspaces.ml` checks exact starter membership, fresh
+initialization versus legacy preservation, cooperative Testing membership/presentation,
+and stock/user tree parity. Central workspace/terminal tests, native builds, lint,
+configuration and domain/reconnect acceptance passed; see the
+[audit and exact evidence](../../docs/workspace_post_merge_audit.md).

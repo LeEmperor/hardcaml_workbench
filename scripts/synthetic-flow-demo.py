@@ -107,8 +107,16 @@ def install_simulation(base):
     return manifest
 
 
+class WorkspaceCatalog(dict):
+    """Legacy tile projection plus the complete canonical composition."""
+
+    def __init__(self, presets, config):
+        super().__init__((field(p, 'id'), p) for p in presets)
+        self.config = config
+
+
 def workspace_presets(executable=None):
-    """Read the OCaml source of truth; never synthesize fallback Python layouts."""
+    """Read both public catalog exports; never synthesize fallback layouts."""
     executable = Path(executable or os.environ.get('WORKBENCH_PRESET_EXPORT',
         REPO / '_build/default/terminal/workspaces/export_presets.exe')).expanduser().resolve()
     if not executable.is_file():
@@ -119,7 +127,36 @@ def workspace_presets(executable=None):
     ids = [field(p, 'id') for p in presets]
     if len(set(ids)) != len(ids):
         raise ValueError('Duplicate OCaml preset IDs')
-    return {field(p, 'id'): p for p in presets}
+    config = parse(subprocess.run(switch_command([executable, '--workspace-config']),
+        check=True, capture_output=True, text=True, timeout=15).stdout)
+    return WorkspaceCatalog(presets, config)
+
+
+def initialize_workspaces(client, snapshot, presets, required=()):
+    """Use stock windows and frozen policy on first startup, preserving saved edits.
+
+    Additional instances are demo workflow choices; their definitions, membership,
+    geometry and presentation come entirely from the shared specification.
+    """
+    config = parse(sexp(presets.config))
+    windows = field(config, 'windows')
+    instances = [w for window in windows for w in field(window, 'workspaces')]
+    for identity in required:
+        if not any(field(w, 'definition') == ['Builtin', identity] for w in instances):
+            definition = next(d for d in field(config, 'definitions')
+                              if field(d, 'key') == identity)
+            field(windows[0], 'workspaces').append([
+                ['key', 'demo-' + identity],
+                ['name', field(field(definition, 'template'), 'name')],
+                ['definition', ['Builtin', identity]]])
+    snapshot = client.rpc('(Initialize_config %s)' % sexp(config), domain='workspace')
+    if field(snapshot, 'defaults_initialized') == 'false':
+        definitions = {field(d, 'key'): d for d in field(presets.config, 'definitions')}
+        templates = [field(definitions[field(w, 'definition')[1]], 'template')
+                     for window in field(presets.config, 'windows')
+                     for w in field(window, 'workspaces')]
+        snapshot = client.rpc('(Bootstrap %s)' % sexp(templates), domain='workspace')
+    return snapshot
 
 
 def apply_workspace_presets(client, snapshot, presets):
@@ -139,25 +176,29 @@ def apply_workspace_presets(client, snapshot, presets):
 
 def ensure_workspaces(client, snapshot, presets):
     """Stable preset identity wins over display names, including custom collisions."""
-    for identity in ('overview', 'timing', 'testing'):
+    # Stock controls defaults. Overview and Testing are explicit needs of this
+    # demo's retained-run selector and simulation workflow, not a layout table.
+    identities = list(dict.fromkeys(
+        [field(w, 'definition')[1] for window in field(presets.config, 'windows')
+         for w in field(window, 'workspaces')] + ['overview', 'testing']))
+    snapshot = initialize_workspaces(client, snapshot, presets,
+                                     required=identities)
+    for identity in identities:
         if any(field(w, 'preset') == [identity] for w in field(snapshot, 'workspaces')):
             continue
-        before = {field(w, 'id') for w in field(snapshot, 'workspaces')}
         names = {field(w, 'name') for w in field(snapshot, 'workspaces')}
         name = field(presets[identity], 'name')
         if name in names:
             name += ' (synthetic default)'
             while name in names:
                 name += '+'
+        definition = next(d for d in field(presets.config, 'definitions')
+                          if field(d, 'key') == identity)
+        template = [[key, name if key == 'name' else value]
+                    for key, value in field(definition, 'template')]
         snapshot = client.mutate(snapshot,
-            '(Create_workspace (window %s) (name %s) (context %s))' %
-            (sexp(field(field(snapshot, 'windows')[0], 'id')), sexp(name),
-             sexp(field(snapshot, 'main_context'))))
-        created = next(w for w in field(snapshot, 'workspaces') if field(w, 'id') not in before)
-        specs = [[field(t, 'kind'), field(t, 'geometry')] for t in field(presets[identity], 'tiles')]
-        snapshot = client.mutate(snapshot,
-            '(Apply_preset (workspace %s) (preset %s) (tiles %s))' %
-            (sexp(field(created, 'id')), sexp(identity), sexp(specs)))
+            '(Instantiate_template (window %s) (template %s))' %
+            (sexp(field(field(snapshot, 'windows')[0], 'id')), sexp(template)))
     return snapshot
 
 
@@ -290,6 +331,7 @@ def seed(base, url, preset_export=None):
     ws = apply_workspace_presets(client, ws, presets)
     seed_simulation(base, client)
     provider.save(base / 'workspace-presets.json', presets)
+    provider.save(base / 'workspace-config.json', presets.config)
     provider.save(base / 'seed-http.json', client.history)
     provider.save(base / 'seeded.json', dict(url=url, project=client.project, runs=registered, workspace=ws))
     print('SYNTHETIC reference and failed candidate registered; FS1 and FS2 evidence imported.', flush=True)

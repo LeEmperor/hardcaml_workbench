@@ -57,7 +57,7 @@ let%test_unit "complete stock spec roundtrips and is accepted as startup input" 
     assert (Workspace_template.equal (Definition.template wrapper) stock.template);
     assert (List.length wrapper.tiles = List.length stock.tiles));
   assert (List.length resolved.windows = 1);
-  assert (List.length (List.hd_exn resolved.windows).workspaces = 2);
+  assert (List.length (List.hd_exn resolved.windows).workspaces = 3);
   assert (Result.is_error (Presets.builtins "not-a-builtin"));
   (* An exported stock definition cannot be silently edited under a reserved ID. *)
   let changed =
@@ -69,6 +69,74 @@ let%test_unit "complete stock spec roundtrips and is accepted as startup input" 
   in
   let changed = Workspace_config.Resolved.encode changed |> Or_error.ok_exn in
   assert (Result.is_error (Presets.decode changed))
+;;
+
+let%test_unit "stock startup retains the merged three starters, with optional Waveforms" =
+  assert (
+    List.equal
+      String.equal
+      (List.map Presets.starters ~f:(fun d -> d.Definition.id))
+      [ "overview"; "timing"; "testing" ]);
+  let initial = Workspace.initial ~session_id:(Workspace.Session_id.of_string "merged") in
+  let initialized =
+    Workspace.apply initial (Presets.startup_operation initial |> Option.value_exn)
+    |> Result.ok
+    |> Option.value_exn
+  in
+  assert (
+    List.equal
+      String.equal
+      (List.map initialized.workspaces ~f:(fun w -> w.name))
+      [ "Overview"; "Timing"; "Testing" ]);
+  (* Legacy bootstrap still targets only the two original placeholders. A catalog
+     upgrade must not silently add Testing to a saved/edited legacy session. *)
+  let legacy = { initial with configuration_pending = false } in
+  let restored =
+    Workspace.apply legacy Presets.bootstrap |> Result.ok |> Option.value_exn
+  in
+  assert (List.length restored.workspaces = 2);
+  assert (Option.is_none (Presets.startup_operation restored));
+  assert (
+    Workspace.Snapshot.equal
+      restored
+      (Workspace.apply restored Presets.bootstrap |> Result.ok |> Option.value_exn))
+;;
+
+let%test_unit "merged stock content and presentation survive the schema projection" =
+  assert (
+    List.equal
+      String.equal
+      (kinds Testing.definition)
+      [ "workspace-tabs"
+      ; "live-status"
+      ; "project-tests"
+      ; "execution"
+      ; "simulation-catalog"
+      ; "simulation-attempts"
+      ; "simulation-cases"
+      ; "simulation-detail"
+      ; "simulation-artifacts"
+      ; "simulation-logs"
+      ]);
+  List.iter Testing.definition.tiles ~f:(fun tile ->
+    let p = tile.Common.presentation in
+    assert (Option.equal String.equal p.binding_badge (Some "hidden"));
+    assert (Option.equal Int.equal p.padding (Some 0));
+    assert (Option.equal Bool.equal p.hints (Some false));
+    if not (String.equal tile.kind "workspace-tabs")
+    then (
+      assert (Option.equal Bool.equal p.run_reference (Some false));
+      assert (Option.equal Bool.equal p.compact_summary (Some true))));
+  List.iter [ Overview.definition; Timing.definition ] ~f:(fun d ->
+    let selector = Definition.presentation d ~kind:"run-selector" |> Option.value_exn in
+    assert (Option.equal Int.equal selector.visible_rows (Some 4)));
+  let checklist =
+    Definition.presentation Overview.definition ~kind:"stage-checklist" |> Option.value_exn
+  in
+  assert (Option.equal Bool.equal checklist.horizontal_stages (Some false));
+  List.iter Presets.all ~f:(fun d ->
+    (* WB-007 explicitly ships as an opt-in tile, without changing preset membership. *)
+    assert (not (List.mem (kinds d) "hierarchy" ~equal:String.equal)))
 ;;
 
 let%test_unit "custom spec addresses duplicate kinds by keys and uses bounded fallback" =
@@ -111,6 +179,32 @@ let%test_unit "Overview identity cannot override a supplied shared-spec tree" =
     assert (synthesis.x = 50 && synthesis.width = 50);
     assert (timing.x = 0 && timing.width = 50);
     assert (List.equal Workspace.Geometry.equal [ synthesis; timing ] renamed)
+  | _ -> assert false
+;;
+
+let%test_unit "Waveforms identity cannot replace a user tree with a stock-only layout" =
+  let stock = Presets.builtins "waveforms" |> Or_error.ok_exn in
+  let leaf tile : Workspace_config.Tree.t =
+    Leaf { tile; min_width = 24; min_height = 6; weight = 1 }
+  in
+  let spec =
+    { stock with
+      layout = Some (Columns [ leaf "waveform-waves"; leaf "waveform-signals" ])
+    }
+  in
+  let definition = Definition.of_spec spec in
+  let compute definition =
+    Layout.compute
+      definition
+      ~width:100
+      ~height:20
+      ~kinds:[ "waveform-signals"; "waveform-waves" ]
+  in
+  match compute definition, compute { definition with id = "custom-waves" } with
+  | Grid [ signals; waves ], Grid renamed ->
+    assert (waves.x = 0 && waves.width = 50);
+    assert (signals.x = 50 && signals.width = 50);
+    assert (List.equal Workspace.Geometry.equal [ signals; waves ] renamed)
   | _ -> assert false
 ;;
 

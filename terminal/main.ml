@@ -2831,6 +2831,7 @@ let load_tile_hierarchy session id =
   let local = Host.local session.host id in
   let ticket = ref () in
   let instance = session.hello.instance_id in
+  let client = session.client in
   let project = Option.map (current_project session) ~f:(fun p -> p.Project.id) in
   let finish hierarchy status =
     let now = Host.local session.host id in
@@ -2840,6 +2841,7 @@ let load_tile_hierarchy session id =
          ~identity:local.identity
          ~request:ticket
        && V1.Daemon_instance_id.equal instance session.hello.instance_id
+       && phys_equal client session.client
        && Option.equal
             Project_id.equal
             project
@@ -2890,9 +2892,17 @@ let load_tile_hierarchy session id =
        (match response with
         | Error message -> finish None ("Hierarchy read error: " ^ message ^ "; r retries")
         | Ok evidence ->
-          finish
-            (Some (Terminal_presentation.Hierarchy_view.create evidence))
-            "Loaded hierarchy; r loads current selection"))
+          let module V = Terminal_presentation.Hierarchy_view in
+          let view = V.create evidence in
+          let view =
+            match (Host.local session.host id).hierarchy with
+            | Some previous
+              when Artifact_id.equal
+                     (V.hierarchy previous).artifact
+                     (V.hierarchy view).artifact -> previous
+            | _ -> view
+          in
+          finish (Some view) "Loaded hierarchy; r loads current selection"))
 ;;
 
 let detail_tile_hierarchy session id =
@@ -4317,12 +4327,14 @@ let activate_timing_demand session tile view =
 
 let open_timing_workspace session ~(run : Run_ref.t) ~stage =
   let instance = session.hello.instance_id in
+  let client = session.client in
   let project = Option.map (current_project session) ~f:(fun p -> p.Project.id) in
   match session.host.registry, Host.active session.host with
   | Some initial, Some active ->
     let name = "Timing · captured " ^ run.id ^ " · " ^ submission_key "inspect" in
     let valid () =
       V1.Daemon_instance_id.equal instance session.hello.instance_id
+      && phys_equal client session.client
       && Option.equal
            Project_id.equal
            project
@@ -4334,10 +4346,17 @@ let open_timing_workspace session ~(run : Run_ref.t) ~stage =
       match Host.matching_timing initial ~run with
       | Some workspace -> return (Some workspace.id)
       | None ->
+        let template =
+          (Hardcaml_workbench_workspaces.Presets.builtins "timing" |> Or_error.ok_exn)
+            .template
+        in
         let%bind () =
           mutate_workspace
             session
-            (Create_workspace { window = active.window; name; context = active.context })
+            (Instantiate_template
+               { window = active.window
+               ; template = { template with name }
+               })
         in
         if not (valid ())
         then return None
@@ -4392,18 +4411,8 @@ let open_timing_workspace session ~(run : Run_ref.t) ~stage =
     in
     (match workspace with
      | None -> return ()
-     | Some workspace when valid () ->
-       let%bind () =
-         mutate_workspace
-           session
-           (Hardcaml_workbench_workspaces.Definition.apply
-              Hardcaml_workbench_workspaces.Timing.definition
-              ~workspace)
-       in
-       if not (valid ())
-       then return ()
-       else (
-         match session.host.registry with
+      | Some workspace when valid () ->
+        (match session.host.registry with
          | None -> return ()
          | Some registry ->
            (match Host.matching_timing ~workspace registry ~run with
@@ -4447,8 +4456,8 @@ let open_timing_workspace session ~(run : Run_ref.t) ~stage =
                      ~default:view
                      ~f:(Inspection_view.reconcile view)
                  in
-                 session.host
-                 <- Host.set_timing (Host.switch session.host workspace) tile view;
+                  activate_workspace session workspace;
+                  session.host <- Host.set_timing session.host tile view;
                  session.host
                  <- Host.set_local
                       session.host
@@ -5089,8 +5098,8 @@ let execute_host session captured action ~exit =
         match session.host.registry, Host.active session.host with
         | Some registry, Some active
           when not
-                 (List.exists registry.workspaces ~f:(fun w ->
-                    Option.equal String.equal w.preset (Some "testing"))) ->
+                 (List.exists registry.tiles ~f:(fun tile ->
+                    Testing_workspace.is_pane tile.kind)) ->
           let%bind () =
             mutate_workspace
               session
@@ -7433,9 +7442,13 @@ let command =
                    with
                    | Some () -> failwith "Workspace configuration exceeds 4 MiB"
                    | None -> Buffer.contents buffer)
-               in
-               let module P = Hardcaml_workbench_workspaces.Presets in
-               P.decode text |> Or_error.bind ~f:P.resolve |> Or_error.ok_exn)))
+                in
+                let module P = Hardcaml_workbench_workspaces.Presets in
+                let config =
+                  P.decode text |> Or_error.bind ~f:P.resolve |> Or_error.ok_exn
+                in
+                Workspace_config.Resolved.encode config |> Or_error.ok_exn |> ignore;
+                config)))
          ~doc:"FILE read a workspace spec on this client; initialize fresh sessions once"
      and discover_project =
        flag

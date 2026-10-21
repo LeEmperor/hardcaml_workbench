@@ -294,19 +294,15 @@ let clone =
 
 let starter =
   Command.async
-    ~summary:"Write a generic, asic, overview, timing or testing starter (offline)"
+    ~summary:"Write a generic, asic or built-in portable starter (offline)"
     (let open Command.Let_syntax in
      let%map_open kind = anon ("PRESET" %: string) in
      fun () ->
        emit
          (match kind with
-          | "generic" -> T.generic
-          | "asic" -> T.asic
-          | id ->
-            Presets.find id
-            |> Option.value_exn
-                 ~message:"Expected generic, asic, overview, timing or testing"
-            |> Hardcaml_workbench_workspaces.Definition.template);
+           | "generic" -> T.generic
+           | "asic" -> T.asic
+           | id -> (Presets.builtins id |> Or_error.ok_exn).template);
        Deferred.unit)
 ;;
 

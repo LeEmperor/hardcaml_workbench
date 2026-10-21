@@ -171,6 +171,13 @@ def authoring(test):
         test.config_cli('validate', [path], 'validate-' + kind)
         again = test.config_cli('export', [kind], 'export-repeat-' + kind)
         test.check(parse(again) == decoded, kind + ' export is deterministic and independently valid')
+        if kind == 'stock':
+            for definition in field(decoded, 'definitions'):
+                key = field(definition, 'key')
+                portable = parse(test.command(test.args.workspace_cli,
+                    ['starter', key], 'canonical-starter-' + key))
+                test.check(portable == field(definition, 'template'),
+                           key + ': version-1 starter is the exact canonical nested template')
     config = custom_config()
     path = test.evidence / 'multi-window.sexp'
     path.write_text(sexp(config) + '\n')
@@ -305,6 +312,25 @@ def terminal_startup(test, config, path):
         test.check(len(created) == 1 and field(created[0], 'preset') == ['overview'] and
                    field(recovered, 'config_workspaces') == field(current, 'config_workspaces'),
                    'Palette creates canonical Overview from custom-only session without changing custom provenance')
+        stock = parse((test.evidence / 'stock.sexp').read_text())
+        definitions = {field(d, 'key'): d for d in field(stock, 'definitions')}
+        exported = parse(test.cli('export', [field(created[0], 'id')], 'export-recovered-overview'))
+        test.check(exported == field(definitions['overview'], 'template'),
+                   'Built-in palette recovery uses exact canonical ordered membership, visibility and geometry')
+        terminal.palette('Create Testing workspace')
+        deadline = time.monotonic() + 20
+        while True:
+            testing = test.workspace()
+            created = [w for w in field(testing, 'workspaces')
+                       if field(w, 'preset') == ['testing']]
+            if len(created) == 1:
+                break
+            require(time.monotonic() < deadline, 'Testing shortcut did not create a workspace')
+            terminal.drain(.15)
+        exported = parse(test.cli('export', [field(created[0], 'id')], 'export-testing-shortcut'))
+        test.check(exported == field(definitions['testing'], 'template') and
+                   field(testing, 'config_workspaces') == field(current, 'config_workspaces'),
+                   'Testing shortcut uses the canonical catalog and preserves custom configuration provenance')
         test.quiet()
     finally:
         if terminal is not None:

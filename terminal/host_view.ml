@@ -2296,57 +2296,37 @@ let tile_view
 ;;
 
 module Fit_layout = struct
-  type t =
+  type t = P.Layout.t =
     | Grid of W.Geometry.t list
     | Compact
-
-  (* Gaps are terminal cells. Remainders go to the leading tracks so every available cell
-     belongs to a track or a gap, including an incomplete last row. *)
-  let tracks total count =
-    let usable = total - (count - 1) in
-    List.init count ~f:(fun i ->
-      let size = (usable / count) + if i < usable % count then 1 else 0 in
-      let offset = (i * ((usable / count) + 1)) + Int.min i (usable % count) in
-      offset, size)
-  ;;
 
   let compute ~width ~height ~count =
     if count <= 0
     then Grid []
     else (
-      let columns = Int.min count (Int.min 4 (Int.max 1 ((width + 1) / 40))) in
-      let rows = (count + columns - 1) / columns in
-      if width - columns + 1 < columns * 24 || height - rows + 1 < rows * 6
-      then Compact
-      else (
-        let xs = tracks width columns in
-        let ys = tracks height rows in
+      match P.Layout.grid ~gutter:1 ~width ~height count with
+      | None -> Compact
+      | Some cells ->
         Grid
-          (List.init count ~f:(fun i ->
-             let x, width = List.nth_exn xs (i % columns) in
-             let y, height = List.nth_exn ys (i / columns) in
-             { W.Geometry.x; y; width; height }))))
+          (List.sort cells ~compare:(fun (a, _) (b, _) -> Int.compare a b)
+           |> List.map ~f:snd))
   ;;
 end
 
 let show_global_header host =
+  let tiles = H.tiles host in
   host.H.chrome
-  && (not
-        (Option.exists (H.active host) ~f:(fun workspace ->
-           Option.equal String.equal workspace.preset (Some P.Waveforms.definition.id))))
+  && (not (List.exists tiles ~f:(fun tile -> P.Waveforms.is_pane tile.kind)))
   && not
        (List.exists (H.tiles host) ~f:(fun tile ->
           String.equal tile.W.Tile.kind "live-status"))
 ;;
 
-(** Waveforms uses the existing focused-tile hint policy, without changing global chrome
-    or another workspace's presentation. Notices and active-input status remain visible. *)
+(** Waveform tiles use their focused hint policy in any composition. Notices and
+    active-input status remain visible. *)
 let show_footer_hints host =
-  match H.active host with
-  | Some workspace
-    when Option.equal String.equal workspace.preset (Some P.Waveforms.definition.id) ->
-    Option.value_map (H.focused host) ~default:false ~f:(fun tile ->
-      (H.policy host tile).hints)
+  match H.focused host with
+  | Some tile when P.Waveforms.is_pane tile.kind -> (H.policy host tile).hints
   | _ -> true
 ;;
 
@@ -3288,6 +3268,52 @@ let%test_unit "stopped exact-run observation qualifies actual checklist layouts"
   assert (contains (render scrolled data tile) observation_qualifier)
 ;;
 
+let%test_unit "custom Waveforms spec preserves tile policy and focused chrome" =
+  let config =
+    P.Presets.custom_example () |> Or_error.ok_exn |> P.Presets.resolve |> Or_error.ok_exn
+  in
+  let stock = P.Presets.builtins "waveforms" |> Or_error.ok_exn in
+  let config =
+    { config with
+      definitions =
+        List.map config.definitions ~f:(fun definition ->
+          { stock with
+            key = definition.key
+          ; template = { stock.template with preset = None }
+          })
+    }
+  in
+  let initial =
+    W.initial ~session_id:(W.Session_id.of_string "custom-waveforms-chrome")
+  in
+  let registry =
+    W.apply initial (Initialize_config config)
+    |> Result.ok
+    |> Option.value_exn
+    |> fun registry -> W.Snapshot.t_of_sexp (W.Snapshot.sexp_of_t registry)
+  in
+  let host = H.receive H.empty registry in
+  let signals =
+    List.find_exn (H.tiles host) ~f:(fun tile ->
+      String.equal tile.W.Tile.kind "waveform-signals")
+  in
+  let host = { host with focus = Some signals.id } in
+  assert (Option.is_none (Option.value_exn (H.active host)).preset);
+  assert (not (show_global_header host));
+  assert (not (show_footer_hints host));
+  assert (not (H.policy host signals).hints);
+  let host, _ =
+    H.set_presentation host signals.id { T.inherit_ with hints = Some true }
+  in
+  assert (show_footer_hints host);
+  let _, data, _ = refinement_fixture P.Waveforms.definition in
+  List.iter
+    [ 32, 8; 120, 40 ]
+    ~f:(fun (width, height) ->
+      let view = render host data { Dimensions.width; height } in
+      assert (View.width view = width && View.height view = height))
+;;
+
 let%test_unit "Waveforms callback renders bounded independent bodies beneath host palette"
   =
   let host, data, find = refinement_fixture P.Waveforms.definition in
@@ -3381,6 +3407,18 @@ let%test_unit "Waveforms banner and hints stay scoped with explicit local hint o
   let legacy = H.receive host legacy_registry in
   assert (not (show_global_header legacy));
   assert (not (H.policy legacy signals).hints);
+  (* Preset identity cannot suppress chrome once its domain tiles are gone. *)
+  let without_waveforms =
+    H.receive
+      host
+      { legacy_registry with
+        tiles =
+          List.filter legacy_registry.tiles ~f:(fun tile ->
+            not (P.Waveforms.is_pane tile.kind))
+      }
+  in
+  assert (show_global_header without_waveforms);
+  assert (show_footer_hints without_waveforms);
   let overview, overview_data, overview_find = refinement_fixture P.Overview.definition in
   let live = overview_find "live-status" in
   assert (H.policy overview live).hints;
@@ -6330,8 +6368,10 @@ let%test_unit "fit geometry fills tracks, keeps thirteen tiles visible, and fall
       cells
   in
   let two = grid ~width:120 ~height:40 ~count:2 in
-  assert (List.sum (module Int) two ~f:(fun g -> g.width) = 119);
-  assert (List.for_all two ~f:(fun g -> g.y = 0 && g.height = 40));
+  assert (
+    Poly.equal
+      (Some (List.mapi two ~f:(fun i g -> i, g)))
+      (P.Layout.grid ~gutter:1 ~width:120 ~height:40 2));
   ignore (grid ~width:120 ~height:40 ~count:13 : W.Geometry.t list);
   List.iter
     [ 24, 6; 32, 6; 1, 1; 120, 5 ]

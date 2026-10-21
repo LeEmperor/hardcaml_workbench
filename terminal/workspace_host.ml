@@ -2322,7 +2322,6 @@ let matching_timing ?workspace:expected_workspace (registry : W.Snapshot.t) ~run
       expected_workspace
       ~default:true
       ~f:(W.Workspace_id.equal workspace.id)
-    && Option.equal String.equal workspace.preset (Some "timing")
     && Option.value_map workspace.zoomed_tile ~default:true ~f:(fun id ->
       List.exists registry.tiles ~f:(fun tile ->
         W.Tile_id.equal tile.id id
@@ -2333,17 +2332,14 @@ let matching_timing ?workspace:expected_workspace (registry : W.Snapshot.t) ~run
             W.Workspace_id.equal tile.workspace workspace.id
             && String.equal tile.kind "timing-paths")
         in
-        List.is_empty paths || List.exists paths ~f:(fun tile -> not tile.hidden))
-    && Option.equal
-         Run_ref.equal
-         (W.context registry workspace.context).selected_run
-         (Some run)
+        List.exists paths ~f:(fun tile -> not tile.hidden))
     && List.for_all registry.tiles ~f:(fun tile ->
       (not (W.Workspace_id.equal tile.workspace workspace.id))
+      || Option.is_none (Timing_workspace.pane tile.kind)
       ||
-      match tile.binding with
-      | Follow -> true
-      | Pin_run pinned -> Run_ref.equal pinned run))
+      match W.resolve_tile registry tile.id with
+      | Ok reference -> Option.equal Run_ref.equal reference.run (Some run)
+      | Error _ -> false))
 ;;
 
 let%test_unit "Timing exact-run reuse preserves pins and independent investigations" =
@@ -2820,8 +2816,7 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
         ("Switch to " ^ w.name)
         "workspace navigation tabs"
         (Switch w.id))
-    @ (if List.exists s.workspaces ~f:(fun w ->
-            Option.equal String.equal w.preset (Some "testing"))
+    @ (if List.exists s.tiles ~f:(fun tile -> Testing_workspace.is_pane tile.kind)
        then []
        else
          [ command
@@ -4739,10 +4734,20 @@ let%test_unit "overview utilities and explicit Testing creation are available ad
   assert (project_scoped_kind "planned-run");
   assert (List.exists commands ~f:(fun c -> String.equal c.id "tile.add.planned-run"));
   assert (List.exists commands ~f:(fun c -> String.equal c.id "workspace.create-testing"));
-  let testing =
-    { (List.last_exn s.workspaces) with name = "Renamed tests"; preset = Some "testing" }
-  in
+  (* A preset label without panes is not a Testing capability. *)
+  let testing = { (List.last_exn s.workspaces) with preset = Some "testing" } in
   let s = { s with workspaces = [ List.hd_exn s.workspaces; testing ] } in
+  assert (
+    List.exists
+      (catalog (receive host s) ~project:None ~jobs:[])
+      ~f:(fun c -> String.equal c.id "workspace.create-testing"));
+  let s =
+    { s with
+      workspaces = List.map s.workspaces ~f:(fun w -> { w with preset = None })
+    ; tiles =
+        { (List.hd_exn s.tiles) with kind = "simulation-detail" } :: List.tl_exn s.tiles
+    }
+  in
   assert (
     not
       (List.exists
@@ -5944,4 +5949,136 @@ let%test_unit "same-builtin Restore detaches frozen policy across restart and ad
   in
   assert (List.length reapplied.tiles = List.length restored.tiles);
   check reapplied
+;;
+
+let%test_unit "mixed spec restores domain navigation and hierarchy without builtin \
+               identity"
+  =
+  let config =
+    P.Presets.custom_example () |> Or_error.ok_exn |> P.Presets.resolve |> Or_error.ok_exn
+  in
+  let kinds =
+    [ "hierarchy"
+    ; "simulation-catalog"
+    ; "simulation-detail"
+    ; "timing-paths"
+    ; "timing-detail"
+    ; "stage-checklist"
+    ; "synthesis"
+    ]
+  in
+  let config =
+    { config with
+      definitions =
+        List.map config.definitions ~f:(fun definition ->
+          { definition with
+            template =
+              { definition.template with
+                preset = None
+              ; views =
+                  List.map kinds ~f:(fun kind ->
+                    { Workspace_template.View.kind
+                    ; hidden = false
+                    ; geometry = { x = 0; y = 0; width = 80; height = 12 }
+                    })
+              }
+          ; tiles =
+              List.map kinds ~f:(fun kind ->
+                { Workspace_config.Tile.key = kind
+                ; presentation =
+                    Some
+                      { Workspace_config.Presentation.inherit_defaults with
+                        hints = Some false
+                      }
+                })
+          ; layout = None
+          })
+    }
+  in
+  let registry = W.initial ~session_id:(W.Session_id.of_string "mixed-spec-navigation") in
+  let registry =
+    W.apply registry (Initialize_config config) |> Result.ok |> Option.value_exn
+  in
+  let workspace = List.hd_exn registry.workspaces in
+  let apply registry mutation =
+    W.apply
+      registry
+      (Mutate { expected_revision = registry.W.Snapshot.revision; mutation })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let context = W.context registry workspace.context in
+  let registry =
+    apply
+      registry
+      (Select_run
+         { workspace = workspace.id
+         ; context = context.id
+         ; expected_selection_revision = context.selection_revision
+         ; run = Some Fs0_fixture.run_a
+         })
+  in
+  let find kind =
+    List.find_exn registry.tiles ~f:(fun tile -> String.equal tile.kind kind)
+  in
+  let synthesis = find "synthesis" in
+  let registry =
+    apply
+      registry
+      (Set_tile_binding { tile = synthesis.id; binding = Pin_run Fs0_fixture.run_b })
+  in
+  assert (Option.is_none workspace.preset);
+  assert (Option.is_some (matching_timing registry ~run:Fs0_fixture.run_a));
+  let paths = find "timing-paths" in
+  let catalog_tile = find "simulation-catalog" in
+  let hierarchy_tile = find "hierarchy" in
+  let host = receive empty registry in
+  let host = establish_testing_scope host catalog_tile.id ~scope:"mixed-project" in
+  let host =
+    update_testing host catalog_tile.id (fun state ->
+      Testing_workspace.select_attempt state "chosen-attempt")
+  in
+  let host =
+    set_timing
+      host
+      paths
+      { (Timing_workspace.create ~generation:0 ~run:Fs0_fixture.run_a ~stage:"routing") with
+        filter = "endpoint/Q"
+      }
+  in
+  let saved =
+    navigation_preferences ~project_key:"mixed-project" host |> Option.value_exn
+  in
+  let restored =
+    W.Snapshot.t_of_sexp (W.Snapshot.sexp_of_t registry)
+    |> receive empty
+    |> restore_navigation_selections saved ~scope:"mixed-project"
+  in
+  assert (
+    Option.equal
+      String.equal
+      (simulation restored (find "simulation-detail").id).attempt
+      (Some "chosen-attempt"));
+  let timing = Option.value_exn (timing restored (find "timing-detail")) in
+  assert (String.equal timing.stage "routing" && String.equal timing.filter "endpoint/Q");
+  let restored = { restored with focus = Some hierarchy_tile.id } in
+  assert (not (policy restored hierarchy_tile).hints);
+  let restored, _ =
+    set_presentation restored hierarchy_tile.id { T.inherit_ with hints = Some true }
+  in
+  assert (policy restored hierarchy_tile).hints;
+  (match snd (input restored (Character 'r') ~commands:[]) with
+   | Execute (_, Load_hierarchy id) -> assert (W.Tile_id.equal id hierarchy_tile.id)
+   | _ -> assert false);
+  let commands = catalog restored ~project:None ~jobs:[] in
+  assert (
+    List.exists commands ~f:(fun command ->
+      String.equal command.id "hierarchy.load-current"));
+  let no_paths =
+    { registry with
+      tiles =
+        List.filter registry.tiles ~f:(fun tile -> not (W.Tile_id.equal tile.id paths.id))
+    }
+  in
+  assert (Option.is_none (matching_timing no_paths ~run:Fs0_fixture.run_a))
 ;;

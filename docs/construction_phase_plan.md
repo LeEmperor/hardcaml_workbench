@@ -592,6 +592,11 @@ Synthesis area/check counters are now projected into the current summary.
 
 ### User-authored window/workspace composition — 2026-10-21
 
+Post-merge follow-up: [composition audit](workspace_post_merge_audit.md) reconciles
+the merged hierarchy/domain/navigation work with canonical stock and custom layouts.
+Implementation and integrated acceptance are complete; the audit records exact
+configuration, hierarchy, Testing, frontend-refinement and reconnect evidence.
+
 [Implementation plan](workspace_configuration_plan.md). Owner-authorized scope uses
 one shared specification for stock and user layouts, including responsive trees.
 

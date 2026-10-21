@@ -114,4 +114,5 @@
                 (Leaf (tile waveform-logs) (min_width 24) (min_height 6) (weight 1)))))))))))
  (windows (((key main) (name Main)
             (workspaces (((key overview) (name Overview) (definition (Builtin overview)))
-                         ((key timing) (name Timing) (definition (Builtin timing)))))))))
+                         ((key timing) (name Timing) (definition (Builtin timing)))
+                         ((key testing) (name Testing) (definition (Builtin testing)))))))))

@@ -1,5 +1,5 @@
-(** Compatibility entry point; all geometry now lives alongside the OCaml preset
-    definitions. New callers should use [Layout.compute] with a stable preset. *)
+(** Compatibility entry point projecting the canonical [workspaces/stock.sexp] Overview
+    tree. New callers should use [Layout.compute] with their resolved definition. *)
 module Shared = Hardcaml_workbench_workspaces
 
 type t = Shared.Layout.t =
