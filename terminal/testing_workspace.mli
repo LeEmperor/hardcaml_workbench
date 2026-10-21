@@ -48,4 +48,9 @@ val receive
     facts only. Artifacts lists all cases in protocol order, with label/case/availability;
     Detail carries the selected artifact's full identity, digest and provenance.
     Selection/export helpers always use exact source IDs. *)
-val rows : t -> pane -> log_lines:(Job_id.t -> string list) -> Simulation_view.row list
+val rows
+  :  ?now:Time_ns.t
+  -> t
+  -> pane
+  -> log_lines:(Job_id.t -> string list)
+  -> Simulation_view.row list

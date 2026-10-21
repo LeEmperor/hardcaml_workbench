@@ -15,6 +15,7 @@ let run : Asic.Run.t =
   ; execution_file = None
   ; error = None
   ; stages = []
+  ; execution_timing = None
   }
 ;;
 
@@ -34,6 +35,7 @@ let%test_unit "stages preserve every status and new-run action through wire code
   let stages =
     List.mapi statuses ~f:(fun i status ->
       { Asic.Stage.id = "stage-" ^ Int.to_string i
+      ; execution_timing = None
       ; name = "Stage " ^ Int.to_string i
       ; status
       ; requested = i < 6

@@ -42,7 +42,7 @@ module Role = struct
     | Success
     | Warning
     | Failure
-    | Emphasis
+    | Linked
   [@@deriving compare, equal, sexp]
 end
 
@@ -55,8 +55,9 @@ type row =
   ; workspace : Workspace.Workspace_id.t option
   ; details : string list
   ; display_run : Run_ref.t option
+  ; time : string option
   ; emphasis : int
-  (** Leading bytes of [value] rendered with [Role.Emphasis]; [0] for none. The emphasized
+  (** Leading bytes of [value] rendered with [Role.Linked]; [0] for none. The emphasized
       text is part of [value], so state never depends on color alone. *)
   }
 
@@ -68,10 +69,11 @@ let row
   ?(details = [])
   ?display_run
   ?(emphasis = 0)
+  ?time
   label
   value
   =
-  { label; value; role; status; active; workspace; details; display_run; emphasis }
+  { label; value; role; status; active; workspace; details; display_run; emphasis; time }
 ;;
 
 let status_role : Status.t -> Role.t = function
@@ -101,6 +103,7 @@ let stage_row (stage : Stage.t) =
     | Not_run | Running | Completed -> []
   in
   row
+    ~time:"Time: unknown"
     ~role:(status_role status)
     ~status
     ~details:([ sprintf "Requested: %b" stage.requested ] @ reason)
@@ -123,9 +126,10 @@ let asic_stage_status : Asic.Stage.Status.t -> Status.t = function
   | Unknown value -> Unrecognized value
 ;;
 
-let asic_stage_row ~run ~selected (stage : Asic.Stage.t) =
+let asic_stage_row ?(now = Time_ns.now ()) ~run ~selected (stage : Asic.Stage.t) =
   let status = asic_stage_status stage.status in
   row
+    ~time:(Execution_time_view.compact_line ~now stage.execution_timing)
     ~role:(status_role status)
     ~status
     ~active:selected
@@ -304,13 +308,12 @@ let summary_rows ?(freshness = true) (summary : Asic.Summary.t) =
   let show_freshness = freshness in
   let freshness, freshness_role = freshness_label summary.freshness in
   let details =
-    [ "Run: " ^ run_identity summary.run
-    ; "Freshness: " ^ freshness
-    ; "Observed at: " ^ summary.observed_at
-    ; "Source digest: " ^ summary.source_digest
-    ; "Execution file: " ^ summary.execution_file
-    ; "Producer: " ^ summary.producer
-    ]
+    [ "Run: " ^ run_identity summary.run; "Freshness: " ^ freshness ]
+    @ Evidence_time_view.summary_lines summary.observed_at
+    @ [ "Source digest: " ^ summary.source_digest
+      ; "Execution file: " ^ summary.execution_file
+      ; "Producer: " ^ summary.producer
+      ]
     @
     match summary.freshness with
     | Refresh_failed reason -> [ "Refresh error: " ^ reason ]
@@ -394,6 +397,7 @@ let stage_rows ?(expected_stages = default_stages) ~selected_run ~asic ~observat
       | [ stage ] -> stage_row stage
       | stages ->
         row
+          ~time:"Time: unknown"
           ~role:Muted
           ~status:Unknown
           ~details:
@@ -570,7 +574,14 @@ let status_column ~appearance ~width ~indent rows =
     let prefix row = cell_width (row_prefix ~appearance ~indent row) in
     let natural = max_of (fun row -> prefix row + cell_width row.label + 2) in
     let floor = max_of prefix + min_label_cells + 2 in
-    Some (Int.min natural (Int.max floor (width - max_of (fun r -> cell_width r.value))))
+    let value_width = max_of (fun r -> cell_width r.value) in
+    let with_time =
+      max_of (fun r ->
+        cell_width r.value
+        + Option.value_map r.time ~default:0 ~f:(fun time -> 3 + cell_width time))
+    in
+    let reserved = if floor + with_time <= width then with_time else value_width in
+    Some (Int.min natural (Int.max floor (width - reserved)))
 ;;
 
 (** Map roles to the host's theme, e.g. [Active -> Host_view.Role.Selection]. Full values
@@ -591,17 +602,23 @@ let row_spans ?status_column ~appearance ~width ~indent row =
     Option.value_map row.display_run ~default:row.value ~f:(fun run ->
       fit_run_label ~width:(Int.max 0 (width - cell_width (prefix ^ label))) run)
   in
+  let time =
+    Option.value_map row.time ~default:"" ~f:(fun time ->
+      let room = width - cell_width (prefix ^ label ^ value) in
+      if room >= cell_width time + 3 then " | " ^ time else "")
+  in
   let value =
     let emphasis = Int.clamp_exn row.emphasis ~min:0 ~max:(String.length value) in
     if emphasis = 0 || Option.is_some row.display_run
     then [ row.role, value ]
     else
-      [ Role.Emphasis, String.prefix value emphasis
+      [ Role.Linked, String.prefix value emphasis
       ; row.role, String.drop_prefix value emphasis
       ]
   in
   [ (if row.active then Role.Active else row.role), prefix; Role.Foreground, label ]
   @ value
+  @ [ Role.Muted, time ]
 ;;
 
 let render_row
@@ -707,7 +724,7 @@ let render
 let inspection_lines rows =
   List.concat_map rows ~f:(fun row ->
     (row.label ^ if String.is_empty row.value then "" else ": " ^ row.value)
-    :: row.details)
+    :: (Option.to_list row.time @ row.details))
 ;;
 
 let%test_unit "native stage frames change only running markers, with fixed cell budgets" =
@@ -792,14 +809,16 @@ module Stage_strip = struct
     ^ item.row.label
     ^ ": "
     ^ item.row.value
+    ^ Option.value_map item.row.time ~default:"" ~f:(fun time -> " | " ^ time)
   ;;
 
-  let model ~appearance ~width ~run ~selected_id stages =
+  let model ?(now = Time_ns.now ()) ~appearance ~width ~run ~selected_id stages =
     let items =
       List.map stages ~f:(fun (stage : Asic.Stage.t) ->
         { stage
         ; row =
             asic_stage_row
+              ~now
               ~run
               ~selected:(Option.equal String.equal selected_id (Some stage.id))
               stage
@@ -897,6 +916,7 @@ let%test_unit "horizontal stages wrap long duplicate labels without changing \
       ; requested = false
       ; reason = None
       ; action = Some action
+      ; execution_timing = None
       })
   in
   let appearance = Appearance.default in
@@ -963,6 +983,7 @@ let%test_unit "ASIC stage projection preserves every explicit status and full ac
       ; requested = false
       ; reason = Some "exact provider reason"
       ; action = Some action
+      ; execution_timing = None
       }
     in
     let row = asic_stage_row ~run ~selected:true stage in
@@ -1054,6 +1075,7 @@ let%test_unit "cached summary facts retain freshness and do not acquire stage st
           }
         ]
     ; evidence = "{}"
+    ; execution_timing = None
     }
   in
   let terminal_rows = summary_rows { summary with terminal = Some terminal } in
@@ -1090,6 +1112,7 @@ let%test_unit "process completion is not stage evidence; mismatched and duplicat
           ; reference = { attempt = "attempt"; stream_id = "stream" }
           ; selection = None
           ; stages = []
+          ; execution_timing = None
           ; cursor = 0
           ; status = "completed"
           ; execution_file = None
@@ -1194,6 +1217,36 @@ let plain_lines view =
   Buffer.contents buffer
   |> String.split_lines
   |> List.map ~f:(fun line -> String.rstrip line)
+;;
+
+let%test_unit "duration is additional to aligned checklist status and clips within \
+               narrow cells"
+  =
+  let rows =
+    [ row ~status:Completed ~time:"Time: 2m 07s" "Synthesis" "completed"
+    ; row ~status:Running ~time:"Time: 14s elapsed" "Placement" "running"
+    ]
+  in
+  List.iter Appearance.Icons.all ~f:(fun icons ->
+    let appearance = { Appearance.default with icons; density = Compact } in
+    List.iter [ 0; 1; 8; 22; 40; 60 ] ~f:(fun width ->
+      let view = render ~appearance ~attrs:(fun _ -> []) ~width ~height:2 rows in
+      assert (View.width view = width && View.height view = 2);
+      if width >= 40
+      then (
+        let text = plain_lines view |> String.concat ~sep:"\n" in
+        assert (String.is_substring text ~substring:"Time: 2m 07s");
+        assert (String.is_substring text ~substring:"Time: 14s elapsed");
+        let column = status_column ~appearance ~width ~indent:"" rows in
+        let starts =
+          List.map rows ~f:(fun row ->
+            row_spans ?status_column:column ~appearance ~width ~indent:"" row
+            |> Fn.flip List.take 2
+            |> List.map ~f:snd
+            |> String.concat
+            |> cell_width)
+        in
+        assert (Int.equal (List.hd_exn starts) (List.last_exn starts)))))
 ;;
 
 let%expect_test "checklist status keywords share a display-width column" =
@@ -1346,7 +1399,7 @@ let%expect_test "context linkage avoids nested colons and keeps names visible" =
     let emphasized =
       row_spans ~appearance:Appearance.default ~width:40 ~indent:"" linkage
       |> List.filter_map ~f:(fun (role, text) ->
-        Option.some_if (Role.equal role Emphasis) text)
+        Option.some_if (Role.equal role Linked) text)
     in
     assert (
       List.equal

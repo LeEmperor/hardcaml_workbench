@@ -132,7 +132,7 @@ workspace CLI together: live protocol records and operations have changed.
 ## Persistent presentation preferences
 
 The existing palette's appearance preset, color scheme/intensity, icon, density, layout-mode,
-chrome and tile-header actions now save their explicit choices. Normal terminal
+chrome, tile-header and tile-appearance actions now save their explicit choices. Normal terminal
 exit waits for queued writes. Preferences use a separate versioned
 `presentation-<digest>.sexp` under
 `${XDG_STATE_HOME:-$HOME/.local/state}/hardcaml-workbench/terminal/`, keyed by
@@ -143,16 +143,24 @@ for the main-window and command-palette bottom hints, toggled by Space c h / Spa
 (palette: "hints"). Version 1 files still load with both visible; the global chrome
 toggle is unchanged and still hides the footer regardless of these choices.
 
-Tile-header choices additionally match session, tile, workspace and view kind.
-Replacement sessions do not inherit stale tile preferences. Focus, scroll, filters,
+Schema version 3 (WB-048) adds a `tile_appearance` list holding the remaining explicit
+per-tile appearance overrides: title, binding badge, hints, frame, padding and
+run-selector row count. Run reference and freshness describe run selection/data rather
+than appearance and stay session-local. Version 1 and 2 files still load, and every
+tile appearance field they lack inherits. A version 3 file must carry the list; each
+entry must be non-empty and unique per tile, with non-negative padding and at least one
+row. Unknown versions and mismatched structure are rejected like other malformed files.
+
+Tile-header and tile-appearance choices additionally match session, tile, workspace and
+view kind. Replacement sessions do not inherit stale tile preferences. Focus, scroll, filters,
 active workspace, run selection and provider data are not persisted in this file.
 Malformed or oversized files fall back to defaults with a visible notice and are
 left untouched until a later explicit preference change saves a replacement.
 Concurrent clients use last-writer-wins files; preferences do not synchronize live.
 
-Only explicit tile-header overrides persist among the per-tile presentation fields.
-Reset removes that override and restores inheritance; title/badge/padding/row-count
-overrides remain transient. Initial restoration is consumed once, so polling never
+Among the per-tile presentation fields, every explicit override except run reference and
+freshness persists; absent fields inherit. Reset removes the stored overrides and
+restores inheritance across restart. Initial restoration is consumed once, so polling never
 replays an old saved choice over a new toggle/reset. Same-daemon/project reconnect
 retains local browsing state while advancing request fences. Replaced sessions and
 removed/moved/retyped tile identities discard stale local state; these navigation

@@ -539,6 +539,7 @@ let%expect_test "ASIC metrics round-trip and old summary sexps have no metrics" 
     ; metrics = [ metric ]
     ; checks = [ check ]
     ; evidence = "supplied operation/results metadata"
+    ; execution_timing = None
     }
   in
   require_portable_round_trip
@@ -630,6 +631,7 @@ let%expect_test "ASIC metrics round-trip and old summary sexps have no metrics" 
     ; acceptance = Some "fail"
     ; error = Some "process exited 1"
     ; owned = false
+    ; execution_timing = None
     }
   in
   require_portable_round_trip

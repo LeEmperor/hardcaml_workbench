@@ -29,6 +29,11 @@ module Index = struct
     ; diagnostics : string list
     ; truncated : bool
     ; cached_unverified : bool
+    ; times : Evidence_time.Index.t
+         [@sexp.default Evidence_time.Index.empty] [@sexp_drop_default.equal]
+    (** Typed production/observation times. Freshness stays in [cached_unverified]: a
+        displayed time never implies validation. Omitted from sexp when empty, so derived
+        caches written before timestamps keep their content digests. *)
     }
   [@@deriving bin_io, compare, equal, sexp]
 end

@@ -226,10 +226,13 @@ then Esc again closes the explorer**. Switching to the already-active Overview
 does not dismiss the inspector remembered by its focused tile. The global palette
 remains available with Space c c, and Ctrl-C exits the client from every mode.
 
-This behavior is functional but not sufficiently self-describing. Breadcrumbs,
-mode-specific help, an explicit Close inspector palette command and less prominent
-raw JSON/full paths are [presentation followups](backlog/README.md#inspector-usability-polish),
-not implemented controls or remaining FS1 feature blockers.
+**Space c x** (palette: `inspector.close`, "Close inspector") closes the focused
+inspector in one step; an open Timing detail/provenance reader returns focus to
+`timing · paths`, and the selected row, tile bindings and run selection are unchanged.
+Contextual inspector actions lead the palette, with a `[reason]` when unavailable, and
+a `workspace › view › run (stage)` breadcrumb appears on the hint row when it fits
+([WB-054](features/presentation/WB-054-contextual-controls.md)). Less prominent raw
+JSON/full paths remain a [presentation followup](backlog/README.md#inspector-usability-polish).
 
 The signoff timing index contains **1020 actual timing paths**, plus its recorded
 input-reference row. Every max/min block matches the independently read original

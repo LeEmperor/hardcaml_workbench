@@ -80,7 +80,11 @@ let receive t ~ticket ~selected operation response =
               in
               match detail with
               | Some d when String.equal d.id summary.id ->
-                { summary with lifecycle = d.lifecycle; outcome = d.outcome }
+                { summary with
+                  lifecycle = d.lifecycle
+                ; outcome = d.outcome
+                ; execution_timing = d.execution_timing
+                }
               | _ -> summary)
           in
           { s with attempts; next_before = old.next_before; detail }
@@ -333,7 +337,7 @@ let case_indicator ~lifecycle : S.Case_status.t -> Indicator.t = function
 (** Canonical presentation projection. Metadata comes only from typed facts or explicit
     context; provider messages and logs remain plain text. [value_start] is a
     terminal-cell offset into the sanitized text, keeping case identities label-neutral. *)
-let annotated_rows t ~log_lines =
+let annotated_rows ?(now = Time_ns.now ()) t ~log_lines =
   let request_indicator = if t.busy then Some Indicator.Running else None in
   let rows =
     [ row ?indicator:request_indicator "Structured simulation — project scoped"
@@ -361,6 +365,7 @@ let annotated_rows t ~log_lines =
          | None -> [ row "Select an attempt from the palette (no job is launched)" ]
          | Some d ->
            [ row ~indicator:(attempt_indicator d.lifecycle d.outcome) ("Attempt: " ^ d.id)
+           ; row (Execution_time_view.line ~now d.execution_timing)
            ; row
                (sprintf
                   "%s / %s; process exit: %s"
@@ -430,8 +435,9 @@ let annotated_rows t ~log_lines =
         row
           ~indicator:(attempt_indicator a.lifecycle a.outcome)
           (sprintf
-             "%s %s seed=%s %s/%s"
+             "%s %s; %s seed=%s %s/%s"
              a.id
+             (Execution_time_view.line ~now a.execution_timing)
              a.suite
              a.seed
              (atom S.Lifecycle.sexp_of_t a.lifecycle)
@@ -449,7 +455,9 @@ let annotated_rows t ~log_lines =
       }))
 ;;
 
-let rows t ~log_lines = annotated_rows t ~log_lines |> List.map ~f:(fun row -> row.text)
+let rows ?now t ~log_lines =
+  annotated_rows ?now t ~log_lines |> List.map ~f:(fun row -> row.text)
+;;
 
 let%test_unit "canonical rows preserve legacy text and distinguish request facts from \
                messages"
@@ -597,6 +605,7 @@ let%test_unit "history, selection, normalized failure and captured rerun inputs 
     ; artifacts = []
     ; next_sequence = 4
     ; recent_events = []
+    ; execution_timing = None
     }
   in
   let snapshot : S.Snapshot.t =
@@ -660,6 +669,7 @@ let%test_unit "history, selection, normalized failure and captured rerun inputs 
     ; job = attempt.job
     ; suite = selection.suite
     ; seed = selection.seed
+    ; execution_timing = None
     ; created_at = attempt.created_at
     ; parent = None
     ; lifecycle = Queued

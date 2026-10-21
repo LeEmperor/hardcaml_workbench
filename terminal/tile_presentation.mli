@@ -38,6 +38,12 @@ type overrides =
 [@@deriving equal, sexp]
 
 val inherit_ : overrides
+
+(** The subset of explicit overrides that persists across client restart (header, title,
+    badge, hints, frame, padding and run-selector rows). [run_reference] and [freshness]
+    are cleared: they describe selection/data rather than appearance and stay local. *)
+val persisted : overrides -> overrides
+
 val defaults : t
 val navigation : overrides
 val apply : t -> overrides -> t

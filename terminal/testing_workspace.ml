@@ -200,7 +200,7 @@ let artifact_details (a : S.Artifact.t) =
   ]
 ;;
 
-let detail_rows t (d : S.Attempt.t) =
+let detail_rows ?(now = Time_ns.now ()) t (d : S.Attempt.t) =
   [ row
       ~indicator:(Simulation_view.attempt_indicator d.lifecycle d.outcome)
       ~spans:
@@ -216,6 +216,7 @@ let detail_rows t (d : S.Attempt.t) =
         ]
       (atom S.Outcome.sexp_of_t d.outcome ^ " / " ^ atom S.Lifecycle.sexp_of_t d.lifecycle)
   ]
+  @ [ row (Execution_time_view.line ~now d.execution_timing) ]
   @ List.concat_map d.cases ~f:(fun c ->
     if Option.equal String.equal t.view.case_id (Some c.case_id)
        || S.Case_status.equal c.status Failed
@@ -259,7 +260,7 @@ let detail_rows t (d : S.Attempt.t) =
     row ("Explicit ASIC reference: " ^ atom S.Asic_input.sexp_of_t input))
 ;;
 
-let rows t pane ~log_lines =
+let rows ?(now = Time_ns.now ()) t pane ~log_lines =
   let detail = Simulation_view.detail t.view in
   let rows =
     match pane with
@@ -288,7 +289,13 @@ let rows t pane ~log_lines =
                    ^ atom S.Lifecycle.sexp_of_t a.lifecycle
                    ^ "/"
                    ^ atom S.Outcome.sexp_of_t a.outcome)
-              ; row ("    " ^ a.suite ^ " · seed=" ^ a.seed)
+              ; row
+                  ("    "
+                   ^ Execution_time_view.line ~now a.execution_timing
+                   ^ " · "
+                   ^ a.suite
+                   ^ " · seed="
+                   ^ a.seed)
               ]))
     | Cases ->
       Option.value_map
@@ -314,7 +321,7 @@ let rows t pane ~log_lines =
       Option.value_map
         detail
         ~default:[ row "Select an attempt for outcome and captured inputs" ]
-        ~f:(detail_rows t)
+        ~f:(detail_rows ~now t)
     | Artifacts ->
       Option.value_map
         detail
@@ -418,6 +425,7 @@ module Test_data = struct
     ; artifacts = [ artifact ]
     ; next_sequence = 5
     ; recent_events = []
+    ; execution_timing = None
     }
   ;;
 
@@ -566,6 +574,7 @@ let%test_unit "large navigators expose a unique typed cursor; artifact identity 
   let attempts : S.Summary.t list =
     List.init 25 ~f:(fun i ->
       { S.Summary.id = sprintf "attempt-%02d-full-identity" i
+      ; execution_timing = None
       ; job = Test_data.attempt.job
       ; suite = "suite"
       ; seed = "7"
@@ -623,7 +632,7 @@ let%test_unit "large navigators expose a unique typed cursor; artifact identity 
     if i mod 2 = 0
     then assert (Option.is_some r.indicator)
     else (
-      assert (String.equal r.text "    suite · seed=7");
+      assert (String.equal r.text "    Time: unknown · suite · seed=7");
       assert (not r.selected);
       assert (Option.is_none r.indicator);
       assert (List.is_empty r.spans)));
@@ -668,6 +677,7 @@ let%test_unit "compact attempt labels preserve short and non-ASCII identities" =
     ; job = attempt.job
     ; suite = "controlled-fifo"
     ; seed = "18446744073709551615"
+    ; execution_timing = None
     ; created_at = attempt.created_at
     ; parent = None
     ; lifecycle = attempt.lifecycle
@@ -691,7 +701,7 @@ let%test_unit "compact attempt labels preserve short and non-ASCII identities" =
       String.equal
       (List.map navigator ~f:(fun r -> r.Simulation_view.text))
       [ "> 3a91c2...89e84b Finished/Failed"
-      ; "    controlled-fifo · seed=18446744073709551615"
+      ; "    Time: unknown · controlled-fifo · seed=18446744073709551615"
       ]);
   assert (List.hd_exn navigator).selected;
   assert (not (List.last_exn navigator).selected);
@@ -701,4 +711,78 @@ let%test_unit "compact attempt labels preserve short and non-ASCII identities" =
     List.exists
       (rows t Detail ~log_lines:(fun _ -> assert false))
       ~f:(fun r -> String.equal r.text ("Attempt: " ^ id)))
+;;
+
+let%test_unit "attempts show durable durations independently of selected detail and clock"
+  =
+  let now = Time_ns.epoch in
+  let later = Time_ns.add now (Time_ns.Span.of_sec 127.) in
+  let live =
+    Execution_timing.make ~started_at:(Timestamp.of_time_ns now) ~running:true ()
+  in
+  let summary id execution_timing : S.Summary.t =
+    { id
+    ; job = Test_data.attempt.job
+    ; suite = "suite"
+    ; seed = "7"
+    ; created_at = "not execution start"
+    ; parent = None
+    ; lifecycle = Running
+    ; outcome = Unknown
+    ; execution_timing
+    }
+  in
+  let attempts =
+    [ summary "live" live
+    ; summary "zero" (Execution_timing.make ~measured_seconds:0. ~running:false ())
+    ; summary "saved" (Execution_timing.make ~measured_seconds:14. ~running:false ())
+    ; summary "legacy" None
+    ]
+  in
+  let t =
+    set_view
+      empty
+      { Simulation_view.empty with
+        attempt = Some "live"
+      ; snapshot =
+          Some { Test_data.snapshot with attempts; detail = Some Test_data.attempt }
+      }
+  in
+  let lines now =
+    rows ~now t Attempts ~log_lines:(fun _ -> assert false)
+    |> List.map ~f:(fun r -> r.Simulation_view.text)
+  in
+  let before = lines now
+  and after = lines later in
+  assert (String.is_substring (List.nth_exn before 1) ~substring:"Time: 0s elapsed");
+  assert (String.is_substring (List.nth_exn after 1) ~substring:"Time: 2m 07s elapsed");
+  List.iter
+    [ 3, "Time: 0s"; 5, "Time: 14s"; 7, "Time: unknown" ]
+    ~f:(fun (i, substring) ->
+      assert (String.equal (List.nth_exn before i) (List.nth_exn after i));
+      assert (String.is_substring (List.nth_exn after i) ~substring));
+  (* Observe updates the matching durable history timing alongside lifecycle/outcome. *)
+  let d =
+    { Test_data.attempt with
+      id = "live"
+    ; execution_timing = Execution_timing.make ~measured_seconds:14. ~running:false ()
+    }
+  in
+  let response = { Test_data.snapshot with attempts = []; detail = Some d } in
+  let t = begin_request t in
+  let t =
+    receive
+      t
+      ~ticket:t.view.request
+      ~selected:(Some "live")
+      (Observe "live")
+      (Ok response)
+  in
+  let text =
+    rows ~now:later t Attempts ~log_lines:(fun _ -> assert false)
+    |> List.map ~f:(fun r -> r.Simulation_view.text)
+    |> String.concat ~sep:"\n"
+  in
+  assert (String.is_substring text ~substring:"Time: 14s");
+  assert (not (String.is_substring text ~substring:"elapsed"))
 ;;

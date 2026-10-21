@@ -465,13 +465,14 @@ let rows state ~summary ~filter ~width ~height =
             ; "Execution file: " ^ summary.execution_file
             ; "Plan identity: "
               ^ Option.value summary.plan_identity ~default:"not reported"
-            ; "Observed at: " ^ summary.observed_at
-            ; "Freshness: " ^ freshness summary.freshness
-            ; "Completion (reported): " ^ summary.completion
-            ; "Acceptance (reported): " ^ summary.acceptance
-            ; "Reported total: " ^ total_text projection.total
-            ; coverage_text projection
             ]
+            @ Evidence_time_view.summary_lines summary.observed_at
+            @ [ "Freshness: " ^ freshness summary.freshness
+              ; "Completion (reported): " ^ summary.completion
+              ; "Acceptance (reported): " ^ summary.acceptance
+              ; "Reported total: " ^ total_text projection.total
+              ; coverage_text projection
+              ]
             @ freshness_detail
             @ List.map summary.timing ~f:(fun (name, value, unit_) ->
               sprintf "Timing (reported): %s = %g %s" name value unit_)

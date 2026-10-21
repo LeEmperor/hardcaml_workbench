@@ -123,10 +123,12 @@ Focus **Timing · Paths** with Tab / Shift-Tab:
 | `r` | Explicitly refresh current evidence |
 | Tab / Shift-Tab | Change pane focus |
 | Space c c | Palette over the current workspace |
+| Space c x | Close the open detail reader, returning focus to `timing · paths` |
 
 In Detail/Provenance, j/k and the existing paging controls scroll that pane without
-changing the selected path. Esc closes the selected detail reader locally; it does
-not cancel a producer or switch back to Overview. Use workspace navigation to return.
+changing the selected path. Esc (or Space c x) closes the selected detail reader
+locally; it does not cancel a producer or switch back to Overview. Use workspace
+navigation to return.
 
 Detail starts with four compact summary lines: path, reported value/status,
 corner/group, and reported endpoints. The actual provider detail begins on line five.

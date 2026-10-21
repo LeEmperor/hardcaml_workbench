@@ -83,6 +83,8 @@ module Attempt = struct
     ; artifacts : Artifact.t list
     ; next_sequence : int
     ; recent_events : Provider.Event.t list
+    ; execution_timing : Execution_timing.t option
+         [@sexp.default None] [@sexp_drop_default.equal]
     }
   [@@deriving bin_io, compare, equal, sexp]
 end
@@ -93,6 +95,8 @@ module Summary = struct
     ; job : Job_id.t
     ; suite : string
     ; seed : string
+    ; execution_timing : Execution_timing.t option
+         [@sexp.default None] [@sexp_drop_default.equal]
     ; created_at : string
     ; parent : Parent.t option
     ; lifecycle : Lifecycle.t
@@ -172,4 +176,9 @@ end
 
 module Response = struct
   type t = (Snapshot.t, V1.Error.t) Result.t [@@deriving bin_io, compare, equal, sexp]
+
+  let sexp_of_negotiated ~execution_timing_header_value response =
+    sexp_of_t response
+    |> Execution_timing.negotiate ~header_value:execution_timing_header_value
+  ;;
 end

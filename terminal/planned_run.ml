@@ -527,10 +527,16 @@ let%test_unit "launch lifecycle uses exact durable reservations, local receipt f
     { preview with plan_json = "different exact preview, same identity/selection" }
   in
   let plan : Asic.Pending.t =
-    { key = key selection; kind = "plan"; state = "completed"; run = None; error = None }
+    { key = key selection
+    ; kind = "plan"
+    ; state = "completed"
+    ; run = None
+    ; error = None
+    ; activity = Unreported
+    }
   in
   let operation ?run state : Asic.Pending.t =
-    { key = "run:new"; kind = "run"; state; run; error = None }
+    { key = "run:new"; kind = "run"; state; run; error = None; activity = Unreported }
   in
   let reference ?(key = "new") ?run_id preview : Asic.Launch.t =
     { key; preview; run_id }
@@ -723,7 +729,13 @@ let%test_unit "old ready to local pending, transport failure, retry and new read
   let pa = preview a "exact-a"
   and pb = preview b "exact-b" in
   let op selection state : Asic.Pending.t =
-    { key = key selection; kind = "plan"; state; run = None; error = None }
+    { key = key selection
+    ; kind = "plan"
+    ; state
+    ; run = None
+    ; error = None
+    ; activity = Unreported
+    }
   in
   let snap p ops = { Fs0_fixture.snapshot with preview = p; operations = ops } in
   let ready =
@@ -781,7 +793,13 @@ let%test_unit "same-selection retry waits past every pre-receipt poll then ordin
     { selection; plan_identity = "exact-identity"; plan_json = "opaque metadata" }
   in
   let operation state : Asic.Pending.t =
-    { key = key selection; kind = "plan"; state; run = None; error = None }
+    { key = key selection
+    ; kind = "plan"
+    ; state
+    ; run = None
+    ; error = None
+    ; activity = Unreported
+    }
   in
   let completed =
     { Fs0_fixture.snapshot with
@@ -863,7 +881,13 @@ let%test_unit "exact raw selection identity and metadata survive display project
     }
   in
   let op : Asic.Pending.t =
-    { key = key selection; kind = "plan"; state = "completed"; run = None; error = None }
+    { key = key selection
+    ; kind = "plan"
+    ; state = "completed"
+    ; run = None
+    ; error = None
+    ; activity = Unreported
+    }
   in
   let snapshot =
     { Fs0_fixture.snapshot with preview = Some preview; operations = [ op ] }

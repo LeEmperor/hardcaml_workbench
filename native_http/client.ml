@@ -60,13 +60,14 @@ let hello t =
     else request_error status body)
 ;;
 
-let post t ~path ~sexp_of_request ~response_of_sexp request =
+let post ?(extra_headers = []) t ~path ~sexp_of_request ~response_of_sexp request =
   bounded t (fun interrupt ->
     let headers =
       Cohttp.Header.of_list
-        [ "content-type", V1.content_type
-        ; String.lowercase V1.protocol_header, Int.to_string V1.version
-        ]
+        ([ "content-type", V1.content_type
+         ; String.lowercase V1.protocol_header, Int.to_string V1.version
+         ]
+         @ extra_headers)
     in
     let body = V1.Codec.encode sexp_of_request request |> Cohttp_async.Body.of_string in
     let%bind response, body =
@@ -182,6 +183,10 @@ let workspace t request =
 
 let asic t request =
   post
+    ~extra_headers:
+      [ Asic.Evidence_metadata.header, Asic.Evidence_metadata.version
+      ; Execution_timing.header, Execution_timing.version
+      ]
     t
     ~path:"/api/v1/asic"
     ~sexp_of_request:Asic.Request.sexp_of_t
@@ -191,6 +196,7 @@ let asic t request =
 
 let simulation t request =
   post
+    ~extra_headers:[ Execution_timing.header, Execution_timing.version ]
     t
     ~path:Simulation.rpc_path
     ~sexp_of_request:Simulation.Request.sexp_of_t

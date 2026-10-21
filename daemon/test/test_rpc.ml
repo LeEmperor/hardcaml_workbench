@@ -63,6 +63,98 @@ let require_instance_changed result message =
     message
 ;;
 
+module Legacy_asic_request = struct
+  type t =
+    { instance_id : V1.Daemon_instance_id.t
+    ; project : Project_id.t
+    ; operation : Asic.Operation.t
+    }
+  [@@deriving sexp]
+end
+
+let test_legacy_asic_server () =
+  let received = ref false in
+  let%bind server =
+    Cohttp_async.Server.create
+      ~on_handler_error:`Raise
+      (Tcp.Where_to_listen.bind_to
+         Tcp.Bind_to_address.Localhost
+         Tcp.Bind_to_port.On_port_chosen_by_os)
+      (fun ~body _peer request ->
+         require
+           (String.equal (Uri.path (Cohttp.Request.uri request)) "/api/v1/asic")
+           "ASIC client used the wrong endpoint";
+         require
+           (Poly.equal (Cohttp.Request.meth request) `POST)
+           "ASIC client did not POST";
+         let headers = Cohttp.Request.headers request in
+         require
+           (Option.equal
+              String.equal
+              (Cohttp.Header.get headers Execution_timing.header)
+              (Some "1"))
+           "ASIC client omitted independent execution timing opt-in";
+         require
+           (Option.equal
+              String.equal
+              (Cohttp.Header.get headers "X-Workbench-Asic-Evidence-Metadata")
+              (Some "1"))
+           "ASIC client omitted the evidence metadata opt-in";
+         require
+           (Option.equal
+              String.equal
+              (Cohttp.Header.get headers V1.protocol_header)
+              (Some "1"))
+           "ASIC client changed the overall protocol version";
+         let%bind body = Cohttp_async.Body.to_string body in
+         let decoded = decode_exn Legacy_asic_request.t_of_sexp body in
+         require
+           (String.equal decoded.instance_id "legacy-instance"
+            && Project_id.equal decoded.project (Project_id.of_string "legacy-project")
+            && Asic.Operation.equal decoded.operation Get)
+           "legacy server could not decode the unchanged request body";
+         received := true;
+         (* Frozen old response: the old server ignores the optional request header. *)
+         Cohttp_async.Server.respond_string
+           ~status:`OK
+           ~headers:(Cohttp.Header.init_with "content-type" V1.content_type)
+           "(Ok ((configured false) (flows ()) (description_json ()) (preview ()) (runs \
+            ()) (operations (((key inspect) (kind inspection) (state complete) (run ()) \
+            (error ())))) (summaries ()) (inspections (((run ((backend asic) (id run:1) \
+            (build ()) (label ()))) (execution_file /public/execution.json) \
+            (execution_sha256 hash) (domain timing) (stage routing) (source_digest \
+            digest) (rows ()) (diagnostics ()) (truncated false) (cached_unverified \
+            true)))) (cache_error ())))")
+  in
+  Monitor.protect
+    ~finally:(fun () -> Cohttp_async.Server.close server)
+    (fun () ->
+      let client =
+        Hardcaml_workbench_native_http.Client.create
+          (sprintf "http://127.0.0.1:%d" (Cohttp_async.Server.listening_on server))
+      in
+      let%map response =
+        Hardcaml_workbench_native_http.Client.asic
+          client
+          { instance_id = "legacy-instance"
+          ; project = Project_id.of_string "legacy-project"
+          ; operation = Get
+          }
+      in
+      let snapshot = Or_error.ok_exn response |> ok in
+      require !received "legacy server did not receive the request";
+      require
+        (Asic.Pending.Activity.equal
+           (List.hd_exn snapshot.operations).activity
+           Unreported)
+        "old server response did not default activity";
+      require
+        (Evidence_time.Index.equal
+           (List.hd_exn snapshot.inspections).times
+           Evidence_time.Index.empty)
+        "old server response did not default evidence times")
+;;
+
 let rec remove_tree path =
   match Sys_unix.file_exists ~follow_symlinks:false path with
   | `No | `Unknown -> ()
@@ -73,6 +165,58 @@ let rec remove_tree path =
       |> List.iter ~f:(fun name -> remove_tree (Filename.concat path name));
       Core_unix.rmdir path)
     else Core_unix.unlink path
+;;
+
+let test_legacy_simulation_server () =
+  let%bind server =
+    Cohttp_async.Server.create
+      ~on_handler_error:`Raise
+      (Tcp.Where_to_listen.bind_to
+         Tcp.Bind_to_address.Localhost
+         Tcp.Bind_to_port.On_port_chosen_by_os)
+      (fun ~body _peer request ->
+         let headers = Cohttp.Request.headers request in
+         require
+           (String.equal (Uri.path (Cohttp.Request.uri request)) Simulation.rpc_path)
+           "Simulation client used wrong endpoint";
+         require
+           (Option.equal
+              String.equal
+              (Cohttp.Header.get headers Execution_timing.header)
+              (Some "1"))
+           "Simulation client omitted execution timing opt-in";
+         let%bind body = Cohttp_async.Body.to_string body in
+         let request = decode_exn Simulation.Request.t_of_sexp body in
+         require
+           (Simulation.Operation.equal request.operation Get)
+           "Simulation request body changed";
+         Cohttp_async.Server.respond_string
+           ~status:`OK
+           ~headers:(Cohttp.Header.init_with "content-type" V1.content_type)
+           "(Ok ((configured true) (discovery ()) (discovery_digest ()) (discovery_job \
+            ()) (discovery_error ()) (attempts (((id old) (job job) (suite suite) (seed \
+            42) (created_at old) (parent ()) (lifecycle Finished) (outcome Passed)))) \
+            (next_before ()) (detail ()) (byte_page ()) (history_error ())))")
+  in
+  Monitor.protect
+    ~finally:(fun () -> Cohttp_async.Server.close server)
+    (fun () ->
+      let client =
+        Hardcaml_workbench_native_http.Client.create
+          (sprintf "http://127.0.0.1:%d" (Cohttp_async.Server.listening_on server))
+      in
+      let%map response =
+        Hardcaml_workbench_native_http.Client.simulation
+          client
+          { instance_id = "legacy-instance"
+          ; project = Project_id.of_string "legacy-project"
+          ; operation = Get
+          }
+      in
+      let snapshot = Or_error.ok_exn response |> ok in
+      require
+        (Option.is_none (List.hd_exn snapshot.attempts).execution_timing)
+        "Legacy simulation response invented timing")
 ;;
 
 let wait_for_terminal_snapshot rpc instance_id job_id =
@@ -96,6 +240,8 @@ let wait_for_terminal_snapshot rpc instance_id job_id =
 ;;
 
 let run () =
+  let%bind () = test_legacy_asic_server () in
+  let%bind () = test_legacy_simulation_server () in
   let instance_id = V1.Daemon_instance_id.of_string "instance-1" in
   let directory = Filename_unix.temp_dir "hardcaml-workbench-rpc-test-" "" in
   let project_root = Filename.concat directory "project" in
@@ -110,7 +256,7 @@ let run () =
       "(rule\n\
       \ (alias all)\n\
       \ (action (progn (echo rpc-log-marker) (echo rpc-log-tail))))\n";
-  let%bind service = Service.create ~instance_id ~log_dir () in
+  let%bind service = Service.create ~instance_id ~log_dir ~state_dir:directory () in
   let service = Or_error.ok_exn service in
   let rpc = Rpc.create ~application_version:"test" ~instance_id ~service in
   Monitor.protect
@@ -432,6 +578,86 @@ let run () =
              })
       in
       let opened = decode_exn V1.Open_project.Response.t_of_sexp opened_body |> ok in
+      let asic_request : Asic.Request.t =
+        { instance_id; project = opened.project.id; operation = Get }
+      in
+      let timing = Execution_timing.make ~measured_seconds:12.5 ~running:false () in
+      let runs =
+        [ { Asic.Run.run =
+              { backend = Backend_id.of_string "asic"
+              ; id = "r"
+              ; build = None
+              ; label = None
+              }
+          ; reference = { attempt = "/public/attempt"; stream_id = "r" }
+          ; selection = None
+          ; cursor = 1
+          ; status = "completed"
+          ; execution_file = None
+          ; error = None
+          ; execution_timing = timing
+          ; stages =
+              [ { id = "synthesis"
+                ; name = "Synthesis"
+                ; status = Completed
+                ; requested = true
+                ; reason = None
+                ; action = None
+                ; execution_timing = timing
+                }
+              ]
+          }
+        ]
+      in
+      let identity =
+        Sexp.to_string_mach
+          (Sexp.List
+             [ Atom project_root
+             ; V1.Environment_selection.sexp_of_t Inherit_daemon
+             ; List []
+             ])
+      in
+      let registry =
+        Sexp.List
+          [ [%sexp "version", (1 : int)]
+          ; [%sexp "identity", (identity : string)]
+          ; [%sexp "runs", (runs : Asic.Run.t list)]
+          ; [%sexp "submissions", ([] : (string * Asic.Preview.t * string option) list)]
+          ; [%sexp "index", ([] : (string * string) list)]
+          ]
+      in
+      Out_channel.write_all
+        (Filename.concat
+           directory
+           ("asic-" ^ Hardcaml_workbench_backend.Asic_public.digest identity ^ ".sexp"))
+        ~data:(Sexp.to_string_mach registry);
+      let%bind () =
+        Deferred.List.iter
+          ~how:`Sequential
+          [ [], false
+          ; [ Asic.Evidence_metadata.header, "1" ], false
+          ; [ Execution_timing.header, "2" ], false
+          ; [ Execution_timing.header, "1" ], true
+          ; [ Asic.Evidence_metadata.header, "1"; Execution_timing.header, "1" ], true
+          ]
+          ~f:(fun (extra, expected) ->
+            let%map _, body =
+              call
+                rpc
+                ~meth:`POST
+                ~headers:(post_headers @ extra)
+                ~body:(Sexp.to_string_mach (Asic.Request.sexp_of_t asic_request))
+                "/api/v1/asic"
+            in
+            let snapshot = decode_exn Asic.Response.t_of_sexp body |> ok in
+            let run = List.hd_exn snapshot.runs in
+            require
+              (Bool.equal (Option.is_some run.execution_timing) expected
+               && Bool.equal
+                    (Option.is_some (List.hd_exn run.stages).execution_timing)
+                    expected)
+              "Execution timing was not independently negotiated")
+      in
       let%bind simulation_body =
         post
           rpc

@@ -224,10 +224,17 @@ let%test_unit "lifecycle wait keys distinguish collection, reconnect, and accept
     ; acceptance = Some "fail"
     ; error = None
     ; owned = false
+    ; execution_timing = None
     }
   in
   let pending key : Asic.Pending.t =
-    { key; kind = "finalize"; state = "completed"; run = Some run; error = None }
+    { key
+    ; kind = "finalize"
+    ; state = "completed"
+    ; run = Some run
+    ; error = None
+    ; activity = Unreported
+    }
   in
   let snapshot =
     { Fs0_fixture.snapshot with
@@ -276,7 +283,7 @@ let%test_unit "Observe waits for its read, independently of a long execution" =
     { backend = Backend_id.of_string "asic"; id = "fixture"; build = None; label = None }
   in
   let operation key kind state : Asic.Pending.t =
-    { key; kind; state; run = None; error = None }
+    { key; kind; state; run = None; error = None; activity = Unreported }
   in
   let snapshot : Asic.Snapshot.t =
     { configured = true
@@ -332,6 +339,7 @@ let%test_unit "finalization waits for the exact attempt rather than an earlier i
     ; state = "completed"
     ; run = None
     ; error = None
+    ; activity = Unreported
     }
   in
   let snapshot = { snapshot with operations = [ completed ] } in
@@ -362,6 +370,7 @@ let%test_unit "Observe does not await the lifetime of a coalesced automatic obse
     ; state = "executing"
     ; run = Some run
     ; error = None
+    ; activity = Unreported
     }
   in
   let snapshot : Asic.Snapshot.t =
@@ -399,6 +408,7 @@ let%test_unit "a targeted operation failure fails without treating historical fa
     ; state = "failed"
     ; run = None
     ; error = Some "fixture failure"
+    ; activity = Unreported
     }
   in
   let snapshot : Asic.Snapshot.t =

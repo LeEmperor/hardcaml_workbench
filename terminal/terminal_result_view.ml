@@ -351,6 +351,7 @@ module%test Tests = struct
           }
         ]
     ; evidence = "full raw terminal evidence"
+    ; execution_timing = None
     }
   ;;
 

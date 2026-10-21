@@ -303,6 +303,18 @@ def acceptance(t, check, http, runs, presets):
         t.capture('fs1-' + domain + '-overlay', ['INSPECT ' + domain])
         t.key(b'\x1b')
         t.capture('fs1-' + domain + '-restored', ['Timing · Paths', 'Timing · Provenance'], ['INSPECT ' + domain])
+
+    # WB-054: explicit close is advertised, keyboard-reachable over the explorer, and
+    # returns to the same composed workspace; with nothing open it explains why.
+    before_close = snapshot()
+    t.command('Inspect clocks ' + field(runs[0], 'id'))
+    t.capture('wb054-explorer-help', ['INSPECT clocks', 'Space c x close'])
+    t.key(b' '); t.key(b'c'); t.key(b'x')
+    t.capture('wb054-explorer-closed', ['Timing · Paths', 'Timing · Provenance'], ['INSPECT clocks'])
+    check(snapshot() == before_close, 'Space c x closes the explorer without changing selection, bindings or registry')
+    t.open_palette('Close inspector')
+    t.capture('wb054-close-unavailable', ['Close inspector (Space c x)', 'no inspector open on the focused tile'])
+    t.key(b'\x1b')
     t.command('Switch to Overview')
     t.resize(180, 55)
     sidebar_geometry(t.capture('sidebar-overview-180x55', ['planned-run', 'Reported cells (agg.)']), check)

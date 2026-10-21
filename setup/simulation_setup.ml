@@ -342,8 +342,7 @@ let run_discovery
     let status = ref None in
     let poll_status () =
       if Option.is_none !status
-      then
-        status := Option.map (Core_unix.wait_nohang (`Pid process.pid)) ~f:snd
+      then status := Option.map (Core_unix.wait_nohang (`Pid process.pid)) ~f:snd
     in
     let close fd =
       Core_unix.close fd;
@@ -362,8 +361,8 @@ let run_discovery
           then fail (sprintf "discovery timed out after %ds" timeout_seconds)
           else (
             (* EOF is independent of child exit, and descendants can retain the pipes
-               after the child exits. Poll both conditions until both are complete.
-               An empty fd set still sleeps, rather than spinning or blocking in waitpid. *)
+               after the child exits. Poll both conditions until both are complete. An
+               empty fd set still sleeps, rather than spinning or blocking in waitpid. *)
             let ready =
               Core_unix.select
                 ~restart:true

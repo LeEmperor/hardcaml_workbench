@@ -32,6 +32,35 @@ WB-001/019/024 await owner visual review. `test-frontend-refinement.py` and
 `test-terminal-indicators.py` fail identically on the prior HEAD (stale Overview and
 Testing-title expectations), independent of these changes.
 
+**2026-10-19 (second bundle):** WB-003 (Session-line `updating evidence` activity with
+cache-lookup/read distinction), WB-006 (typed production/observation timestamps;
+unknown production time is explicit), WB-048 (title/badge/hints/frame/padding/row-count
+overrides persist; preferences schema v3) and WB-054 (contextual palette actions with
+availability reasons, breadcrumbs, Space c x close inspector) were initially reported
+implemented and automatically verified; the completion review below supersedes that
+blanket delivery claim. Live delayed-provider checks for WB-003 await retained FS1
+fixtures; WB-003/006/054 await owner visual review. `test-testing-workspace.py` also
+fails identically on the prior HEAD (`Generic project tests` expectation).
+
+**2026-10-20 initial completion review (superseded by fixes below):** WB-048 remains **delivered**. WB-003, WB-006 and
+WB-054 are **partial**, with affected acceptance criteria reopened and actionable
+review findings in their ticket files. WB-003 needs summary-refresh identity/error
+wiring and stale/overlapping error handling; WB-006 needs timestamp range and age
+overflow handling plus a mixed-version protocol compatibility decision; WB-054 needs
+rendered inspector breadcrumbs, pane-accurate help, unavailable-key explanations and
+runnable-action ordering. Independent full build, tests and lint passed; these gaps
+are not covered by the current checks. Interactive visual acceptance and the reported
+clean-HEAD comparisons for stale scripts were not repeated during this review.
+
+**2026-10-20 follow-up fixes:** WB-003, WB-006 and WB-054 are now **delivered** at
+the implementation/automated-validation level. The summary activity/error lifecycle,
+timestamp range/age arithmetic, optional ASIC metadata negotiation, rendered inspector
+breadcrumbs, pane-specific help and Testing action routing/ordering are corrected with
+regression coverage. Full combined build, tests and lint passed serially at `-j4`
+after crash recovery. Ticket follow-up sections record details and remaining visual
+validation; live delayed-provider visual review and actual HTTP failure injection are
+not claimed. WB-048 remains delivered.
+
 ## How this directory works
 
 - **WB-NNN** identifies one actionable feature/defect ticket; filenames and category
@@ -47,8 +76,11 @@ Testing-title expectations), independent of these changes.
   submissions, Testing-workspace usability, generic job detail and ASIC lifecycle
   coverage). They are explicitly marked existing-backlog, not new owner requests.
 - **WB-066** records the subsequent native-provider request, now delivered and
-  accepted. The catalog contains **66 tickets**: 61 original distinct requests,
-  four retained followups and this later request.
+  accepted.
+- **WB-067–075** come from the owner's 2026-10-20 notes (see the second intake
+  table). One note extended WB-004 instead of creating a ticket. The catalog
+  contains **75 tickets**: 61 original distinct requests, four retained followups,
+  WB-066, and these nine.
 - [Dependency map](dependencies.md) explains cross-category sequencing. Required
   dependencies differ from related work; an existing delivered foundation is not
   an open blocker. Remaining older deferred ideas stay in [backlog](../backlog/README.md).
@@ -108,6 +140,8 @@ needed; References. A dependency needs a reason, not just a list of IDs.
 | [WB-060](presentation/WB-060-comparison-gallery.md) | Richer A–E comparison gallery | FS5 | P3 | 8 | medium |
 | [WB-061](presentation/WB-061-aesthetic-refinement.md) | Bounded workspace aesthetic refinement | FS5 | P2 | 13 | low |
 | [WB-063](presentation/WB-063-testing-workspace.md) | Testing-workspace investigation redesign | FS2, FS5 | P2 | 21 | medium |
+| [WB-073](presentation/WB-073-identifier-compression.md) | Identifier compression with global/workspace/tile toggles | FS5, FS2 | P2 | 8 | medium |
+| [WB-075](presentation/WB-075-execution-job-labels.md) | Human-readable job labels in the execution tile | FS0, FS2, FS5 | P2 | 3 | high |
 
 ## Workspaces, input and configuration
 
@@ -120,6 +154,10 @@ needed; References. A dependency needs a reason, not just a list of IDs.
 | [WB-045](workspaces/WB-045-template-picker.md) | TUI template browser/picker | FS3 | P2 | 8 | medium |
 | [WB-046](workspaces/WB-046-interactive-layout-editing.md) | Interactive layout editing | FS3, FS5 | P2 | 34 | low |
 | [WB-047](workspaces/WB-047-window-attachment.md) | Full window/monitor attachment | FS3 | P2 | 21 | medium |
+| [WB-067](workspaces/WB-067-modal-tile-buffers.md) | Vim-style tile buffers: counts, visual selection, repeat | FS3, FS5 | P2 | 21 | low |
+| [WB-070](workspaces/WB-070-text-input-word-deletion.md) | Ctrl-Backspace word deletion in palette and inputs | FS5 | P2 | 2 | high |
+| [WB-071](workspaces/WB-071-workspace-order-synthesis.md) | Workspace order, Timing membership, Synthesis workspace | FS3, FS1, FS2 | P2 | 13 | medium |
+| [WB-072](workspaces/WB-072-per-workspace-source-directories.md) | Per-workspace source directories | FS3 | P2 | 13 | medium |
 
 ## Project adoption and design scope
 
@@ -149,6 +187,7 @@ needed; References. A dependency needs a reason, not just a list of IDs.
 | [WB-022](evidence/WB-022-signal-name-annotations.md) | Provenance-safe generated-net naming annotations | FS1, FS4 | P3 | 21 | low |
 | [WB-023](evidence/WB-023-provider-evidence.md) | Additional typed provider evidence | FS1 | P2 | 13 | low |
 | [WB-026](evidence/WB-026-power-analysis.md) | Activity/corner-qualified power analysis | FS1 | P3 | 34 | low |
+| [WB-069](evidence/WB-069-timing-checklist-stage.md) | Timing as a distinct stage on the stage checklist | FS1, FS5 | P2 | 8 | low |
 
 ## Verification and simulation
 
@@ -165,6 +204,8 @@ needed; References. A dependency needs a reason, not just a list of IDs.
 | [WB-038](verification/WB-038-acceptance-bridge.md) | Simulation-to-ASIC acceptance evidence bridge | FS2, FS1 | P3 | 21 | low |
 | [WB-062](verification/WB-062-submission-recovery.md) | Uncertain simulation submission/history recovery | FS2 | P2 | 13 | medium |
 | [WB-066](verification/WB-066-ocaml-provider-library.md) | Shared OCaml simulation provider library | FS2, FS3 | P2 | 21 | medium |
+| [WB-068](verification/WB-068-waveform-cursor-stepping.md) | Waveform cursor repeat lag and step units | FS2, FS5 | P2 | 8 | medium |
+| [WB-074](verification/WB-074-catalog-run-fields.md) | Normalized suite/parameter/seed fields and run inputs | FS2, FS5 | P2 | 13 | medium |
 
 ## Execution, storage and observability
 
@@ -204,6 +245,9 @@ needed; References. A dependency needs a reason, not just a list of IDs.
    resource budgets.
 4. Decide first supported formats/tools/surfaces for WB-020/021/025/028/031/033
    before treating their estimates as implementation-ready.
+5. Owner direction, 2026-10-20: square away the front-end tools — Testing and
+   Waveforms (WB-063, WB-067, WB-068, WB-073, WB-074, WB-075) — before flow-related
+   Synthesis/Timing work (WB-069, WB-071's Synthesis workspace).
 
 Feature specs and historical acceptance remain authoritative about what already
 works. The construction plan owns activated implementation and acceptance; this

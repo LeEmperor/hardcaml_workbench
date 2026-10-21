@@ -63,6 +63,7 @@ let run : Asic.Run.t =
   ; execution_file = None
   ; error = None
   ; stages = []
+  ; execution_timing = None
   }
 ;;
 
@@ -84,6 +85,113 @@ let unknown (s : Asic.Stage.t) =
 ;;
 
 let fixtures () =
+  List.iter
+    [ "unreached", `Null; "running", `Null ]
+    ~f:(fun (status, exit) ->
+      require
+        (Option.is_none
+           (synthesis (observation [ occurrence status exit ])).execution_timing)
+        "Placeholder zero became measured duration");
+  let completed =
+    occurrence "completed" (`Int 0) |> fun o -> set o "duration_seconds" (`Float 12.5)
+  in
+  let measured = synthesis (observation [ completed ]) in
+  require
+    (Option.equal
+       Float.equal
+       (Option.value_exn measured.execution_timing).measured_seconds
+       (Some 12.5))
+    "Authoritative occurrence duration lost";
+  List.iter
+    [ `Int (-1); `Float Float.infinity; `String "12"; `Null ]
+    ~f:(fun value ->
+      require
+        (Option.is_none
+           (synthesis (observation [ set completed "duration_seconds" value ]))
+             .execution_timing)
+        "Invalid duration accepted");
+  let event name data elapsed =
+    `Assoc
+      [ "event", `String name
+      ; "data", data
+      ; "recorded_at", `String "2026-10-20T12:00:00.000000Z"
+      ; "elapsed_seconds", `Float elapsed
+      ]
+  in
+  let events xs = `Assoc [ "events", `List xs ] in
+  let r, _ =
+    Public.inspection run ~cursor:4 (observation [ occurrence "running" `Null ])
+  in
+  let running =
+    Public.updates_timing
+      r
+      ~writer_active:true
+      (events
+         [ event "allocated" `Null 0.
+         ; event "started" (`Assoc [ "occurrence", occurrence "running" `Null ]) 2.
+         ])
+  in
+  require (Option.value_exn running.execution_timing).running "Run start missing";
+  require
+    (Option.value_exn (List.hd_exn running.stages).execution_timing).running
+    "Stage start missing";
+  let starts =
+    Public.stage_start_events
+      (events
+         [ event "started" (`Assoc [ "occurrence", occurrence "running" `Null ]) 2. ])
+  in
+  let starts =
+    [%of_sexp: (string * Timestamp.t) list]
+      ([%sexp_of: (string * Timestamp.t) list] starts)
+  in
+  let ahead, _ =
+    Public.inspection run ~cursor:3 (observation [ occurrence "running" `Null ])
+  in
+  require (List.is_empty ahead.stages) "Race fixture did not fence checklist";
+  let caught_up, _ =
+    Public.inspection ahead ~cursor:4 (observation [ occurrence "running" `Null ])
+  in
+  let caught_up = Public.with_stage_starts caught_up ~writer_active:true starts in
+  require
+    (Option.value_exn (List.hd_exn caught_up.stages).execution_timing).running
+    "Retained start anchor lost across cursor race/serialization";
+  let detached, _ =
+    Public.inspection
+      running
+      ~cursor:4
+      (observation [ occurrence "running" `Null ]
+       |> fun j -> set j "writer_active" (`Bool false))
+  in
+  require
+    (not (Option.value_exn detached.execution_timing).running)
+    "Detached run still ticking";
+  require
+    (not (Option.value_exn (List.hd_exn detached.stages).execution_timing).running)
+    "Detached stage still ticking";
+  let finished =
+    Public.updates_timing
+      detached
+      ~writer_active:false
+      (events [ event "outcome" `Null 99. ])
+  in
+  require
+    (Option.equal
+       Float.equal
+       (Option.value_exn finished.execution_timing).measured_seconds
+       (Some 99.))
+    "Run total must be outcome elapsed, not stage sum";
+  let receipt =
+    `Assoc
+      [ "started_at", `String "2026-10-20T12:00:00.000000Z"
+      ; "ended_at", `String "2026-10-20T12:00:07.500000Z"
+      ]
+  in
+  require
+    (Option.equal
+       Float.equal
+       (Option.value_exn (Public.receipt_timing ~running:false receipt)).measured_seconds
+       (Some 7.5))
+    "Receipt duration lost";
   List.iter
     [ "unreached", `Null, Asic.Stage.Status.Pending
     ; "running", `Null, Running

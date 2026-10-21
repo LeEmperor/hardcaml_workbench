@@ -114,6 +114,7 @@ let fixture
     ; timing_goal = "pass"
     ; metrics = []
     ; checks = []
+    ; execution_timing = None
     ; evidence =
         Yojson.Safe.to_string (json [ "operation", operation; "results", results ])
     }

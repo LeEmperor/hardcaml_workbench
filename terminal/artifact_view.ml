@@ -385,7 +385,9 @@ let rows ?(width = 80) t ~height =
   let body =
     match t.reading with
     | None ->
-      [ external_control ^ " · Enter: read · Up/Down: select · Esc: close (≤32)" ]
+      [ external_control
+        ^ " · Enter: read · Up/Down: select · Esc or Space c x: close (≤32)"
+      ]
       @ (if List.is_empty t.catalog
          then [ "No catalog entries received for this exact run" ]
          else [])
@@ -409,7 +411,8 @@ let rows ?(width = 80) t ~height =
           r.offset
           (Option.value_map r.page ~default:"waiting for bounded page" ~f:(fun p ->
              sprintf "next %d · EOF %b" p.next_offset p.eof))
-      ; external_control ^ " · Enter: reread · n/p: page · Up/Down: scroll · Esc: back"
+      ; external_control
+        ^ " · Enter: reread · n/p: page · Up/Down: scroll · Esc: back · Space c x: close"
       ]
       @
         (match t.error, r.page with
@@ -591,6 +594,7 @@ let%test_unit "artifact inspector pins run/attempt/hash and pages with exact off
     ; state = "completed"
     ; run = None
     ; error = None
+    ; activity = Unreported
     }
   in
   let missing = { (snapshot []) with operations = [ complete ] } in

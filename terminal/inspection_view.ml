@@ -33,6 +33,8 @@ type detail_cache =
   ; detail : Asic_inspection.Detail.t option
   ; width : int
   ; info : bool
+  ; age_bucket : int option
+  (** Ages in [lines] are rebuilt when this minute bucket changes (WB-006). *)
   ; lines : string array
   }
 
@@ -369,13 +371,14 @@ let cycle_axis t axis =
      | Producer -> { t with producer = next })
 ;;
 
-let build_detail_lines (t : t) ~width =
+let build_detail_lines ?(now = Time_ns.now ()) (t : t) ~width =
   let metadata =
     Option.value_map t.index ~default:[] ~f:(fun i ->
       [ "Execution: " ^ i.execution_file
       ; "Execution SHA256: " ^ i.execution_sha256
       ; "Source digest: " ^ i.source_digest
       ]
+      @ Evidence_time_view.lines ~now i
       @ (if i.cached_unverified
          then [ "CACHED UNVERIFIED — explicit refresh required" ]
          else [])
@@ -388,19 +391,20 @@ let build_detail_lines (t : t) ~width =
   in
   let row =
     Option.value_map row ~default:[] ~f:(fun r ->
-      [ "Row: " ^ r.id ^ " · " ^ r.name
-      ; "Producer: " ^ r.producer
-      ; "Category: " ^ r.category ^ " · Status: " ^ r.status
-      ; "Value: "
-        ^ Option.value_map r.value ~default:"(unreported)" ~f:(sprintf "%.9g")
-        ^ " "
-        ^ Option.value r.unit_ ~default:"(unit unreported)"
-      ; "Corner: "
-        ^ Option.value r.corner ~default:"(none)"
-        ^ " · Group: "
-        ^ Option.value r.group ~default:"(none)"
-      ; "Source: " ^ r.source
-      ]
+      [ "Row: " ^ r.id ^ " · " ^ r.name; "Producer: " ^ r.producer ]
+      @ Option.value_map t.index ~default:[] ~f:(fun i ->
+        [ Evidence_time_view.row_line ~now i r ])
+      @ [ "Category: " ^ r.category ^ " · Status: " ^ r.status
+        ; "Value: "
+          ^ Option.value_map r.value ~default:"(unreported)" ~f:(sprintf "%.9g")
+          ^ " "
+          ^ Option.value r.unit_ ~default:"(unit unreported)"
+        ; "Corner: "
+          ^ Option.value r.corner ~default:"(none)"
+          ^ " · Group: "
+          ^ Option.value r.group ~default:"(none)"
+        ; "Source: " ^ r.source
+        ]
       @ List.map r.fields ~f:(fun (k, v) -> k ^ ": " ^ v))
   in
   let body =
@@ -430,11 +434,13 @@ let same_detail_metadata (a : Asic_inspection.Index.t) (b : Asic_inspection.Inde
       && String.equal a.execution_sha256 b.execution_sha256
       && Bool.equal a.cached_unverified b.cached_unverified
       && Bool.equal a.truncated b.truncated
+      && Evidence_time.Index.equal a.times b.times
       && (phys_equal a.diagnostics b.diagnostics
           || List.equal String.equal a.diagnostics b.diagnostics))
 ;;
 
-let memoize_detail (t : t) ~width =
+let memoize_detail ?(now = Time_ns.now ()) (t : t) ~width =
+  let age_bucket = Evidence_time_view.age_bucket ~now t.index in
   let row =
     List.find (visible t) ~f:(fun row ->
       Option.equal String.equal t.selected (Some row.Asic_inspection.Row.id))
@@ -443,6 +449,7 @@ let memoize_detail (t : t) ~width =
     Option.exists t.detail_cache ~f:(fun cache ->
       cache.width = width
       && Bool.equal cache.info t.info
+      && Option.equal Int.equal cache.age_bucket age_bucket
       && Option.equal String.equal t.selected cache.selected
       && Option.equal
            (fun (a, b) (c, d) -> String.equal a c && String.equal b d)
@@ -474,7 +481,8 @@ let memoize_detail (t : t) ~width =
           ; detail = t.detail
           ; width
           ; info = t.info
-          ; lines = Array.of_list (build_detail_lines t ~width)
+          ; age_bucket
+          ; lines = Array.of_list (build_detail_lines ~now t ~width)
           }
     }
 ;;
@@ -482,12 +490,12 @@ let memoize_detail (t : t) ~width =
 let detail_mode (t : t) = Option.is_some t.requested || t.info
 let page_size (t : t) ~height = Int.max 1 (height - if detail_mode t then 3 else 4)
 
-let clamp (t : t) ~width ~height =
+let clamp ?now (t : t) ~width ~height =
   let t = normalize t in
   if not (detail_mode t)
   then { t with scroll = 0; detail_cache = None }
   else (
-    let t = memoize_detail t ~width in
+    let t = memoize_detail ?now t ~width in
     let last =
       Int.max
         0
@@ -719,8 +727,8 @@ let input ~width ~height t action =
     | Character _ | Text _ | Backspace -> local t)
 ;;
 
-let rows ~width ~height t =
-  let t = clamp t ~width ~height in
+let rows ?(now = Time_ns.now ()) ~width ~height t =
+  let t = clamp ~now t ~width ~height in
   let all = Option.value ~default:"ALL" in
   let header =
     [ sprintf "INSPECT %s · stage %s · run %s" t.domain t.stage t.run.id
@@ -739,8 +747,9 @@ let rows ~width ~height t =
              "FILTER INPUT — Enter/Esc finish · Backspace deletes codepoint · Ctrl-U \
               clears · Ctrl-C exits"
            else
-             "Enter detail · Esc back · j/k scroll · n/N page · / filter · s sort · \
-              c/g/p axes · v ≤1ns · t stage · r refresh · d source/diagnostics"))
+             "Enter detail · Esc back · Space c x close · j/k scroll · n/N page · / \
+              filter · s sort · c/g/p axes · v ≤1ns · t stage · r refresh · d \
+              source/diagnostics"))
     ; (if t.editing || t.pasting
        then ""
        else
@@ -783,10 +792,11 @@ let rows ~width ~height t =
         in
         let viewport = Int.max 1 (height - 4) in
         [ sprintf
-            "%d rows%s%s · %s%s"
+            "%d rows%s%s · %s · %s%s"
             (List.length rows)
             (if i.truncated then " TRUNCATED" else "")
             (if i.cached_unverified then " CACHED UNVERIFIED" else "")
+            (Evidence_time_view.summary ~now i)
             (if String.equal t.domain "clocks"
              then
                "Clock/name | Value/unit | Status | Producer/corner/group | Reported \
@@ -845,6 +855,7 @@ let%test_unit "literal endpoint filtering, stable numeric selection and explicit
     ; diagnostics = [ "fixture" ]
     ; truncated = false
     ; cached_unverified = true
+    ; times = Evidence_time.Index.empty
     }
   in
   let t =
@@ -918,6 +929,7 @@ let%test_unit "detail responses require exact digest row stage scope and request
     ; diagnostics = []
     ; truncated = false
     ; cached_unverified = true
+    ; times = Evidence_time.Index.empty
     }
   in
   let snapshot = { Fs0_fixture.snapshot with inspections = [ index ] } in
@@ -1002,6 +1014,7 @@ let%test_unit "inspection memo preserves projections across scrolling repaint an
     ; diagnostics = []
     ; truncated = false
     ; cached_unverified = false
+    ; times = Evidence_time.Index.empty
     }
   in
   let snapshot = { Fs0_fixture.snapshot with inspections = [ index ] } in
@@ -1099,6 +1112,7 @@ let%test_unit "1000 detail downs then one up reverses the visible viewport and r
     ; diagnostics = []
     ; truncated = false
     ; cached_unverified = false
+    ; times = Evidence_time.Index.empty
     }
   in
   let detail : Asic_inspection.Detail.t =

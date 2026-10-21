@@ -37,8 +37,14 @@ type line_role =
   | Failure
 
 (** Width-bounded four-line Detail summary, or complete Context provenance. Provider text
-    follows the Detail prefix in [rows] and must remain neutrally styled. *)
-val semantic_prefix : pane:pane -> width:int -> t -> (line_role * string) list
+    follows the Detail prefix in [rows] and must remain neutrally styled. Context lists
+    labelled evidence times; [now] (default: the current time) only computes their ages. *)
+val semantic_prefix
+  :  ?now:Time_ns.t
+  -> pane:pane
+  -> width:int
+  -> t
+  -> (line_role * string) list
 
 val input
   :  pane:pane
@@ -49,4 +55,11 @@ val input
   -> Inspection_view.input
   -> t * int * Asic.Operation.t option
 
-val rows : pane:pane -> scroll:int -> width:int -> height:int -> t -> string list
+val rows
+  :  ?now:Time_ns.t
+  -> pane:pane
+  -> scroll:int
+  -> width:int
+  -> height:int
+  -> t
+  -> string list

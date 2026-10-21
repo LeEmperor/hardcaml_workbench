@@ -97,6 +97,7 @@ let reducers () =
     ; artifacts = []
     ; next_sequence = 0
     ; recent_events = []
+    ; execution_timing = None
     }
   in
   let event ?(attempt_id = "sim-test") sequence payload : Provider.Event.t =
@@ -480,6 +481,19 @@ let tests fixture =
       let%bind conflict = rpc (launch "same" "fail") in
       expect_error conflict Conflict;
       let%bind first = terminal first in
+      let first_timing = Option.value_exn first.execution_timing in
+      require
+        (Option.is_some first_timing.started_at
+         && Option.is_some first_timing.measured_seconds
+         && not first_timing.running)
+        "Terminal simulation duration missing";
+      let%bind frozen = observe first.id in
+      require
+        (Option.equal
+           Execution_timing.equal
+           first.execution_timing
+           frozen.execution_timing)
+        "Terminal simulation duration changed on observation";
       require
         (Outcome.equal first.outcome Passed)
         (Option.value first.diagnostic ~default:"Expected pass");
@@ -777,6 +791,11 @@ let tests fixture =
              { entry.record.attempt with
                lifecycle = Running
              ; outcome = Unknown
+             ; execution_timing =
+                 Execution_timing.make
+                   ?started_at:first_timing.started_at
+                   ~running:true
+                   ()
              ; cases =
                  List.map entry.record.attempt.cases ~f:(fun c ->
                    { c with status = Running })
@@ -794,6 +813,15 @@ let tests fixture =
         >>| ok
       in
       let historical = detail history in
+      let interrupted_timing = Option.value_exn historical.execution_timing in
+      require
+        ((not interrupted_timing.running)
+         && Option.is_none interrupted_timing.measured_seconds
+         && Option.equal
+              Timestamp.equal
+              interrupted_timing.started_at
+              first_timing.started_at)
+        "Restart invented an actual end or kept a live estimate";
       require
         (Lifecycle.equal historical.lifecycle Interrupted
          && Outcome.equal historical.outcome Incomplete)
@@ -829,6 +857,7 @@ let tests fixture =
           ; lifecycle = (if index = 0 then Running else Finished)
           ; artifacts = []
           ; recent_events = []
+          ; execution_timing = None
           }
         in
         let record : Store.Record.t =

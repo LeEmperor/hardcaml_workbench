@@ -131,6 +131,7 @@ let metric_fixtures () =
     ; execution_file = Some "/public/execution.json"
     ; error = None
     ; stages = []
+    ; execution_timing = None
     }
   in
   let checkpoint ?(boundary = "synthesis") n =
@@ -1311,6 +1312,7 @@ let stage_fixtures () =
     ; execution_file = None
     ; error = None
     ; stages = []
+    ; execution_timing = None
     }
   in
   let next, final = Public.inspection run ~cursor:0 observation in
@@ -1684,6 +1686,9 @@ let main () =
           let%bind snapshot = handle service root Get in
           if List.exists snapshot.runs ~f:(fun r ->
                String.equal r.Asic.Run.run.id ("stream-" ^ profile))
+             && List.exists snapshot.launches ~f:(fun l ->
+               String.equal l.Asic.Launch.key key
+               && Option.equal String.equal l.run_id (Some ("stream-" ^ profile)))
           then return snapshot
           else (
             let%bind () = Clock.after (Time_float.Span.of_sec 0.01) in
@@ -1705,6 +1710,15 @@ let main () =
         handle service root Get
       in
       let%bind first = launch "balanced" "one" in
+      require
+        (List.exists first.runs ~f:(fun r ->
+           String.equal r.Asic.Run.run.id "stream-balanced"
+           && String.equal r.status "completed"
+           && Option.is_none r.error)
+         && List.exists first.operations ~f:(fun op ->
+           String.equal op.Asic.Pending.key "observe:stream-balanced"
+           && String.equal op.state "completed"))
+        "Successful EOF did not retain completed observation";
       require
         (Option.equal Int.equal (summary first "stream-balanced").cell_count (Some 50))
         "R1 count";
@@ -2082,6 +2096,12 @@ let main () =
       let%bind () = Service.completion recovered in
       let%bind cancelled = handle recovered root Get in
       require
+        (List.exists cancelled.runs ~f:(fun r ->
+           String.equal r.Asic.Run.run.id "stream-cancel"
+           && String.equal r.status "observation_unavailable"
+           && Option.is_some r.error))
+        "Cancellation without provider terminal records retained stale observation";
+      require
         (List.exists cancelled.operations ~f:(fun op ->
            String.equal op.Asic.Pending.key "run:cancel" && String.equal op.state "failed"))
         "Owned launcher cancellation was not recorded";
@@ -2106,6 +2126,75 @@ let main () =
               "Natural completion was signalled"))
       in
       let%bind () = Service.shutdown recovered in
+      let race_service = create () in
+      let%bind () =
+        Deferred.List.iter
+          [ "exit-race"; "exit-race-unavailable"; "exit-race-active" ]
+          ~how:`Sequential
+          ~f:(fun profile ->
+            let%bind planned = settled race_service root (Plan (selection profile)) in
+            let preview = Option.value_exn planned.preview in
+            let%bind raced = settled race_service root (Run { key = profile; preview }) in
+            let run =
+              List.find_exn raced.runs ~f:(fun r ->
+                String.equal r.Asic.Run.run.id ("stream-" ^ profile))
+            in
+            let operation key =
+              List.find_exn raced.operations ~f:(fun op ->
+                String.equal op.Asic.Pending.key key)
+            in
+            require
+              (String.equal (operation ("run:" ^ profile)).state "failed"
+               && Option.is_some (operation ("run:" ^ profile)).error)
+              "Final reconciliation erased producer failure";
+            if String.equal profile "exit-race"
+            then
+              require
+                (String.equal run.status "failed"
+                 && run.cursor = 2
+                 && Asic.Stage.Status.equal (List.hd_exn run.stages).status Failed
+                 && Option.is_none run.error
+                 && String.equal (operation ("observe:" ^ run.run.id)).state "completed")
+                "Nonzero EOF discarded terminal records while observation was in flight"
+            else
+              require
+                (String.equal run.status "observation_unavailable"
+                 && Option.is_some run.error
+                 && (not (List.is_empty run.stages))
+                 && List.for_all run.stages ~f:(fun stage ->
+                   match stage.status with
+                   | Running | Pending -> false
+                   | _ -> true))
+                "Unavailable final observation retained stale active stages";
+            let%bind before = launches root profile in
+            let%bind (_ : Asic.Snapshot.t) =
+              settled race_service root (Run { key = profile; preview })
+            in
+            let%bind after = launches root profile in
+            require (before = 1 && after = before) "Failed run retry relaunched producer";
+            (* Refresh reads retained provider truth, even after the automatic reader
+               failed. No process execution is needed to repair a historical run. *)
+            let%bind () =
+              In_thread.run (fun () ->
+                Out_channel.write_all (Filename.concat root "race-recover") ~data:"")
+            in
+            let%bind refreshed = settled race_service root (Refresh run.run) in
+            let repaired =
+              List.find_exn refreshed.runs ~f:(fun r ->
+                Run_ref.equal r.Asic.Run.run run.run)
+            in
+            require
+              (String.equal repaired.status "failed"
+               && repaired.cursor = 2
+               && Asic.Stage.Status.equal (List.hd_exn repaired.stages).status Failed
+               && Option.is_none repaired.error)
+              "Read-only Refresh did not repair stale failed run";
+            let%bind after_refresh = launches root profile in
+            require (after_refresh = before) "Refresh launched a producer";
+            In_thread.run (fun () ->
+              Core_unix.unlink (Filename.concat root "race-recover")))
+      in
+      let%bind () = Service.shutdown race_service in
       Deferred.unit)
 ;;
 

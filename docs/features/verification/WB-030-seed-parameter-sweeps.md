@@ -15,7 +15,7 @@ estimate_scope: incremental
 origin: owner-intake
 tags: [regressions, seeds, matrices]
 depends_on: [WB-042]
-related: [WB-031, WB-032, WB-012]
+related: [WB-031, WB-032, WB-012, WB-074]
 ---
 
 # WB-030 — Seed sweeps and test-parameter matrices

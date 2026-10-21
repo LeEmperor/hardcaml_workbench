@@ -18,6 +18,15 @@ val parse_index
   -> Yojson.Safe.t
   -> Wire.Index.t
 
+(** Record Workbench's own observations of a freshly provider-validated index: the
+    validation instant and the execution record's filesystem modification time. Neither is
+    a production time; production times come only from the provider response. *)
+val observe_times
+  :  execution_file:string
+  -> validated_at:Timestamp.t
+  -> Wire.Index.t
+  -> Wire.Index.t
+
 val parse_detail
   :  registered:Asic.Run.t
   -> index:Wire.Index.t

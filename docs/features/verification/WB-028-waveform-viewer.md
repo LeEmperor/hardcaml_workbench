@@ -15,7 +15,7 @@ estimate_scope: incremental
 origin: owner-intake
 tags: [waveforms, investigation, viewer]
 depends_on: []
-related: [WB-025, WB-040]
+related: [WB-025, WB-040, WB-067, WB-068]
 ---
 
 # WB-028 — Embedded waveform viewer

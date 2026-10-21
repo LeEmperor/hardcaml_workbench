@@ -460,9 +460,10 @@ def terminal_integration(test, before, starters, header_id):
                     break
                 require(time.monotonic() < deadline, label + ': hint preference save deadline')
                 terminal.drain(.1)
-            test.check(field(stored, 'schema_version') == '2'
+            test.check(field(stored, 'schema_version') == '3'
                        and field(stored, 'chrome') == 'true'
-                       and field(stored, 'tile_headers') == override,
+                       and field(stored, 'tile_headers') == override
+                       and field(stored, 'tile_appearance') == [],
                        label + ': hint choices persist without altering chrome or headers')
 
         def chord(key):

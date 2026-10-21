@@ -84,6 +84,16 @@ elif args[:2] == ['flow', 'run']:
     signal.signal(signal.SIGTERM, terminate)
     emit(envelope('stage-observation', event='observation_allocated',
                   attempt=attempt, stream_id=stream))
+    if profile.startswith('exit-race'):
+        for _ in range(500):
+            if os.path.exists(os.path.join(attempt, 'in-flight')):
+                break
+            time.sleep(0.01)
+        else:
+            sys.exit(99)
+        with open(os.path.join(attempt, 'done'), 'w') as out:
+            out.write('terminal records published before failing exit')
+        sys.exit(2)
     time.sleep(0.6 if not os.path.exists('hold') else 30)
     with open(os.path.join(attempt, 'done'), 'w') as out:
         out.write('done')
@@ -92,6 +102,8 @@ elif args[:2] == ['flow', 'run']:
 elif args[:2] == ['observation', 'read-updates']:
     stage_fixture = os.path.join(args[2], 'observation.json')
     cursor = 0
+    if os.path.basename(args[2]).startswith('attempt-exit-race'):
+        cursor = 2 if os.path.exists(os.path.join(args[2], 'done')) else 0
     if os.path.exists(stage_fixture):
         with open(stage_fixture) as src:
             cursor = json.load(src)['cursor']
@@ -106,6 +118,37 @@ elif args[:2] == ['observation', 'inspect']:
         sys.exit(0)
     stream = 'stream-' + os.path.basename(attempt).removeprefix('attempt-')
     done = os.path.exists(os.path.join(attempt, 'done'))
+    profile = os.path.basename(attempt).removeprefix('attempt-')
+    if profile.startswith('exit-race'):
+        recovered = os.path.exists('race-recover')
+        if done and profile == 'exit-race-unavailable' and not recovered:
+            print('fixture terminal inspection unavailable', file=sys.stderr)
+            sys.exit(3)
+        final = done and (profile != 'exit-race-active' or recovered)
+        value = envelope('stage-observation', 2, stream_id=stream,
+                         cursor=2 if done else 0,
+                         writer_active=not final,
+                         observation_status='final' if final else 'active',
+                         state=dict(outcome=dict(status='failed', exit_code=2) if final else None),
+                         execution_file=os.path.join(attempt, 'execution.json') if final else None,
+                         methodology=envelope('historical-methodology', state='pending',
+                             launch=dict(attempt_id=stream, expected_plan_identity='a' * 64)),
+                         stage_plan=envelope('stage-plan', stages=[dict(
+                             id='synthesis', name='Synthesis', requested=True,
+                             status='failed' if final else 'running', action=None,
+                             reason='recorded provider outcome')]))
+        if not done:
+            seen = os.path.join(attempt, 'active-observed')
+            if os.path.exists(seen):
+                # First publish Running, then keep a subsequent read in flight at EOF.
+                with open(os.path.join(attempt, 'in-flight'), 'w') as out:
+                    out.write('inspection in flight')
+                time.sleep(0.8)
+            else:
+                with open(seen, 'w') as out:
+                    out.write('initial active inspection')
+        emit(value)
+        sys.exit(0)
     missing = os.path.exists('missing')
     method = envelope('historical-methodology', state='recorded' if done else 'pending',
                       plan_identity='a' * 64, bundle_identity='b' * 64,
@@ -145,6 +188,10 @@ elif args[:1] == ['report']:
     execution = dict(attempt_id=stream, status='completed', artifacts=references,
                      occurrences=[dict(action_key='implementation.' + boundary,
                                         status='completed', exit_code=0)])
+    if profile.startswith('exit-race'):
+        execution.update(status='failed', exit_code=2,
+                         occurrences=[dict(action_key='implementation.synthesis',
+                                           status='failed', exit_code=2)])
     if profile == 'terminal':
         stages = [ref['boundary'] for ref in references]
         execution.update(exit_code=0, plan=dict(schema_version=3, initial_boundary=None, stages=stages),

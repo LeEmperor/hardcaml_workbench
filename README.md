@@ -45,6 +45,9 @@ simulation tile and independent counter fixture remain supported.
 
 ## Documentation
 
+- [Execution durations](docs/execution_durations.md) — stage/run and simulation elapsed
+  times in Overview and Testing, availability limits, and linked-context theme colors.
+
 - [Restore a default workspace layout](docs/default_layout_restore.md) — one-step
   recovery from extra/hidden tiles or altered sizes, preserving runs and pins.
 

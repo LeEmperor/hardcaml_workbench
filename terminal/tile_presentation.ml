@@ -47,6 +47,10 @@ let inherit_ : overrides =
   }
 ;;
 
+(* WB-048: run reference and freshness describe run selection/data, not appearance, so
+   they stay session-local. Everything else is an explicit appearance choice. *)
+let persisted (o : overrides) = { o with run_reference = None; freshness = None }
+
 let defaults : t =
   { header = true
   ; title = true

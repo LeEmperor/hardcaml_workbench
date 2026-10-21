@@ -1,0 +1,15 @@
+(test
+ (name test_evidence_activity)
+ (deps refresh_provider.py)
+ (libraries
+  async
+  core
+  core_unix
+  hardcaml_workbench_backend
+  hardcaml_workbench_project_integration
+  hardcaml_workbench_protocol
+  terminal_presentation)
+ (preprocess
+  (pps ppx_jane))
+ (lint
+  (pps ppx_js_style)))

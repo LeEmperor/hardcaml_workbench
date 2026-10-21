@@ -3,9 +3,10 @@
 ## Actionable ticket catalog
 
 The owner's current requests now have **one Markdown file per feature**, grouped
-in [the WB ticket catalog](features/README.md). It contains **66 tickets**: 61 distinct
+in [the WB ticket catalog](features/README.md). It contains **75 tickets**: 61 distinct
 features from 62 intake entries (one duplicate merged), four explicitly sourced
-existing followups, and the later WB-066 native-provider request. Each has tags,
+existing followups, the later WB-066 native-provider request, and WB-067–075 from the
+owner's 2026-10-20 notes. Each has tags,
 status, priority, defect severity where relevant,
 original size label, estimated size/points/confidence, acceptance criteria,
 dependencies and open decisions.
@@ -18,11 +19,11 @@ estimates; epic estimates exclude separately ticketed prerequisites.
 
 | Category | Tickets | Main concerns |
 | --- | ---: | --- |
-| [Presentation](features/README.md#presentation-and-interaction) |15 | Alignment, controls, icons, tabs, overlays, glyphs and Testing composition |
-| [Workspaces](features/README.md#workspaces-input-and-configuration) |7 | Mouse/hotkeys, layout/window files, editing, template picker and attachment |
+| [Presentation](features/README.md#presentation-and-interaction) |17 | Alignment, controls, icons, tabs, overlays, glyphs, Testing composition, ID compression and job labels |
+| [Workspaces](features/README.md#workspaces-input-and-configuration) |11 | Mouse/hotkeys, layout/window files, editing, picker, attachment, modal buffers, text input, workspace order and source layout |
 | [Project adoption](features/README.md#project-adoption-and-design-scope) |10 | Build/bundle state, hierarchy/IP scope, files, setup and discovery |
-| [Evidence](features/README.md#evidence-and-hardware-investigation) |9 | Refresh/timestamps, Timing triage, comparisons, graphics, mappings and power |
-| [Verification](features/README.md#verification-and-simulation) |11 | Formal, waveforms, catalogs, sweeps, adapters, native provider helpers, replay and acceptance |
+| [Evidence](features/README.md#evidence-and-hardware-investigation) |10 | Refresh/timestamps, Timing triage, comparisons, graphics, mappings, power and a distinct timing stage |
+| [Verification](features/README.md#verification-and-simulation) |13 | Formal, waveforms, catalogs, sweeps, adapters, provider helpers, replay, acceptance, cursor stepping and catalog run fields |
 | [Infrastructure](features/README.md#execution-storage-and-observability) |9 | Process view, metrics, logs, streaming, budgets, responsiveness and coverage |
 | [Integrations](features/README.md#external-providers-and-clients) |3 | Vivado, Ches and Git/Mercurial |
 | [Exploration](features/README.md#design-space-exploration) |2 | Design/build sweeping and Quick-Harn comparative editing |

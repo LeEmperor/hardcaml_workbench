@@ -158,6 +158,7 @@ let fixture_run ?execution_file ?error status : Asic.Run.t =
   ; reference = { attempt = "/explicit/fixture"; stream_id = "fixture" }
   ; selection = None
   ; stages = []
+  ; execution_timing = None
   ; cursor = 0
   ; status
   ; execution_file
@@ -166,7 +167,7 @@ let fixture_run ?execution_file ?error status : Asic.Run.t =
 ;;
 
 let fixture_operation ?run ?error key kind state : Asic.Pending.t =
-  { key; kind; state; run; error }
+  { key; kind; state; run; error; activity = Unreported }
 ;;
 
 let fixture_snapshot ?(operations = []) ?(summaries = []) runs : Asic.Snapshot.t =
@@ -266,6 +267,7 @@ let%test_unit "running stage updates are polled even with an execution file and 
     ; requested = true
     ; reason = None
     ; action = None
+    ; execution_timing = None
     }
   in
   let snapshot =

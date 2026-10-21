@@ -18,14 +18,19 @@
   artifact_view
   artifact_export
   artifact_binary_export
+  evidence_time_view
+  execution_time_view
   inspection_view
   timing_workspace
   presentation
   state
   workspace_host
+  evidence_activity
   palette_search
   palette_view
   host_view
+  evidence_session_test
+  execution_duration_test
   plain_rpc
   launch_preferences
   presentation_preferences

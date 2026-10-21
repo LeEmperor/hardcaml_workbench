@@ -34,6 +34,8 @@ module Stage = struct
     ; requested : bool
     ; reason : string option
     ; action : Selection.t option
+    ; execution_timing : Execution_timing.t option
+         [@sexp.default None] [@sexp_drop_default.equal]
     }
   [@@deriving bin_io, compare, equal, sexp]
 end
@@ -106,6 +108,8 @@ module Terminal_result = struct
     ; metrics : Metric.t list
     ; checks : Check.t list
     ; evidence : string
+    ; execution_timing : Execution_timing.t option
+         [@sexp.default None] [@sexp_drop_default.equal]
     }
   [@@deriving bin_io, compare, equal, sexp]
 
@@ -156,17 +160,36 @@ module Run = struct
     ; execution_file : string option
     ; error : string option
     ; stages : Stage.t list [@sexp.default []]
+    ; execution_timing : Execution_timing.t option
+         [@sexp.default None] [@sexp_drop_default.equal]
     }
   [@@deriving bin_io, compare, equal, sexp]
 end
 
 module Pending = struct
+  module Activity = struct
+    (** What an operation is doing, where the daemon distinguishes it. Evidence reads are
+        read-only: neither constructor is producer or flow execution.
+
+        - [Evidence_cache_lookup]: only Workbench-derived caches are consulted; no
+          provider operation is in progress.
+        - [Evidence_read]: a bounded read-only provider/source read of retained evidence
+          (an explicit refresh, a cold-cache fallback, a detail read or a summary
+          revalidation). *)
+    type t =
+      | Unreported
+      | Evidence_cache_lookup
+      | Evidence_read
+    [@@deriving bin_io, compare, equal, sexp]
+  end
+
   type t =
     { key : string
     ; kind : string
     ; state : string
     ; run : Run_ref.t option
     ; error : string option
+    ; activity : Activity.t [@sexp.default Unreported] [@sexp_drop_default.equal]
     }
   [@@deriving bin_io, compare, equal, sexp]
 end
@@ -215,6 +238,8 @@ module Finalization = struct
     ; acceptance : string option
     ; error : string option
     ; owned : bool
+    ; execution_timing : Execution_timing.t option
+         [@sexp.default None] [@sexp_drop_default.equal]
     }
   [@@deriving bin_io, compare, equal, sexp]
 end
@@ -320,4 +345,31 @@ end
 
 module Response = struct
   type t = (Snapshot.t, V1.Error.t) Result.t [@@deriving bin_io, compare, equal, sexp]
+end
+
+module Evidence_metadata = struct
+  (* Per-request opt-in: old servers ignore this header and new readers default the absent
+     metadata. Do not add fields to Request, which old readers reject. *)
+  let header = "X-Workbench-Asic-Evidence-Metadata"
+  let version = "1"
+  let negotiated value = Option.value_map value ~default:false ~f:(String.equal version)
+
+  let sexp_of_response ?(execution_timing_header_value = None) ~header_value response =
+    let response =
+      if negotiated header_value
+      then response
+      else
+        Result.map response ~f:(fun (snapshot : Snapshot.t) ->
+          { snapshot with
+            inspections =
+              List.map snapshot.inspections ~f:(fun index ->
+                { index with Asic_inspection.Index.times = Evidence_time.Index.empty })
+          ; operations =
+              List.map snapshot.operations ~f:(fun operation ->
+                { operation with Pending.activity = Unreported })
+          })
+    in
+    Response.sexp_of_t response
+    |> Execution_timing.negotiate ~header_value:execution_timing_header_value
+  ;;
 end

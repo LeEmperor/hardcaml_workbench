@@ -30,6 +30,7 @@ let make_registered execution_file : Asic.Run.t =
   ; execution_file = Some execution_file
   ; error = None
   ; stages = []
+  ; execution_timing = None
   }
 ;;
 
@@ -118,6 +119,75 @@ let parser_tests () =
     ; "diagnostics", `List [ str (String.make (Inspection.index_limit + 1) 'x') ]
     ]
     ~f:(fun (key, value) -> rejects (fun () -> parse (replace response key value)));
+  (* WB-006: producer-supplied production times keep their meaning and zone; anything else
+     stays visibly unknown rather than being reinterpreted. *)
+  let produced value =
+    let index =
+      parse
+        (replace
+           response
+           "production_times"
+           (`List [ json [ "producer", str "opensta"; "produced_at", value ] ]))
+    in
+    Evidence_time.Index.production index.times ~producer:"opensta"
+  in
+  let supplied raw expected =
+    match produced (str raw) with
+    | Supplied { at } ->
+      require
+        (Time_ns.equal
+           (Timestamp.to_time_ns at)
+           (Time_ns.of_string_with_utc_offset expected))
+        ("Production time was reinterpreted: " ^ raw)
+    | Unknown | Rejected _ -> failwith ("Valid production time rejected: " ^ raw)
+  in
+  supplied "2026-10-19T15:04:05.123456Z" "2026-10-19 15:04:05.123456Z";
+  supplied "2026-10-19T17:04:05+02:00" "2026-10-19 15:04:05Z";
+  supplied "2026-10-19T11:04:05-04:00" "2026-10-19 15:04:05Z";
+  supplied "1850-01-01T00:00:00Z" "1850-01-01T00:00:00Z";
+  let boundary raw expected =
+    match produced (str raw) with
+    | Supplied { at } ->
+      require
+        (Int63.equal
+           (Time_ns.Span.to_int63_ns
+              (Time_ns.to_span_since_epoch (Timestamp.to_time_ns at)))
+           expected)
+        ("Production boundary lost precision: " ^ raw)
+    | Unknown | Rejected _ -> failwith ("Valid production boundary rejected: " ^ raw)
+  in
+  boundary "1823-11-12T00:06:21.572612096Z" Int63.min_value;
+  boundary "2116-02-20T23:53:38.427387903Z" Int63.max_value;
+  boundary "1823-11-11T23:06:21.572612096-01:00" Int63.min_value;
+  boundary "2116-02-21T00:53:38.427387903+01:00" Int63.max_value;
+  List.iter
+    [ "2026-10-19T15:04:05"
+    ; "yesterday"
+    ; "2026-13-45T99:00:00Z"
+    ; "2200-01-01T00:00:00Z"
+    ; "1700-01-01T00:00:00Z"
+    ; "1823-11-12T00:06:21.572612095Z"
+    ; "2116-02-20T23:53:38.427387904Z"
+    ; "1823-11-12T00:06:21.572612096+00:01"
+    ; "2116-02-20T23:53:38.427387903-00:01"
+    ; String.make 80 '1' ^ "Z"
+    ]
+    ~f:(fun raw ->
+      match produced (str raw) with
+      | Rejected { raw = kept; _ } ->
+        require (String.length kept <= 128) "Rejected production time was unbounded"
+      | Unknown | Supplied _ -> failwith ("Invalid production time accepted: " ^ raw));
+  require
+    (Evidence_time.Production.equal
+       (Evidence_time.Index.production (parse response).times ~producer:"opensta")
+       Unknown)
+    "Absent production time was not unknown";
+  rejects (fun () -> parse (replace response "production_times" (str "not a list")));
+  rejects (fun () ->
+    let entry =
+      json [ "producer", str "opensta"; "produced_at", str "2026-10-19T00:00:00Z" ]
+    in
+    parse (replace response "production_times" (`List [ entry; entry ])));
   let detail =
     response
     |> fun j -> replace (replace j "row_id" (str "path-1")) "detail" (str "path report")
@@ -142,7 +212,27 @@ let parser_tests () =
 
 let cache_tests () =
   let root, registered, response, parse = fixture () in
-  let index = parse response in
+  let index =
+    parse
+      (replace
+         response
+         "production_times"
+         (`List
+           [ json
+               [ "producer", str "opensta"
+               ; "produced_at", str "1850-01-01T01:00:00+01:00"
+               ]
+           ]))
+    |> Inspection.observe_times
+         ~execution_file:(Option.value_exn registered.execution_file)
+         ~validated_at:
+           (Timestamp.of_time_ns
+              (Time_ns.of_string_with_utc_offset "2026-10-19T15:30:00Z"))
+  in
+  require
+    (Option.is_some (Evidence_time.Index.validated index.times)
+     && Option.is_some (Evidence_time.Index.file_modified index.times))
+    "Restart fixture lacks observation times";
   let state_dir = Filename.concat root "cache" in
   let identity = "project/environment/configuration" in
   let load run =
@@ -280,6 +370,26 @@ let service_tests () =
         , (None : Hardcaml_workbench_project_integration.Asic_config.t option)]
   in
   let index = parse response in
+  let index =
+    { index with
+      times =
+        { index.times with
+          production =
+            [ ( "opensta"
+              , Supplied
+                  { at =
+                      Timestamp.of_time_ns
+                        (Time_ns.of_string_with_utc_offset "1850-01-01T00:00:00Z")
+                  } )
+            ]
+        }
+    }
+    |> Inspection.observe_times
+         ~execution_file:index.execution_file
+         ~validated_at:
+           (Timestamp.of_time_ns
+              (Time_ns.of_string_with_utc_offset "2026-10-19T15:30:00Z"))
+  in
   Inspection.save ~state_dir ~identity index;
   let registry =
     Sexp.List
@@ -345,6 +455,9 @@ let service_tests () =
   let restarted = Service.create ~state_dir in
   let%bind snapshot = settled restarted root (request false) in
   require (List.hd_exn snapshot.inspections).cached_unverified "Restart freshness lost";
+  require
+    (Evidence_time.Index.equal (List.hd_exn snapshot.inspections).times index.times)
+    "Service restart changed production, validation or filesystem observation times";
   let cache_file =
     Filename.concat state_dir ("asic-" ^ Public.digest identity ^ "-inspections-v1.sexp")
   in
@@ -478,6 +591,87 @@ let observation_generation_tests () =
       return (Poly.equal (Sys_unix.file_exists (file ("started-" ^ kind))) `Yes))
   in
   let release kind = Core_unix.unlink (file ("hold-" ^ kind)) in
+  let index_key = Asic_inspection.index_key ~run ~domain:"timing" ~stage:"routing" in
+  let pending (snapshot : Asic.Snapshot.t) =
+    List.find_exn snapshot.operations ~f:(fun p -> String.equal p.key index_key)
+  in
+  let current (snapshot : Asic.Snapshot.t) = List.hd_exn snapshot.inspections in
+  (* WB-003 #1/#2 and WB-006 #1/#2 against the daemon: a held explicit refresh reports an
+     evidence read for its whole duration; refreshing unchanged bytes moves only the
+     validation time; a warm reopen reports only a cache lookup and calls no provider. *)
+  let activity_and_time_tests () =
+    let%bind before = handle service root Get in
+    let before = current before in
+    require
+      (List.is_empty before.times.production
+       && Evidence_time.Production.equal
+            (Evidence_time.Index.production before.times ~producer:"opensta")
+            Unknown)
+      "Missing production time was not unknown";
+    require
+      (Option.is_some (Evidence_time.Index.validated before.times)
+       && Option.exists
+            (Evidence_time.Index.file_modified before.times)
+            ~f:(fun (path, _) -> String.equal path before.execution_file))
+      "Provider-validated index lacks its observation times";
+    let%bind () = Clock.after (Time_float.Span.of_ms 5.) in
+    hold "index";
+    let%bind (_ : Asic.Snapshot.t) = handle service root (inspect true) in
+    let%bind () = wait_started "index" in
+    let%bind () =
+      Deferred.List.iter (List.init 3 ~f:Fn.id) ~how:`Sequential ~f:(fun _ ->
+        let%bind snapshot = handle service root Get in
+        let op = pending snapshot in
+        require
+          (String.equal op.state "executing"
+           && Asic.Pending.Activity.equal op.activity Evidence_read)
+          "Held explicit refresh did not report an evidence read";
+        require
+          (current snapshot).cached_unverified
+          "Prior evidence kept a validated label while its refresh was pending";
+        Clock.after (Time_float.Span.of_ms 20.))
+    in
+    release "index";
+    let%bind () = Service.completion service in
+    let%bind snapshot = handle service root Get in
+    let after = current snapshot in
+    require
+      (String.equal (pending snapshot).state "completed" && not after.cached_unverified)
+      "Released refresh did not complete";
+    require
+      (Asic_inspection.Index.equal
+         { after with times = Evidence_time.Index.empty }
+         { before with times = Evidence_time.Index.empty }
+       && List.equal
+            (Tuple2.equal ~eq1:String.equal ~eq2:Evidence_time.Production.equal)
+            after.times.production
+            before.times.production
+       && Option.equal
+            (Tuple2.equal ~eq1:String.equal ~eq2:Timestamp.equal)
+            (Evidence_time.Index.file_modified after.times)
+            (Evidence_time.Index.file_modified before.times))
+      "Refreshing unchanged evidence changed more than its validation time";
+    require
+      (match
+         ( Evidence_time.Index.validated before.times
+         , Evidence_time.Index.validated after.times )
+       with
+       | Some old, Some fresh -> Timestamp.compare fresh old > 0
+       | _ -> false)
+      "Refresh did not move the validation time";
+    let calls = inspection_calls () in
+    let%bind reopened = handle service root (inspect false) in
+    require
+      (not (Asic.Pending.Activity.equal (pending reopened).activity Evidence_read))
+      "Warm reopen claimed a provider read";
+    let%bind () = Service.completion service in
+    let%map reopened = handle service root Get in
+    require (inspection_calls () = calls) "Warm reopen queried the provider";
+    require
+      (Asic.Pending.Activity.equal (pending reopened).activity Evidence_cache_lookup
+       && String.equal (pending reopened).state "completed")
+      "Warm reopen was not reported as a cache lookup"
+  in
   Monitor.protect
     ~finally:(fun () ->
       List.iter [ "index"; "detail" ] ~f:(fun kind ->
@@ -495,6 +689,7 @@ let observation_generation_tests () =
            (List.hd_exn snapshot.inspection_details).text
            "verified path detail")
         "Initial validated detail was not published";
+      let%bind () = activity_and_time_tests () in
       let calls = inspection_calls () in
       let%bind () = observe_cursor 2 in
       let%bind snapshot = handle service root Get in

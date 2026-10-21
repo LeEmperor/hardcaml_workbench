@@ -120,6 +120,11 @@ remains visible underneath; Esc returns to that same view/selection.
 | Ctrl-U | Clear query |
 | Backspace | Remove the last complete code point |
 
+Contextual commands for the focused view lead the list; ones that exist but cannot
+run show a `[reason]` (for example `no run selected`) instead of disappearing
+([WB-054](features/presentation/WB-054-contextual-controls.md)). Bottom palette hints
+can be hidden with Space c p ([WB-019](features/presentation/WB-019-hideable-controls.md)).
+
 Selection clamps at the list ends. Matched characters are highlighted separately
 from the selected row. Alias/ID-only matches show their matching field as context.
 ASCII matching ignores case; other Unicode scalars match exactly. Query edits keep

@@ -42,19 +42,34 @@ def main():
         for combo in ("11", "10", "01", "00"):
             run("hints-write", state, combo)
             run("hints-read", state, combo)
-        # A schema 1 file written before the hint choices existed stays readable.
+        # Schema 2 (before WB-048 tile appearance) and schema 1 (before WB-019
+        # hints) files stay readable; missing fields inherit.
+        assert b"(schema_version 3)" in original and b"tile_appearance" in original
+        run("headers-write")
+        current = files[0].read_bytes()
+        assert b"(tile_appearance ())" in current
+        legacy_v2 = re.sub(rb"\s*\(tile_appearance \(\)\)", b"", current).replace(
+            b"(schema_version 3)", b"(schema_version 2)"
+        )
+        assert b"tile_appearance" not in legacy_v2 and b"(schema_version 2)" in legacy_v2
+        files[0].write_bytes(legacy_v2)
+        run("read-legacy", state, "2")
         legacy = re.sub(
-            rb"\s*\((main|palette)_hints (true|false)\)", b"", files[0].read_bytes()
+            rb"\s*\((main|palette)_hints (true|false)\)", b"", legacy_v2
         ).replace(b"(schema_version 2)", b"(schema_version 1)")
         assert b"hints" not in legacy and b"(schema_version 1)" in legacy
         files[0].write_bytes(legacy)
-        run("read-legacy")
+        run("read-legacy", state, "1")
         run("write")
         run("read")
 
-        unknown_version = original.replace(b"(schema_version 2)", b"(schema_version 99)")
+        unknown_version = original.replace(b"(schema_version 3)", b"(schema_version 99)")
+        # A schema 3 file missing its required appearance structure is rejected.
+        cut = original.index(b"(tile_appearance")
+        missing_appearance = original[:cut].rstrip() + b")\n"
+        assert b"(tile_headers" in missing_appearance
         assert unknown_version != original
-        for malformed in (b"(", unknown_version, b" " * 65537):
+        for malformed in (b"(", unknown_version, missing_appearance, b" " * 65537):
             files[0].write_bytes(malformed)
             run("malformed")
             assert files[0].read_bytes() == malformed

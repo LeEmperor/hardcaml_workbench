@@ -3,6 +3,7 @@ open Hardcaml_workbench_protocol
 module P = Terminal_presentation.Presentation_preferences
 module Host = Terminal_presentation.Workspace_host
 module W = Workspace
+module T = Terminal_presentation.Tile_presentation
 
 let choose host id =
   let command =
@@ -39,6 +40,26 @@ let () =
     |> fun host ->
     let host, save = choose host "tile.headers" in
     assert save;
+    (* WB-048: every persisted appearance field, through the production catalog. *)
+    let host =
+      List.fold
+        [ "tile.presentation.title"
+        ; "tile.presentation.badge.hidden"
+        ; "tile.presentation.hints"
+        ; "tile.presentation.frame"
+        ; "tile.presentation.padding"
+        ; "tile.presentation.rows.more"
+        ; "tile.presentation.rows.more"
+        ]
+        ~init:host
+        ~f:(fun host id ->
+          let host, save = choose host id in
+          assert save;
+          host)
+    in
+    (* Selection/data choices stay local: not saved, not restored. *)
+    let host, save = choose host "tile.presentation.run-reference" in
+    assert (not save);
     let local = Host.local host tile.id in
     Host.set_local host tile.id { local with filter = "not-persistent"; scroll = 23 }
   in
@@ -55,6 +76,11 @@ let () =
         Bool.equal
         (Host.local restored tile.id).presentation.header
         (Host.local expected tile.id).presentation.header);
+    let saved = (Host.local expected tile.id).presentation in
+    assert (Option.is_some saved.run_reference);
+    assert (
+      T.equal_overrides (Host.local restored tile.id).presentation (T.persisted saved));
+    assert (Option.is_some saved.title && Option.is_some saved.run_selector_rows);
     assert (String.is_empty (Host.local restored tile.id).filter);
     assert ((Host.local restored tile.id).scroll = 0);
     assert (Option.equal W.Snapshot.equal restored.registry (Some registry));
@@ -62,7 +88,7 @@ let () =
       { registry with session_id = W.Session_id.of_string "new-session" }
     in
     let replaced = P.apply preferences (Host.receive Host.empty replacement) in
-    assert (Option.is_none (Host.local replaced tile.id).presentation.header);
+    assert (T.equal_overrides (Host.local replaced tile.id).presentation T.inherit_);
     assert (not replaced.chrome);
     assert (
       Option.is_none (P.load ~state_directory ~project_key:"other-project/inherited"))
@@ -71,22 +97,22 @@ let () =
     let restored, pending =
       P.receive (Some preferences) (P.apply preferences host) registry
     in
-    let restored, save = choose restored "tile.presentation.title" in
-    assert (not save);
+    let restored, save = choose restored "tile.presentation.padding" in
+    assert save;
     let reset, save = choose restored "tile.presentation.reset" in
     assert save;
     let polled, pending =
       P.receive pending reset { registry with revision = registry.revision + 1 }
     in
     assert (Option.is_none pending);
-    assert (Option.is_none (Host.local polled tile.id).presentation.header);
+    assert (T.equal_overrides (Host.local polled tile.id).presentation T.inherit_);
     P.save ~state_directory (P.capture ~project_key polled)
   | "read-reset" ->
     let preferences = Option.value_exn (P.load ~state_directory ~project_key) in
     assert (List.is_empty preferences.tile_headers);
+    assert (List.is_empty (Option.value_exn preferences.tile_appearance));
     let restored = P.apply preferences host in
-    assert (Option.is_none (Host.local restored tile.id).presentation.header);
-    assert (Option.is_none (Host.local restored tile.id).presentation.title);
+    assert (T.equal_overrides (Host.local restored tile.id).presentation T.inherit_);
     let inherited = { host with appearance = expected.appearance } in
     assert (
       Bool.equal (Host.policy restored tile).header (Host.policy inherited tile).header);
@@ -109,14 +135,35 @@ let () =
       (* Hint choices never alter the existing global chrome choice. *)
       assert (not restored.chrome);
       assert (Host.equal_layout_mode restored.layout_mode expected.layout_mode))
+  | "headers-write" ->
+    (* Header only, so the file has an empty appearance list for the legacy rewrite. *)
+    let local = Host.local expected tile.id in
+    P.save
+      ~state_directory
+      (P.capture
+         ~project_key
+         (Host.set_local
+            expected
+            tile.id
+            { local with
+              presentation = { T.inherit_ with header = local.presentation.header }
+            }))
   | "read-legacy" ->
+    (* argv.(3) is the legacy schema version written by the test (1 or 2). *)
+    let version = Int.of_string argv.(3) in
     let preferences = Option.value_exn (P.load ~state_directory ~project_key) in
-    assert (preferences.schema_version = 1);
+    assert (preferences.schema_version = version);
+    assert (Option.is_none preferences.tile_appearance);
     let restored =
       P.apply preferences { host with main_hints = false; palette_hints = false }
     in
     assert (not restored.chrome);
-    assert (restored.main_hints && restored.palette_hints)
+    assert (restored.main_hints && restored.palette_hints);
+    (* Missing appearance fields inherit; the legacy header choice is kept. *)
+    assert (
+      T.equal_overrides
+        (Host.local restored tile.id).presentation
+        { T.inherit_ with header = (Host.local expected tile.id).presentation.header })
   | "missing" -> assert (Option.is_none (P.load ~state_directory ~project_key))
   | "malformed" ->
     let path = P.path ~state_directory ~project_key in

@@ -45,6 +45,7 @@ module Stored = struct
     ; index : (string * string) list
     ; terminal_attempts : (string * string) list [@sexp.default []]
     ; finalizations : Finalization_stored.t list [@sexp.default []]
+    ; stage_starts : (string * (string * Timestamp.t) list) list [@sexp.default []]
     }
   [@@deriving sexp]
 end
@@ -141,6 +142,7 @@ type project =
   ; mutable index : (string * string) list
   ; mutable terminal_attempts : (string * string) list
   ; mutable finalizations : Finalization_stored.t list
+  ; mutable stage_starts : (string * (string * Timestamp.t) list) list
   ; mutable artifacts : Asic_artifact.Reference.t list
   ; mutable artifact_pages : Asic_artifact.Page.t list
   ; mutable artifact_byte_pages : Asic_artifact.Byte_page.t list
@@ -245,6 +247,7 @@ let save_registry ?reservation t p =
         ; index = p.index
         ; terminal_attempts = p.terminal_attempts
         ; finalizations = p.finalizations
+        ; stage_starts = p.stage_starts
         }
       in
       let data = Sexp.to_string (Stored.sexp_of_t stored) in
@@ -323,6 +326,7 @@ let load_project t ~root ~environment =
     ; index = []
     ; terminal_attempts = []
     ; finalizations = []
+    ; stage_starts = []
     ; artifacts = []
     ; artifact_pages = []
     ; artifact_byte_pages = []
@@ -381,10 +385,29 @@ let load_project t ~root ~environment =
        p.registry_writable <- false;
        p.cache_error <- Some "Incompatible ASIC registry")
      else (
-       p.runs <- s.runs;
+       p.runs
+       <- List.map s.runs ~f:(fun r ->
+            { r with
+              execution_timing = Execution_timing.stopped r.execution_timing
+            ; stages =
+                List.map r.stages ~f:(fun stage ->
+                  { stage with
+                    execution_timing = Execution_timing.stopped stage.execution_timing
+                  })
+            });
        p.submissions <- s.submissions;
        p.index <- s.index;
        p.terminal_attempts <- s.terminal_attempts;
+       p.stage_starts
+       <- List.filter_map p.runs ~f:(fun r ->
+            Option.map
+              (List.Assoc.find s.stage_starts r.run.id ~equal:String.equal)
+              ~f:(fun starts ->
+                ( r.run.id
+                , List.filter_map Public.canonical_stages ~f:(fun id ->
+                    Option.map
+                      (List.Assoc.find starts id ~equal:String.equal)
+                      ~f:(fun at -> id, at)) )));
        p.finalizations
        <- List.map s.finalizations ~f:(fun f ->
             (* Older records have only an undifferentiated error. Preserve it as a stable
@@ -398,6 +421,7 @@ let load_project t ~root ~environment =
               value =
                 { f.value with
                   owned = false
+                ; execution_timing = Execution_timing.stopped f.value.execution_timing
                 ; state =
                     (if List.mem
                           [ "pending"; "executing" ]
@@ -509,6 +533,7 @@ let register t (p : project) ?selection (reference : Asic.Reference.t) =
       ; execution_file = None
       ; error = None
       ; stages = []
+      ; execution_timing = None
       }
     in
     replace_run p r;
@@ -617,6 +642,27 @@ let observe_unlocked t p cancel (run : Run_ref.t) =
          Adapter.inspect c ~root ~environment r.reference))
   in
   let next, final = Public.inspection r ~cursor inspection in
+  let next =
+    Public.updates_timing
+      next
+      ~writer_active:(Poly.equal (Public.field "writer_active" inspection) (`Bool true))
+      updates
+  in
+  let starts =
+    List.fold
+      (Public.stage_start_events updates)
+      ~init:
+        (Option.value
+           (List.Assoc.find p.stage_starts run.id ~equal:String.equal)
+           ~default:[])
+      ~f:(fun starts (id, at) -> List.Assoc.add starts ~equal:String.equal id at)
+  in
+  let next =
+    Public.with_stage_starts
+      next
+      starts
+      ~writer_active:(Poly.equal (Public.field "writer_active" inspection) (`Bool true))
+  in
   Public.require
     (not (Deferred.is_determined cancel))
     "ASIC observation stopped; reconnect with Observe";
@@ -651,6 +697,7 @@ let observe_unlocked t p cancel (run : Run_ref.t) =
   if current.cursor <= next.cursor
   then (
     replace_run p next;
+    p.stage_starts <- List.Assoc.add p.stage_starts ~equal:String.equal run.id starts;
     if not (Option.equal String.equal current.execution_file next.execution_file)
     then
       p.inspections
@@ -688,7 +735,24 @@ let observe_unlocked t p cancel (run : Run_ref.t) =
 ;;
 
 let observe t p cancel (run : Run_ref.t) =
-  serialized p ("observe:" ^ run.Run_ref.id) (fun () -> observe_unlocked t p cancel run)
+  serialized p ("observe:" ^ run.Run_ref.id) (fun () ->
+    let%bind result = Monitor.try_with (fun () -> observe_unlocked t p cancel run) in
+    match result with
+    | Ok final -> return final
+    | Error exn ->
+      let r = find_run p run in
+      replace_run
+        p
+        { r with
+          execution_timing = Execution_timing.stopped r.execution_timing
+        ; stages =
+            List.map r.stages ~f:(fun stage ->
+              { stage with
+                execution_timing = Execution_timing.stopped stage.execution_timing
+              })
+        };
+      let%bind () = persist t p in
+      raise exn)
 ;;
 
 let materialize_unlocked ?attempt t p cancel (run : Run_ref.t) =
@@ -885,6 +949,7 @@ let snapshot p : Asic.Snapshot.t =
                ; state = "reserving"
                ; run = None
                ; error = None
+               ; activity = Unreported
                }))
       @ List.filter_map p.submissions ~f:(fun (key, _, id) ->
         if Hashtbl.mem p.tasks ("run:" ^ key) || Hashtbl.mem p.reservations key
@@ -902,6 +967,7 @@ let snapshot p : Asic.Snapshot.t =
                 Some
                   "Submission reserved; execution ownership unavailable. Observe \
                    registered reference; never relaunch implicitly."
+            ; activity = Unreported
             })
       @ List.filter_map p.finalizations ~f:(fun f ->
         let key = "finalize:" ^ f.value.key in
@@ -914,9 +980,17 @@ let snapshot p : Asic.Snapshot.t =
             ; state = f.value.state
             ; run = Some f.value.run
             ; error = f.value.error
+            ; activity = Unreported
             })
   ; summaries = Hashtbl.data p.hot
-  ; finalizations = List.map p.finalizations ~f:(fun f -> f.value)
+  ; finalizations =
+      List.map p.finalizations ~f:(fun f ->
+        if f.value.owned
+        then f.value
+        else
+          { f.value with
+            execution_timing = Execution_timing.stopped f.value.execution_timing
+          })
   ; artifacts = p.artifacts
   ; artifact_pages = p.artifact_pages
   ; artifact_byte_pages = p.artifact_byte_pages
@@ -942,7 +1016,14 @@ let schedule t p ~key ~kind ~execution f =
     let task =
       { cancel = Ivar.create ()
       ; completion = Deferred.unit
-      ; pending = { Asic.Pending.key; kind; state = "pending"; run = None; error = None }
+      ; pending =
+          { Asic.Pending.key
+          ; kind
+          ; state = "pending"
+          ; run = None
+          ; error = None
+          ; activity = Unreported
+          }
       }
     in
     Hashtbl.set p.tasks ~key ~data:task;
@@ -1262,6 +1343,10 @@ let inspect_owned_finalization t p cancel key =
                   (Public.supplied_string (field "phase" receipt))
                   ~f:(fun s -> String.prefix s 4096)
             ; operation_status = Some status
+            ; execution_timing =
+                Public.receipt_timing
+                  ~running:((not terminal) && current.value.owned)
+                  receipt
             ; acceptance =
                 (if terminal && not (Poly.equal (field "results" receipt) `Null)
                  then current.value.acceptance
@@ -1397,7 +1482,14 @@ let launch_finalization t p key task =
   let%bind result in
   Ivar.fill_if_empty finished ();
   let%bind polling_result = Monitor.try_with (fun () -> !polling) in
-  update_finalization p key (fun f -> { f with value = { f.value with owned = false } });
+  update_finalization p key (fun f ->
+    { f with
+      value =
+        { f.value with
+          owned = false
+        ; execution_timing = Execution_timing.stopped f.value.execution_timing
+        }
+    });
   (* Nonzero acceptance still publishes a valid receipt/results. Process outcome is kept
      in error/pending independently of the receipt's status and acceptance verdict. *)
   let%bind inspection =
@@ -1493,6 +1585,7 @@ let reserve_finalization t p ~key ~run ~execution_file ~acceptance =
             ; acceptance = None
             ; error = None
             ; owned = true
+            ; execution_timing = None
             }
         ; acceptance
         ; execution_hash = None
@@ -1581,7 +1674,7 @@ let inspection_hash t p cancel registered execution_file =
     In_thread.run (fun () -> Inspection.execution_hash ~registered ~execution_file))
 ;;
 
-let load_inspection t p cancel ~run ~domain ~stage ~refresh =
+let load_inspection t p cancel ~run ~domain ~stage ~refresh ~on_read =
   serialized p "inspection-publication" (fun () ->
     let registered = find_run p run in
     let execution_file =
@@ -1590,6 +1683,7 @@ let load_inspection t p cancel ~run ~domain ~stage ~refresh =
         ~message:"No registered execution_file; Observe first"
     in
     let fetch () =
+      on_read ();
       p.inspections
       <- List.map p.inspections ~f:(fun index ->
            if inspection_matches index ~run ~domain ~stage
@@ -1627,6 +1721,11 @@ let load_inspection t p cancel ~run ~domain ~stage ~refresh =
       Public.require
         (String.equal after execution_sha256)
         "Execution bytes changed during inspection";
+      let validated_at = Timestamp.of_time_ns (Time_ns.now ()) in
+      let%bind index =
+        In_thread.run (fun () ->
+          Inspection.observe_times ~execution_file ~validated_at index)
+      in
       let%map () =
         Throttle.enqueue t.queries (fun () ->
           check_inspection_current p cancel registered;
@@ -1761,7 +1860,13 @@ let handle_operation t p operation =
        Hashtbl.set p.inspection_refreshes ~key ~data:requested;
        (try
           schedule t p ~key ~kind:"inspection" ~execution:false (fun task ->
-            task.pending <- { task.pending with run = Some run };
+            (* Only a provider query is reported as an evidence read; a warm reopen
+               reports a cache lookup until (unless) it falls back to the provider. *)
+            task.pending
+            <- { task.pending with
+                 run = Some run
+               ; activity = (if !requested then Evidence_read else Evidence_cache_lookup)
+               };
             Monitor.protect
               ~finally:(fun () ->
                 Hashtbl.remove p.inspection_refreshes key;
@@ -1774,7 +1879,9 @@ let handle_operation t p operation =
                   ~run
                   ~domain
                   ~stage
-                  ~refresh:requested))
+                  ~refresh:requested
+                  ~on_read:(fun () ->
+                    task.pending <- { task.pending with activity = Evidence_read })))
         with
         | exn ->
           Hashtbl.remove p.inspection_refreshes key;
@@ -1792,7 +1899,7 @@ let handle_operation t p operation =
       ~kind:"inspection-detail"
       ~execution:false
       (fun task ->
-         task.pending <- { task.pending with run = Some run };
+         task.pending <- { task.pending with run = Some run; activity = Evidence_read };
          let cancel = Ivar.read task.cancel in
          let%bind result =
            Monitor.try_with (fun () ->
@@ -2058,10 +2165,21 @@ let handle_operation t p operation =
       | Refresh _ -> true
       | _ -> false
     in
-    enqueue
+    schedule
+      t
+      p
       ~key:((if refresh then "refresh:" else "summary:") ^ run.id)
       ~kind:(if refresh then "refresh" else "summary")
-      (fun cancel ->
+      ~execution:false
+      (fun task ->
+        (* An explicit Refresh revalidates retained evidence; a summary load may stay
+           offline, so it makes no evidence-read claim. *)
+        task.pending
+        <- { task.pending with
+             run = Some run
+           ; activity = (if refresh then Evidence_read else Unreported)
+           };
+        let cancel = Ivar.read task.cancel in
         serialized p ("summaryop:" ^ run.id) (fun () ->
           let%bind result =
             Monitor.try_with (fun () ->
@@ -2238,13 +2356,81 @@ let handle_operation t p operation =
               (invoke p (fun c ~root ~environment ->
                  Adapter.run c ~root ~environment preview)))
         in
-        (match result with
-         | Ok _ -> ()
-         | Error _ ->
-           Option.iter !allocated ~f:(fun run ->
-             Option.iter
-               (Hashtbl.find p.tasks (observation_key run))
-               ~f:(fun observer -> Ivar.fill_if_empty observer.cancel ())));
+        (* EOF (including nonzero exit) is not provider stage evidence. Retire and join
+           the polling reader before a fresh, bounded reconciliation: otherwise its
+           cancelled in-flight read can discard the producer's last records or overwrite
+           the reconciled state with a late cancellation error. *)
+        let%bind () =
+          match !allocated with
+          | None -> Deferred.unit
+          | Some run ->
+            let observer = Hashtbl.find p.tasks (observation_key run) in
+             Option.iter observer ~f:(fun observer ->
+              Ivar.fill_if_empty observer.cancel ());
+            let%bind () =
+               Option.value_map observer ~default:Deferred.unit ~f:(fun o -> o.completion)
+             in
+             let already_materialized =
+               Option.value_map observer ~default:false ~f:(fun o ->
+                 String.equal o.pending.state "completed")
+             in
+            (* Deliberately independent of the execution cancellation/deadline: an
+               interrupted producer may have recorded its terminal truth during its
+               termination grace. These queries only read the retained reference. *)
+            let final_cancel = Clock.after (Time_float.Span.of_sec 90.) in
+            let%bind reconciled =
+              Monitor.try_with (fun () ->
+                let%bind final = observe t p final_cancel run in
+                (* Inspection can race ahead of the updates cursor. One catch-up read
+                   suffices for a stopped writer; never poll a surviving writer. *)
+                let%bind final =
+                  if final then return true else observe t p final_cancel run
+                in
+                Public.require
+                  final
+                  "Final observation unavailable: provider writer still active or \
+                   terminal records unavailable; reconnect with Observe";
+                validate_delivery run;
+                if already_materialized
+                then Deferred.unit
+                else materialize t p final_cancel run)
+            in
+            (match reconciled with
+             | Ok () ->
+               Option.iter observer ~f:(fun o ->
+                 o.pending <- { o.pending with state = "completed"; error = None })
+             | Error exn ->
+               let current = find_run p run in
+               let error = "Final observation unavailable: " ^ Exn.to_string exn in
+               (* Preserve already-recorded terminal stages; never infer failure or
+                  cancellation from the owned process's exit status. *)
+               replace_run
+                 p
+                 { current with
+                   status =
+                     (if List.mem
+                           [ "allocated"; "observing" ]
+                           current.status
+                           ~equal:String.equal
+                      then "observation_unavailable"
+                      else current.status)
+                 ; error = Some error
+                 ; execution_timing = Execution_timing.stopped current.execution_timing
+                 ; stages =
+                     List.map current.stages ~f:(fun stage ->
+                       { stage with
+                         status =
+                           (match stage.status with
+                            | Running | Pending -> Unknown "observation_unavailable"
+                            | status -> status)
+                       ; execution_timing =
+                           Execution_timing.stopped stage.execution_timing
+                       })
+                 };
+               Option.iter observer ~f:(fun o ->
+                 o.pending <- { o.pending with state = "failed"; error = Some error }));
+            Deferred.unit
+        in
         let%bind () = persist t p in
         match result with
         | Error exn -> raise exn

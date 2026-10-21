@@ -298,7 +298,12 @@ let handle_post t ~path ~headers ~body =
         (match decode body Asic.Request.t_of_sexp with
          | Error error -> boundary_error `Bad_request error.kind "malformed ASIC request"
          | Ok request ->
-           operation_response (Service.asic t.service request) Asic.Response.sexp_of_t)
+           operation_response
+             (Service.asic t.service request)
+             (Asic.Evidence_metadata.sexp_of_response
+                ~execution_timing_header_value:
+                  (Cohttp.Header.get headers Execution_timing.header)
+                ~header_value:(Cohttp.Header.get headers Asic.Evidence_metadata.header)))
       | Ok body when String.equal path Simulation.rpc_path ->
         (match decode body Simulation.Request.t_of_sexp with
          | Error error ->
@@ -306,7 +311,9 @@ let handle_post t ~path ~headers ~body =
          | Ok request ->
            operation_response
              (Service.simulation t.service request)
-             Simulation.Response.sexp_of_t)
+             (Simulation.Response.sexp_of_negotiated
+                ~execution_timing_header_value:
+                  (Cohttp.Header.get headers Execution_timing.header)))
       | Ok _ -> boundary_error `Not_found Not_found "unknown operation")
   | _ ->
     boundary_error

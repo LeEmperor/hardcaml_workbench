@@ -15,7 +15,7 @@ estimate_scope: incremental
 origin: owner-intake
 tags: [project-preparation, status, tiles]
 depends_on: []
-related: []
+related: [WB-069, WB-001]
 ---
 
 # WB-004 — Core preparation status
@@ -23,6 +23,10 @@ related: []
 ## Request
 Original size: **Ticket**. Show core build, bundle-emission and verification
 status in a useful tile, optionally with a stage-checklist-like presentation.
+
+**Owner addition, 2026-10-20:** bundle emission / OCaml elaboration should be its
+own stage. It is now a named checklist row ahead of `synthesis`, rather than only
+part of a separate preparation tile.
 
 ## Current baseline
 Generic build/test jobs and project-driver RTL generation already exist.
@@ -47,6 +51,9 @@ Do not infer bundle emission from an arbitrary successful Dune command.
 3. Running, failure and cancellation replace prior status without hiding its history.
 4. Preparation rows cannot mark canonical physical stages complete.
 5. Existing job logs/artifacts are reachable without resubmitting the operation.
+6. The stage checklist shows an **elaboration / bundle emission** row before
+   `synthesis`, labelled as preparation. Its status comes only from the real
+   generate-RTL/bundle operation.
 
 ## Dependencies
 Required: delivered supervisor, driver and tile-host contracts; no new ticket blocker.
@@ -57,7 +64,9 @@ Related: none required for this bounded projection.
 Exclude creation of bundle producers or additional simulation adapters.
 
 ## Assumptions and decisions needed
-Default: one preparation tile with explicit capability gaps.
+Default: one preparation tile with explicit capability gaps, plus the elaboration
+row on the checklist (2026-10-20). Agree that row's order with
+[WB-069](../evidence/WB-069-timing-checklist-stage.md)'s timing row.
 TBD: which existing project/provider operation authoritatively means “bundle emitted”;
 do not invent a universal bundle lifecycle before that contract is selected.
 

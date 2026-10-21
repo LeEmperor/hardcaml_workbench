@@ -8,7 +8,18 @@ let supports = function
   | _ -> false
 ;;
 
-let rows ?(compact = false) ?(freshness = true) ?stage_id ~kind ~run ~summary ~stages () =
+let rows
+  ?(now = Time_ns.now ())
+  ?(finalizations = [])
+  ?(compact = false)
+  ?(freshness = true)
+  ?stage_id
+  ~kind
+  ~run
+  ~summary
+  ~stages
+  ()
+  =
   let show_freshness = freshness in
   let stage_id = Option.value stage_id ~default:kind in
   let summary =
@@ -20,8 +31,8 @@ let rows ?(compact = false) ?(freshness = true) ?stage_id ~kind ~run ~summary ~s
       [ "Source digest: " ^ s.source_digest
       ; "Producer: " ^ s.producer
       ; "Execution file: " ^ s.execution_file
-      ; "Observed at: " ^ s.observed_at
       ]
+      @ Evidence_time_view.summary_lines s.observed_at
       @ Option.value_map s.terminal ~default:[] ~f:(fun t ->
         [ "Finalization attempt: " ^ t.attempt
         ; "Results digest: " ^ t.results_digest
@@ -35,12 +46,40 @@ let rows ?(compact = false) ?(freshness = true) ?stage_id ~kind ~run ~summary ~s
     match
       List.filter stages ~f:(fun (s : Asic.Stage.t) -> String.equal s.id stage_id)
     with
-    | [ stage ] -> O.asic_stage_row ~run ~selected:false stage
+    | [ stage ] -> { (O.asic_stage_row ~now ~run ~selected:false stage) with time = None }
     | stages ->
       plain
         "Stage"
         (if List.is_empty stages then "not reported" else "ambiguous duplicate stage IDs")
   in
+  let timing, scope =
+    if String.equal kind "finalization"
+    then (
+      match
+        List.filter finalizations ~f:(fun (f : Asic.Finalization.t) ->
+          Run_ref.equal f.run run)
+      with
+      | [ f ] -> f.execution_timing, "Finalization receipt"
+      | [] ->
+        ( Option.bind summary ~f:(fun s ->
+            Option.bind s.terminal ~f:(fun t -> t.execution_timing))
+        , "Finalization terminal result" )
+      | _ -> None, "Finalization receipts ambiguous")
+    else (
+      match
+        List.filter stages ~f:(fun (s : Asic.Stage.t) -> String.equal s.id stage_id)
+      with
+      | [ s ] -> s.execution_timing, "Stage: " ^ stage_id
+      | _ -> None, "Stage: " ^ stage_id ^ " (no exact unique timing)")
+  in
+  let time_value = Execution_time_view.value ~now timing in
+  let time_value =
+    if String.equal time_value "unknown"
+       && List.mem [ "timing"; "checks" ] kind ~equal:String.equal
+    then "unknown (stage " ^ stage_id ^ ")"
+    else time_value
+  in
+  let time = plain ~extra:[ "Execution time scope: " ^ scope ] "Time" time_value in
   let freshness =
     match summary with
     | None -> plain "Evidence" "not loaded for this run"
@@ -160,7 +199,7 @@ let rows ?(compact = false) ?(freshness = true) ?stage_id ~kind ~run ~summary ~s
     else []
   in
   if not compact
-  then (stage :: freshness_rows) @ evidence
+  then (stage :: time :: freshness_rows) @ evidence
   else (
     let evidence =
       let failures, others =
@@ -178,8 +217,8 @@ let rows ?(compact = false) ?(freshness = true) ?stage_id ~kind ~run ~summary ~s
         })
     in
     match evidence with
-    | [] -> freshness_rows @ [ stage ]
-    | first :: rest -> (first :: stage :: rest) @ freshness_rows)
+    | [] -> [ stage; time ] @ freshness_rows
+    | first :: rest -> (first :: stage :: time :: rest) @ freshness_rows)
 ;;
 
 let%test_unit "typed metrics preserve zero, units, missing and nonfinite without a \
@@ -206,6 +245,7 @@ let%test_unit "typed metrics preserve zero, units, missing and nonfinite without
     ; metrics
     ; checks = []
     ; evidence = "{}"
+    ; execution_timing = None
     }
   in
   let summary metrics : Asic.Summary.t =
@@ -240,7 +280,9 @@ let%test_unit "typed metrics preserve zero, units, missing and nonfinite without
           ~stages:[]
           ()
       in
-      let r = List.nth_exn rs 2 in
+      let r =
+        List.find_exn rs ~f:(fun r -> String.is_prefix r.label ~prefix:"Aggregate ")
+      in
       [%test_result: string] r.value ~expect:expected;
       [%test_result: O.Role.t] r.role ~expect:Muted;
       assert (Option.is_none r.status);
@@ -251,7 +293,9 @@ let%test_unit "typed metrics preserve zero, units, missing and nonfinite without
         ]
         ~f:(fun text -> assert (List.mem r.details text ~equal:String.equal)));
   let rs = rows ~kind:"finalization" ~run ~summary:(Some (summary [])) ~stages:[] () in
-  let acceptance = List.nth_exn rs 2 in
+  let acceptance =
+    List.find_exn rs ~f:(fun r -> String.equal r.label "Acceptance (agg.)")
+  in
   [%test_result: string] acceptance.value ~expect:"not_evaluated";
   [%test_result: O.Role.t] acceptance.role ~expect:Warning;
   let failed : Asic.Stage.t =
@@ -261,6 +305,7 @@ let%test_unit "typed metrics preserve zero, units, missing and nonfinite without
     ; requested = true
     ; reason = Some "tool failed"
     ; action = None
+    ; execution_timing = None
     }
   in
   let compact =
@@ -331,13 +376,13 @@ let%test_unit "typed compact facts fence run, availability and acceptance" =
   in
   let get kind summary = rows ~kind ~run ~summary ~stages:[] () in
   let rs = get "synthesis" (Some summary) in
-  assert (String.equal (List.nth_exn rs 2).value "0");
-  assert (String.equal (List.nth_exn rs 1).value "cached/unverified");
+  assert (String.equal (List.nth_exn rs 3).value "0");
+  assert (String.equal (List.nth_exn rs 2).value "cached/unverified");
   assert (List.for_all rs ~f:(fun r -> Option.is_none r.status));
   let other = { summary with run = { run with id = "foreign" } } in
-  assert (List.length (get "synthesis" (Some other)) = 2);
+  assert (List.length (get "synthesis" (Some other)) = 3);
   let finalization = get "finalization" (Some summary) in
-  assert (String.equal (List.nth_exn finalization 2).value "not imported");
+  assert (String.equal (List.nth_exn finalization 3).value "not imported");
   assert (List.for_all finalization ~f:(fun r -> not (String.equal r.value "pass")))
 ;;
 
@@ -390,4 +435,44 @@ let%test_unit "compact evidence uses actual panel content bounds at accepted ter
             content
         in
         assert (View.width view = g.width && View.height view = g.height)))
+;;
+
+let%test_unit "execution duration never guesses aliases or ambiguous stage identities" =
+  let stage id seconds : Asic.Stage.t =
+    { id
+    ; name = "Same display label"
+    ; requested = true
+    ; status = Completed
+    ; reason = None
+    ; action = None
+    ; execution_timing = Execution_timing.make ~measured_seconds:seconds ~running:false ()
+    }
+  in
+  let stages =
+    [ stage "synthesis" 127.
+    ; stage "placement" 14.
+    ; stage "routing" 61.
+    ; stage "signoff" 3723.
+    ]
+  in
+  let time ?stage_id kind stages =
+    rows
+      ~now:Time_ns.epoch
+      ?stage_id
+      ~kind
+      ~run:Fs0_fixture.run_a
+      ~summary:None
+      ~stages
+      ()
+    |> List.find_exn ~f:(fun r -> String.equal r.O.label "Time")
+  in
+  List.iter
+    [ "synthesis", "2m 07s"; "placement", "14s"; "routing", "1m 01s" ]
+    ~f:(fun (kind, expected) -> assert (String.equal (time kind stages).value expected));
+  assert (String.equal (time "timing" stages).value "unknown (stage timing)");
+  assert (String.equal (time "checks" stages).value "unknown (stage checks)");
+  assert (String.equal (time "finalization" stages).value "unknown");
+  assert (String.equal (time "synthesis" (stage "synthesis" 0. :: stages)).value "unknown");
+  assert (String.equal (time ~stage_id:"Synthesis" "synthesis" stages).value "unknown");
+  assert (String.equal (time ~stage_id:"routing" "synthesis" stages).value "1m 01s")
 ;;

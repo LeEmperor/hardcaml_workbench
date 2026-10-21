@@ -94,6 +94,11 @@ type action =
   | Testing_launch of W.Tile_id.t * testing_launch
   | Testing_launch_unavailable of string
   | Testing_accept of W.Tile_id.t
+  (* WB-054: close the focused tile's inspector; replay one existing inspector key; or
+     explain why a contextual action that exists is unavailable right now. *)
+  | Close_inspector
+  | Inspector_input of W.Tile_id.t * Inspection_view.input
+  | Unavailable of string
 
 type command =
   { id : string
@@ -509,8 +514,9 @@ let set_filter t id filter =
   | _ -> t
 ;;
 
-(** The catalog captures sparse overrides. Only a changed header is durable; the other
-    fields remain local even when they travel in the same action. *)
+(** The catalog captures sparse overrides. A change to any persisted appearance field
+    ([T.persisted]) is durable; run reference/freshness remain local even when they travel
+    in the same action. *)
 let set_presentation t id presentation =
   if not
        (Option.exists t.registry ~f:(fun registry ->
@@ -519,7 +525,9 @@ let set_presentation t id presentation =
   else (
     let previous = local t id in
     ( set_local t id { previous with presentation; scroll = 0 }
-    , not (Option.equal Bool.equal previous.presentation.header presentation.header) ))
+    , not
+        (T.equal_overrides (T.persisted previous.presentation) (T.persisted presentation))
+    ))
 ;;
 
 let timing_epoch registry workspace =
@@ -668,6 +676,7 @@ let%test_unit "stage cursor uses stable IDs within exact runs and resets stale i
     ; requested = true
     ; reason = None
     ; action = None
+    ; execution_timing = None
     }
   in
   let a = stage "a"
@@ -713,6 +722,7 @@ let%test_unit "stage planning uses only advertised selection and never resumes a
     ; requested = true
     ; reason = Some "provider reason"
     ; action = Some selection
+    ; execution_timing = None
     }
   in
   (match stage_plan (Some stage) with
@@ -1522,7 +1532,14 @@ let%test_unit "launch catalog captures exact ready preview and explains pending 
     { Fs0_fixture.snapshot with
       preview = Some preview
     ; operations =
-        [ { key; kind = "plan"; state = "completed"; run = None; error = None } ]
+        [ { key
+          ; kind = "plan"
+          ; state = "completed"
+          ; run = None
+          ; error = None
+          ; activity = Unreported
+          }
+        ]
     }
   in
   let ready =
@@ -2080,7 +2097,8 @@ let horizontal_stages t tile =
 ;;
 
 (** Presentation preferences are client-local, keyed by stable workspace/tile IDs. They
-    survive polling/workspace switches, not client restart. No daemon writes. *)
+    survive polling/workspace switches; tile appearance overrides also survive client
+    restart via [Presentation_preferences]. No daemon writes. *)
 let policy t (tile : W.Tile.t) =
   let density_defaults : T.t =
     { T.defaults with
@@ -2486,6 +2504,380 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
                ("Move focused tile to " ^ destination.name)
                (Move_tile { tile = id; workspace = destination.id }))))
   | _ -> base
+;;
+
+(* WB-054: contextual actions, explicit inspector close and breadcrumbs. Everything here
+   is derived from the focused tile's typed host state; nothing creates new routing. *)
+
+type inspector =
+  | Explorer of Inspection_view.t
+  | Artifact_browser of Artifact_view.t
+  | Timing_detail of Timing_workspace.pane * Inspection_view.t
+
+let tile_run t (tile : W.Tile.t) =
+  Option.bind t.registry ~f:(fun s ->
+    Result.ok (W.resolve_tile s tile.id) |> Option.bind ~f:(fun r -> r.run))
+;;
+
+(** The inspector the focused tile currently shows. Explorer/artifact views whose run
+    scope no longer matches the tile are hidden by the renderer, so they are not open. A
+    Timing pane counts only while its Detail/provenance reader is open. *)
+let open_inspector t =
+  Option.bind (focused t) ~f:(fun tile ->
+    let l = local t tile.id
+    and scope = tile_run t tile in
+    match
+      ( Option.bind l.inspection ~f:(fun v -> Inspection_view.reconcile_scope v ~scope)
+      , Option.bind l.artifacts ~f:(fun v -> Artifact_view.reconcile_scope v ~scope) )
+    with
+    | Some view, _ -> Some (tile, Explorer view)
+    | None, Some view -> Some (tile, Artifact_browser view)
+    | None, None ->
+      (match Timing_workspace.pane tile.kind, timing_pane t tile with
+       | Some pane, Some _ ->
+         Option.bind (timing t tile) ~f:(fun view ->
+           if Inspection_view.detail_mode view
+           then Some (tile, Timing_detail (pane, view))
+           else None)
+       | _ -> None))
+;;
+
+let no_inspector = "no inspector open on the focused tile"
+
+(** Close the focused tile's inspector in one step (Esc keeps its step-by-step behavior).
+    Return focus: an explorer or artifact browser belongs to the focused tile, so focus
+    stays there; a Timing reader returns focus to the workspace's [timing-paths] tile when
+    visible. The selected row/artifact cursor, tile bindings and run selection are never
+    changed; pending detail responses are fenced by the existing generation counters. *)
+let close_inspector t =
+  match open_inspector t with
+  | None -> Error no_inspector
+  | Some (tile, Explorer view) ->
+    let l = local t tile.id in
+    Ok
+      ( set_local
+          t
+          tile.id
+          { l with
+            inspection = None
+          ; inspection_generation = Int.max l.inspection_generation view.generation
+          }
+      , sprintf "Closed %s inspector; focus stays on %s" view.domain tile.kind )
+  | Some (tile, Artifact_browser view) ->
+    let l = local t tile.id in
+    Ok
+      ( set_local
+          t
+          tile.id
+          { l with
+            artifacts = None
+          ; artifact_generation = Int.max l.artifact_generation view.generation
+          }
+      , "Closed reports/artifacts browser; focus stays on " ^ tile.kind )
+  | Some (tile, Timing_detail (pane, view)) ->
+    let closed, _, _ =
+      Timing_workspace.input
+        ~pane
+        ~scroll:(local t tile.id).scroll
+        ~width:1
+        ~height:1
+        view
+        Inspection_view.Back
+    in
+    let t = set_timing t tile closed in
+    let paths =
+      List.find (tiles t) ~f:(fun candidate ->
+        W.Workspace_id.equal candidate.workspace tile.workspace
+        && Option.equal
+             Timing_workspace.equal_pane
+             (Timing_workspace.pane candidate.kind)
+             (Some Paths))
+    in
+    Ok
+      ( { t with
+          focus = Some (Option.value_map paths ~default:tile.id ~f:(fun p -> p.id))
+        }
+      , if Option.is_some paths
+        then "Closed path detail; focus returned to timing · paths (selection kept)"
+        else "Closed path detail; selection kept" )
+;;
+
+(* Inspector keys that the explorer and Timing panes already route. *)
+let inspector_key_commands t (tile : W.Tile.t) =
+  let view, missing =
+    match open_inspector t with
+    | Some (_, Explorer view) -> Some view, None
+    | Some (_, Artifact_browser _) -> None, None
+    | Some (_, Timing_detail (_, view)) -> Some view, None
+    | None ->
+      if Option.is_none (Timing_workspace.pane tile.kind)
+      then None, None
+      else (
+        match timing t tile with
+        | Some view -> Some view, None
+        | None ->
+          ( None
+          , Some
+              (if Option.is_none (tile_run t tile)
+               then "no run selected"
+               else "no timing paths opened for this run; use Inspect timing paths") ))
+  in
+  let key id title aliases input reason =
+    let unavailable = Option.first_some missing reason in
+    command
+      ?unavailable
+      ("inspector." ^ id)
+      title
+      ("inspect explorer timing paths " ^ aliases)
+      (match unavailable with
+       | Some reason -> Unavailable reason
+       | None -> Inspector_input (tile.id, input))
+  in
+  let reason f = Option.bind view ~f in
+  match view, missing with
+  | None, None -> []
+  | _ ->
+    [ key
+        "open-detail"
+        "Inspector: Open selected row detail (Enter)"
+        "row path detail"
+        Open
+        (reason (fun v ->
+           if Option.is_none v.index
+           then Some "index not loaded yet"
+           else if Inspection_view.detail_mode v
+           then Some "detail already open; Space c x closes it"
+           else if List.is_empty (Inspection_view.visible v)
+           then Some "no rows match the current filter"
+           else if Option.is_none v.selected
+           then Some "no row selected"
+           else None))
+    ; key "refresh" "Inspector: Refresh current evidence (r)" "reload" Refresh None
+    ; key "stage" "Inspector: Next inspection stage (t)" "stage cycle" Stage None
+    ; key
+        "near"
+        "Inspector: Toggle near/violated rows (v)"
+        "slack threshold"
+        Near
+        (reason (fun v ->
+           if String.equal v.domain "timing"
+           then None
+           else Some "near/violated applies to timing paths only"))
+    ; key
+        "source"
+        "Inspector: Source metadata and diagnostics (d)"
+        "provenance info"
+        Info
+        (reason (fun v -> if v.info then Some "source view already open" else None))
+    ]
+;;
+
+(* Run-scoped tiles: reuse the existing Browse_* actions for the tile's own run. *)
+let run_context_commands t (tile : W.Tile.t) =
+  if project_scoped_kind tile.kind || String.equal tile.kind "run-selector"
+  then []
+  else (
+    let run = tile_run t tile in
+    let unavailable = if Option.is_none run then Some "no run selected" else None in
+    let action f =
+      match run with
+      | Some run -> f run
+      | None -> Unavailable "no run selected"
+    in
+    [ command
+        ?unavailable
+        "context.inspect-timing"
+        "Context: Inspect timing paths for this tile's run"
+        "investigate slack signoff"
+        (action (fun run -> Browse_inspection (run, "timing", "signoff")))
+    ; command
+        ?unavailable
+        "context.artifacts"
+        "Context: Browse reports/artifacts for this tile's run"
+        "catalog report"
+        (action (fun run -> Browse_artifacts run))
+    ])
+;;
+
+(* Testing panes: actions whose real command exists only while a selection allows it. *)
+let testing_context_commands t (tile : W.Tile.t) =
+  if not (Testing_workspace.is_pane tile.kind)
+  then []
+  else (
+    let v = simulation t tile.id in
+    let detail = Simulation_view.detail v in
+    let attempt_reason =
+      if Option.is_none v.attempt
+      then Some "no attempt selected"
+      else if Option.is_none detail
+      then Some "attempt detail not loaded"
+      else None
+    in
+    let placeholder id title reason =
+      Option.map reason ~f:(fun reason ->
+        command ~unavailable:reason id title "rerun testing" (Unavailable reason))
+    in
+    let artifact_reason =
+      match Testing_workspace.artifact (testing_state t tile.id) with
+      | Some _ -> None
+      | None -> Some (Option.value attempt_reason ~default:"no artifact selected")
+    in
+    List.filter_opt
+      [ placeholder
+          "simulation.rerun-case"
+          "Simulation: Rerun selected case (r)"
+          (Option.first_some
+             attempt_reason
+             (if Option.is_none v.case_id then Some "no case selected" else None))
+      ; placeholder
+          "simulation.rerun-failed"
+          "Simulation: Rerun all failed cases (f)"
+          (Option.first_some
+             attempt_reason
+             (Option.bind detail ~f:(fun d ->
+                if List.exists d.cases ~f:(fun c ->
+                     Simulation.Case_status.equal c.status Failed)
+                then None
+                else Some "no failed cases in this attempt")))
+      ]
+    @
+    match Testing_workspace.pane tile.kind with
+    | Some Artifacts ->
+      List.filter_opt
+        [ placeholder
+            "testing.artifact.export"
+            "Simulation: Export selected artifact (e)"
+            artifact_reason
+        ; placeholder
+            "testing.artifact.waveform"
+            "Simulation: Open selected artifact as embedded waveform (w)"
+            artifact_reason
+        ]
+    | _ -> [])
+;;
+
+(* Production selection commands, shared with catalog/keyboard regression seams. The
+   caller supplies the existing submission-key allocator; promotion retains these exact
+   command records and their captured identities. *)
+let simulation_selection_commands t (tile : W.Tile.t) ~submission_key =
+  let v = simulation t tile.id in
+  Option.value_map (Simulation_view.detail v) ~default:[] ~f:(fun d ->
+    let rerun id title cases =
+      command
+        ("simulation." ^ id)
+        ("Simulation: " ^ title)
+        "suite cases seed history"
+        (Simulation
+           ( tile.id
+           , Rerun
+               { submission_key = submission_key "simulation-rerun"
+               ; attempt_id = d.id
+               ; cases
+               } ))
+    in
+    let failed =
+      List.filter_map d.cases ~f:(fun c ->
+        if Simulation.Case_status.equal c.status Failed then Some c.case_id else None)
+    in
+    (if List.is_empty failed
+     then []
+     else
+       [ rerun "rerun-failed" "Rerun all failed (original inputs; current project)" failed
+       ])
+    @ Option.value_map v.case_id ~default:[] ~f:(fun id ->
+      [ rerun
+          "rerun-case"
+          ("Rerun case " ^ id ^ " (original inputs; current project)")
+          [ id ]
+      ])
+    @ List.concat_map d.artifacts ~f:(fun a ->
+      [ command
+          ("simulation.export." ^ a.id)
+          ("Simulation: Export exact bytes " ^ a.label)
+          "trace waveform"
+          (Simulation_export (a, false))
+      ; command
+          ("simulation.viewer." ^ a.id)
+          ("Simulation: Open external viewer " ^ a.label)
+          "trace waveform"
+          (Simulation_export (a, true))
+      ; command
+          ("simulation.waveform." ^ a.id)
+          ("Simulation: Open embedded waveform " ^ a.label)
+          "vcd wave retained full-area"
+          (Simulation_waveform a)
+      ; command
+          ("simulation.waveform-workspace." ^ a.id)
+          ("Simulation: Open Waveforms workspace " ^ a.label)
+          "vcd dedicated signals waves picker logs"
+          (Simulation_waveform_workspace a)
+      ]))
+;;
+
+(* Shared by production keyboard routing and contextual catalog ordering. *)
+let testing_shortcut t key =
+  Option.bind (focused t) ~f:(fun tile ->
+    if not (Testing_workspace.is_pane tile.kind)
+    then None
+    else (
+      match key with
+      | 'r' -> Some "simulation.rerun-case"
+      | 'f' -> Some "simulation.rerun-failed"
+      | ('e' | 'v' | 'w' | 'W') when String.equal tile.kind "simulation-artifacts" ->
+        (match Testing_workspace.artifact (testing_state t tile.id) with
+         | Some artifact ->
+           Some
+             ((match key with
+               | 'e' -> "simulation.export."
+               | 'w' -> "simulation.waveform."
+               | 'W' -> "simulation.waveform-workspace."
+               | _ -> "simulation.viewer.")
+              ^ artifact.id)
+         | None ->
+           (match key with
+            | 'e' -> Some "testing.artifact.export"
+            | 'w' -> Some "testing.artifact.waveform"
+            | _ -> None))
+      | _ -> None))
+;;
+
+(** Contextual actions for the focused view, listed first. A contextual entry never
+    replaces an existing command with the same ID. *)
+let contextual t commands =
+  let close =
+    command
+      ?unavailable:(Result.error (close_inspector t))
+      "inspector.close"
+      "Close inspector (Space c x)"
+      "dismiss leave back explorer reader artifacts detail esc"
+      Close_inspector
+  in
+  let extras =
+    close
+    :: Option.value_map (focused t) ~default:[] ~f:(fun tile ->
+      inspector_key_commands t tile
+      @ run_context_commands t tile
+      @ testing_context_commands t tile)
+  in
+  let existing id = List.find commands ~f:(fun c -> String.equal c.id id) in
+  let promoted =
+    List.map extras ~f:(fun extra -> Option.value (existing extra.id) ~default:extra)
+    @ (List.filter_map [ 'r'; 'f'; 'e'; 'w' ] ~f:(fun key ->
+         Option.bind (testing_shortcut t key) ~f:existing)
+       |> List.filter ~f:(fun c ->
+         not (List.exists extras ~f:(fun extra -> String.equal extra.id c.id))))
+  in
+  promoted
+  @ List.filter commands ~f:(fun c ->
+    not (List.exists promoted ~f:(fun extra -> String.equal extra.id c.id)))
+;;
+
+let testing_dispatch t key ~commands =
+  Option.bind (testing_shortcut t key) ~f:(fun id ->
+    Option.bind (capture t) ~f:(fun capture ->
+      Option.map
+        (List.find commands ~f:(fun command -> String.equal command.id id))
+        ~f:(fun command -> capture, command.action)))
 ;;
 
 let ranked_matches p =
@@ -3087,6 +3479,13 @@ let input t event ~commands : t * effect =
                  ( capture
                  , if Char.equal key 'h' then Toggle_main_hints else Toggle_palette_hints
                  ) ))
+        (* WB-054: explicit inspector close; also reachable over the explorer, whose key
+           routing lets the Space prefix through. *)
+        | Character 'x', 2 ->
+          let t = { t with prefix = 0 } in
+          (match capture t with
+           | None -> t, No_effect
+           | Some capture -> t, Execute (capture, Close_inspector))
         | Character '/', _ ->
           ( { t with
               editing_filter = true
@@ -3242,6 +3641,7 @@ let%test_unit "catalog reducer browses filters and captures subset without launc
           ; job = Job_id.of_string "job"
           ; suite = "fifo"
           ; seed = "42"
+          ; execution_timing = None
           ; created_at = "now"
           ; parent = None
           ; lifecycle = Finished
@@ -4163,6 +4563,7 @@ let%test_unit "actual catalog and palette can cancel an allocated owned launch b
     ; state = "executing"
     ; run = Some run
     ; error = None
+    ; activity = Unreported
     }
   in
   let snapshot : Asic.Snapshot.t =

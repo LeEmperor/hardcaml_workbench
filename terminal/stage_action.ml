@@ -50,6 +50,7 @@ let%test_unit "fresh stage resolution captures exact inputs and rejects stale ch
     ; requested = false
     ; reason = None
     ; action = None
+    ; execution_timing = None
     }
   in
   let selection : Asic.Selection.t =

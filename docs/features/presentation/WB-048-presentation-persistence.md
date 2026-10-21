@@ -3,7 +3,7 @@ id: WB-048
 title: More persistent presentation overrides
 category: presentation
 feature_sets: [FS3, FS5]
-status: partial
+status: delivered
 kind: enhancement
 priority: P2
 severity: n/a
@@ -41,11 +41,11 @@ Persisting run selections, pins, focus, scroll or provider data as presentation.
 Portable templates remain distinct from identity-scoped local preferences.
 
 ## Acceptance criteria
-- [ ] Enumerate supported fields and round-trip each explicit value and inheritance.
-- [ ] Reset stays reset after polling, reconnect and process restart.
-- [ ] Moved/retyped/removed tiles and replacement sessions reject stale overrides.
-- [ ] Existing preference files remain readable under a declared migration policy.
-- [ ] Invalid files fail visibly and safely; changes do not trigger domain operations.
+- [x] Enumerate supported fields and round-trip each explicit value and inheritance.
+- [x] Reset stays reset after polling, reconnect and process restart.
+- [x] Moved/retyped/removed tiles and replacement sessions reject stale overrides.
+- [x] Existing preference files remain readable under a declared migration policy.
+- [x] Invalid files fail visibly and safely; changes do not trigger domain operations.
 
 ## Dependencies
 Required: none; persistence and override resolution foundations are delivered.
@@ -61,7 +61,48 @@ semantics, not a new persistence engine or two separately estimated requests.
 Agree which remaining fields persist and their project/session scope before coding.
 Keep existing last-writer-wins behavior unless a separately scoped decision changes it.
 
+## Completion review — 2026-10-20
+
+**Delivered status confirmed.** Independent code review found no blocking defect in
+the persistence whitelist, sparse inheritance/reset semantics, schema 1/2/3 migration,
+session/tile/workspace/kind identity guards, or fresh-process coverage. The combined
+tree's full `dune build -j20`, `dune runtest -j20` and `dune build -j20 @lint` passed.
+This is implementation/automated-validation sign-off, not an interactive visual review.
+
 ## References
 - [Persistent presentation baseline](../../fs3_adoption.md#persistent-presentation-preferences)
 - [Preference schema](../../../terminal/presentation_preferences.ml)
 - [Override fields](../../../terminal/tile_presentation.mli)
+
+## Delivery notes
+Delivered 2026-10-19.
+
+**Persisted per-tile fields** (explicit overrides only; absent = inherited):
+header (unchanged, `tile_headers`), title, binding badge, hints, frame, padding and
+run-selector row count (new `tile_appearance`). Hints and frame are purely presentational
+explicit overrides, so they persist with the rest. **Not persisted:** run reference and
+freshness (selection/data, not appearance) stay session-local; toggling them never
+triggers a save. The split lives in `Tile_presentation.persisted`, which also drives the
+`Workspace_host.set_presentation` save decision.
+
+**Schema version 3** (`terminal/presentation_preferences.ml`):
+- adds `tile_appearance` (sparse entries keyed by tile/workspace/kind, each field
+  `[@sexp.option]`); required in v3, forbidden in v1/v2.
+- v1/v2 files keep loading; every missing appearance field inherits (header kept).
+- rejected: unknown versions, v3 without the list, v2 with it, appearance entries without
+  a session, duplicate tiles, all-absent entries, negative padding, rows < 1, bad field
+  values. Malformed/oversized files still fall back to defaults with a notice and are left
+  untouched. `save` validates through the same decoder.
+- same identity guards as headers (session/tile/workspace/kind); replacement sessions,
+  retyped/moved/removed tiles inherit. One-shot restoration and last-writer-wins unchanged.
+
+**Verification** (all via `./scripts/with-switch.sh`, serialized with flock):
+- `dune build`, `dune runtest` (new inline test "every persisted tile appearance field
+  round-trips, resets and is guarded", extended strict-schema and catalog tests),
+  `dune build @lint` pass; `@fmt` clean for touched files.
+- `python3 terminal/test_presentation_preferences_restart.py
+  _build/default/terminal/presentation_preferences_probe.exe`: fresh-process round-trip of
+  every field via the catalog, reset across restart, v2 and v1 legacy reads, v3 missing
+  structure rejected.
+- `scripts/test-fs3-adoption.py` (schema check updated to 3) and
+  `scripts/test-default-layout-restore.py` pass.

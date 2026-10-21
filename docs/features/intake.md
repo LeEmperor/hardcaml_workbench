@@ -84,3 +84,23 @@ These are not additional entries attributed to the owner's paste.
 | [WB-063](presentation/WB-063-testing-workspace.md) | FS2-F06 and existing Testing-workspace followup; cohesive investigation beyond process monitoring and catalog browsing |
 | [WB-064](infrastructure/WB-064-generic-job-detail.md) | Construction plan's deferred generic selected-job detail; structured simulation detail already exists |
 | [WB-065](infrastructure/WB-065-asic-lifecycle-coverage.md) | FS1's broader physical cancellation/reconnect/publication matrix, separate from simulator load acceptance |
+
+## Owner notes, 2026-10-20
+
+These come from notes the owner wrote down while walking. They were added after the
+original intake and its followups.
+
+| Entry | Note (lightly normalized) | Canonical ticket |
+| --- | --- | --- |
+| N01 | Tile buffers usable like a Ches buffer: visual select, repeatable commands with counts (`20 l` in Waves) | [WB-067](workspaces/WB-067-modal-tile-buffers.md) |
+| N02 | Repeated h/l in the waveform should not lag | [WB-068](verification/WB-068-waveform-cursor-stepping.md) |
+| N03 | Cursor tick scaling: distinguish per-column from per-timestep steps | [WB-068](verification/WB-068-waveform-cursor-stepping.md) |
+| N04 | Timing should be a discrete checklist step, not grouped with signoff checks/finalization | [WB-069](evidence/WB-069-timing-checklist-stage.md) |
+| N05 | Bundle emission / OCaml elaboration should be its own stage | [WB-004](project/WB-004-build-bundle-status.md) (extended) |
+| N06 | Ctrl+Backspace should work in the command palette | [WB-070](workspaces/WB-070-text-input-word-deletion.md) |
+| N07 | simulation-catalog should not be in Timing; Timing later; dedicated Synthesis workspace before it; Testing/Waveforms before flow items | [WB-071](workspaces/WB-071-workspace-order-synthesis.md) |
+| N08 | Split the workspaces into their own source directories | [WB-072](workspaces/WB-072-per-workspace-source-directories.md) |
+| N09 | Signals tile: visual block select and mass enable/disable, Vim-style | [WB-067](workspaces/WB-067-modal-tile-buffers.md) |
+| N10 | Compressed long IDs in simulation-detail; palette toggle globally, per workspace and per tile | [WB-073](presentation/WB-073-identifier-compression.md) |
+| N11 | simulation-catalog: separate and normalize suite/parameter/seed; enterable fields injected as run arguments | [WB-074](verification/WB-074-catalog-run-fields.md) |
+| N12 | Why does the execution tile say `simulation.run` / `simulation.discover`? | [WB-075](presentation/WB-075-execution-job-labels.md) |

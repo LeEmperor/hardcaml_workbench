@@ -29,6 +29,32 @@ let optional_text = function
   | j -> Some (text j)
 ;;
 
+let duration_number = function
+  | `Float f -> Execution_timing.seconds (Some f)
+  | `Int n -> Execution_timing.seconds (Some (Float.of_int n))
+  | _ -> None
+;;
+
+let timing_start timing = Option.bind timing ~f:(fun t -> t.Execution_timing.started_at)
+
+let receipt_timing ~running receipt =
+  let stamp name =
+    match field name receipt with
+    | `String text -> Execution_timing.timestamp text
+    | _ -> None
+  in
+  let started_at = stamp "started_at" in
+  let measured_seconds =
+    match started_at, stamp "ended_at" with
+    | Some start, Some finish when not running ->
+      Some
+        (Time_ns.Span.to_sec
+           (Time_ns.diff (Timestamp.to_time_ns finish) (Timestamp.to_time_ns start)))
+    | _ -> None
+  in
+  Execution_timing.make ?started_at ?measured_seconds ~running ()
+;;
+
 let absolute s =
   require (Filename.is_absolute s) "Expected absolute public reference";
   s
@@ -374,12 +400,23 @@ let observation_stages j =
           | "interrupted", `Int n when n <> 0 -> Cancelled
           | _ -> Unknown "invalid_or_unknown_occurrence_state"
         in
-        id, status)
+        let execution_timing =
+          match status with
+          | Completed | Failed | Cancelled ->
+            Execution_timing.make
+              ?measured_seconds:(duration_number (field "duration_seconds" occurrence))
+              ~running:false
+              ()
+          | _ -> None
+        in
+        id, (status, execution_timing))
     in
     let stages =
       List.map canonical_stages ~f:(fun id ->
         let requested = List.mem requested id ~equal:String.equal in
         let occurrence = List.Assoc.find occurrences id ~equal:String.equal in
+        let execution_timing = Option.bind occurrence ~f:snd in
+        let occurrence = Option.map occurrence ~f:fst in
         let status, reason =
           match requested, occurrence with
           | true, Some Cancelled ->
@@ -399,6 +436,11 @@ let observation_stages j =
             Not_requested, "Resume input boundary; not newly measured by this recipe"
           | false, None -> Not_requested, "Not requested in this recipe"
         in
+        let execution_timing =
+          match status with
+          | Completed | Failed | Cancelled -> execution_timing
+          | _ -> None
+        in
         { Asic.Stage.id
         ; name =
             (if (not requested) && Asic.Stage.Status.equal status Completed
@@ -408,6 +450,7 @@ let observation_stages j =
         ; requested
         ; reason = Some reason
         ; action = None (* No fresh-selection capability is advertised by state. *)
+        ; execution_timing
         })
     in
     validate_stages stages;
@@ -462,6 +505,7 @@ let stage_plan j =
           ; requested
           ; reason = optional_text (field "reason" entry)
           ; action
+          ; execution_timing = None
           })
       in
       validate_stages stages;
@@ -496,7 +540,130 @@ let inspection (r : Asic.Run.t) ~cursor j =
   (* Inspect can race ahead of read-updates. Never attach its stage state to an older
      cursor, or retain the previous cursor's checklist. The next poll catches up. *)
   let stages = if integer (field "cursor" j) = cursor then stages else [] in
-  { r with cursor; status; execution_file; stages; error = None }, final
+  let stages =
+    List.map stages ~f:(fun stage ->
+      let started_at =
+        List.find r.stages ~f:(fun old -> String.equal old.id stage.id)
+        |> Option.bind ~f:(fun old -> timing_start old.execution_timing)
+      in
+      let measured_seconds =
+        Option.bind stage.execution_timing ~f:(fun t -> t.measured_seconds)
+      in
+      { stage with
+        execution_timing =
+          Execution_timing.make
+            ?started_at
+            ?measured_seconds
+            ~running:(writer_active && Asic.Stage.Status.equal stage.status Running)
+            ()
+      })
+  in
+  let execution_timing =
+    Option.map r.execution_timing ~f:(fun timing ->
+      { timing with
+        Execution_timing.running =
+          writer_active
+          && (not final)
+          && Option.is_some timing.started_at
+          && Option.is_none timing.measured_seconds
+      })
+  in
+  { r with cursor; status; execution_file; stages; execution_timing; error = None }, final
+;;
+
+(* Only validated update records supply start anchors and total elapsed time. Old
+   registries whose cursor passed these events remain unknown; no implicit replay. *)
+let updates_timing (r : Asic.Run.t) ~writer_active j =
+  List.fold
+    (list (field "events" j))
+    ~init:r
+    ~f:(fun r event ->
+      let started_at =
+        match field "recorded_at" event with
+        | `String text -> Execution_timing.timestamp text
+        | _ -> None
+      in
+      match field "event" event with
+      | `String "allocated" ->
+        { r with
+          execution_timing = Execution_timing.make ?started_at ~running:writer_active ()
+        }
+      | `String "outcome" ->
+        { r with
+          execution_timing =
+            Execution_timing.make
+              ?started_at:(timing_start r.execution_timing)
+              ?measured_seconds:(duration_number (field "elapsed_seconds" event))
+              ~running:false
+              ()
+        }
+      | `String "started" ->
+        let occurrence = field "occurrence" (field "data" event) in
+        let key = field "action_key" occurrence in
+        { r with
+          stages =
+            List.map r.stages ~f:(fun stage ->
+              if Poly.equal key (`String ("implementation." ^ stage.id))
+              then (
+                let measured_seconds =
+                  Option.bind stage.execution_timing ~f:(fun timing ->
+                    timing.measured_seconds)
+                in
+                { stage with
+                  execution_timing =
+                    Execution_timing.make
+                      ?started_at
+                      ?measured_seconds
+                      ~running:
+                        (writer_active && Asic.Stage.Status.equal stage.status Running)
+                      ()
+                })
+              else stage)
+        }
+      | _ -> r)
+;;
+
+(* At most six anchors per registered run. An inspect racing ahead of the update cursor
+   intentionally projects no stages, so retain starts independently. *)
+let stage_start_events j =
+  List.filter_map
+    (list (field "events" j))
+    ~f:(fun event ->
+      if not (Poly.equal (field "event" event) (`String "started"))
+      then None
+      else (
+        let occurrence = field "occurrence" (field "data" event) in
+        let id =
+          List.find canonical_stages ~f:(fun id ->
+            Poly.equal (field "action_key" occurrence) (`String ("implementation." ^ id)))
+        in
+        match id, field "recorded_at" event with
+        | Some id, `String text ->
+          Option.map (Execution_timing.timestamp text) ~f:(fun at -> id, at)
+        | _ -> None))
+;;
+
+let with_stage_starts (r : Asic.Run.t) ~writer_active starts =
+  { r with
+    stages =
+      List.map r.stages ~f:(fun stage ->
+        let started_at =
+          Option.first_some
+            (List.Assoc.find starts stage.id ~equal:String.equal)
+            (timing_start stage.execution_timing)
+        in
+        let measured_seconds =
+          Option.bind stage.execution_timing ~f:(fun t -> t.measured_seconds)
+        in
+        { stage with
+          execution_timing =
+            Execution_timing.make
+              ?started_at
+              ?measured_seconds
+              ~running:(writer_active && Asic.Stage.Status.equal stage.status Running)
+              ()
+        })
+  }
 ;;
 
 let digest text =
@@ -1029,5 +1196,6 @@ let terminal_result
   ; metrics
   ; checks
   ; evidence
+  ; execution_timing = receipt_timing ~running:false receipt
   }
 ;;

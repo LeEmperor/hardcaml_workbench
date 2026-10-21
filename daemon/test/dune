@@ -6,6 +6,7 @@
   core
   core_unix.command_unix
   hardcaml_workbench_protocol
+  hardcaml_workbench_native_http
   hardcaml_workbench_rpc_server)
  (preprocess
   (pps ppx_jane))

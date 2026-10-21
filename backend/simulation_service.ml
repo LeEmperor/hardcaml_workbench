@@ -305,6 +305,7 @@ let project t root =
                   attempt =
                     { attempt with
                       lifecycle = Interrupted
+                    ; execution_timing = Execution_timing.stopped attempt.execution_timing
                     ; outcome = Incomplete
                     ; diagnostic = Some "Daemon restarted; producer was not replayed"
                     ; cases =
@@ -361,6 +362,7 @@ let summary (a : Attempt.t) : Summary.t =
   ; parent = a.parent
   ; lifecycle = a.lifecycle
   ; outcome = a.outcome
+  ; execution_timing = a.execution_timing
   }
 ;;
 
@@ -633,7 +635,15 @@ let run_task p (entry : entry) config ~environment =
   ; timeout_seconds = config.Config.run_timeout_seconds
   ; start =
       (fun () ->
-        reducer.attempt <- { reducer.attempt with lifecycle = Running };
+        reducer.attempt
+        <- { reducer.attempt with
+             lifecycle = Running
+           ; execution_timing =
+               Execution_timing.make
+                 ~started_at:(Timestamp.of_time_ns (Time_ns.now ()))
+                 ~running:true
+                 ()
+           };
         persist ())
   ; stdout = (fun _ -> ())
   ; poll
@@ -662,6 +672,20 @@ let run_task p (entry : entry) config ~environment =
         if not (String.is_empty !pending)
         then Reducer.fail reducer "Unterminated final simulation event";
         ignore (Reducer.finish reducer ~cancelled status : string option);
+        let started_at =
+          Option.bind reducer.attempt.execution_timing ~f:(fun timing ->
+            timing.started_at)
+        in
+        let measured_seconds =
+          Option.map started_at ~f:(fun start ->
+            Time_ns.Span.to_sec
+              (Time_ns.diff (Time_ns.now ()) (Timestamp.to_time_ns start)))
+        in
+        reducer.attempt
+        <- { reducer.attempt with
+             execution_timing =
+               Execution_timing.make ?started_at ?measured_seconds ~running:false ()
+           };
         (match Or_error.try_with persist with
          | Ok () -> ()
          | Error error ->
@@ -1049,6 +1073,7 @@ let handle t ~root ~environment ~schedule ~cancel ~verify_asic operation =
                        ; artifacts = []
                        ; next_sequence = 0
                        ; recent_events = []
+                       ; execution_timing = None
                        }
                      in
                      let entry =

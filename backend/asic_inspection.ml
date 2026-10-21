@@ -95,6 +95,73 @@ let row j : Wire.Row.t =
   }
 ;;
 
+(** A producer-supplied instant must name its zone ([Z] or a numeric UTC offset); a
+    zone-less or unparseable value is retained as [Rejected], never reinterpreted in a
+    local zone or replaced by another time. *)
+let production_time raw : Evidence_time.Production.t =
+  let reject reason =
+    Evidence_time.Production.Rejected { raw = String.prefix raw 128; reason }
+  in
+  let explicit_zone =
+    String.is_suffix raw ~suffix:"Z"
+    || (String.length raw >= 6
+        &&
+        let zone = String.suffix raw 6 in
+        List.for_alli (String.to_list zone) ~f:(fun i c ->
+          match i with
+          | 0 -> Char.equal c '+' || Char.equal c '-'
+          | 3 -> Char.equal c ':'
+          | _ -> Char.is_digit c))
+  in
+  if String.length raw > 64
+  then reject "production time exceeds 64 bytes"
+  else if not explicit_zone
+  then reject "production time has no explicit UTC offset"
+  else (
+    match
+      Or_error.try_with (fun () ->
+        let at = Time_ns.of_string_with_utc_offset raw in
+        (* The nanosecond parser can wrap its Int63 arithmetic. Independently parse in the
+           much wider float representation to detect that wrap, without converting the
+           stored instant through a float or losing its nanosecond precision. The
+           one-second guard comfortably exceeds float rounding error; a wrap shifts the
+           instant by centuries, including at either one-nanosecond range boundary. *)
+        let wide = Time_float.of_string_with_utc_offset raw in
+        let delta = Time_float.diff wide (Time_ns.to_time_float_round_nearest at) in
+        if Float.(abs (Time_float.Span.to_sec delta) >= 1.)
+        then failwith "production time outside nanosecond range";
+        at)
+    with
+    | Ok at -> Supplied { at = Timestamp.of_time_ns at }
+    | Error _ -> reject "unparseable production time")
+;;
+
+(** Optional [production_times]: [{producer; produced_at}] entries keyed by the exact row
+    producer attribution. Absent or [null] means no producer supplied any production time,
+    which is rendered as unknown. *)
+let production_times j =
+  match Public.field "production_times" j with
+  | `Null -> []
+  | entries ->
+    let entries = Public.list entries in
+    Public.require (List.length entries <= 256) "Inspection production times exceed 256";
+    let production =
+      List.map entries ~f:(fun entry ->
+        require_fields [ "producer"; "produced_at" ] entry;
+        let producer = Public.text (Public.field "producer" entry) in
+        Public.require
+          ((not (String.is_empty producer)) && String.length producer <= 4096)
+          "Invalid inspection production producer";
+        producer, production_time (Public.text (Public.field "produced_at" entry)))
+    in
+    let producers = List.map production ~f:fst in
+    Public.require
+      (List.length producers
+       = List.length (List.dedup_and_sort producers ~compare:String.compare))
+      "Duplicate inspection production producer";
+    production
+;;
+
 (** The path is supplied only by the registered run, never by the client. Hash the actual
     bytes at the exact canonical public path, and fence the attempt as well. *)
 let execution_hash ~(registered : Asic.Run.t) ~execution_file =
@@ -142,6 +209,10 @@ let validate_index (index : Wire.Index.t) =
   validate_digest index.execution_sha256;
   ignore (Public.absolute index.execution_file : string);
   Public.require (List.length index.rows <= 4096) "Inspection exceeds 4096 rows";
+  Public.require
+    (List.length index.times.production <= 256
+     && List.length index.times.observations <= 4)
+    "Inspection timestamps exceed budget";
   let ids = List.map index.rows ~f:(fun r -> r.Wire.Row.id) in
   Public.require
     (List.length ids = List.length (List.dedup_and_sort ids ~compare:String.compare))
@@ -174,10 +245,30 @@ let parse_index ~registered ~execution_file ~execution_sha256 ~domain ~stage j =
     ; diagnostics = List.map (Public.list (Public.field "diagnostics" j)) ~f:Public.text
     ; truncated = boolean (Public.field "truncated" j)
     ; cached_unverified = false
+    ; times = { Evidence_time.Index.empty with production = production_times j }
     }
   in
   validate_index index;
   index
+;;
+
+let observe_times ~execution_file ~validated_at (index : Wire.Index.t) =
+  let modified =
+    Option.try_with (fun () ->
+      let stats = Core_unix.stat execution_file in
+      Evidence_time.Observation.File_modified
+        { at =
+            Timestamp.of_time_ns
+              (Time_ns.of_span_since_epoch (Time_ns.Span.of_sec stats.st_mtime))
+        ; path = execution_file
+        })
+  in
+  let times =
+    Evidence_time.Index.with_validated
+      { index.times with observations = Option.to_list modified }
+      ~at:validated_at
+  in
+  { index with times }
 ;;
 
 let parse_detail ~registered ~(index : Wire.Index.t) ~row_id j =

@@ -1276,23 +1276,22 @@ let asic_request ?artifact_request ?inspection_request ?plan_request session ope
     then
       Option.iter inspection_request ~f:(fun (tile_id, ticket) ->
         reconcile_synthesis session;
-        if Option.exists
-             inspection_identity
-             ~f:(phys_equal (Host.local session.host tile_id).identity)
-        then
-          Option.iter (Host.inspection session.host tile_id) ~f:(fun view ->
-            let inspection =
-              Inspection_view.apply_response
-                view
-                ticket
-                (Result.map response ~f:(fun _ -> ()))
-            in
-            session.host <- Host.set_inspection session.host tile_id (Some inspection)));
+        Option.iter inspection_identity ~f:(fun identity ->
+          session.host
+          <- Terminal_presentation.Evidence_activity.inspection_receipt
+               session.host
+               ~tile_id
+               ~identity
+               ~ticket
+               ~publish_notice:(request_id >= session.asic_applied_id)
+               (Result.map response ~f:(fun _ -> ()))));
     if request_id >= session.asic_applied_id && current
     then (
       match response with
       | Error message ->
-        if Option.is_none artifact_request && plan_current
+        if Option.is_none artifact_request
+           && Option.is_none inspection_request
+           && plan_current
         then session.host <- { session.host with notice = "ASIC: " ^ message }
       | Ok snapshot ->
         session.asic_applied_id <- request_id;
@@ -3281,7 +3280,7 @@ let waveform_pane session (tile : Workspace.Tile.t) ~width ~height =
          |> lines))
 ;;
 
-let render ?indicator_frames session dimensions =
+let render ?(now = Time_ns.now ()) ?indicator_frames session dimensions =
   let render_host () =
     session.last_dimensions <- Some dimensions;
     reconcile_synthesis session;
@@ -3301,6 +3300,7 @@ let render ?indicator_frames session dimensions =
     in
     reconcile_waveform_workspaces session;
     Host_view.render
+      ~now
       ?indicator_frames
       ~render_pane:(waveform_pane session)
       host
@@ -3503,7 +3503,7 @@ let waveform_context session =
       rt.view, fun view -> rt.view <- view)
 ;;
 
-let host_catalog session =
+let host_catalog_base session =
   Host.catalog
     session.host
     ~project:(current_project session)
@@ -3596,56 +3596,7 @@ let host_catalog session =
              ("Simulation: Select case " ^ c.case_id)
              "detail failure"
              (Simulation_case (tile.id, c.case_id)))
-         @ (let failed =
-              List.filter_map d.cases ~f:(fun c ->
-                if Simulation.Case_status.equal c.status Failed
-                then Some c.case_id
-                else None)
-            in
-            if List.is_empty failed
-            then []
-            else
-              [ cmd
-                  "rerun-failed"
-                  "Rerun all failed (original inputs; current project)"
-                  (Rerun
-                     { submission_key = submission_key "simulation-rerun"
-                     ; attempt_id = d.id
-                     ; cases = failed
-                     })
-              ])
-         @ Option.value_map v.case_id ~default:[] ~f:(fun id ->
-           [ cmd
-               "rerun-case"
-               ("Rerun case " ^ id ^ " (original inputs; current project)")
-               (Rerun
-                  { submission_key = submission_key "simulation-rerun"
-                  ; attempt_id = d.id
-                  ; cases = [ id ]
-                  })
-           ])
-         @ List.concat_map d.artifacts ~f:(fun a ->
-           [ Host.command
-               ("simulation.export." ^ a.id)
-               ("Simulation: Export exact bytes " ^ a.label)
-               "trace waveform"
-               (Simulation_export (a, false))
-           ; Host.command
-               ("simulation.viewer." ^ a.id)
-               ("Simulation: Open external viewer " ^ a.label)
-               "trace waveform"
-               (Simulation_export (a, true))
-           ; Host.command
-               ("simulation.waveform." ^ a.id)
-               ("Simulation: Open embedded waveform " ^ a.label)
-               "vcd wave retained full-area"
-               (Simulation_waveform a)
-           ; Host.command
-               ("simulation.waveform-workspace." ^ a.id)
-               ("Simulation: Open Waveforms workspace " ^ a.label)
-               "vcd dedicated signals waves picker logs"
-               (Simulation_waveform_workspace a)
-           ]))
+         @ Host.simulation_selection_commands session.host tile ~submission_key)
      | _ -> [])
   @ Option.value_map session.remembered_selection ~default:[] ~f:(fun selection ->
     let available =
@@ -3736,6 +3687,9 @@ let host_catalog session =
             (Edit_acceptance (run.run, execution_file))
         ])))
 ;;
+
+(* WB-054: contextual actions for the focused view lead the palette and key dispatch. *)
+let host_catalog session = Host.contextual session.host (host_catalog_base session)
 
 let open_timing_workspace session ~(run : Run_ref.t) ~stage =
   let instance = session.hello.instance_id in
@@ -4150,6 +4104,72 @@ let open_waveform_workspace session artifact =
   | _ ->
     session.host <- { session.host with notice = "Workspace registry is not ready" };
     return ()
+;;
+
+(* One explorer/Timing inspector input step. The key handler and the WB-054 contextual
+   palette actions share it, so both reach exactly the same routing. *)
+let inspection_step session tile view action =
+  let operation =
+    let width, height =
+      Option.value_map session.last_dimensions ~default:(80, 24) ~f:(fun dimensions ->
+        if Option.is_none (Host.timing_pane session.host tile)
+        then Host_view.inspection_viewport dimensions
+        else (
+          let _, _, layout = Host_view.tile_layout session.host dimensions in
+          List.find layout ~f:(fun (candidate, _) ->
+            Workspace.Tile_id.equal candidate.id tile.id)
+          |> Option.value_map ~default:(80, 24) ~f:(fun (_, geometry) ->
+            let _, _, _, width, height =
+              Host_view.body_geometry
+                session.host
+                tile
+                ~width:geometry.width
+                ~height:geometry.height
+            in
+            width, height)))
+    in
+    let inspection, operation =
+      match Host.timing_pane session.host tile with
+      | None -> Inspection_view.input ~width ~height view action
+      | Some pane ->
+        let local = Host.local session.host tile.id in
+        let view, scroll, operation =
+          Timing_workspace.input ~pane ~scroll:local.scroll ~width ~height view action
+        in
+        let view =
+          Option.value_map session.asic ~default:view ~f:(Inspection_view.reconcile view)
+        in
+        let operation =
+          match operation with
+          | Some (Asic.Operation.Inspect_detail _) when Option.is_some view.detail -> None
+          | other -> other
+        in
+        session.host <- Host.set_local session.host tile.id { local with scroll };
+        Some view, operation
+    in
+    let local = Host.local session.host tile.id in
+    let inspection_generation =
+      Option.value_map inspection ~default:local.inspection_generation ~f:(fun v ->
+        v.generation)
+    in
+    session.host <- Host.set_inspection session.host tile.id inspection;
+    if Option.is_none (Host.timing_pane session.host tile)
+    then
+      session.host
+      <- Host.set_local
+           session.host
+           tile.id
+           { (Host.local session.host tile.id) with inspection_generation };
+    Option.bind operation ~f:(fun operation ->
+      Option.map inspection ~f:(fun view ->
+        operation, (tile.id, Inspection_view.capture view operation)))
+  in
+  Option.value_map
+    operation
+    ~default:Bonsai_term.Effect.Ignore
+    ~f:(fun (operation, inspection_request) ->
+      Bonsai_term.Effect.of_deferred_thunk (fun () ->
+        asic_request ~inspection_request session operation))
 ;;
 
 let execute_host session captured action ~exit =
@@ -4870,7 +4890,10 @@ let execute_host session captured action ~exit =
       session.host <- host;
       session.host
       <- { session.host with
-           notice = "Presentation override: headers retained; reset inherits defaults"
+           notice =
+             (if save
+              then "Presentation override saved; reset inherits defaults"
+              else "Presentation override applied for this session")
          };
       if save
       then Effect.of_deferred_thunk (fun () -> save_presentation_preferences session)
@@ -4941,6 +4964,26 @@ let execute_host session captured action ~exit =
     | Synthesis_clear_filter ->
       change_synthesis session (fun _ local -> { local with filter = "" });
       reconcile_synthesis session;
+      Effect.Ignore
+    | Close_inspector ->
+      (match Host.close_inspector session.host with
+       | Ok (host, notice) -> session.host <- { host with notice }
+       | Error reason -> session.host <- { session.host with notice = reason });
+      Effect.Ignore
+    | Inspector_input (id, input) ->
+      (match Host.focused session.host with
+       | Some tile when Workspace.Tile_id.equal tile.id id ->
+         (match Host.inspection session.host tile.id with
+          | Some view -> inspection_step session tile view input
+          | None ->
+            session.host <- { session.host with notice = Host.no_inspector };
+            Effect.Ignore)
+       | _ ->
+         session.host
+         <- { session.host with notice = "Command target changed; reopen palette" };
+         Effect.Ignore)
+    | Unavailable reason ->
+      session.host <- { session.host with notice = reason };
       Effect.Ignore
     | Exit -> exit ())
 ;;
@@ -5157,6 +5200,11 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
         |> Option.map ~f:(fun command ->
           execute_host session capture command.action ~exit))
     in
+    let dispatch_testing key =
+      Host.testing_dispatch session.host key ~commands:(host_catalog session)
+      |> Option.map ~f:(fun (capture, action) ->
+        execute_host session capture action ~exit)
+    in
     (match input with
      | Some (Character (('j' | 'k' | 'n' | 'p' | 'l') as key))
        when Option.value_map (Host.focused session.host) ~default:false ~f:(fun t ->
@@ -5214,26 +5262,13 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
        dispatch "simulation.catalog-accept"
      | Some (Character (('e' | 'v' | 'w' | 'W') as key))
        when Option.exists (Host.focused session.host) ~f:(fun tile ->
-              String.equal tile.kind "simulation-artifacts") ->
-       let tile = Option.value_exn (Host.focused session.host) in
-       Option.bind
-         (Testing_workspace.artifact (Host.testing_state session.host tile.id))
-         ~f:(fun artifact ->
-           dispatch
-             ((if Char.equal key 'e'
-               then "simulation.export."
-               else if Char.equal key 'w'
-               then "simulation.waveform."
-               else if Char.equal key 'W'
-               then "simulation.waveform-workspace."
-               else "simulation.viewer.")
-              ^ artifact.id))
+              String.equal tile.kind "simulation-artifacts") -> dispatch_testing key
      | Some (Character 'r')
        when Option.exists (Host.focused session.host) ~f:(fun tile ->
-              Testing_workspace.is_pane tile.kind) -> dispatch "simulation.rerun-case"
+              Testing_workspace.is_pane tile.kind) -> dispatch_testing 'r'
      | Some (Character 'f')
        when Option.exists (Host.focused session.host) ~f:(fun tile ->
-              Testing_workspace.is_pane tile.kind) -> dispatch "simulation.rerun-failed"
+              Testing_workspace.is_pane tile.kind) -> dispatch_testing 'f'
      | Some (Character 'h')
        when Option.exists (Host.focused session.host) ~f:(fun tile ->
               Host.simulation_kind tile.kind) -> dispatch "simulation.history"
@@ -5412,73 +5447,9 @@ let host_handler_overlays session event ~exit =
         | Key_press { key = Arrow `Left; mods = [] }, _ -> Some Page_up
         | _ -> None)
     in
-    let operation =
-      Option.bind action ~f:(fun action ->
-        let width, height =
-          Option.value_map session.last_dimensions ~default:(80, 24) ~f:(fun dimensions ->
-            if Option.is_none (Host.timing_pane session.host tile)
-            then Host_view.inspection_viewport dimensions
-            else (
-              let _, _, layout = Host_view.tile_layout session.host dimensions in
-              List.find layout ~f:(fun (candidate, _) ->
-                Workspace.Tile_id.equal candidate.id tile.id)
-              |> Option.value_map ~default:(80, 24) ~f:(fun (_, geometry) ->
-                let _, _, _, width, height =
-                  Host_view.body_geometry
-                    session.host
-                    tile
-                    ~width:geometry.width
-                    ~height:geometry.height
-                in
-                width, height)))
-        in
-        let inspection, operation =
-          match Host.timing_pane session.host tile with
-          | None -> Inspection_view.input ~width ~height view action
-          | Some pane ->
-            let local = Host.local session.host tile.id in
-            let view, scroll, operation =
-              Timing_workspace.input ~pane ~scroll:local.scroll ~width ~height view action
-            in
-            let view =
-              Option.value_map
-                session.asic
-                ~default:view
-                ~f:(Inspection_view.reconcile view)
-            in
-            let operation =
-              match operation with
-              | Some (Asic.Operation.Inspect_detail _) when Option.is_some view.detail ->
-                None
-              | other -> other
-            in
-            session.host <- Host.set_local session.host tile.id { local with scroll };
-            Some view, operation
-        in
-        let local = Host.local session.host tile.id in
-        let inspection_generation =
-          Option.value_map inspection ~default:local.inspection_generation ~f:(fun v ->
-            v.generation)
-        in
-        session.host <- Host.set_inspection session.host tile.id inspection;
-        if Option.is_none (Host.timing_pane session.host tile)
-        then
-          session.host
-          <- Host.set_local
-               session.host
-               tile.id
-               { (Host.local session.host tile.id) with inspection_generation };
-        Option.bind operation ~f:(fun operation ->
-          Option.map inspection ~f:(fun view ->
-            operation, (tile.id, Inspection_view.capture view operation))))
-    in
     Some
-      (Option.value_map
-         operation
-         ~default:Bonsai_term.Effect.Ignore
-         ~f:(fun (operation, inspection_request) ->
-           Bonsai_term.Effect.of_deferred_thunk (fun () ->
-             asic_request ~inspection_request session operation)))
+      (Option.value_map action ~default:Bonsai_term.Effect.Ignore ~f:(fun action ->
+         inspection_step session tile view action))
   | _, Some (tile, view)
     when (not bypass)
          &&
@@ -5987,9 +5958,9 @@ let tui session ~exit ~dimensions graph =
       Some { Indicator.dot; line }
   in
   let view =
-    let%arr dimensions, _, _now, _revision = display
+    let%arr dimensions, _, now, _revision = display
     and indicator_frames in
-    render ?indicator_frames session dimensions
+    render ~now ?indicator_frames session dimensions
   in
   let handle (event : Event.t) =
     if Host.is_interrupt event

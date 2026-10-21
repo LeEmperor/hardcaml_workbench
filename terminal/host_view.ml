@@ -348,8 +348,57 @@ let run_has_producer data run =
       && Option.exists operation.run ~f:(Run_ref.equal run)))
 ;;
 
+(* Absence of an owned producer says nothing about external execution. Only explicit
+   observation loss for this exact run qualifies retained, unresolved stage evidence. *)
+let stopped_observation data run =
+  Option.bind data.asic ~f:(fun snapshot ->
+    let operations =
+      List.filter snapshot.Asic.Snapshot.operations ~f:(fun operation ->
+        List.mem [ "observe"; "run" ] operation.kind ~equal:String.equal
+        && Option.exists operation.run ~f:(Run_ref.equal run))
+    in
+    let replacement =
+      List.exists operations ~f:(fun operation ->
+        Plain_rpc.active operation || String.equal operation.state "reserving")
+    in
+    Option.bind
+      (List.find snapshot.runs ~f:(fun execution -> Run_ref.equal execution.run run))
+      ~f:(fun execution ->
+        let unresolved =
+          List.is_empty execution.stages
+          || List.exists execution.stages ~f:(fun stage ->
+            match stage.Asic.Stage.status with
+            | Pending | Running | Unknown _ -> true
+            | Completed | Failed | Skipped | Cancelled | Not_requested | Unsupported ->
+              false)
+        in
+        if replacement || not unresolved
+        then None
+        else (
+          let explicit_error =
+            Option.filter execution.error ~f:(fun error ->
+              let error = String.lowercase error in
+              List.exists
+                [ "observation unavailable"; "observation stopped" ]
+                ~f:(fun phrase -> String.is_substring error ~substring:phrase))
+          in
+          Option.first_some
+            explicit_error
+            (List.find_map operations ~f:(fun operation ->
+               if List.mem [ "failed"; "cancelled" ] operation.state ~equal:String.equal
+               then
+                 Some
+                   (Option.value
+                      operation.error
+                      ~default:(operation.kind ^ " " ^ operation.state))
+               else None)))))
+;;
+
+let observation_qualifier = "Observation stopped; stage state unconfirmed"
+
 let run_selector_view
   ?indicator_frames
+  ?time
   appearance
   ~width
   ~status_width
@@ -362,7 +411,9 @@ let run_selector_view
   let icon =
     indicator_view ?indicator_frames appearance status_role (run_indicator status)
   in
-  let text_width = Int.max 0 (width - View.width icon) in
+  let time = Option.value_map time ~default:"" ~f:(fun time -> " | " ^ time) in
+  let time = if cell_width time + status_width + 7 <= width then time else "" in
+  let text_width = Int.max 0 (width - View.width icon - cell_width time) in
   let row = run_selector_row ~width:text_width ~status_width ~cursor ~active run status in
   let identity_width = Int.max 0 (text_width - status_width) in
   let identity = E.text (E.clip ~width:identity_width (E.plain row)) in
@@ -377,6 +428,7 @@ let run_selector_view
       |> View.with_colors'
            ?bg:(if cursor then Some (Role.backdrop appearance Selection) else None)
     ; View.text ~attrs:(attrs status_role) status
+    ; View.text ~attrs:(attrs Muted) time
     ]
   |> box ~width ~height:1
 ;;
@@ -593,7 +645,7 @@ let checklist_hints host data tile =
       ])
 ;;
 
-let utility_rows host data tile =
+let utility_rows ?(now = Time_ns.now ()) host data tile =
   let policy = H.policy host tile in
   Option.bind host.H.registry ~f:(fun registry ->
     let selected_run =
@@ -617,7 +669,8 @@ let utility_rows host data tile =
            ~active_workspace:host.active
            ~project:data.project
            ~selected_run
-           ~connection:data.status)
+           ~connection:data.status
+         @ [ Evidence_activity.session_row ?selected_run host data.asic ])
     | "workspace-tabs" ->
       Some
         (Overview_tiles.navigation_rows ~snapshot:registry ~active_workspace:host.active
@@ -653,6 +706,7 @@ let utility_rows host data tile =
           (if local.utility_detail then Option.to_list selected else stages)
           |> List.map ~f:(fun stage ->
             Overview_tiles.asic_stage_row
+              ~now
               ~run
               ~selected:(Option.exists selected ~f:(fun s -> String.equal s.id stage.id))
               stage)
@@ -709,9 +763,15 @@ let utility_rows host data tile =
                 (Option.value_map selected_run ~default:"none selected" ~f:run_label)
             ]
           else [])
+         @ (if local.utility_detail
+            then
+              Option.bind selected_run ~f:(stopped_observation data)
+              |> Option.value_map ~default:[] ~f:(fun error ->
+                [ Overview_tiles.row ~role:Warning "Observation error" error ])
+            else [])
          @ (if H.compact_summary host tile && not local.utility_detail
-            then Overview_tiles.checklist_rows ~compact:true ~stages ~aggregate:facts ()
-            else stages @ facts)
+             then Overview_tiles.checklist_rows ~compact:true ~stages ~aggregate:facts ()
+             else stages @ facts)
          @ interaction)
     | _ -> None)
 ;;
@@ -725,8 +785,8 @@ let utility_attrs appearance : Overview_tiles.Role.t -> Attr.t list = function
   | Success -> Role.attrs appearance Success
   | Warning -> Role.attrs appearance Warning
   | Failure -> Role.attrs appearance Failure
-  (* Bold accent; Restrained keeps the bold weight, and the keyword is always text. *)
-  | Emphasis -> Role.attrs appearance Focus
+  (* Linked state shares the scheme's success green; the keyword is always text. *)
+  | Linked -> Role.attrs appearance Success @ [ Attr.bold ]
 ;;
 
 let inspection_explorer host tile =
@@ -854,12 +914,16 @@ let compact_summary_enabled host tile =
       || Synthesis_view.Mode.equal (Synthesis_view.State.mode local.synthesis) Summary)
 ;;
 
-let compact_rows host data tile =
+let compact_rows ?(now = Time_ns.now ()) host data tile =
   if not (compact_summary_enabled host tile)
   then None
   else
     Option.map (tile_run host tile) ~f:(fun run ->
       Overview_summary.rows
+        ~now
+        ~finalizations:
+          (Option.value_map data.asic ~default:[] ~f:(fun s ->
+             s.Asic.Snapshot.finalizations))
         ~compact:(H.compact_summary host tile)
         ~freshness:(H.policy host tile).freshness
         ~kind:tile.W.Tile.kind
@@ -1111,7 +1175,7 @@ let indicator_role : Indicator.t -> Role.t = function
   | Not_requested | Unknown | Pin | Artifact | Log | Seed | Report | Trace | Info -> Muted
 ;;
 
-let simulation_annotations host data tile =
+let simulation_annotations ?(now = Time_ns.now ()) host data tile =
   match Testing_workspace.pane tile.W.Tile.kind with
   | Some pane ->
     (match pane with
@@ -1125,9 +1189,16 @@ let simulation_annotations host data tile =
          (Option.to_list view.error @ Option.to_list view.notice)
          ~f:Simulation_view.row
      | _ -> [])
-    @ Testing_workspace.rows (H.testing_state host tile.id) pane ~log_lines:data.log_lines
+    @ Testing_workspace.rows
+        ~now
+        (H.testing_state host tile.id)
+        pane
+        ~log_lines:data.log_lines
   | None ->
-    Simulation_view.annotated_rows (H.simulation host tile.id) ~log_lines:data.log_lines
+    Simulation_view.annotated_rows
+      ~now
+      (H.simulation host tile.id)
+      ~log_lines:data.log_lines
 ;;
 
 let annotated_view_rows ?indicator_frames host ~width annotations =
@@ -1195,8 +1266,8 @@ let annotated_view_rows ?indicator_frames host ~width annotations =
            selected && i = 0, view))
 ;;
 
-let simulation_view_rows_with_selection ?indicator_frames host data tile ~width =
-  simulation_annotations host data tile
+let simulation_view_rows_with_selection ?indicator_frames ?now host data tile ~width =
+  simulation_annotations ?now host data tile
   |> List.filter ~f:(fun row ->
     (not row.Simulation_view.hint) || (H.policy host tile).hints)
   |> annotated_view_rows ?indicator_frames host ~width
@@ -1253,8 +1324,8 @@ let execution_annotations host data (tile : W.Tile.t) =
       (prefix ^ status ^ "  " ^ Job.Kind.to_string job.kind))
 ;;
 
-let simulation_view_rows ?indicator_frames host data tile ~width =
-  simulation_view_rows_with_selection ?indicator_frames host data tile ~width
+let simulation_view_rows ?indicator_frames ?now host data tile ~width =
+  simulation_view_rows_with_selection ?indicator_frames ?now host data tile ~width
   |> List.map ~f:snd
 ;;
 
@@ -1648,7 +1719,17 @@ let timing_body appearance ~pane ~scroll ~width ~height (view : Timing_workspace
 
 (** The transport owner supplies waveform bodies to avoid a Host_view/Waveform_view
     dependency cycle. The host retains frame, title, clipping and palette ownership. *)
-let tile_view ?indicator_frames ?render_pane host data tile ~width ~height =
+let tile_view
+  ?(now = Time_ns.now ())
+  ?indicator_frames
+  ?render_pane
+  ?horizontal_stages
+  host
+  data
+  tile
+  ~width
+  ~height
+  =
   let appearance = host.H.appearance in
   let local = H.local host tile.W.Tile.id in
   let indicator_frames =
@@ -1674,12 +1755,56 @@ let tile_view ?indicator_frames ?render_pane host data tile ~width ~height =
       | Follow -> if H.project_scoped_kind tile.kind then "project" else "follow")
   in
   let _, _, _, body_width, body_height = body_geometry host tile ~width ~height in
+  let observation_banner =
+    if String.equal tile.kind "stage-checklist"
+    then
+      Option.bind (tile_run host tile) ~f:(stopped_observation data)
+      |> Option.value_map ~default:[] ~f:(fun _ ->
+        wrap_cells ~width:body_width observation_qualifier)
+    else []
+  in
+  let full_body_height = body_height in
+  let banner_height = Int.min body_height (List.length observation_banner) in
+  let body_height = Int.max 0 (body_height - banner_height) in
   let geometry = panel_geometry host tile ~width ~height in
-  let compact = compact_rows host data tile in
+  let compact = compact_rows ~now host data tile in
   let semantic =
     if Option.is_some compact
     then None
     else semantic_rows host data tile ~width:body_width ~height:body_height
+  in
+  let semantic =
+    if Option.is_none compact
+       && Overview_summary.supports tile.kind
+       && Option.is_none local.inspection
+       && Option.is_none local.artifacts
+       && (not local.terminal_result.detail)
+       && ((not (String.equal tile.kind "synthesis"))
+           || Synthesis_view.Mode.equal
+                (Synthesis_view.State.mode local.synthesis)
+                Summary)
+    then
+      Option.value_map (tile_run host tile) ~default:semantic ~f:(fun run ->
+        let time =
+          Overview_summary.rows
+            ~now
+            ~kind:tile.kind
+            ~run
+            ~summary:(data.summary run)
+            ~stages:(Overview_tiles.observed_stages ~asic:data.asic ~run)
+            ~finalizations:
+              (Option.value_map data.asic ~default:[] ~f:(fun s ->
+                 s.Asic.Snapshot.finalizations))
+            ()
+          |> List.find_exn ~f:(fun row -> String.equal row.Overview_tiles.label "Time")
+        in
+        Some
+          (E.plain ("Time: " ^ time.value)
+           :: Option.value_or_thunk semantic ~default:(fun () ->
+             List.map
+               (rows host data tile ~width:body_width ~height:body_height)
+               ~f:E.plain)))
+    else semantic
   in
   let rows =
     match compact, semantic with
@@ -1811,7 +1936,7 @@ let tile_view ?indicator_frames ?render_pane host data tile ~width ~height =
         ~height:body_height
         rows
     | None ->
-      (match utility_rows host data tile with
+      (match utility_rows ~now host data tile with
        | None ->
          (match semantic with
           | None
@@ -1853,6 +1978,12 @@ let tile_view ?indicator_frames ?render_pane host data tile ~width ~height =
             |> Fn.flip List.take (Int.max 0 available)
             |> List.map ~f:(fun (run, status) ->
               run_selector_view
+                ~time:
+                  (Execution_time_view.compact_line
+                     ~now
+                     (Option.bind
+                        (Overview_tiles.execution ~asic:data.asic ~run)
+                        ~f:(fun r -> r.execution_timing)))
                 ?indicator_frames:
                   (if run_has_producer data run then indicator_frames else None)
                 appearance
@@ -1876,7 +2007,7 @@ let tile_view ?indicator_frames ?render_pane host data tile ~width ~height =
          |> lines ~appearance ~width:body_width ~height:body_height
        | Some rows
          when String.equal tile.kind "stage-checklist"
-              && H.horizontal_stages host tile
+               && Option.value horizontal_stages ~default:(H.horizontal_stages host tile)
               && Option.is_some (tile_run host tile) ->
          let run = Option.value_exn (tile_run host tile) in
          let stages = Overview_tiles.observed_stages ~asic:data.asic ~run in
@@ -1898,6 +2029,7 @@ let tile_view ?indicator_frames ?render_pane host data tile ~width ~height =
            in
            let model =
              Overview_tiles.Stage_strip.model
+               ~now
                ~appearance
                ~width:body_width
                ~run
@@ -1916,6 +2048,8 @@ let tile_view ?indicator_frames ?render_pane host data tile ~width ~height =
                    | Comfortable when body_width >= 30 -> 1
                    | _ -> 0)
                  + cell_width ("Selected: " ^ ": " ^ selected.value)
+                 + Option.value_map selected.time ~default:0 ~f:(fun time ->
+                   3 + cell_width time)
                in
                { model with
                  selected_line =
@@ -2069,6 +2203,7 @@ let tile_view ?indicator_frames ?render_pane host data tile ~width ~height =
     then (
       let views =
         simulation_view_rows_with_selection
+          ~now
           ?indicator_frames
           host
           data
@@ -2106,6 +2241,18 @@ let tile_view ?indicator_frames ?render_pane host data tile ~width ~height =
       render tile ~width:body_width ~height:body_height)
     |> Option.value ~default:body
     |> box ~width:body_width ~height:body_height
+  in
+  let body =
+    View.vcat
+      [ lines
+          ~appearance
+          ~role:Warning
+          ~width:body_width
+          ~height:banner_height
+          observation_banner
+      ; body
+      ]
+    |> box ~width:body_width ~height:full_body_height
   in
   let content = View.vcat (header @ [ body ]) in
   Panel.render
@@ -2459,7 +2606,99 @@ let inspection_viewport (dimensions : Dimensions.t) =
   Int.max 1 dimensions.width, Int.max 1 dimensions.height
 ;;
 
+(* WB-054 breadcrumbs: [workspace › view › run (stage)], built only from the active
+   workspace, the focused tile, its resolved run and its open inspector. A segment that
+   has no typed fact (e.g. no run) is omitted rather than guessed. *)
+let breadcrumb_view host (tile : W.Tile.t) =
+  let pane = function
+    | Timing_workspace.Paths -> "timing paths"
+    | Detail -> "path detail"
+    | Context -> "path provenance"
+  in
+  match H.open_inspector host with
+  | Some (_, Explorer view) -> "inspect " ^ view.domain, Some view.stage
+  | Some (_, Artifact_browser _) -> "reports/artifacts", None
+  | Some (_, Timing_detail (p, view)) -> pane p, Some view.stage
+  | None ->
+    (match Timing_workspace.pane tile.kind, H.timing host tile with
+     | Some p, Some view -> pane p, Some view.stage
+     | Some p, None -> pane p, None
+     | None, _ ->
+       ( (match tile.kind with
+          | "live-status" -> "session"
+          | "workspace-tabs" -> "workspaces"
+          | kind -> String.tr kind ~target:'-' ~replacement:' ')
+       , None ))
+;;
+
+(** Candidates from most to least complete. The workspace name and the full run identity
+    stay available in the global header, the session tile and the inspector heading, so a
+    shorter candidate drops whole segments and never clips one. *)
+let breadcrumbs host =
+  match H.active host, H.focused host with
+  | Some workspace, Some tile ->
+    let sep =
+      match host.H.appearance.icons with
+      | Unicode -> " › "
+      | Ascii | None_ -> " > "
+    in
+    let view, stage = breadcrumb_view host tile in
+    let run =
+      Option.map (tile_run host tile) ~f:(fun run ->
+        display_run run ^ Option.value_map stage ~default:"" ~f:(sprintf " (%s)"))
+    in
+    let join segments = String.concat ~sep (List.filter_opt segments) in
+    [ join [ Some workspace.name; Some view; run ]; join [ Some view; run ] ]
+  | _ -> []
+;;
+
+(** A footer row keeps its leading text and gains the widest breadcrumb that fits after a
+    two-cell gap, right-aligned. Without room the row is unchanged: no extra chrome. *)
+let with_breadcrumb host ~width text =
+  let used = cell_width text in
+  match
+    List.find (breadcrumbs host) ~f:(fun crumb -> used + 2 + cell_width crumb <= width)
+  with
+  | None -> text
+  | Some crumb -> text ^ String.make (width - used - cell_width crumb) ' ' ^ crumb
+;;
+
+(* Full-area inspectors have no workspace footer. Reuse spare heading cells so the
+   breadcrumb never covers evidence or consumes a content row. *)
+let inspector_breadcrumb host ~width rows =
+  match rows with
+  | heading :: rest
+    when host.H.chrome
+         && host.main_hints
+         && show_footer_hints host
+         && String.is_empty host.notice -> with_breadcrumb host ~width heading :: rest
+  | _ -> rows
+;;
+
+(** Main-window hints name only controls that work on the focused view. Timing panes own
+    their keys (q does not exit there), and an open reader names its explicit close. *)
+let main_hint_text host =
+  let timing =
+    Option.bind (H.focused host) ~f:(fun tile ->
+      Option.bind (H.timing_pane host tile) ~f:(fun pane ->
+        Option.map (H.timing host tile) ~f:(fun view -> pane, view)))
+  in
+  match timing with
+  | Some ((Timing_workspace.Detail | Context), view) when Inspection_view.detail_mode view
+    ->
+    "Space c c commands | Tab/Shift-Tab focus | j/k scroll | Esc or Space c x close \
+     detail | Ctrl-C exit"
+  | Some ((Timing_workspace.Detail | Context), _) ->
+    "Space c c commands | Tab/Shift-Tab focus | j/k scroll | Ctrl-C exit"
+  | Some (Paths, _) ->
+    "Space c c commands | Tab/Shift-Tab focus | j/k select | Enter detail | / filter | \
+     Ctrl-C exit"
+  | None ->
+    "Space c c commands | Tab/Shift-Tab focus | j/k browse | Enter inspect | q exit"
+;;
+
 let render_workspace
+  ?(now = Time_ns.now ())
   ?indicator_frames
   ?render_pane
   host
@@ -2511,6 +2750,7 @@ let render_workspace
     else
       List.map layout ~f:(fun (tile, (g : W.Geometry.t)) ->
         tile_view
+          ~now
           ?indicator_frames
           ?render_pane
           host
@@ -2565,11 +2805,13 @@ let render_workspace
              then
                if show_footer_hints host
                then
-                 "Compact: focused tile only | Tab: next tile | enlarge terminal for grid"
-               else "Compact: focused tile only"
-             else
-               "Space c c commands | Tab/Shift-Tab focus | j/k browse | Enter inspect | \
-                q exit")
+                 with_breadcrumb
+                   host
+                   ~width
+                   "Compact: focused tile only | Tab: next tile | enlarge terminal for \
+                    grid"
+               else with_breadcrumb host ~width "Compact: focused tile only"
+             else with_breadcrumb host ~width (main_hint_text host))
           ]
       ]
   in
@@ -2586,7 +2828,7 @@ let render_workspace
       ~role:Surface
       ~width
       ~height
-      (Artifact_view.rows view ~width ~height)
+      (Artifact_view.rows view ~width ~height |> inspector_breadcrumb host ~width)
     |> colored appearance Surface
     |> box ~width:dimensions.width ~height:dimensions.height
 ;;
@@ -2758,7 +3000,7 @@ let render_palette host dimensions background =
 
 (* A focused explorer covers the workspace. Do not construct the obscured tile images:
    those have different widths and would wrap the same large source a second time. *)
-let render ?indicator_frames ?render_pane host data dimensions =
+let render ?(now = Time_ns.now ()) ?indicator_frames ?render_pane host data dimensions =
   let inspection_tile =
     match host.H.inspection_paste with
     | None -> H.focused host
@@ -2775,10 +3017,10 @@ let render ?indicator_frames ?render_pane host data dimensions =
         ~role:Surface
         ~width
         ~height
-        (Inspection_view.rows view ~width ~height)
+        (Inspection_view.rows view ~width ~height |> inspector_breadcrumb host ~width)
       |> colored host.appearance Surface
       |> box ~width ~height
-    | None -> render_workspace ?indicator_frames ?render_pane host data dimensions
+    | None -> render_workspace ~now ?indicator_frames ?render_pane host data dimensions
   in
   render_palette host dimensions background
 ;;
@@ -2833,6 +3075,7 @@ let refinement_fixture (definition : P.Definition.t) =
         ; requested = true
         ; reason = None
         ; action = None
+        ; execution_timing = None
         })
   in
   let snapshot =
@@ -2860,6 +3103,116 @@ let refinement_fixture (definition : P.Definition.t) =
     List.find_exn (H.tiles host) ~f:(fun tile -> String.equal tile.W.Tile.kind kind)
   in
   host, data, find
+;;
+
+let%test_unit "stopped exact-run observation qualifies actual checklist layouts" =
+  let host, data, find = refinement_fixture P.Overview.definition in
+  let tile = find "stage-checklist" in
+  let snapshot = Option.value_exn data.asic in
+  let error = "Final observation unavailable: exact checkpoint read timed out" in
+  let runs =
+    List.map snapshot.runs ~f:(fun execution ->
+      if Run_ref.equal execution.run Fs0_fixture.run_a
+      then
+        { execution with
+          error = Some error
+        ; stages =
+            List.mapi execution.stages ~f:(fun i stage ->
+              if i = 1 then { stage with status = Running } else stage)
+        }
+      else execution)
+  in
+  let snapshot = { snapshot with runs; operations = [] } in
+  let data = { data with asic = Some snapshot } in
+  let render host data ?horizontal_stages tile =
+    tile_view ?horizontal_stages host data tile ~width:100 ~height:16 |> plain_text
+  in
+  let contains text phrase = String.is_substring text ~substring:phrase in
+  let check host ?horizontal_stages () =
+    let text = render host data ?horizontal_stages tile in
+    assert (contains text observation_qualifier);
+    assert (contains text "running");
+    assert (contains text "completed")
+  in
+  assert (H.compact_summary host tile);
+  check host ();
+  check host ~horizontal_stages:true ();
+  let registry = Option.value_exn host.registry in
+  let vertical =
+    H.receive host
+      { registry with
+        workspaces = List.map registry.workspaces ~f:(fun w -> { w with preset = None })
+      }
+  in
+  assert (not (H.compact_summary vertical tile));
+  check vertical ();
+  let detail =
+    H.set_local host tile.id { (H.local host tile.id) with utility_detail = true }
+  in
+  assert (contains (render detail data tile) error);
+  let operation kind state run error : Asic.Pending.t =
+    { key = "test-observation"; kind; state; run = Some run; error; activity = Unreported }
+  in
+  let with_state ?(error = None) ?(stages = (List.hd_exn runs).stages) operations =
+    { data with
+      asic =
+        Some
+          { snapshot with
+            operations
+          ; runs = List.map runs ~f:(fun r -> { r with error; stages })
+          }
+    }
+  in
+  let failed = operation "observe" "failed" Fs0_fixture.run_a (Some "reader lost") in
+  let cancelled = { failed with state = "cancelled" } in
+  List.iter [ failed; cancelled; { failed with kind = "run" } ] ~f:(fun failure ->
+    assert (contains (render host (with_state [ failure ]) tile) observation_qualifier));
+  List.iter
+    [ with_state []
+    ; with_state [ { failed with kind = "refresh" } ]
+    ; with_state [ { failed with run = Some Fs0_fixture.run_b } ]
+    ; with_state [ { failed with run = Some { Fs0_fixture.run_a with backend = Backend_id.of_string "other" } } ]
+    ; with_state ~error:(Some "unrelated provider error") []
+    ; with_state ~error:(Some error)
+        [ failed; { failed with state = "executing"; error = None } ]
+    ; with_state ~error:(Some error)
+        [ failed; { failed with kind = "run"; state = "executing"; error = None } ]
+    ; with_state ~error:(Some error)
+        ~stages:(List.map (List.hd_exn runs).stages ~f:(fun s -> { s with status = Completed }))
+        [ failed ]
+    ]
+    ~f:(fun data ->
+      assert (not (contains (render host data tile) observation_qualifier)));
+  let pinned = { tile with binding = Pin_run Fs0_fixture.run_b } in
+  let pinned_host =
+    H.receive host
+      { registry with
+        tiles = List.map registry.tiles ~f:(fun t -> if W.Tile_id.equal t.id tile.id then pinned else t)
+      }
+  in
+  assert (not (contains (render pinned_host data pinned) observation_qualifier));
+  let retained = { tile with binding = Pin_run Fs0_fixture.run_a } in
+  let selected_elsewhere =
+    W.apply
+      registry
+      (Mutate
+         { expected_revision = registry.revision
+         ; mutation = Option.value_exn (H.select_run host (Some Fs0_fixture.run_b))
+         })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let retained_host =
+    H.receive host
+      { selected_elsewhere with
+        tiles =
+          List.map selected_elsewhere.tiles ~f:(fun t ->
+            if W.Tile_id.equal t.id tile.id then retained else t)
+      }
+  in
+  assert (contains (render retained_host data retained) observation_qualifier);
+  let scrolled = H.set_local host tile.id { (H.local host tile.id) with scroll = 100 } in
+  assert (contains (render scrolled data tile) observation_qualifier)
 ;;
 
 let%test_unit "Waveforms callback renders bounded independent bodies beneath host palette"
@@ -3135,6 +3488,7 @@ let%test_unit "long cooperative lists follow typed wrapped cursors and respect m
           })
     ; next_sequence = 0
     ; recent_events = []
+    ; execution_timing = None
     }
   in
   let snapshot : Simulation.Snapshot.t =
@@ -3157,6 +3511,7 @@ let%test_unit "long cooperative lists follow typed wrapped cursors and respect m
           ; job = attempt.job
           ; suite = suite.id
           ; seed = "42"
+          ; execution_timing = None
           ; created_at = "now"
           ; parent = None
           ; lifecycle = Finished
@@ -3383,6 +3738,7 @@ let%test_unit "cooperative detail artifacts and logs paint typed values only" =
             ; artifacts = [ artifact ]
             ; next_sequence = 0
             ; recent_events = []
+            ; execution_timing = None
             }
           in
           let snapshot : Simulation.Snapshot.t =
@@ -3545,6 +3901,7 @@ let%test_unit "Testing paints readiness and independent attempt facts in actual 
           ; job = Job_id.of_string "job"
           ; suite = suite.id
           ; seed = "42"
+          ; execution_timing = None
           ; created_at = "now"
           ; parent = None
           ; lifecycle
@@ -3576,7 +3933,9 @@ let%test_unit "Testing paints readiness and independent attempt facts in actual 
             String.to_list text |> List.map ~f:(fun c -> String.of_char c, role))
         in
         let icon_width = if Appearance.Icons.equal icons None_ then 0 else 2 in
-        let context = Overview_tiles.display_clusters "    Failed-suite · seed=42" in
+        let context =
+          Overview_tiles.display_clusters "    Time: unknown · Failed-suite · seed=42"
+        in
         List.iter [ 5; 11; 120 ] ~f:(fun width ->
           let selected_rows = simulation_view_rows_with_selection host data tile ~width in
           assert (List.count selected_rows ~f:fst = 1);
@@ -3687,6 +4046,7 @@ let%test_unit "simulation annotations preserve typed rows, logs and terminal cas
     ; artifacts = []
     ; next_sequence = 0
     ; recent_events = []
+    ; execution_timing = None
     }
   in
   let snapshot : Simulation.Snapshot.t =
@@ -3792,6 +4152,7 @@ let%test_unit "shared host frames follow exact producers and leave tile layout u
     ; state = "executing"
     ; run = Some Fs0_fixture.run_a
     ; error = None
+    ; activity = Unreported
     }
   in
   let snapshot =
@@ -4182,7 +4543,14 @@ let%test_unit "shallow plan always shows readiness and endpoint; detail retains 
     { snapshot with
       preview = Some preview
     ; operations =
-        [ { key; kind = "plan"; state = "completed"; run = None; error = None } ]
+        [ { key
+          ; kind = "plan"
+          ; state = "completed"
+          ; run = None
+          ; error = None
+          ; activity = Unreported
+          }
+        ]
     }
   in
   let host =
@@ -4374,6 +4742,7 @@ let%test_unit "Timing panes render typed selection and exact scoped detail with 
     ; diagnostics = []
     ; truncated = false
     ; cached_unverified = true
+    ; times = Evidence_time.Index.empty
     }
   in
   let snapshot = { (Option.value_exn data.asic) with inspections = [ index ] } in
@@ -4823,6 +5192,7 @@ let%test_unit "actual utility and selector token images carry independent attrib
     ; requested = true
     ; reason = None
     ; action = None
+    ; execution_timing = None
     }
   in
   let strip =
@@ -5353,6 +5723,7 @@ let%test_unit "host semantic terminal rows preserve failure and raw evidence whe
         ]
     ; evidence =
         "Freshness: provider source\nRun: original raw identity\nfailed pending validated"
+    ; execution_timing = None
     }
   in
   let summary =
@@ -5549,7 +5920,14 @@ let%test_unit "checklist follows exact run and pin with selected-stage detail an
       (Set_tile_binding { tile = pinned.id; binding = Pin_run Fs0_fixture.run_a })
   in
   let stage id status reason : Asic.Stage.t =
-    { id; name = id; status; requested = true; reason; action = None }
+    { id
+    ; name = id
+    ; status
+    ; requested = true
+    ; reason
+    ; action = None
+    ; execution_timing = None
+    }
   in
   let terminal : Asic.Terminal_result.t =
     { attempt = "attempt"
@@ -5568,6 +5946,7 @@ let%test_unit "checklist follows exact run and pin with selected-stage detail an
           }
         ]
     ; evidence = "{}"
+    ; execution_timing = None
     }
   in
   let snapshot =
@@ -5666,7 +6045,7 @@ let%test_unit "checklist follows exact run and pin with selected-stage detail an
   let compact =
     tile_view compact_host data following ~width:40 ~height:10 |> plain_text
   in
-  List.iter [ "placement: running" ] ~f:(fun text ->
+  List.iter [ "running"; "Time: unknown" ] ~f:(fun text ->
     assert (String.is_substring compact ~substring:text));
   let missing = { data with asic = None } in
   let fallback = utility_rows host missing following |> Option.value_exn in
@@ -5698,7 +6077,14 @@ let%test_unit "checklist follows exact run and pin with selected-stage detail an
   let snapshot =
     { snapshot with
       operations =
-        [ { key; kind = "plan"; state = "completed"; run = None; error = None } ]
+        [ { key
+          ; kind = "plan"
+          ; state = "completed"
+          ; run = None
+          ; error = None
+          ; activity = Unreported
+          }
+        ]
     }
   in
   let host =
@@ -5713,7 +6099,7 @@ let%test_unit "checklist follows exact run and pin with selected-stage detail an
           following.id
           { (H.local host following.id) with presentation = T.inherit_; scroll }
       in
-      let text = tile_view host data following ~width:40 ~height |> plain_text in
+      let text = tile_view host data following ~width:60 ~height |> plain_text in
       assert (String.is_substring text ~substring:"stage-5: pending")));
   let top =
     H.browse_stages host following.id ~run:Fs0_fixture.run_b ~stages ~delta:(-5)
@@ -5723,7 +6109,7 @@ let%test_unit "checklist follows exact run and pin with selected-stage detail an
   in
   assert (
     String.is_substring
-      (tile_view top data following ~width:40 ~height:10 |> plain_text)
+      (tile_view top data following ~width:60 ~height:10 |> plain_text)
       ~substring:"stage-0: pending");
   let ready = tile_view host data following ~width:40 ~height:14 |> plain_text in
   assert (String.is_substring ready ~substring:"Space c c: Launch");
@@ -5996,6 +6382,7 @@ let%test_unit "imported clock configuration retains explicit known or unknown re
     ; metrics = [ clock ]
     ; checks = []
     ; evidence = "original terminal evidence"
+    ; execution_timing = None
     }
   in
   let snapshot =
@@ -6302,6 +6689,7 @@ let%test_unit "inspection overlay and input share full viewport and visibly reve
     ; diagnostics = []
     ; truncated = false
     ; cached_unverified = false
+    ; times = Evidence_time.Index.empty
     }
   in
   let detail : Asic_inspection.Detail.t =
@@ -6654,4 +7042,555 @@ let%test_unit "custom and unknown presets honor generic Fit without rewriting ge
     assert (W.Snapshot.equal registry (Option.value_exn host.registry));
     assert (
       Workspace_template.equal template (W.export_template registry workspace.id |> ok)))
+;;
+
+(* WB-054: contextual actions, breadcrumbs and explicit inspector close. *)
+
+(* Built through sexp so optional index fields keep their declared defaults. *)
+let wb054_index rows =
+  let field name value = Sexp.List [ Atom name; value ] in
+  let index =
+    Asic_inspection.Index.t_of_sexp
+      (Sexp.List
+         [ field "run" (Run_ref.sexp_of_t Fs0_fixture.run_a)
+         ; field "execution_file" (Atom "/exact/execution")
+         ; field "execution_sha256" (Atom "exact-sha")
+         ; field "domain" (Atom "timing")
+         ; field "stage" (Atom "signoff")
+         ; field "source_digest" (Atom "exact-source-digest")
+         ; field "rows" (List [])
+         ; field "diagnostics" (List [])
+         ; field "truncated" (Atom "false")
+         ; field "cached_unverified" (Atom "true")
+         ])
+  in
+  { index with
+    rows =
+      List.init rows ~f:(fun i ->
+        { Asic_inspection.Row.id = Int.to_string i
+        ; name = sprintf "path-%02d/endpoint/Q" i
+        ; category = "path"
+        ; producer = "sta"
+        ; corner = Some "slow"
+        ; group = Some "clk"
+        ; value = Some (Float.of_int i -. 1.)
+        ; unit_ = Some "ns"
+        ; status = "violated"
+        ; source = "/exact/report"
+        ; fields = []
+        })
+  }
+;;
+
+(* Timing fixture with an opened, reconciled paths index whose row "2" is selected. *)
+let wb054_timing () =
+  let host, data, find = refinement_fixture P.Timing.definition in
+  let snapshot = { (Option.value_exn data.asic) with inspections = [ wb054_index 3 ] } in
+  let state =
+    Inspection_view.reconcile
+      (Timing_workspace.create ~generation:4 ~run:Fs0_fixture.run_a ~stage:"signoff")
+      snapshot
+  in
+  let paths = find "timing-paths" in
+  let host = { host with notice = ""; focus = Some paths.id } in
+  { host with notice = "" }, { data with asic = Some snapshot }, find, state
+;;
+
+let wb054_without_run host =
+  let registry = Option.value_exn host.H.registry in
+  let workspace = Option.value_exn (H.active host) in
+  let context = W.context registry workspace.context in
+  W.apply
+    registry
+    (Mutate
+       { expected_revision = registry.revision
+       ; mutation =
+           Select_run
+             { workspace = workspace.id
+             ; context = context.id
+             ; expected_selection_revision = context.selection_revision
+             ; run = None
+             }
+       })
+  |> Result.ok
+  |> Option.value_exn
+  |> H.receive host
+  |> fun cleared -> { cleared with H.focus = host.H.focus }
+;;
+
+let wb054_commands host = H.contextual host (H.catalog host ~project:None ~jobs:[])
+
+let wb054_reason host id =
+  (List.find_exn (wb054_commands host) ~f:(fun c -> String.equal c.H.id id)).unavailable
+;;
+
+let%test_unit "WB-054 Timing actions stay listed with availability reasons" =
+  let host, _, find, state = wb054_timing () in
+  let paths = find "timing-paths"
+  and detail = find "timing-detail" in
+  (* Contextual actions lead the palette; close explains that nothing is open. *)
+  assert (String.equal (List.hd_exn (wb054_commands host)).id "inspector.close");
+  assert (
+    Option.equal String.equal (wb054_reason host "inspector.close") (Some H.no_inspector));
+  (* No paths index opened for the selected run yet. *)
+  let unopened = { host with focus = Some detail.id } in
+  assert (
+    String.is_substring
+      (Option.value_exn (wb054_reason unopened "inspector.open-detail"))
+      ~substring:"no timing paths opened for this run");
+  assert (Option.is_none (wb054_reason unopened "context.inspect-timing"));
+  (* No run selected: the same actions remain, with the typed reason. *)
+  let cleared = wb054_without_run unopened in
+  List.iter
+    [ "inspector.open-detail"; "inspector.refresh"; "context.inspect-timing" ]
+    ~f:(fun id ->
+      assert (Option.equal String.equal (wb054_reason cleared id) (Some "no run selected")));
+  (* Selection-appropriate actions on the loaded paths table. *)
+  let loaded = H.set_timing host paths { state with selected = Some "2" } in
+  assert (Option.is_none (wb054_reason loaded "inspector.open-detail"));
+  assert (Option.is_none (wb054_reason loaded "inspector.near"));
+  (match
+     (List.find_exn (wb054_commands loaded) ~f:(fun c ->
+        String.equal c.id "inspector.open-detail"))
+       .action
+   with
+   | Inspector_input (id, Open) -> assert (W.Tile_id.equal id paths.id)
+   | _ -> assert false);
+  let filtered = H.set_timing host paths { state with filter = "NO_MATCH" } in
+  assert (
+    Option.equal
+      String.equal
+      (wb054_reason filtered "inspector.open-detail")
+      (Some "no rows match the current filter"));
+  let opened =
+    H.set_timing
+      host
+      paths
+      { state with selected = Some "2"; requested = Some ("exact-source-digest", "2") }
+  in
+  assert (Option.is_none (wb054_reason opened "inspector.close"));
+  assert (
+    String.is_substring
+      (Option.value_exn (wb054_reason opened "inspector.open-detail"))
+      ~substring:"Space c x");
+  (* Help names the explicit close only while it applies, and never claims q exits. *)
+  assert (String.is_substring (main_hint_text opened) ~substring:"j/k select");
+  assert (not (String.is_substring (main_hint_text loaded) ~substring:"q exit"));
+  assert (String.is_substring (main_hint_text cleared) ~substring:"q exit")
+;;
+
+let%test_unit "WB-054 Testing panes keep selection actions with reasons" =
+  let host, _, find = refinement_fixture P.Testing.definition in
+  let cases = find "simulation-cases"
+  and artifacts = find "simulation-artifacts" in
+  let on tile = { host with focus = Some tile.W.Tile.id } in
+  assert (
+    Option.equal
+      String.equal
+      (wb054_reason (on cases) "simulation.rerun-case")
+      (Some "no attempt selected"));
+  assert (
+    Option.equal
+      String.equal
+      (wb054_reason (on artifacts) "testing.artifact.export")
+      (Some "no attempt selected"));
+  let selected =
+    H.update_testing (on cases) cases.id (fun state ->
+      Testing_workspace.select_attempt state "attempt-1")
+  in
+  assert (
+    Option.equal
+      String.equal
+      (wb054_reason selected "simulation.rerun-failed")
+      (Some "attempt detail not loaded"));
+  (* Project-scoped Testing panes do not advertise run-scoped evidence actions. *)
+  assert (
+    not
+      (List.exists
+         (wb054_commands (on cases))
+         ~f:(fun c -> String.equal c.id "context.inspect-timing")));
+  (* Placeholders explain rather than act. *)
+  match
+    (List.find_exn
+       (wb054_commands (on cases))
+       ~f:(fun c -> String.equal c.id "simulation.rerun-case"))
+      .action
+  with
+  | Unavailable reason -> assert (String.equal reason "no attempt selected")
+  | _ -> assert false
+;;
+
+let%test_unit "WB-054 close inspector returns focus predictably and keeps selection" =
+  let host, _, find, state = wb054_timing () in
+  let paths = find "timing-paths"
+  and detail = find "timing-detail" in
+  let registry = Option.value_exn host.registry in
+  (* Timing: Detail opened from the paths table; close returns to timing · paths. *)
+  let opened =
+    H.set_timing
+      { host with focus = Some detail.id }
+      paths
+      { state with selected = Some "2"; requested = Some ("exact-source-digest", "2") }
+  in
+  let closed, notice = H.close_inspector opened |> Result.ok |> Option.value_exn in
+  assert (Option.equal W.Tile_id.equal closed.focus (Some paths.id));
+  assert (String.is_substring notice ~substring:"timing · paths");
+  let view = Option.value_exn (H.timing closed paths) in
+  assert (Option.equal String.equal view.selected (Some "2"));
+  assert (not (Inspection_view.detail_mode view));
+  assert (view.generation > (Option.value_exn (H.timing opened paths)).generation);
+  assert (phys_equal (Option.value_exn closed.registry) registry);
+  assert (Result.is_error (H.close_inspector closed));
+  (* The Space c x chord routes through the captured command path. *)
+  let step host event = fst (H.input host event ~commands:[]) in
+  (match
+     H.input
+       (step (step opened (Character ' ')) (Character 'c'))
+       (Character 'x')
+       ~commands:[]
+   with
+   | after, Execute (_, Close_inspector) -> assert (after.prefix = 0)
+   | _ -> assert false);
+  (* Explorer and artifact browser belong to the focused tile: focus stays there. *)
+  let overview, _, ofind = refinement_fixture P.Overview.definition in
+  let tile =
+    List.find_exn (H.tiles overview) ~f:(fun tile ->
+      Option.is_some (tile_run overview tile) && not (H.project_scoped_kind tile.kind))
+  in
+  ignore (ofind : string -> W.Tile.t);
+  let overview = { overview with focus = Some tile.id } in
+  let scope = tile_run overview tile in
+  let explorer =
+    H.set_local
+      overview
+      tile.id
+      { (H.local overview tile.id) with
+        inspection =
+          Some
+            (Inspection_view.create
+               ?scope
+               ~generation:3
+               ~run:Fs0_fixture.run_a
+               ~domain:"clocks"
+               ~stage:"signoff"
+               ())
+      }
+  in
+  assert (
+    Option.equal
+      String.equal
+      (wb054_reason explorer "inspector.near")
+      (Some "near/violated applies to timing paths only"));
+  let closed, _ = H.close_inspector explorer |> Result.ok |> Option.value_exn in
+  assert (Option.is_none (H.local closed tile.id).inspection);
+  assert ((H.local closed tile.id).inspection_generation >= 3);
+  assert (Option.equal W.Tile_id.equal closed.focus (Some tile.id));
+  let browser =
+    H.set_local
+      overview
+      tile.id
+      { (H.local overview tile.id) with
+        artifacts = Some (Artifact_view.create ?scope ~generation:2 Fs0_fixture.run_a)
+      }
+  in
+  let closed, _ = H.close_inspector browser |> Result.ok |> Option.value_exn in
+  assert (Option.is_none (H.local closed tile.id).artifacts);
+  assert (Option.equal W.Tile_id.equal closed.focus (Some tile.id))
+;;
+
+let%test_unit "WB-054 breadcrumbs use typed context, fit or vanish, and follow icon modes"
+  =
+  let host, data, find, state = wb054_timing () in
+  let paths = find "timing-paths" in
+  let host = H.set_timing host paths { state with selected = Some "2" } in
+  let workspace = Option.value_exn (H.active host) in
+  let run = display_run Fs0_fixture.run_a in
+  List.iter Appearance.Icons.all ~f:(fun icons ->
+    let host = { host with appearance = { host.appearance with icons } } in
+    let sep =
+      match icons with
+      | Unicode -> " › "
+      | Ascii | None_ -> " > "
+    in
+    let full = String.concat ~sep [ workspace.name; "timing paths"; run ^ " (signoff)" ]
+    and short = String.concat ~sep [ "timing paths"; run ^ " (signoff)" ] in
+    assert (List.equal String.equal (breadcrumbs host) [ full; short ]);
+    let text = "Space c c commands" in
+    let fits crumb = cell_width text + 2 + cell_width crumb in
+    let check width expected =
+      let row = with_breadcrumb host ~width text in
+      assert (String.is_prefix row ~prefix:text);
+      match expected with
+      | None -> assert (String.equal row text)
+      | Some crumb ->
+        assert (String.is_suffix row ~suffix:crumb && cell_width row = width)
+    in
+    check (fits full) (Some full);
+    check (fits full - 1) (Some short);
+    check (fits short - 1) None;
+    (match icons with
+     | Unicode -> ()
+     | Ascii | None_ -> assert (not (String.is_substring full ~substring:"›")));
+    (* Wide and narrow rendered screens: the crumb appears only when the row fits. *)
+    let screen width = plain_text (render host data { Dimensions.width; height = 40 }) in
+    assert (String.is_substring (screen 200) ~substring:full);
+    let narrow = screen 60 in
+    assert (not (String.is_substring narrow ~substring:short)));
+  (* Never invent context: without a selected run there is no run or stage segment. *)
+  let cleared = wb054_without_run host in
+  List.iter (breadcrumbs cleared) ~f:(fun crumb ->
+    assert (not (String.is_substring crumb ~substring:"(signoff)"));
+    assert (not (String.is_substring crumb ~substring:Fs0_fixture.run_a.id)));
+  (* An open inspector names itself and its stage. *)
+  let overview, _, _ = refinement_fixture P.Overview.definition in
+  let tile =
+    List.find_exn (H.tiles overview) ~f:(fun tile ->
+      Option.is_some (tile_run overview tile) && not (H.project_scoped_kind tile.kind))
+  in
+  let overview = { overview with focus = Some tile.id } in
+  let explorer =
+    H.set_local
+      overview
+      tile.id
+      { (H.local overview tile.id) with
+        inspection =
+          Some
+            (Inspection_view.create
+               ?scope:(tile_run overview tile)
+               ~run:Fs0_fixture.run_a
+               ~domain:"clocks"
+               ~stage:"signoff"
+               ())
+      }
+  in
+  assert (
+    String.is_substring
+      (List.hd_exn (breadcrumbs explorer))
+      ~substring:("inspect clocks › " ^ run ^ " (signoff)"))
+;;
+
+let%test_unit "WB-054 full-area inspector renders breadcrumbs without losing content" =
+  let host, data, _ = refinement_fixture P.Overview.definition in
+  let tile =
+    List.find_exn (H.tiles host) ~f:(fun tile ->
+      Option.is_some (tile_run host tile) && not (H.project_scoped_kind tile.kind))
+  in
+  let host = { host with focus = Some tile.id; notice = "" } in
+  let scope = tile_run host tile in
+  let explorer =
+    Inspection_view.create
+      ?scope
+      ~run:Fs0_fixture.run_a
+      ~domain:"clocks"
+      ~stage:"signoff"
+      ()
+  in
+  let browser = Artifact_view.create ?scope Fs0_fixture.run_a in
+  List.iter Appearance.Icons.all ~f:(fun icons ->
+    let host = { host with appearance = { host.appearance with icons } } in
+    List.iter
+      [ Some explorer, None, "Waiting for explicitly requested index"
+      ; None, Some browser, "No catalog entries received for this exact run"
+      ]
+      ~f:(fun (inspection, artifacts, content) ->
+        let host =
+          H.set_local host tile.id { (H.local host tile.id) with inspection; artifacts }
+        in
+        let full = List.hd_exn (breadcrumbs host)
+        and short = List.last_exn (breadcrumbs host) in
+        let screen host width =
+          plain_text (render host data { Dimensions.width; height = 12 })
+        in
+        let wide = screen host 240 in
+        assert (String.is_substring wide ~substring:full);
+        assert (String.is_substring wide ~substring:content);
+        (* Only the heading changes: every evidence/help row stays in place. *)
+        let hidden = screen { host with main_hints = false } 240 in
+        assert (not (String.is_substring hidden ~substring:short));
+        assert (
+          List.equal
+            String.equal
+            (List.tl_exn (String.split_lines wide))
+            (List.tl_exn (String.split_lines hidden)));
+        List.iter
+          [ { host with chrome = false }
+          ; { host with notice = "a notice takes precedence" }
+          ]
+          ~f:(fun host ->
+            assert (not (String.is_substring (screen host 240) ~substring:short)));
+        assert (not (String.is_substring (screen host 60) ~substring:short))))
+;;
+
+let%test_unit "WB-054 Timing rendered footer follows Paths Detail and Context focus" =
+  let host, data, find, view = wb054_timing () in
+  let paths = find "timing-paths" in
+  let opened =
+    { view with selected = Some "1"; requested = Some ("exact-source-digest", "1") }
+  in
+  List.iter [ false; true ] ~f:(fun detail_open ->
+    let view = if detail_open then opened else { view with selected = Some "1" } in
+    let host = H.set_timing host paths view in
+    List.iter
+      [ "timing-paths", Timing_workspace.Paths, "j/k select"
+      ; "timing-detail", Detail, "j/k scroll"
+      ; "timing-context", Context, "j/k scroll"
+      ]
+      ~f:(fun (kind, pane, hint) ->
+        let host = { host with focus = Some (find kind).id } in
+        let screen =
+          plain_text (render host data { Dimensions.width = 240; height = 40 })
+        in
+        let footer = List.last_exn (String.split_lines (String.strip screen)) in
+        assert (String.is_substring footer ~substring:hint);
+        if detail_open && not (Timing_workspace.equal_pane pane Paths)
+        then assert (String.is_substring footer ~substring:"Space c x close detail");
+        let next, scroll, _ =
+          Timing_workspace.input ~pane ~scroll:0 ~width:80 ~height:1 view Down
+        in
+        match pane with
+        | Paths ->
+          assert (not (Option.equal String.equal next.selected view.selected));
+          assert (not (Inspection_view.detail_mode next))
+        | Detail | Context ->
+          assert (Option.equal String.equal next.selected view.selected);
+          assert (scroll > 0)))
+;;
+
+let%test_unit "WB-054 artifact keyboard seam dispatches unavailable selection reasons" =
+  let host, _, find = refinement_fixture P.Testing.definition in
+  let tile = find "simulation-artifacts" in
+  let host = { host with focus = Some tile.id } in
+  List.iter
+    [ host, "no attempt selected"
+    ; ( H.update_testing host tile.id (fun state ->
+          Testing_workspace.select_attempt state "a")
+      , "attempt detail not loaded" )
+    ]
+    ~f:(fun (host, expected) ->
+      List.iter [ 'e'; 'w' ] ~f:(fun key ->
+        let event : Bonsai_term.Event.t = Key_press { key = ASCII key; mods = [] } in
+        let dispatch =
+          match H.decode_event event with
+          | Some (Character key) ->
+            H.testing_dispatch host key ~commands:(wb054_commands host)
+            |> Option.value_exn
+          | _ -> assert false
+        in
+        match snd dispatch with
+        | Unavailable reason -> assert (String.equal reason expected)
+        | _ -> assert false))
+;;
+
+let%test_unit "WB-054 production selection catalog promotes original runnable identities" =
+  let host, _, find = refinement_fixture P.Testing.definition in
+  let tile = find "simulation-artifacts" in
+  let artifact : Simulation.Artifact.t =
+    { id = "exact-vcd"
+    ; attempt_id = "attempt"
+    ; case_id = Some "case"
+    ; label = "waves"
+    ; kind = "waveform"
+    ; media_type = "text/vcd"
+    ; size = None
+    ; sha256 = None
+    ; availability = Available
+    }
+  in
+  let attempt : Simulation.Attempt.t =
+    { id = "attempt"
+    ; job = Job_id.of_string "job"
+    ; project_root = "/fixture"
+    ; created_at = "now"
+    ; parent = None
+    ; captured =
+        { selection =
+            { suite = "suite"
+            ; cases = [ "case" ]
+            ; seed = "42"
+            ; parameters = []
+            ; asic_inputs = []
+            }
+        ; discovery_digest = "digest"
+        ; provider_executable = "/provider"
+        ; provider_args = []
+        ; environment = Inherit_daemon
+        }
+    ; lifecycle = Finished
+    ; outcome = Failed
+    ; exit_code = Some 1
+    ; diagnostic = None
+    ; progress = None
+    ; cases = [ { case_id = "case"; status = Failed; message = None; progress = None } ]
+    ; artifacts = [ artifact ]
+    ; next_sequence = 0
+    ; recent_events = []
+    ; execution_timing = None
+    }
+  in
+  let snapshot : Simulation.Snapshot.t =
+    { configured = true
+    ; discovery = None
+    ; discovery_digest = None
+    ; discovery_job = None
+    ; discovery_error = None
+    ; history_error = None
+    ; next_before = None
+    ; detail = Some attempt
+    ; byte_page = None
+    ; attempts = []
+    }
+  in
+  let loaded =
+    H.set_simulation
+      { host with focus = Some tile.id }
+      tile.id
+      { Simulation_view.empty with
+        snapshot = Some snapshot
+      ; attempt = Some attempt.id
+      ; case_id = Some "case"
+      }
+  in
+  let selected =
+    H.update_testing loaded tile.id (fun state ->
+      Testing_workspace.select_artifact state artifact.id)
+  in
+  let allocations = ref 0 in
+  let base =
+    H.catalog selected ~project:None ~jobs:[]
+    @ H.simulation_selection_commands selected tile ~submission_key:(fun _ ->
+      incr allocations;
+      "captured-" ^ Int.to_string !allocations)
+  in
+  assert (!allocations = 2);
+  let commands = H.contextual selected base in
+  let ids = List.map commands ~f:(fun c -> c.H.id) in
+  assert (not (List.contains_dup ids ~compare:String.compare));
+  let promoted =
+    [ "simulation.rerun-case"
+    ; "simulation.rerun-failed"
+    ; "simulation.export.exact-vcd"
+    ; "simulation.waveform.exact-vcd"
+    ]
+  in
+  assert (List.equal String.equal (List.take ids 5) ("inspector.close" :: promoted));
+  List.iter promoted ~f:(fun id ->
+    let original = List.find_exn base ~f:(fun c -> String.equal c.id id) in
+    let current = List.find_exn commands ~f:(fun c -> String.equal c.id id) in
+    assert (phys_equal original current);
+    assert (Option.is_none current.unavailable));
+  assert (!allocations = 2);
+  List.iter [ 'r'; 'f'; 'e'; 'w' ] ~f:(fun key ->
+    let id = Option.value_exn (H.testing_shortcut selected key) in
+    let original = List.find_exn base ~f:(fun c -> String.equal c.id id) in
+    let _, action = Option.value_exn (H.testing_dispatch selected key ~commands) in
+    assert (phys_equal action original.action));
+  (* Loaded attempt, but no artifact selected: explain e/w through the same dispatch. *)
+  List.iter [ 'e'; 'w' ] ~f:(fun key ->
+    let _, action =
+      Option.value_exn
+        (H.testing_dispatch loaded key ~commands:(H.contextual loaded base))
+    in
+    match action with
+    | Unavailable reason -> assert (String.equal reason "no artifact selected")
+    | _ -> assert false)
 ;;

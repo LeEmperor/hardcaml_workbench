@@ -88,7 +88,7 @@ let selected_row (t : t) =
 
 (** The compact prefix is width-bounded; complete values live in Context. Provider payload
     is deliberately outside this prefix and is never semantically styled. *)
-let semantic_prefix ~pane ~width (t : t) =
+let semantic_prefix ?(now = Time_ns.now ()) ~pane ~width (t : t) =
   let field label value = Metadata, label ^ ": " ^ value in
   match pane with
   | Paths -> []
@@ -139,6 +139,7 @@ let semantic_prefix ~pane ~width (t : t) =
         ; field "Execution" i.execution_file
         ; field "Execution SHA256" i.execution_sha256
         ]
+        @ List.map (Evidence_time_view.lines ~now i) ~f:(fun line -> Metadata, line)
         @ List.map i.diagnostics ~f:(fun diagnostic -> field "Diagnostic" diagnostic)
     in
     [ field "Run" t.run.id; field "Domain" (t.domain ^ " · Stage: " ^ t.stage) ]
@@ -147,19 +148,19 @@ let semantic_prefix ~pane ~width (t : t) =
       (match selected_row t with
       | None -> [ Pending, "No selected path provenance" ]
       | Some row ->
-        [ field "Row" row.id
-        ; field "Path" row.name
-        ; field "Producer" row.producer
-        ; field "Category / status" (row.category ^ " / " ^ row.status)
-        ; field
-            "Value"
-            (Option.value_map row.value ~default:"unreported" ~f:(sprintf "%.17g")
-             ^ " "
-             ^ Option.value row.unit_ ~default:"(unit unreported)")
-        ; field "Corner" (Option.value row.corner ~default:"(none)")
-        ; field "Group" (Option.value row.group ~default:"(none)")
-        ; field "Source" row.source
-        ]
+        [ field "Row" row.id; field "Path" row.name; field "Producer" row.producer ]
+        @ Option.value_map t.index ~default:[] ~f:(fun i ->
+          [ Metadata, Evidence_time_view.row_line ~now i row ])
+        @ [ field "Category / status" (row.category ^ " / " ^ row.status)
+          ; field
+              "Value"
+              (Option.value_map row.value ~default:"unreported" ~f:(sprintf "%.17g")
+               ^ " "
+               ^ Option.value row.unit_ ~default:"(unit unreported)")
+          ; field "Corner" (Option.value row.corner ~default:"(none)")
+          ; field "Group" (Option.value row.group ~default:"(none)")
+          ; field "Source" row.source
+          ]
         @ List.map row.fields ~f:(fun (key, value) -> field key value))
 ;;
 
@@ -183,7 +184,7 @@ let detail_body (t : t) =
              else String.split_lines detail.text)))
 ;;
 
-let rows ~pane ~scroll ~width ~height (t : t) =
+let rows ?now ~pane ~scroll ~width ~height (t : t) =
   match pane with
   | Paths ->
     let items = path_items t in
@@ -249,7 +250,7 @@ let rows ~pane ~scroll ~width ~height (t : t) =
       (Int.max 0 height)
   | Detail | Context ->
     let lines =
-      List.map (semantic_prefix ~pane ~width t) ~f:snd
+      List.map (semantic_prefix ?now ~pane ~width t) ~f:snd
       @ if equal_pane pane Detail then detail_body t else []
     in
     let lines =
@@ -338,6 +339,7 @@ let%test_unit "ten-row selected detail leads with provider text and retains full
     ; diagnostics = [ "provider diagnostic" ]
     ; truncated = false
     ; cached_unverified = false
+    ; times = Evidence_time.Index.empty
     }
   in
   let snapshot = { Fs0_fixture.snapshot with inspections = [ index ] } in
@@ -451,6 +453,7 @@ let%test_unit "cooperating panes select actual paths; browsing is local and deta
     ; diagnostics = []
     ; truncated = false
     ; cached_unverified = false
+    ; times = Evidence_time.Index.empty
     }
   in
   let snapshot = { Fs0_fixture.snapshot with inspections = [ index ] } in
@@ -570,4 +573,122 @@ let%test_unit "cooperating panes select actual paths; browsing is local and deta
          refresh_ticket
          (Error "old index receipt"))
         .error)
+;;
+
+let%test_unit "WB-006: evidence times keep their meanings through refresh, cache and \
+               carry-forward"
+  =
+  let now = Time_ns.of_string_with_utc_offset "2026-10-19 15:30:00Z" in
+  let ago minutes =
+    Timestamp.of_time_ns (Time_ns.sub now (Time_ns.Span.of_min minutes))
+  in
+  let row id producer : Asic_inspection.Row.t =
+    { id
+    ; category = "path"
+    ; producer
+    ; corner = Some "slow"
+    ; group = Some "clk"
+    ; name = id
+    ; value = Some 0.25
+    ; unit_ = Some "ns"
+    ; status = "met"
+    ; source = "{}"
+    ; fields = []
+    }
+  in
+  let routed = "OpenROAD.DetailedRouting@9-route"
+  and sta = "OpenROAD.STAPostPNR@11-sta" in
+  let index : Asic_inspection.Index.t =
+    { run = Fs0_fixture.run_a
+    ; execution_file = "/exact/execution.json"
+    ; execution_sha256 = String.make 64 'a'
+    ; domain = "timing"
+    ; stage = "signoff"
+    ; source_digest = String.make 64 'b'
+    ; rows = [ row "carried" routed; row "fresh" sta ]
+    ; diagnostics = []
+    ; truncated = false
+    ; cached_unverified = false
+    ; times =
+        Evidence_time.Index.with_validated
+          { production = [ routed, Supplied { at = ago (60. *. 50.) } ]
+          ; observations = []
+          }
+          ~at:(ago 90.)
+    }
+  in
+  let snapshot index = { Fs0_fixture.snapshot with inspections = [ index ] } in
+  let view =
+    Inspection_view.reconcile
+      (create ~generation:1 ~run:Fs0_fixture.run_a ~stage:"signoff")
+      (snapshot index)
+  in
+  let has lines substring = List.exists lines ~f:(String.is_substring ~substring) in
+  let header view = Inspection_view.rows ~now ~width:200 ~height:10 view in
+  assert (has (header view) "produced 1/2 producers known · validated 1h 30m ago");
+  (* #1: refreshing unchanged bytes moves only the labelled validation time. *)
+  let refreshed =
+    { index with times = Evidence_time.Index.with_validated index.times ~at:(ago 1.) }
+  in
+  let after = Inspection_view.reconcile view (snapshot refreshed) in
+  assert (after.generation = view.generation);
+  assert (has (header after) "validated 1m ago");
+  let context view = rows ~now ~pane:Context ~scroll:0 ~width:400 ~height:100 view in
+  let production lines = List.filter lines ~f:(String.is_prefix ~prefix:"Produced (") in
+  assert (List.equal String.equal (production (context view)) (production (context after)));
+  assert (has (context after) "Validated by Workbench: 2026-10-19 15:29 UTC (1m ago)");
+  assert (has (context view) "Validated by Workbench: 2026-10-19 14:00 UTC (1h 30m ago)");
+  (* #2: the producer without a supplied time stays unknown, whatever else is known. *)
+  let selected id view = { view with Inspection_view.selected = Some id } in
+  assert (has (context (selected "fresh" after)) ("Produced: unknown · by " ^ sta));
+  (* #3: the carried-forward row keeps its own producer's time and age. *)
+  assert (
+    has
+      (context (selected "carried" after))
+      ("Produced: 2026-10-17 13:30 UTC (2d ago) · by " ^ routed));
+  (* #4: a future value is flagged, with its zone, never as a negative age. *)
+  let future =
+    { refreshed with
+      times =
+        { refreshed.times with production = [ routed, Supplied { at = ago (-15.) } ] }
+    }
+  in
+  let future_view = Inspection_view.reconcile after (snapshot future) in
+  assert (
+    has
+      (context (selected "carried" future_view))
+      "Produced: 2026-10-19 15:45 UTC (FUTURE +15m: clock skew?)");
+  assert (not (has (context (selected "carried" future_view)) "-15"));
+  (* #5: cached-unverified status is shown independently of a recent timestamp. *)
+  let cached =
+    Inspection_view.reconcile after (snapshot { refreshed with cached_unverified = true })
+  in
+  assert (has (header cached) "CACHED UNVERIFIED");
+  assert (has (header cached) "validated 1m ago");
+  assert (has (context cached) "CACHED UNVERIFIED");
+  (* The memoized detail page is rebuilt when only the times change. *)
+  let detail view =
+    let view =
+      Inspection_view.clamp ~now { view with info = true } ~width:200 ~height:40
+    in
+    Array.to_list (Option.value_exn view.detail_cache).lines
+  in
+  let before =
+    Inspection_view.clamp ~now { view with info = true } ~width:200 ~height:40
+  in
+  let rebased = Inspection_view.reconcile before (snapshot refreshed) in
+  assert (has (detail rebased) "(1m ago)");
+  assert (has (detail view) "(1h 30m ago)");
+  (* The clock alone must invalidate memoized ages, even with identical metadata. *)
+  let memoized =
+    Inspection_view.clamp ~now { after with info = true } ~width:200 ~height:40
+  in
+  let later = Time_ns.add now (Time_ns.Span.of_min 1.) in
+  let advanced = Inspection_view.clamp ~now:later memoized ~width:200 ~height:40 in
+  assert (has (Array.to_list (Option.value_exn advanced.detail_cache).lines) "(2m ago)");
+  assert (phys_equal advanced.index memoized.index);
+  assert (
+    has
+      (rows ~now:later ~pane:Context ~scroll:0 ~width:400 ~height:100 after)
+      "2026-10-19 15:29 UTC (2m ago)")
 ;;

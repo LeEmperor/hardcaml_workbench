@@ -12,7 +12,9 @@ val supports : string -> bool
     [freshness] defaults to true; false hides validated-only chrome, never stale or
     unavailable warnings. *)
 val rows
-  :  ?compact:bool
+  :  ?now:Time_ns.t
+  -> ?finalizations:Asic.Finalization.t list
+  -> ?compact:bool
   -> ?freshness:bool
   -> ?stage_id:string
   -> kind:string

@@ -227,11 +227,7 @@ let%test_unit "check: timeout covers child exit and inherited output pipes indep
            | `Closed_streams -> "exec 1>&- 2>&-\nexec sleep 10"
            | `Inherited_pipes -> "sleep 10 &\nexit 0")
       in
-      configure
-        ~root
-        (provider ~base "p.sh" ~body)
-        ~discovery_timeout_seconds:1
-        ();
+      configure ~root (provider ~base "p.sh" ~body) ~discovery_timeout_seconds:1 ();
       let pid () = In_channel.read_all pid_path |> String.strip |> Pid.of_string in
       Exn.protect
         ~f:(fun () ->
@@ -251,10 +247,8 @@ let%test_unit "check: timeout covers child exit and inherited output pipes indep
            | _ -> failwith "discovery child was not reaped");
           match scenario with
           | `Closed_streams ->
-            assert
-              (Poly.equal
-                 (Signal_unix.send Signal.zero (`Pid (pid ())))
-                 `No_such_process)
+            assert (
+              Poly.equal (Signal_unix.send Signal.zero (`Pid (pid ()))) `No_such_process)
           | `Inherited_pipes -> ())
         ~finally:(fun () ->
           if Sys_unix.file_exists_exn pid_path
