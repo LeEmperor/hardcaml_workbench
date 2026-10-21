@@ -1,5 +1,17 @@
 # Hardcaml Workbench — Demo construction plan
 
+## Active WB-007 hierarchy tile — 2026-10-21
+
+Owner authorized implementation on `bpurtell/hier`. The
+[hierarchy tile plan](hierarchy_tile_plan.md) owns agent work packages, execution
+budgets, selection semantics and acceptance gates. Scope is the opt-in hierarchy
+module/tile and existing-inspector integration; WB-008 execution is separate.
+Implementation and automated verification are complete. Normal build, full tests,
+lint and changed-file formatting passed; native HTTP/PTY receipts are retained at
+`/tmp/opencode/hierarchy-tile-w1de3jp1/`. See
+[controls and acceptance](hierarchy_tile.md) for coverage and the unrelated
+repository-wide formatting failures. Owner visual acceptance remains separate.
+
 ## Planning intake — 2026-10-17
 
 The [WB feature catalog](features/README.md) now organizes the owner's new requests

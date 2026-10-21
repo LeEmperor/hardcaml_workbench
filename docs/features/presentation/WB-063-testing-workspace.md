@@ -3,7 +3,7 @@ id: WB-063
 title: Testing-workspace investigation redesign
 category: presentation
 feature_sets: [FS2, FS5]
-status: partial
+status: delivered
 kind: enhancement
 priority: P2
 severity: n/a
@@ -22,8 +22,8 @@ related: [WB-028, WB-032, WB-041, WB-054, WB-062, WB-064]
 
 ## Implementation delivery — 2026-10-17
 
-Code and automated acceptance are complete; status remains **partial only for the
-explicit owner visual/workflow review below**. Catalog, Attempts, Cases, Detail,
+Code and automated acceptance are complete; the owner visual/workflow review was
+accepted after the reconnect and Attempts-pane follow-ups. Catalog, Attempts, Cases, Detail,
 Artifacts and Logs share client/workspace-local investigation, with independent
 tile scroll/focus and one polling stream. Generic process tests and legacy
 standalone simulation remain distinct. See [controls and evidence](../../testing_workspace.md).
@@ -33,7 +33,22 @@ proof: `/tmp/opencode/testing-workspace-w56bs6_c/verified.json`. Actual painted
 120x40/180x55 geometry, case-selection stability, exact artifact bytes, rerun lineage,
 independent workspaces and preserved saved extras/pins were verified. Original
 points record the implementation estimate; this is not another 21 points of
-unfinished implementation. Owner aesthetic acceptance has not been assumed.
+unfinished implementation. Owner acceptance is recorded separately below.
+
+## Owner acceptance — 2026-10-21
+
+The owner confirmed Testing behavior and subsequently approved the final Attempts-pane
+tab-switch correction. WB-063 is now **delivered and closed/accepted**, including
+retained-catalog reuse, initial attempt/artifact selection, persisted investigation
+navigation and stable rows during background refresh. The earlier explicit manual
+workflow gate is satisfied by this approval, not inferred from automated tests.
+
+Follow-up implementation and evidence:
+[client reconnect/hydration](../../client_reconnect_hydration_plan.md). A two-client
+PTY acceptance verified exact selection restoration without second-client input or
+additional provider jobs; held-response tests cover the row-shift/busy/paging races.
+This closure does not cover unrelated large-regression load tests, durable logging,
+the dedicated Clocks workspace or signoff-dependent report inspection.
 
 ## Request
 Carry forward Testing-workspace usability work as a coherent investigation surface
@@ -62,7 +77,7 @@ The workspace must work with currently available data and honest missing states.
   native historical reopen remains tool-free with explicit unavailable logs.
 - [x] Existing pending/cancelled/missing/truncated/unavailable states remain explicit.
 - [x] Keyboard navigation and bounded narrow/normal layouts have automated coverage.
-- [ ] Owner reviews the actual composition/workflow; further visual preferences are
+- [x] Owner reviews the actual composition/workflow; further visual preferences are
   followup refinements rather than assumed acceptance.
 
 ## Dependencies

@@ -11,7 +11,10 @@ age, which answers when a report was produced or validated.
 - Testing's simulation-attempts pane shows timing in each attempt entry, with the
   same information in attempt details.
 
-`Time: 2m 07s` is a completed measurement; `Elapsed: 2m 07s` is a live estimate from
+Runs and checklist rows show bare durations such as `2m 07s`, right-aligned in a
+shared duration column beside left-aligned statuses. They omit redundant Time/Elapsed
+prefixes; the lifecycle status identifies active work. Standalone summary/detail views
+retain descriptive timing labels. Completed measurements freeze; live estimates use
 a recorded start. Zero is a valid measured duration. Unknown timing is explicitly
 unknown, not zero. Extremely narrow checklist/run rows may omit timing to preserve
 readable status. Live display updates use the existing repaint clock, not new provider
@@ -61,4 +64,12 @@ old-server responses decode with missing timing as unknown.
 Full combined build, tests and lint passed with `-j4`. Focused tests cover provider
 timing validation, lifecycle/restart retention, transport compatibility, visible default
 tile layouts, exact stage/run selection, frozen and live values, and narrow clipping.
-Owner visual validation remains outstanding.
+Owner feedback on 2026-10-21 accepts Testing behavior and authorizes closing the
+non-signoff-dependent work in this set. Simulation-attempt duration presentation is
+therefore accepted. Clock/timing report review is blocked by the failed signoff run;
+no successful signoff-report validation is implied by that closure.
+
+The later Runs/checklist alignment refinement has automated rendering coverage and
+awaits owner appearance review. See the
+[duration alignment and lazy Timing cache plan](timing_cache_and_duration_alignment_plan.md)
+for shared-column behavior and configurable inspection caching.

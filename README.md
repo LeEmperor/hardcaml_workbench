@@ -50,6 +50,10 @@ simulation tile and independent counter fixture remain supported.
 
 - [Execution durations](docs/execution_durations.md) — stage/run and simulation elapsed
   times in Overview and Testing, availability limits, and linked-context theme colors.
+- [Lazy Timing details and cache configuration](docs/timing_cache_and_duration_alignment_plan.md)
+  — selected-first loading, bounded neighbor warming, cache limits, and duration columns.
+- [Reconnect and saved navigation](docs/client_reconnect_hydration_plan.md) — retained
+  catalog reuse, immediate tab hydration, and restored attempt/artifact/Timing selections.
 
 - [Restore a default workspace layout](docs/default_layout_restore.md) — one-step
   recovery from extra/hidden tiles or altered sizes, preserving runs and pins.

@@ -103,7 +103,7 @@ let stage_row (stage : Stage.t) =
     | Not_run | Running | Completed -> []
   in
   row
-    ~time:"Time: unknown"
+    ~time:"unknown"
     ~role:(status_role status)
     ~status
     ~details:([ sprintf "Requested: %b" stage.requested ] @ reason)
@@ -129,7 +129,7 @@ let asic_stage_status : Asic.Stage.Status.t -> Status.t = function
 let asic_stage_row ?(now = Time_ns.now ()) ~run ~selected (stage : Asic.Stage.t) =
   let status = asic_stage_status stage.status in
   row
-    ~time:(Execution_time_view.compact_line ~now stage.execution_timing)
+    ~time:(Execution_time_view.list_value ~now stage.execution_timing)
     ~role:(status_role status)
     ~status
     ~active:selected
@@ -397,7 +397,7 @@ let stage_rows ?(expected_stages = default_stages) ~selected_run ~asic ~observat
       | [ stage ] -> stage_row stage
       | stages ->
         row
-          ~time:"Time: unknown"
+          ~time:"unknown"
           ~role:Muted
           ~status:Unknown
           ~details:
@@ -572,14 +572,20 @@ let status_column ~appearance ~width ~indent rows =
   | group ->
     let max_of f = List.fold group ~init:0 ~f:(fun acc row -> Int.max acc (f row)) in
     let prefix row = cell_width (row_prefix ~appearance ~indent row) in
-    let natural = max_of (fun row -> prefix row + cell_width row.label + 2) in
-    let floor = max_of prefix + min_label_cells + 2 in
-    let value_width = max_of (fun r -> cell_width r.value) in
-    let with_time =
-      max_of (fun r ->
-        cell_width r.value
-        + Option.value_map r.time ~default:0 ~f:(fun time -> 3 + cell_width time))
+    let timed = List.exists group ~f:(fun r -> Option.is_some r.time) in
+    let prefix_width =
+      if timed
+      then max_of (fun r -> cell_width (indent ^ marker appearance r) + 2)
+      else max_of prefix
     in
+    let natural =
+      max_of (fun row ->
+        (if timed then prefix_width else prefix row) + cell_width row.label + 2)
+    in
+    let floor = prefix_width + min_label_cells + 2 in
+    let value_width = max_of (fun r -> cell_width r.value) in
+    let time_width = max_of (fun r -> Option.value_map r.time ~default:0 ~f:cell_width) in
+    let with_time = value_width + if time_width = 0 then 0 else 3 + time_width in
     let reserved = if floor + with_time <= width then with_time else value_width in
     Some (Int.min natural (Int.max floor (width - reserved)))
 ;;
@@ -588,7 +594,15 @@ let status_column ~appearance ~width ~indent rows =
     and identity are available through [inspection_lines] before clipping. [title=None]
     makes a headerless tile. [status_column] pads the label so the value starts at that
     display cell. No nested frame or background is imposed. *)
-let row_spans ?status_column ~appearance ~width ~indent row =
+let row_spans
+  ?status_column
+  ?(status_width = 0)
+  ?(time_width = 0)
+  ~appearance
+  ~width
+  ~indent
+  row
+  =
   let prefix = row_prefix ~appearance ~indent row in
   let label =
     match status_column with
@@ -605,7 +619,15 @@ let row_spans ?status_column ~appearance ~width ~indent row =
   let time =
     Option.value_map row.time ~default:"" ~f:(fun time ->
       let room = width - cell_width (prefix ^ label ^ value) in
-      if room >= cell_width time + 3 then " | " ^ time else "")
+      if time_width > 0
+      then
+        String.make (Int.max 0 (status_width - cell_width value)) ' '
+        ^ " | "
+        ^ String.make (Int.max 0 (time_width - cell_width time)) ' '
+        ^ time
+      else if Option.is_none status_column && room >= cell_width time + 3
+      then " | " ^ time
+      else "")
   in
   let value =
     let emphasis = Int.clamp_exn row.emphasis ~min:0 ~max:(String.length value) in
@@ -626,13 +648,17 @@ let render_row
   ?indicator_fg
   ?selected_bg
   ?status_column
+  ?status_width
+  ?time_width
   ~appearance
   ~attrs
   ~width
   ~indent
   row
   =
-  let spans = row_spans ?status_column ~appearance ~width ~indent row in
+  let spans =
+    row_spans ?status_column ?status_width ?time_width ~appearance ~width ~indent row
+  in
   View.hcat
     (List.mapi spans ~f:(fun i (role, text) ->
        let attrs =
@@ -668,6 +694,9 @@ let render_row
 ;;
 
 let render
+  (* Supply the full filtered group when [rows] has already been scrolled. Column budgets
+     are computed before the viewport height is applied. *)
+  ?candidate_rows
   ?indicator_frames
   ?indicator_fg
   ?title
@@ -695,8 +724,22 @@ let render
     | Comfortable when width >= 30 -> " "
     | Compact | Comfortable -> ""
   in
+  let candidates = Option.value candidate_rows ~default:rows in
+  let status_column = status_column ~appearance ~width ~indent candidates in
+  let group = List.filter candidates ~f:aligned in
+  let status_width =
+    List.fold group ~init:0 ~f:(fun n r -> Int.max n (cell_width r.value))
+  in
+  let time_width =
+    List.fold group ~init:0 ~f:(fun n r ->
+      Int.max n (Option.value_map r.time ~default:0 ~f:cell_width))
+  in
+  let time_width =
+    if Option.value status_column ~default:width + status_width + 3 + time_width <= width
+    then time_width
+    else 0
+  in
   let rows = List.take rows (Int.max 0 (height - List.length heading)) in
-  let status_column = status_column ~appearance ~width ~indent rows in
   let content =
     List.map
       rows
@@ -706,6 +749,8 @@ let render
            ?indicator_fg
            ?selected_bg
            ?status_column
+           ~status_width
+           ~time_width
            ~appearance
            ~attrs
            ~width
@@ -724,7 +769,7 @@ let render
 let inspection_lines rows =
   List.concat_map rows ~f:(fun row ->
     (row.label ^ if String.is_empty row.value then "" else ": " ^ row.value)
-    :: (Option.to_list row.time @ row.details))
+    :: (List.map (Option.to_list row.time) ~f:(fun time -> "Time: " ^ time) @ row.details))
 ;;
 
 let%test_unit "native stage frames change only running markers, with fixed cell budgets" =
@@ -823,6 +868,29 @@ module Stage_strip = struct
               ~selected:(Option.equal String.equal selected_id (Some stage.id))
               stage
         })
+    in
+    let show_time =
+      List.for_all items ~f:(fun item ->
+        let r = item.row in
+        cell_width (row_prefix ~appearance ~indent:"" r)
+        + min_label_cells
+        + 2
+        + cell_width r.value
+        + Option.value_map r.time ~default:0 ~f:(fun time -> 3 + cell_width time)
+        <= width)
+    in
+    let items =
+      List.map items ~f:(fun item ->
+        let r = item.row in
+        let time = if show_time then r.time else None in
+        let label_width =
+          width
+          - cell_width (row_prefix ~appearance ~indent:"" r)
+          - 2
+          - cell_width r.value
+          - Option.value_map time ~default:0 ~f:(fun time -> 3 + cell_width time)
+        in
+        { item with row = { r with label = fit_cells ~width:label_width r.label; time } })
     in
     let lines, line, _ =
       List.fold items ~init:([], [], 0) ~f:(fun (lines, line, used) item ->
@@ -1223,8 +1291,8 @@ let%test_unit "duration is additional to aligned checklist status and clips with
                narrow cells"
   =
   let rows =
-    [ row ~status:Completed ~time:"Time: 2m 07s" "Synthesis" "completed"
-    ; row ~status:Running ~time:"Time: 14s elapsed" "Placement" "running"
+    [ row ~status:Completed ~time:"2m 07s" "Synthesis" "completed"
+    ; row ~status:Running ~time:"14s" "Placement" "running"
     ]
   in
   List.iter Appearance.Icons.all ~f:(fun icons ->
@@ -1235,8 +1303,8 @@ let%test_unit "duration is additional to aligned checklist status and clips with
       if width >= 40
       then (
         let text = plain_lines view |> String.concat ~sep:"\n" in
-        assert (String.is_substring text ~substring:"Time: 2m 07s");
-        assert (String.is_substring text ~substring:"Time: 14s elapsed");
+        assert (String.is_substring text ~substring:"2m 07s");
+        assert (String.is_substring text ~substring:"14s");
         let column = status_column ~appearance ~width ~indent:"" rows in
         let starts =
           List.map rows ~f:(fun row ->

@@ -9,6 +9,8 @@ type pane =
 
 type t = Inspection_view.t
 
+val attach_retained : t -> Asic.Snapshot.t -> t
+
 type path_item =
   { row : Asic_inspection.Row.t
   ; selected : bool

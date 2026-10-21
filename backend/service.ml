@@ -152,6 +152,8 @@ let check_instance t instance_id =
 
 let create
   ?state_dir
+  ?inspection_detail_cache_entries
+  ?inspection_detail_cache_bytes
   ?(kill_after = Time_float.Span.of_sec 2.)
   ?action_invocation
   ?(driver_invocation = Driver_adapter.describe_invocation)
@@ -165,6 +167,9 @@ let create
   let state_dir = Option.value state_dir ~default:(log_dir ^ "-state") in
   let%map result =
     Monitor.try_with_or_error (fun () ->
+      Inspection_detail_cache.validate_limits
+        ~entries:(Option.value inspection_detail_cache_entries ~default:64)
+        ~bytes:(Option.value inspection_detail_cache_bytes ~default:4194304);
       In_thread.run (fun () ->
         (match Sys_unix.file_exists log_dir with
          | `Yes ->
@@ -180,7 +185,12 @@ let create
     ; artifact_dir
     ; output_dir
     ; workspace_service = Workspace_service.create ~state_dir
-    ; asic_service = Asic_service.create ~state_dir
+    ; asic_service =
+        Asic_service.create_with_detail_cache
+          ?inspection_detail_cache_entries
+          ?inspection_detail_cache_bytes
+          ~state_dir
+          ()
     ; simulation_service = Simulation_service.create ~state_dir
     ; projects_by_key = Hashtbl.create (module String)
     ; projects = Project_id.Table.create ()

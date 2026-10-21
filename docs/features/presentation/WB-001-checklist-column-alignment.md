@@ -65,6 +65,11 @@ Current density/title preferences guide the fix but are not immutable design rul
 - [Host renderer](../../../terminal/host_view.ml)
 
 ## Delivery notes
+
+**Owner closure — 2026-10-21:** closed under the owner's authorization to close
+the non-signoff-dependent tickets in this set. Existing automated evidence stands;
+this records closure authorization, not a new exhaustive manual test run.
+
 **Reproduction (confirmed defect).** I rendered `Overview_tiles.render` (the vertical
 checklist renderer for the Overview stage-checklist tile and other utility tiles) with
 stage labels of different lengths and the second row selected. Before the change,
@@ -133,4 +138,3 @@ check, and the script then stopped at its later Testing-workspace step
 (`cooperative-testing-default` expects `SIMULATION CATALOG` pane titles, but the panes
 are titled by kind id, `simulation-catalog`). That step is outside the checklist renderer
 and this ticket. Owner visual review of the padded column is still welcome.
-

@@ -31,16 +31,24 @@ let pane_kind = function
   | Logs -> "simulation-logs"
 ;;
 
+type artifact_identity =
+  { id : string
+  ; sha256 : string option
+  ; size : int option
+  }
+
 type t =
   { view : Simulation_view.t
   ; catalog : Simulation_catalog.t
   ; selected_artifact : string option
+  ; restored_artifact : artifact_identity option
   }
 
 let empty =
   { view = Simulation_view.empty
   ; catalog = Simulation_catalog.empty
   ; selected_artifact = None
+  ; restored_artifact = None
   }
 ;;
 
@@ -50,14 +58,86 @@ let set_catalog t catalog = { t with catalog }
 let update_catalog t f = set_catalog t (f t.catalog)
 let selected_artifact t = t.selected_artifact
 
-let artifact t =
+let raw_artifact t =
   Option.bind (Simulation_view.detail t.view) ~f:(fun d ->
     List.find d.artifacts ~f:(fun a ->
       String.equal a.attempt_id d.id
       && Option.equal String.equal t.selected_artifact (Some a.id)))
 ;;
 
+let artifact t =
+  Option.filter (raw_artifact t) ~f:(fun a ->
+    Option.value_map t.restored_artifact ~default:true ~f:(fun saved ->
+      String.equal saved.id a.id
+      && Option.equal String.equal saved.sha256 a.sha256
+      && Option.equal Int.equal saved.size a.size
+      && S.Artifact.Availability.equal a.availability Available))
+;;
+
+let artifact_identity t =
+  Option.first_some
+    t.restored_artifact
+    (Option.map (raw_artifact t) ~f:(fun a ->
+       { id = a.id; sha256 = a.sha256; size = a.size }))
+;;
+
+let selection_unavailable t =
+  match Simulation_view.detail t.view with
+  | None ->
+    Option.map t.view.error ~f:(fun error -> "Selected attempt unavailable: " ^ error)
+  | Some d ->
+    if Option.exists t.view.case_id ~f:(fun id ->
+         not (List.exists d.cases ~f:(fun c -> String.equal c.case_id id)))
+    then Some "Saved case unavailable in selected attempt"
+    else if Option.is_some t.restored_artifact && Option.is_none (artifact t)
+    then Some "Saved artifact unavailable: missing, changed, or identity mismatch"
+    else None
+;;
+
+let default_detail t =
+  match Simulation_view.detail t.view with
+  | None -> t
+  | Some d ->
+    let case_id =
+      Option.first_some
+        t.view.case_id
+        (Option.map
+           (Option.first_some
+              (List.find d.cases ~f:(fun c -> S.Case_status.equal c.status Failed))
+              (List.hd d.cases))
+           ~f:(fun c -> c.case_id))
+    in
+    let available =
+      List.filter d.artifacts ~f:(fun a ->
+        String.equal a.attempt_id d.id
+        && S.Artifact.Availability.equal a.availability Available
+        && (Option.is_none t.view.case_id
+            || Option.is_none a.case_id
+            || Option.equal String.equal a.case_id t.view.case_id))
+    in
+    let preferred =
+      Option.first_some
+        (List.find available ~f:(fun a ->
+           String.is_substring (String.lowercase a.media_type) ~substring:"vcd"))
+        (Option.first_some
+           (List.find available ~f:(fun a -> Option.equal String.equal a.case_id case_id))
+           (List.hd available))
+    in
+    let chosen = if Option.is_some t.selected_artifact then None else preferred in
+    { t with
+      view =
+        { t.view with
+          case_id =
+            Option.value_map chosen ~default:case_id ~f:(fun a ->
+              Option.first_some a.case_id case_id)
+        }
+    ; selected_artifact =
+        Option.first_some t.selected_artifact (Option.map chosen ~f:(fun a -> a.id))
+    }
+;;
+
 let set_view t view =
+  let had_detail = Option.is_some (Simulation_view.detail t.view) in
   let same_attempt =
     Option.equal String.equal t.view.attempt view.Simulation_view.attempt
   in
@@ -76,21 +156,47 @@ let set_view t view =
     ; catalog
     ; selected_artifact =
         (if same_attempt && same_case then t.selected_artifact else None)
+    ; restored_artifact = (if same_attempt then t.restored_artifact else None)
     }
   in
-  if Option.is_some (Simulation_view.detail view) && Option.is_none (artifact t)
-  then { t with selected_artifact = None }
+  let t =
+    if Option.is_some (Simulation_view.detail view)
+       && Option.is_none (raw_artifact t)
+       && Option.is_none t.restored_artifact
+    then { t with selected_artifact = None }
+    else t
+  in
+  if Option.is_none (Simulation_view.detail t.view)
+  then t
+  else if (not same_attempt) || not had_detail
+  then default_detail t
   else t
 ;;
 
-let select_attempt t id = set_view t (Simulation_view.select t.view id)
+let select_attempt t id =
+  set_view { t with restored_artifact = None } (Simulation_view.select t.view id)
+;;
+
+let restore_selection t ~attempt ~case_id ~artifact =
+  let t = select_attempt t attempt in
+  { t with
+    view = { t.view with case_id }
+  ; selected_artifact = Option.map artifact ~f:(fun a -> a.id)
+  ; restored_artifact = artifact
+  }
+;;
 
 let select_case t id =
   match Simulation_view.detail t.view with
   | Some d when List.exists d.cases ~f:(fun c -> String.equal c.case_id id) ->
     if Option.equal String.equal t.view.case_id (Some id)
     then t
-    else { t with view = { t.view with case_id = Some id }; selected_artifact = None }
+    else
+      { t with
+        view = { t.view with case_id = Some id }
+      ; selected_artifact = None
+      ; restored_artifact = None
+      }
   | _ -> t
 ;;
 
@@ -106,6 +212,7 @@ let select_artifact t id =
      | Some a ->
        { t with
          selected_artifact = Some id
+       ; restored_artifact = None
        ; view = { t.view with case_id = Option.first_some a.case_id t.view.case_id }
        })
 ;;
@@ -266,7 +373,9 @@ let rows ?(now = Time_ns.now ()) t pane ~log_lines =
     match pane with
     | Catalog -> Simulation_catalog.rows t.catalog
     | Attempts ->
-      (if t.view.busy then [ row ~indicator:Running "Loading simulation history" ] else [])
+      (if t.view.busy && Option.is_none t.view.snapshot
+       then [ row ~indicator:Running "Loading simulation history" ]
+       else [])
       @ List.map (Option.to_list t.view.error @ Option.to_list t.view.notice) ~f:row
       @ Option.value_map
           t.view.snapshot
@@ -361,6 +470,7 @@ let rows ?(now = Time_ns.now ()) t pane ~log_lines =
           :: row ("Attempt: " ^ d.id ^ "; job: " ^ Job_id.to_string d.job)
           :: List.map (log_lines d.job) ~f:row)
   in
+  let rows = List.map (Option.to_list (selection_unavailable t)) ~f:row @ rows in
   List.concat_map rows ~f:(fun r ->
     String.split_lines r.Simulation_view.text
     |> List.mapi ~f:(fun i text ->
@@ -454,6 +564,222 @@ module Test_data = struct
   ;;
 end
 
+let%test_unit "restoring during Get releases busy and ignores the held response" =
+  let pending = begin_request empty in
+  let restored =
+    restore_selection
+      pending
+      ~attempt:Test_data.attempt.id
+      ~case_id:(Some "b")
+      ~artifact:None
+  in
+  assert (not restored.view.busy);
+  let late =
+    receive
+      restored
+      ~ticket:pending.view.request
+      ~selected:pending.view.attempt
+      Get
+      (Ok Test_data.snapshot)
+  in
+  assert (not late.view.busy);
+  assert (Option.is_none late.view.snapshot);
+  let next = begin_request late in
+  let loaded =
+    receive
+      next
+      ~ticket:next.view.request
+      ~selected:next.view.attempt
+      (Observe Test_data.attempt.id)
+      (Ok Test_data.snapshot)
+  in
+  assert (Option.is_some (Simulation_view.detail loaded.view));
+  assert (Option.equal String.equal loaded.view.case_id (Some "b"))
+;;
+
+let%test_unit "background Get and Observe keep retained attempts at stable row offsets" =
+  let t = Test_data.loaded () in
+  let summary : S.Summary.t =
+    { id = Test_data.attempt.id
+    ; job = Test_data.attempt.job
+    ; suite = "suite"
+    ; seed = "7"
+    ; created_at = "now"
+    ; parent = None
+    ; lifecycle = Finished
+    ; outcome = Failed
+    ; execution_timing = None
+    }
+  in
+  let snapshot = { Test_data.snapshot with attempts = [ summary ] } in
+  let t = set_view t { t.view with snapshot = Some snapshot } in
+  let projected t =
+    rows ~now:Time_ns.epoch t Attempts ~log_lines:(fun _ -> assert false)
+    |> List.map ~f:(fun row -> row.text, row.selected)
+  in
+  let expected = projected t in
+  List.fold [ S.Operation.Get; Observe summary.id ] ~init:t ~f:(fun t operation ->
+    let pending = begin_request t in
+    assert (Poly.equal expected (projected pending));
+    let t =
+      receive
+        pending
+        ~ticket:pending.view.request
+        ~selected:pending.view.attempt
+        operation
+        (Ok snapshot)
+    in
+    assert (Poly.equal expected (projected t));
+    t)
+  |> ignore;
+  assert (
+    List.exists
+      (rows (begin_request empty) Attempts ~log_lines:(fun _ -> assert false))
+      ~f:(fun row -> String.equal row.text "Loading simulation history"))
+;;
+
+let%test_unit "cold Get selects newest and detail defaults once with VCD preference" =
+  let summary id : S.Summary.t =
+    { id
+    ; job = Test_data.attempt.job
+    ; suite = "suite"
+    ; seed = "7"
+    ; created_at = "now"
+    ; parent = None
+    ; lifecycle = Finished
+    ; outcome = Failed
+    ; execution_timing = None
+    }
+  in
+  let receive_ok t op snapshot =
+    let t = begin_request t in
+    receive t ~ticket:t.view.request ~selected:t.view.attempt op (Ok snapshot)
+  in
+  let history =
+    { Test_data.snapshot with
+      detail = None
+    ; attempts = [ summary Test_data.attempt.id; summary "older" ]
+    }
+  in
+  let t = receive_ok empty Get history in
+  assert (Option.equal String.equal t.view.attempt (Some Test_data.attempt.id));
+  assert (Option.is_none (Simulation_view.detail t.view));
+  let vcd =
+    { Test_data.artifact with id = "wave"; case_id = Some "b"; media_type = "text/vcd" }
+  in
+  let snapshot =
+    { history with
+      detail = Some { Test_data.attempt with artifacts = [ Test_data.artifact; vcd ] }
+    }
+  in
+  let t = receive_ok t (Observe Test_data.attempt.id) snapshot in
+  assert (Option.equal String.equal (selected_artifact t) (Some "wave"));
+  assert (Option.equal String.equal t.view.case_id (Some "b"));
+  let t = select_artifact t Test_data.artifact.id in
+  let t = receive_ok t Get history in
+  let t = receive_ok t (Observe Test_data.attempt.id) snapshot in
+  assert (Option.equal String.equal (selected_artifact t) (Some Test_data.artifact.id));
+  assert (Option.equal String.equal t.view.case_id (Some "a"));
+  let t = select_attempt t "older" in
+  let t = receive_ok t Get history in
+  assert (Option.equal String.equal t.view.attempt (Some "older"))
+;;
+
+let%test_unit "exact saved attempt outside page stages evidence validation and retains \
+               failures"
+  =
+  let saved : artifact_identity =
+    { id = Test_data.artifact.id
+    ; sha256 = Test_data.artifact.sha256
+    ; size = Test_data.artifact.size
+    }
+  in
+  let restored () =
+    restore_selection
+      empty
+      ~attempt:Test_data.attempt.id
+      ~case_id:(Some "a")
+      ~artifact:(Some saved)
+  in
+  let receive_ok t op snapshot =
+    let t = begin_request t in
+    receive t ~ticket:t.view.request ~selected:t.view.attempt op (Ok snapshot)
+  in
+  let t = receive_ok (restored ()) Get { Test_data.snapshot with detail = None } in
+  assert (Option.equal String.equal t.view.attempt (Some Test_data.attempt.id));
+  assert (Option.is_some (artifact_identity t));
+  assert (Option.is_none (artifact t));
+  let t = receive_ok t (Observe Test_data.attempt.id) Test_data.snapshot in
+  assert (Option.is_some (artifact t));
+  assert (Option.is_none (selection_unavailable t));
+  List.iter
+    [ []
+    ; [ { Test_data.artifact with sha256 = Some "different" } ]
+    ; [ { Test_data.artifact with size = Some 99 } ]
+    ; [ { Test_data.artifact with availability = Missing } ]
+    ; [ { Test_data.artifact with availability = Changed } ]
+    ]
+    ~f:(fun artifacts ->
+      let snapshot =
+        { Test_data.snapshot with detail = Some { Test_data.attempt with artifacts } }
+      in
+      let t = receive_ok (restored ()) (Observe Test_data.attempt.id) snapshot in
+      assert (Option.is_none (artifact t));
+      assert (Option.is_some (selection_unavailable t));
+      assert (Option.equal String.equal (selected_artifact t) (Some saved.id));
+      let t = receive_ok t Get { Test_data.snapshot with detail = None } in
+      assert (Option.is_none (artifact t));
+      assert (Option.is_some (artifact_identity t)));
+  let changed = { Test_data.artifact with sha256 = Some "different" } in
+  let snapshot =
+    { Test_data.snapshot with
+      detail = Some { Test_data.attempt with artifacts = [ changed ] }
+    }
+  in
+  let t = receive_ok (restored ()) (Observe Test_data.attempt.id) snapshot in
+  assert (Option.is_none (artifact (select_case t "a")));
+  let t = select_artifact t saved.id in
+  assert (Option.is_some (artifact t));
+  assert (Option.is_none (selection_unavailable t));
+  let pending = restored () |> begin_request in
+  let explicit = select_attempt pending "user-choice" in
+  let late =
+    receive
+      explicit
+      ~ticket:pending.view.request
+      ~selected:pending.view.attempt
+      (Observe Test_data.attempt.id)
+      (Ok Test_data.snapshot)
+  in
+  assert (Option.equal String.equal late.view.attempt (Some "user-choice"));
+  assert (Option.is_none (artifact_identity late));
+  let t = restore_selection empty ~attempt:"missing" ~case_id:None ~artifact:None in
+  let t = begin_request t in
+  let t =
+    receive
+      t
+      ~ticket:t.view.request
+      ~selected:t.view.attempt
+      (Observe "missing")
+      (Error "Simulation attempt not found")
+  in
+  assert (Option.is_some (selection_unavailable t));
+  assert (Option.equal String.equal t.view.attempt (Some "missing"));
+  let t = receive_ok t Get { Test_data.snapshot with detail = None } in
+  assert (Option.is_some (selection_unavailable t));
+  let t =
+    restore_selection
+      empty
+      ~attempt:Test_data.attempt.id
+      ~case_id:(Some "missing-case")
+      ~artifact:None
+    |> fun t -> receive_ok t (Observe Test_data.attempt.id) Test_data.snapshot
+  in
+  assert (Option.equal String.equal t.view.case_id (Some "missing-case"));
+  assert (Option.is_some (selection_unavailable t));
+  assert (Option.is_none (artifact t))
+;;
+
 let%test_unit "workspace browsing independent of attempt and other workspaces" =
   let t = Test_data.loaded () in
   let other = Test_data.loaded () in
@@ -465,7 +791,7 @@ let%test_unit "workspace browsing independent of attempt and other workspaces" =
   let t = select_case t "b" |> fun t -> select_artifact t "artifact-full-id" in
   assert (Option.equal String.equal t.view.case_id (Some "a"));
   assert (Option.equal String.equal (selected_artifact t) (Some "artifact-full-id"));
-  assert (Option.is_none (selected_artifact other));
+  assert (Option.is_some (selected_artifact other));
   let t = select_case t "b" in
   assert (Option.is_none (artifact t));
   let t = select_artifact t "artifact-full-id" |> fun t -> select_attempt t "new" in
@@ -549,7 +875,7 @@ let%test_unit "cooperative rows keep facts typed full provenance and logs separa
     ; "Process exit: 0"
     ]
     ~f:(fun substring -> assert (String.is_substring text ~substring));
-  assert (not (String.is_substring text ~substring:"artifact-full-id"));
+  assert (String.is_substring text ~substring:"artifact-full-id");
   let cases = rows t Cases ~log_lines:no_logs in
   assert (Option.equal Poly.equal (List.nth_exn cases 0).indicator (Some Indicator.Failed));
   assert (Option.is_some (List.nth_exn cases 0).value_start);
@@ -638,7 +964,8 @@ let%test_unit "large navigators expose a unique typed cursor; artifact identity 
       assert (List.is_empty r.spans)));
   assert (Option.equal String.equal t.view.attempt (Some attempt.id));
   assert (String.equal (only Cases t) "> case-1023: Passed");
-  assert (List.is_empty (selected Artifacts t));
+  assert (List.length (selected Artifacts t) = 1);
+  assert (Option.equal String.equal (selected_artifact t) (Some "artifact-00-exact-id"));
   let t = select_artifact t "artifact-31-exact-id" in
   assert (String.equal (only Artifacts t) "> Evidence label");
   let navigator = rows t Artifacts ~log_lines:(fun _ -> assert false) in

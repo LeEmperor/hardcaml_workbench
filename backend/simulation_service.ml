@@ -383,7 +383,7 @@ let snapshot p ~configured ?detail ?byte_page ?before ?(limit = Limits.history_p
   { Snapshot.configured
   ; discovery = p.discovery
   ; discovery_digest = p.discovery_digest
-  ; discovery_job = p.discovery_job
+  ; discovery_job = (if p.discovering then p.discovery_job else None)
   ; discovery_error = p.discovery_error
   ; attempts = List.map page ~f:(fun e -> summary e.record.attempt)
   ; next_before =
@@ -731,6 +731,7 @@ let discover p config ~environment ~schedule =
           ; finish =
               (fun ~cancelled status ->
                 p.discovering <- false;
+                p.discovery_job <- None;
                 if cancelled then fail "Discovery cancelled";
                 (match status with
                  | Some (Job.Exit_status.Exited 0) -> ()
@@ -752,9 +753,10 @@ let discover p config ~environment ~schedule =
           }))
     in
     match job with
-    | Ok job -> p.discovery_job <- Some job
+    | Ok job -> p.discovery_job <- (if p.discovering then Some job else None)
     | Error exn ->
       p.discovering <- false;
+      p.discovery_job <- None;
       p.discovery_error <- Some (Exn.to_string exn);
       raise exn)
 ;;

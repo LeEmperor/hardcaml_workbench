@@ -3,7 +3,7 @@ id: WB-007
 title: Hierarchy tile and selected top visibility
 category: project
 feature_sets: [FS1, FS2]
-status: partial
+status: delivered
 kind: enhancement
 priority: P2
 severity: n/a
@@ -25,6 +25,9 @@ Original size: **Ticket**. Make the hardware hierarchy and selected/tested top
 visible in a tile. The owner is unsure whether Overview is its best home.
 
 ## Current baseline
+Implemented and automatically verified 2026-10-21. See
+[controls and acceptance](../../hierarchy_tile.md). Owner visual review is separate.
+
 The driver exports bounded structural hierarchy artifacts with ports and provenance.
 The terminal already offers “Inspect hardware hierarchy” and current/historical
 generation checks. This is not a request to rebuild that inspector.
@@ -57,11 +60,22 @@ Related: none; alternate-top execution can consume this view independently later
 Exclude provider DUT mapping generation and out-of-context execution costs.
 
 ## Assumptions and decisions needed
-Default: opt-in tile, leaving current preset composition intact initially.
-TBD: Overview placement and compact depth; confirm the meaning of “tested top”
-for each provider rather than treating an instance tree as test evidence.
+Delivered default: opt-in tile, leaving current preset composition intact. Root
+initially expanded; independent local navigation; explicit load-current action.
+Loaded artifacts remain browsable with recomputed current/historical labels.
+Current provider contracts supply no tested-DUT association, so it is unknown.
+
+## Delivery evidence
+
+- Shared immutable hierarchy model, bounded/deduplicated reads, tile-local navigation
+  and exact artifact/node handoff to the existing inspector are implemented.
+- Normal build, full tests, lint and changed-file formatting passed. Native HTTP/PTY
+  acceptance passed at `/tmp/opencode/hierarchy-tile-w1de3jp1/`.
+- The [acceptance record](../../hierarchy_tile.md#verification-limits) records
+  pre-existing global format failures and native lifecycle/real-provider coverage limits.
 
 ## References
+- [Implementation plan and agent work packages](../../hierarchy_tile_plan.md)
 - [Hierarchy contract](../../../protocol/hierarchy.ml)
 - [Existing inspector](../../../terminal/main.ml)
 - [Current-generation checks](../../../terminal/state.ml)

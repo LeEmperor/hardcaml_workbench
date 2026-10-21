@@ -27,6 +27,28 @@ val set_catalog : t -> Simulation_catalog.t -> t
 val update_catalog : t -> (Simulation_catalog.t -> Simulation_catalog.t) -> t
 val selected_artifact : t -> string option
 val artifact : t -> Simulation.Artifact.t option
+
+type artifact_identity =
+  { id : string
+  ; sha256 : string option
+  ; size : int option
+  }
+
+(** Call once after establishing project scope, before Get/Observe. Selects the exact
+    attempt even outside the history page. Subsequent detail validates saved evidence;
+    polling retains unavailable intent, and explicit selection overrides it. *)
+val restore_selection
+  :  t
+  -> attempt:string
+  -> case_id:string option
+  -> artifact:artifact_identity option
+  -> t
+
+(** Includes pending/unavailable saved identity so persistence never replaces it with an
+    empty intermediate hydration state. *)
+val artifact_identity : t -> artifact_identity option
+
+val selection_unavailable : t -> string option
 val select_attempt : t -> string -> t
 val select_case : t -> string -> t
 val select_artifact : t -> string -> t

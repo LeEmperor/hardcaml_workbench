@@ -32,6 +32,12 @@ let value ~now (timing : Execution_timing.t option) =
 
 let line ~now timing = "Time: " ^ value ~now timing
 
+(** Lifecycle status already distinguishes elapsed from terminal measurements in lists. *)
+let list_value ~now timing =
+  let value = value ~now timing in
+  Option.value (String.chop_suffix value ~suffix:" elapsed") ~default:value
+;;
+
 let compact_line ~now timing =
   let value = value ~now timing in
   match String.chop_suffix value ~suffix:" elapsed" with

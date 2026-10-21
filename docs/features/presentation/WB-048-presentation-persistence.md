@@ -63,6 +63,11 @@ Keep existing last-writer-wins behavior unless a separately scoped decision chan
 
 ## Completion review — 2026-10-20
 
+**Owner closure — 2026-10-21:** closed under the owner's authorization to close
+the non-signoff-dependent tickets in this set. Automated restart/persistence evidence
+remains the basis for those checks; no additional manual restart test is claimed.
+
+
 **Delivered status confirmed.** Independent code review found no blocking defect in
 the persistence whitelist, sparse inheritance/reset semantics, schema 1/2/3 migration,
 session/tile/workspace/kind identity guards, or fresh-process coverage. The combined
