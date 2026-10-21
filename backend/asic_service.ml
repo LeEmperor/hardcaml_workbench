@@ -148,6 +148,7 @@ type project =
   ; mutable artifact_byte_pages : Asic_artifact.Byte_page.t list
   ; mutable inspections : Inspection_wire.Index.t list
   ; mutable inspection_details : Inspection_wire.Detail.t list
+  ; detail_cache : Inspection_detail_cache.t
   ; inspection_refreshes : bool ref String.Table.t
   ; hot : Asic.Summary.t String.Table.t
   ; mutable recency : string list
@@ -168,20 +169,34 @@ type project =
 
 type t =
   { state_dir : string
+  ; inspection_detail_cache_entries : int
+  ; inspection_detail_cache_bytes : int
   ; projects : (project, exn) Result.t Deferred.t String.Table.t
   ; queries : unit Throttle.t
   ; executions : unit Throttle.t
   ; mutable closing : bool
   }
 
-let create ~state_dir =
+let create_with_detail_cache
+  ?(inspection_detail_cache_entries = 64)
+  ?(inspection_detail_cache_bytes = 4194304)
+  ~state_dir
+  ()
+  =
+  Inspection_detail_cache.validate_limits
+    ~entries:inspection_detail_cache_entries
+    ~bytes:inspection_detail_cache_bytes;
   { state_dir
+  ; inspection_detail_cache_entries
+  ; inspection_detail_cache_bytes
   ; projects = String.Table.create ()
   ; queries = Throttle.create ~continue_on_error:true ~max_concurrent_jobs:4
   ; executions = Throttle.create ~continue_on_error:true ~max_concurrent_jobs:1
   ; closing = false
   }
 ;;
+
+let create ~state_dir = create_with_detail_cache ~state_dir ()
 
 let path t identity suffix =
   Filename.concat t.state_dir ("asic-" ^ Public.digest identity ^ suffix)
@@ -332,6 +347,10 @@ let load_project t ~root ~environment =
     ; artifact_byte_pages = []
     ; inspections = []
     ; inspection_details = []
+    ; detail_cache =
+        Inspection_detail_cache.create
+          ~entries:t.inspection_detail_cache_entries
+          ~bytes:t.inspection_detail_cache_bytes
     ; inspection_refreshes = String.Table.create ()
     ; hot = String.Table.create ()
     ; recency = []
@@ -503,6 +522,19 @@ let find_run (p : project) (run : Run_ref.t) : Asic.Run.t =
 ;;
 
 let replace_run (p : project) (r : Asic.Run.t) =
+  Option.iter
+    (List.find p.runs ~f:(fun old -> Run_ref.equal old.Asic.Run.run r.run))
+    ~f:(fun old ->
+      if not
+           (Asic.Reference.equal old.reference r.reference
+            && old.cursor = r.cursor
+            && Option.equal String.equal old.execution_file r.execution_file)
+      then (
+        Inspection_detail_cache.retain p.detail_cache ~f:(fun ~identity:_ detail ->
+          not (Run_ref.equal detail.run r.run));
+        p.inspection_details
+        <- List.filter p.inspection_details ~f:(fun detail ->
+             not (Run_ref.equal detail.Inspection_wire.Detail.run r.run))));
   p.runs
   <- r
      :: List.filter p.runs ~f:(fun (old : Asic.Run.t) ->
@@ -1633,7 +1665,74 @@ let inspection_matches (index : Inspection_wire.Index.t) ~run ~domain ~stage =
   && String.equal index.stage stage
 ;;
 
+let detail_source_identity (registered : Asic.Run.t) (index : Inspection_wire.Index.t) =
+  (* Include all row/index content, even if a provider reuses a digest. Observation times
+     and the offline label are not source identity. No filesystem I/O on hits. *)
+  Public.digest
+    (Sexp.to_string_mach
+       [%sexp
+         (registered.run : Run_ref.t)
+         , (registered.reference : Asic.Reference.t)
+         , (registered.cursor : int)
+         , (registered.execution_file : string option)
+         , ({ index with times = Evidence_time.Index.empty; cached_unverified = false }
+            : Inspection_wire.Index.t)])
+;;
+
+let detail_identity registered index row_id =
+  detail_source_identity registered index ^ ":" ^ Public.digest row_id
+;;
+
+let retain_current_details p =
+  let sources =
+    List.map p.inspections ~f:(fun index ->
+      index, detail_source_identity (find_run p index.run) index)
+  in
+  Inspection_detail_cache.retain p.detail_cache ~f:(fun ~identity detail ->
+    List.exists sources ~f:(fun (index, source_identity) ->
+      inspection_matches index ~run:detail.run ~domain:detail.domain ~stage:detail.stage
+      && String.equal index.source_digest detail.source_digest
+      && List.exists index.rows ~f:(fun row -> String.equal row.id detail.row_id)
+      && String.equal identity (source_identity ^ ":" ^ Public.digest detail.row_id)))
+;;
+
+let publish_detail p (detail : Inspection_wire.Detail.t) =
+  let key d =
+    Inspection_wire.detail_key
+      ~run:d.Inspection_wire.Detail.run
+      ~domain:d.domain
+      ~stage:d.stage
+      ~source_digest:d.source_digest
+      ~row_id:d.row_id
+  in
+  p.inspection_details
+  <- List.take
+       (detail
+        :: List.filter p.inspection_details ~f:(fun old ->
+          not (String.equal (key old) (key detail))))
+       8
+;;
+
 let publish_inspection p (index : Inspection_wire.Index.t) =
+  (* Publication invalidation must compare full source identity, not just digest:
+     unchanged digests can accompany changed rows or execution hashes. *)
+  let previous =
+    List.find p.inspections ~f:(fun old ->
+      inspection_matches old ~run:index.run ~domain:index.domain ~stage:index.stage)
+  in
+  Option.iter previous ~f:(fun old ->
+    let registered = find_run p index.run in
+    if not
+         (String.equal
+            (detail_source_identity registered old)
+            (detail_source_identity registered index))
+    then
+      p.inspection_details
+      <- List.filter p.inspection_details ~f:(fun detail ->
+           not
+             (Run_ref.equal detail.Inspection_wire.Detail.run index.run
+              && String.equal detail.domain index.domain
+              && String.equal detail.stage index.stage)));
   p.inspections
   <- List.take
        (index
@@ -1653,7 +1752,9 @@ let publish_inspection p (index : Inspection_wire.Index.t) =
            ~run:detail.Inspection_wire.Detail.run
            ~domain:detail.domain
            ~stage:detail.stage
-         && String.equal current.source_digest detail.source_digest))
+         && String.equal current.source_digest detail.source_digest
+         && List.exists current.rows ~f:(fun row -> String.equal row.id detail.row_id)));
+  retain_current_details p
 ;;
 
 let check_inspection_current p cancel (registered : Asic.Run.t) =
@@ -1782,7 +1883,7 @@ let load_inspection t p cancel ~run ~domain ~stage ~refresh ~on_read =
     Deferred.unit)
 ;;
 
-let load_inspection_detail t p cancel ~run ~domain ~stage ~source_digest ~row_id =
+let load_inspection_detail t p cancel ~run ~domain ~stage ~source_digest ~row_id ~on_read =
   serialized p "inspection-publication" (fun () ->
     let registered = find_run p run in
     let index =
@@ -1792,49 +1893,47 @@ let load_inspection_detail t p cancel ~run ~domain ~stage ~source_digest ~row_id
     in
     Public.require
       (String.equal index.source_digest source_digest
+       && Option.equal String.equal registered.execution_file (Some index.execution_file)
        && List.exists index.rows ~f:(fun row -> String.equal row.id row_id))
       "Stale inspection digest or unknown row";
-    let%bind () = check_provider t p cancel in
-    let%bind hash = inspection_hash t p cancel registered index.execution_file in
-    Public.require
-      (String.equal hash index.execution_sha256)
-      "Inspection execution bytes changed";
-    let%bind response =
-      query
-        ~max_bytes:(512 * 1024)
-        ~before:(fun () -> check_inspection_current p cancel registered)
-        t
-        p
-        cancel
-        (invoke p (fun c ~root ~environment ->
-           Adapter.inspection
-             c
-             ~root
-             ~environment
-             ~execution_file:index.execution_file
-             ~domain
-             ~stage
-             ~detail:(Some (row_id, source_digest))))
-    in
-    let detail = Inspection.parse_detail ~registered ~index ~row_id response in
-    let%map after = inspection_hash t p cancel registered index.execution_file in
-    Public.require (String.equal after hash) "Execution bytes changed during detail read";
     check_inspection_current p cancel registered;
-    p.inspection_details
-    <- List.take
-         (detail
-          :: List.filter p.inspection_details ~f:(fun old ->
-            not
-              (String.equal
-                 (Inspection_wire.detail_key
-                    ~run:old.run
-                    ~domain:old.domain
-                    ~stage:old.stage
-                    ~source_digest:old.source_digest
-                    ~row_id:old.row_id)
-                 (Inspection_wire.detail_key ~run ~domain ~stage ~source_digest ~row_id)))
-         )
-         8)
+    let identity = detail_identity registered index row_id in
+    match Inspection_detail_cache.find p.detail_cache identity with
+    | Some detail ->
+      publish_detail p detail;
+      Deferred.unit
+    | None ->
+      on_read ();
+      let%bind () = check_provider t p cancel in
+      let%bind hash = inspection_hash t p cancel registered index.execution_file in
+      Public.require
+        (String.equal hash index.execution_sha256)
+        "Inspection execution bytes changed";
+      let%bind response =
+        query
+          ~max_bytes:(512 * 1024)
+          ~before:(fun () -> check_inspection_current p cancel registered)
+          t
+          p
+          cancel
+          (invoke p (fun c ~root ~environment ->
+             Adapter.inspection
+               c
+               ~root
+               ~environment
+               ~execution_file:index.execution_file
+               ~domain
+               ~stage
+               ~detail:(Some (row_id, source_digest))))
+      in
+      let detail = Inspection.parse_detail ~registered ~index ~row_id response in
+      let%map after = inspection_hash t p cancel registered index.execution_file in
+      Public.require
+        (String.equal after hash)
+        "Execution bytes changed during detail read";
+      check_inspection_current p cancel registered;
+      Inspection_detail_cache.add p.detail_cache ~identity detail;
+      publish_detail p detail)
 ;;
 
 let handle_operation t p operation =
@@ -1899,11 +1998,22 @@ let handle_operation t p operation =
       ~kind:"inspection-detail"
       ~execution:false
       (fun task ->
-         task.pending <- { task.pending with run = Some run; activity = Evidence_read };
+         task.pending
+         <- { task.pending with run = Some run; activity = Evidence_cache_lookup };
          let cancel = Ivar.read task.cancel in
          let%bind result =
            Monitor.try_with (fun () ->
-             load_inspection_detail t p cancel ~run ~domain ~stage ~source_digest ~row_id)
+             load_inspection_detail
+               t
+               p
+               cancel
+               ~run
+               ~domain
+               ~stage
+               ~source_digest
+               ~row_id
+               ~on_read:(fun () ->
+                 task.pending <- { task.pending with activity = Evidence_read }))
          in
          match result with
          | Ok () -> Deferred.unit
@@ -1918,20 +2028,7 @@ let handle_operation t p operation =
              ; error = Some (Exn.to_string exn)
              }
            in
-           let key d =
-             Inspection_wire.detail_key
-               ~run:d.Inspection_wire.Detail.run
-               ~domain:d.domain
-               ~stage:d.stage
-               ~source_digest:d.source_digest
-               ~row_id:d.row_id
-           in
-           p.inspection_details
-           <- List.take
-                (detail
-                 :: List.filter p.inspection_details ~f:(fun old ->
-                   not (String.equal (key old) (key detail))))
-                8;
+           publish_detail p detail;
            raise exn);
     Deferred.unit
   | Finalize { key; run; execution_file; acceptance } ->
@@ -2365,15 +2462,15 @@ let handle_operation t p operation =
           | None -> Deferred.unit
           | Some run ->
             let observer = Hashtbl.find p.tasks (observation_key run) in
-             Option.iter observer ~f:(fun observer ->
+            Option.iter observer ~f:(fun observer ->
               Ivar.fill_if_empty observer.cancel ());
             let%bind () =
-               Option.value_map observer ~default:Deferred.unit ~f:(fun o -> o.completion)
-             in
-             let already_materialized =
-               Option.value_map observer ~default:false ~f:(fun o ->
-                 String.equal o.pending.state "completed")
-             in
+              Option.value_map observer ~default:Deferred.unit ~f:(fun o -> o.completion)
+            in
+            let already_materialized =
+              Option.value_map observer ~default:false ~f:(fun o ->
+                String.equal o.pending.state "completed")
+            in
             (* Deliberately independent of the execution cancellation/deadline: an
                interrupted producer may have recorded its terminal truth during its
                termination grace. These queries only read the retained reference. *)

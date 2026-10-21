@@ -68,6 +68,13 @@ as a clearly labeled observation; it must never masquerade as production evidenc
 
 ## Follow-up resolution — 2026-10-20
 
+**Human-review status — 2026-10-21:** clock/timing evidence timestamp review is blocked
+by failed signoff and absent published reports in the current run. Implementation
+remains delivered, but successful report-view acceptance is not claimed. The owner
+accepted Testing behavior, including its separately implemented execution-duration
+surface; execution duration is distinct from this ticket's evidence-age semantics.
+
+
 **Code fixes delivered and automatically verified.** Producer parsing checks the
 nanosecond parser's result against the wider time representation to reject wraparound,
 while retaining accepted nanosecond precision. Age arithmetic widens epoch values to

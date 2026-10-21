@@ -159,6 +159,8 @@ type t =
   ; presentation : T.overrides
   ; workspace_presentation : (string * T.overrides) list
   ; timing : (string * Timing_workspace.t) list
+  ; timing_restore : (string * Navigation_preferences.timing) list
+  ; timing_rejected : (string * string) list
   ; testing : (string * (unit ref * string * Testing_workspace.t)) list
   ; waveforms : (string * (unit ref * P.Waveforms.pin)) list
   ; planned_run : Planned_run.t
@@ -188,6 +190,8 @@ let empty =
   ; presentation = T.inherit_
   ; workspace_presentation = []
   ; timing = []
+  ; timing_restore = []
+  ; timing_rejected = []
   ; testing = []
   ; waveforms = []
   ; planned_run = Planned_run.empty
@@ -449,6 +453,12 @@ let update_testing t id f =
       ref (), "", Testing_workspace.empty)
   in
   set_testing t id (identity, scope, f state)
+;;
+
+let establish_testing_scope t id ~scope =
+  match testing t id with
+  | Some (_, previous, _) when String.equal previous scope -> t
+  | _ -> set_testing t id (ref (), scope, Testing_workspace.empty)
 ;;
 
 let simulation t id =
@@ -787,6 +797,8 @@ let receive t (s : W.Snapshot.t) =
         ; workspace_focus = []
         ; workspace_presentation = []
         ; timing = []
+        ; timing_restore = []
+        ; timing_rejected = []
         ; testing = []
         ; waveforms = []
         ; palette = None
@@ -983,6 +995,8 @@ let reconnect t ~replacement =
     ; workspace_focus = []
     ; workspace_presentation = []
     ; timing = []
+    ; timing_restore = []
+    ; timing_rejected = []
     ; testing = []
     ; waveforms = []
     }
@@ -1312,6 +1326,305 @@ let switch t id =
       }
     in
     Option.value_map t.registry ~default:t ~f:(receive t))
+;;
+
+(** Registry membership, not labels or preset names, fences local navigation. *)
+let navigation_members registry workspace =
+  List.filter registry.W.Snapshot.tiles ~f:(fun tile ->
+    W.Workspace_id.equal tile.workspace workspace)
+  |> List.map ~f:(fun tile ->
+    { Navigation_preferences.tile = W.Tile_id.to_string tile.id; kind = tile.kind })
+  |> List.sort ~compare:(fun a b -> String.compare a.tile b.tile)
+;;
+
+let navigation_preferences ~project_key t =
+  Option.map t.registry ~f:(fun registry ->
+    let workspaces =
+      List.map registry.workspaces ~f:(fun workspace ->
+        let id = W.Workspace_id.to_string workspace.id in
+        let focus =
+          if Option.equal W.Workspace_id.equal t.active (Some workspace.id)
+          then t.focus
+          else List.Assoc.find t.workspace_focus id ~equal:String.equal |> Option.join
+        in
+        let testing =
+          List.Assoc.find t.testing id ~equal:String.equal
+          |> Option.map ~f:(fun (_, _, state) ->
+            let view = Testing_workspace.view state in
+            let artifact =
+              Testing_workspace.artifact_identity state
+              |> Option.map ~f:(fun artifact ->
+                { Navigation_preferences.id = artifact.Testing_workspace.id
+                ; sha256 = artifact.sha256
+                ; size = artifact.size
+                })
+            in
+            { Navigation_preferences.attempt = view.attempt
+            ; case_id = view.case_id
+            ; artifact
+            })
+        in
+        let timing =
+          match List.Assoc.find t.timing_restore id ~equal:String.equal with
+          | Some saved -> Some saved
+          | None ->
+            List.Assoc.find t.timing id ~equal:String.equal
+            |> Option.map ~f:(fun view ->
+              { Navigation_preferences.stage = view.Inspection_view.stage
+              ; filter = view.filter
+              ; row_id = view.selected
+              ; run = Some (Sexp.to_string_mach (Run_ref.sexp_of_t view.run))
+              ; source_digest =
+                  Option.map view.index ~f:(fun index -> index.source_digest)
+              })
+        in
+        { Navigation_preferences.id
+        ; members = navigation_members registry workspace.id
+        ; focus = Option.map focus ~f:W.Tile_id.to_string
+        ; testing
+        ; timing
+        })
+    in
+    Navigation_preferences.create
+      ~project_key
+      ~session:(W.Session_id.to_string registry.session_id)
+      ~active:(Option.map t.active ~f:W.Workspace_id.to_string)
+      ~workspaces)
+;;
+
+let valid_navigation_workspaces (saved : Navigation_preferences.t) t =
+  Option.value_map t.registry ~default:[] ~f:(fun registry ->
+    if not (String.equal saved.session (W.Session_id.to_string registry.session_id))
+    then []
+    else
+      List.filter saved.workspaces ~f:(fun pref ->
+        List.exists registry.workspaces ~f:(fun workspace ->
+          String.equal pref.id (W.Workspace_id.to_string workspace.id)
+          && List.equal
+               (fun a b ->
+                 String.equal a.Navigation_preferences.tile b.tile
+                 && String.equal a.kind b.kind)
+               pref.members
+               (navigation_members registry workspace.id))))
+;;
+
+let restore_navigation_focus ?(restore_active = true) ?(preserve_focus = []) saved t =
+  let valid = valid_navigation_workspaces saved t in
+  let workspace_focus =
+    List.fold valid ~init:t.workspace_focus ~f:(fun focus pref ->
+      if List.mem preserve_focus pref.Navigation_preferences.id ~equal:String.equal
+      then focus
+      else
+        List.Assoc.add
+          focus
+          ~equal:String.equal
+          pref.id
+          (Option.map pref.focus ~f:W.Tile_id.of_string))
+  in
+  let t = { t with workspace_focus } in
+  match if restore_active then saved.Navigation_preferences.active else None with
+  | Some id when List.exists valid ~f:(fun pref -> String.equal pref.id id) ->
+    switch { t with focus = None; active = None } (W.Workspace_id.of_string id)
+  | _ -> t
+;;
+
+(** Only actual navigation transitions fence a pending preference read. Repaint, unknown
+    keys and palette query editing do not acquire navigation ownership. *)
+let navigation_input_changes before after =
+  let active = not (Option.equal W.Workspace_id.equal before.active after.active) in
+  let focus =
+    if (not active) && not (Option.equal W.Tile_id.equal before.focus after.focus)
+    then Option.map after.active ~f:W.Workspace_id.to_string
+    else None
+  in
+  let testing =
+    List.filter_map after.testing ~f:(fun (id, (_, _, state)) ->
+      Option.bind
+        (List.Assoc.find before.testing id ~equal:String.equal)
+        ~f:(fun (_, _, old) ->
+          let before = Testing_workspace.view old
+          and after = Testing_workspace.view state in
+          if (not (Option.equal String.equal before.attempt after.attempt))
+             || (not (Option.equal String.equal before.case_id after.case_id))
+             || not
+                  (Option.equal
+                     String.equal
+                     (Testing_workspace.selected_artifact old)
+                     (Testing_workspace.selected_artifact state))
+          then Some id
+          else None))
+  in
+  let timing =
+    List.filter_map after.timing ~f:(fun (id, state) ->
+      Option.bind (List.Assoc.find before.timing id ~equal:String.equal) ~f:(fun old ->
+        if (not (String.equal old.stage state.stage))
+           || (not (String.equal old.filter state.filter))
+           || not (Option.equal String.equal old.selected state.selected)
+        then Some id
+        else None))
+  in
+  active, focus, testing @ timing
+;;
+
+let restore_navigation_selections saved t ~scope =
+  List.fold (valid_navigation_workspaces saved t) ~init:t ~f:(fun t pref ->
+    let workspace = W.Workspace_id.of_string pref.id in
+    let members =
+      Option.value_map t.registry ~default:[] ~f:(fun registry ->
+        List.filter registry.tiles ~f:(fun tile ->
+          W.Workspace_id.equal tile.workspace workspace))
+    in
+    let t =
+      match
+        ( pref.testing
+        , List.find members ~f:(fun tile -> Testing_workspace.is_pane tile.kind) )
+      with
+      | Some saved, Some tile ->
+        let t = establish_testing_scope t tile.id ~scope in
+        let identity, _, state = Option.value_exn (testing t tile.id) in
+        let state =
+          Option.value_map saved.attempt ~default:state ~f:(fun attempt ->
+            Testing_workspace.restore_selection
+              state
+              ~attempt
+              ~case_id:saved.case_id
+              ~artifact:
+                (Option.map saved.artifact ~f:(fun artifact ->
+                   { Testing_workspace.id = artifact.id
+                   ; sha256 = artifact.sha256
+                   ; size = artifact.size
+                   })))
+        in
+        set_testing t tile.id (identity, scope, state)
+      | _ -> t
+    in
+    match
+      ( pref.timing
+      , List.find members ~f:(fun tile ->
+          Option.is_some (Timing_workspace.pane tile.kind)) )
+    with
+    | Some saved, Some tile ->
+      Option.value_map t.registry ~default:t ~f:(fun registry ->
+        Workspace.resolve_tile registry tile.id
+        |> Result.ok
+        |> Option.bind ~f:(fun reference -> reference.run)
+        |> Option.value_map ~default:t ~f:(fun run ->
+          let view = Timing_workspace.create ~generation:0 ~run ~stage:saved.stage in
+          let t =
+            set_timing t tile { view with filter = saved.filter; selected = None }
+          in
+          { t with
+            timing_restore =
+              List.Assoc.add t.timing_restore ~equal:String.equal pref.id saved
+          }))
+    | _ -> t)
+;;
+
+let cancel_navigation_timing t id =
+  { t with
+    timing_restore = List.Assoc.remove t.timing_restore id ~equal:String.equal
+  ; timing_rejected = List.Assoc.remove t.timing_rejected id ~equal:String.equal
+  ; timing =
+      List.map t.timing ~f:(fun (workspace, view) ->
+        if String.equal workspace id
+           && List.Assoc.mem t.timing_rejected id ~equal:String.equal
+        then workspace, { view with error = None }
+        else workspace, view)
+  }
+;;
+
+(** Saved rows are evidence identities, not merely equal-looking row labels. Keep
+    unresolved intent through read-only Gets, and keep rejected evidence visibly
+    unselected until the user makes a new choice. *)
+let reconcile_navigation_timing t snapshot =
+  let find t id =
+    Option.bind t.registry ~f:(fun registry ->
+      List.find registry.tiles ~f:(fun tile ->
+        String.equal id (W.Workspace_id.to_string tile.workspace)
+        && Option.is_some (Timing_workspace.pane tile.kind)))
+    |> Option.bind ~f:(fun tile -> Option.map (timing t tile) ~f:(fun view -> tile, view))
+  in
+  let reject t id message =
+    { t with
+      timing_restore = List.Assoc.remove t.timing_restore id ~equal:String.equal
+    ; timing_rejected = List.Assoc.add t.timing_rejected ~equal:String.equal id message
+    ; notice = message
+    }
+  in
+  let t =
+    List.fold t.timing_restore ~init:t ~f:(fun t (id, saved) ->
+      match find t id with
+      | None -> cancel_navigation_timing t id
+      | Some (tile, view) ->
+        if Option.is_none saved.row_id
+        then cancel_navigation_timing t id
+        else if (not
+                   (Option.equal
+                      String.equal
+                      saved.run
+                      (Some (Sexp.to_string_mach (Run_ref.sexp_of_t view.run)))))
+                || Option.is_none saved.source_digest
+        then
+          reject
+            t
+            id
+            "Saved Timing path not restored: run/source identity changed or was not \
+             recorded; select a path explicitly"
+        else (
+          let index =
+            Option.bind snapshot ~f:(fun snapshot ->
+              List.find snapshot.Asic.Snapshot.inspections ~f:(fun index ->
+                Run_ref.equal index.run view.run
+                && String.equal index.domain view.domain
+                && String.equal index.stage view.stage))
+          in
+          match index with
+          | None -> t
+          | Some index ->
+            if (not
+                  (Option.equal
+                     String.equal
+                     saved.source_digest
+                     (Some index.source_digest)))
+               || not
+                    (List.exists index.rows ~f:(fun row ->
+                       Option.equal String.equal saved.row_id (Some row.id)))
+            then
+              reject
+                t
+                id
+                "Saved Timing path not restored: source digest or path changed; select a \
+                 path explicitly"
+            else (
+              let view = { view with selected = saved.row_id; error = None } in
+              let view =
+                Option.value_map
+                  snapshot
+                  ~default:view
+                  ~f:(Timing_workspace.attach_retained view)
+              in
+              set_timing (cancel_navigation_timing t id) tile view)))
+  in
+  let t =
+    List.fold t.timing_restore ~init:t ~f:(fun t (id, _) ->
+      match find t id with
+      | None -> t
+      | Some (tile, view) ->
+        set_timing t tile { view with selected = None; requested = None; detail = None })
+  in
+  List.fold t.timing_rejected ~init:t ~f:(fun t (id, message) ->
+    match find t id with
+    | None -> t
+    | Some (tile, view) ->
+      set_timing
+        t
+        tile
+        { view with
+          selected = None
+        ; requested = None
+        ; detail = None
+        ; error = Some message
+        })
 ;;
 
 let%test_unit "workspace roundtrip cannot revive a pending stage preparation" =
@@ -3634,9 +3947,9 @@ let input t event ~commands : t * effect =
                  String.equal tile.kind "workspace-tabs") ->
           let tile = Option.value_exn (focused t) in
           let t = { t with prefix = 0 } in
-          ( Option.value_map (workspace_cursor t tile.id) ~default:t ~f:(fun w ->
-              switch t w.id)
-          , No_effect )
+          (match workspace_cursor t tile.id, capture t with
+           | Some workspace, Some capture -> t, Execute (capture, Switch workspace.id)
+           | _ -> t, No_effect)
         | (Character ('j' | 'k' | 'n' | 'p' | 'x' | 'a') | Next | Previous), _
           when Option.exists (focused t) ~f:(fun tile ->
                  Testing_workspace.is_pane tile.kind) ->
@@ -3841,7 +4154,9 @@ let%test_unit "catalog reducer browses filters and captures subset without launc
      assert (List.equal String.equal captured.inputs.selection.cases [ "second" ]);
      assert (Or_error.is_ok (validate_testing_launch host id captured))
    | _ -> assert false);
-  assert (Option.is_none (simulation host tile.id).attempt);
+  (* Initial retained history now defaults to its newest attempt, independently of catalog
+     filtering/launch capture. No execution or extra request was issued. *)
+  assert (Option.equal String.equal (simulation host tile.id).attempt (Some "attempt"));
   assert ((simulation host tile.id).request = 0);
   let attempts =
     List.find_exn s.tiles ~f:(fun tile ->
@@ -3849,6 +4164,10 @@ let%test_unit "catalog reducer browses filters and captures subset without launc
       && String.equal tile.kind "simulation-attempts")
   in
   let host = { host with focus = Some attempts.id } in
+  let host =
+    update_testing host attempts.id (fun state ->
+      Testing_workspace.select_attempt state "outside-history")
+  in
   let pending = Simulation_view.begin_request (simulation host attempts.id) in
   let host = set_simulation host attempts.id pending in
   let host = press host (Character 'j') in
@@ -4209,7 +4528,13 @@ let%test_unit "workspace tabs browse registry IDs and switch without mutating co
     W.Workspace_id.equal
       (Option.value_exn (workspace_cursor browsed tile.id)).id
       timing.id);
-  let selected = step browsed Enter in
+  let pending, effect = input browsed Enter ~commands:[] in
+  assert (Option.equal W.Workspace_id.equal pending.active browsed.active);
+  let selected =
+    match effect with
+    | Execute (_, Switch id) -> switch pending id
+    | _ -> failwith "Sidebar Enter must use the host activation effect"
+  in
   assert (Option.equal W.Workspace_id.equal selected.active (Some timing.id));
   assert (Option.equal W.Snapshot.equal selected.registry host.registry);
   let returned = switch selected overview.id in

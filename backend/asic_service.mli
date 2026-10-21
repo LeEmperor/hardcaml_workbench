@@ -8,6 +8,16 @@ type t
     single-writer and separate from provider results. *)
 val create : state_dir:string -> t
 
+(** Daemon policy only: defaults 64 entries / 4194304 serialized payload bytes per
+    project. Either zero disables reuse; maxima 4096 entries / 268435456 bytes. Snapshot
+    publications remain independently bounded to eight. *)
+val create_with_detail_cache
+  :  ?inspection_detail_cache_entries:int
+  -> ?inspection_detail_cache_bytes:int
+  -> state_dir:string
+  -> unit
+  -> t
+
 (** Parent validates instance/project before calling. Provider work is scheduled;
     subsequent [Get] snapshots expose completion. Client detach never cancels work. *)
 val handle

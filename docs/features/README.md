@@ -8,7 +8,7 @@ and native icons/spinners are delivered foundations for several enhancements bel
 
 **Current delivery update:** WB-032 catalog and WB-034 genuine FIFO adoption are
 implemented and automatically verified. WB-063's cooperative Testing implementation
-is verified, with its explicit owner visual-review gate still pending. See
+is verified and owner-accepted following the reconnect and Attempts-pane fixes. See
 [the Testing guide](../testing_workspace.md). Their original points record estimates,
 not additional remaining implementation effort.
 
@@ -68,6 +68,23 @@ implementation/automated-validation level. Independent trees, shared reads,
 current/historical provenance and exact-node inspector handoff pass native HTTP/PTY
 acceptance. Tested DUT remains explicitly unknown. See
 [controls, receipts and verification limits](../hierarchy_tile.md).
+
+**2026-10-21 Testing closure:** the owner's approval after the Attempts-pane tab-switch
+fix satisfies WB-063's remaining visual/workflow gate; it is now delivered and
+closed/accepted. Reconnect selection/defaults and retained-catalog reuse are included
+in that Testing acceptance. Previously closed WB-001/019/024/039/048/050 remain closed.
+Clock/timing inspection review and broader WB-027/WB-065 coverage are not implied.
+
+**2026-10-21 owner acceptance:** Testing and hints were confirmed satisfactory.
+The owner authorized closure of this set's non-signoff-dependent tickets:
+**WB-001, WB-019, WB-024, WB-039, WB-048 and WB-050** remain `delivered` and are now
+closed/accepted. This is closure authorization, not a claim that every automated
+case was repeated manually. Testing execution-duration behavior and the Testing/hint
+portions of WB-054 are accepted. WB-003/WB-006/WB-054 remain implemented/delivered,
+with their clock/timing inspection human-review portions blocked on usable evidence:
+the current run failed signoff and published no relevant report/checkpoint. Broader
+WB-065 lifecycle coverage remains partial. A dedicated Clocks workspace is separate
+future work.
 
 - **WB-NNN** identifies one actionable feature/defect ticket; filenames and category
   placement do not change its identity. Each ticket has its own Markdown file.

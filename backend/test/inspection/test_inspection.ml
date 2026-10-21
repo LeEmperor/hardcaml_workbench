@@ -487,6 +487,12 @@ let service_tests () =
 let observation_generation_tests () =
   let module Config = Hardcaml_workbench_project_integration.Asic_config in
   let root, registered, response, _ = fixture () in
+  let response =
+    replace
+      response
+      "rows"
+      (`List (List.init 12 ~f:(fun i -> row (sprintf "path-%d" (i + 1)) `Null)))
+  in
   let file name = Filename.concat root name in
   let executable = file "fixture-provider" in
   Out_channel.write_all executable ~data:(In_channel.read_all "inspection_provider.py");
@@ -545,6 +551,10 @@ let observation_generation_tests () =
       ; row_id = "path-1"
       }
   in
+  let detail_for row_id =
+    Asic.Operation.Inspect_detail
+      { run; domain = "timing"; stage = "routing"; source_digest = digest; row_id }
+  in
   let inspection_calls () =
     In_channel.read_lines (file "inspection-calls")
     |> List.count ~f:(fun line ->
@@ -596,6 +606,263 @@ let observation_generation_tests () =
     List.find_exn snapshot.operations ~f:(fun p -> String.equal p.key index_key)
   in
   let current (snapshot : Asic.Snapshot.t) = List.hd_exn snapshot.inspections in
+  let successful_detail (snapshot : Asic.Snapshot.t) =
+    let value = List.hd_exn snapshot.inspection_details in
+    require (Option.is_none value.error) "Expected successful detail";
+    value
+  in
+  let cache_tests () =
+    let calls = inspection_calls () in
+    (* A successful hit must work even when the execution file is absent. This also
+       catches an accidental hash read before the reusable-cache lookup. *)
+    let execution_file = Option.value_exn registered.execution_file in
+    let bytes = In_channel.read_all execution_file in
+    Core_unix.unlink execution_file;
+    let%bind snapshot =
+      Monitor.protect
+        ~finally:(fun () ->
+          Out_channel.write_all execution_file ~data:bytes;
+          Deferred.unit)
+        (fun () -> settled service root detail)
+    in
+    ignore (successful_detail snapshot : Asic_inspection.Detail.t);
+    require (inspection_calls () = calls) "Successful detail hit queried provider";
+    require
+      (List.exists snapshot.operations ~f:(fun op ->
+         String.equal op.kind "inspection-detail"
+         && String.equal op.state "completed"
+         && Asic.Pending.Activity.equal op.activity Evidence_cache_lookup))
+      "Successful hit was not reported as a cache lookup";
+    let%bind () =
+      Deferred.List.iter
+        (List.init 9 ~f:(fun i -> sprintf "path-%d" (i + 2)))
+        ~how:`Sequential
+        ~f:(fun row_id ->
+          let%map snapshot = settled service root (detail_for row_id) in
+          ignore (successful_detail snapshot : Asic_inspection.Detail.t);
+          require
+            (List.length snapshot.inspection_details <= 8)
+            "Snapshot detail bound exceeded")
+    in
+    let%bind snapshot = handle service root Get in
+    require
+      (not
+         (List.exists snapshot.inspection_details ~f:(fun d ->
+            String.equal d.row_id "path-1")))
+      "Expected first detail to leave the publication window";
+    let calls = inspection_calls () in
+    let%bind snapshot = settled service root detail in
+    require (inspection_calls () = calls) "Snapshot eviction discarded reusable detail";
+    require
+      (String.equal (successful_detail snapshot).row_id "path-1")
+      "Hit did not republish detail";
+    (* Concurrent identical misses share one held provider read. *)
+    hold "detail";
+    let calls = inspection_calls () in
+    let%bind (_ : Asic.Snapshot.t) = handle service root (detail_for "path-11") in
+    let%bind () = wait_started "detail" in
+    let%bind () =
+      Deferred.List.iter (List.init 3 ~f:Fn.id) ~how:`Sequential ~f:(fun _ ->
+        let%map (_ : Asic.Snapshot.t) = handle service root (detail_for "path-11") in
+        ())
+    in
+    require
+      (inspection_calls () = calls + 1)
+      "Concurrent detail requests were not coalesced";
+    release "detail";
+    let%bind () = Service.completion service in
+    hold "detail";
+    let%bind (_ : Asic.Snapshot.t) = handle service root (detail_for "path-12") in
+    let%bind () = wait_started "detail" in
+    let key =
+      Asic_inspection.detail_key
+        ~run
+        ~domain:"timing"
+        ~stage:"routing"
+        ~source_digest:digest
+        ~row_id:"path-12"
+    in
+    let%bind (_ : Asic.Snapshot.t) = handle service root (Cancel key) in
+    release "detail";
+    let%bind () = Service.completion service in
+    let calls = inspection_calls () in
+    let%bind snapshot = settled service root (detail_for "path-12") in
+    ignore (successful_detail snapshot : Asic_inspection.Detail.t);
+    require
+      (inspection_calls () = calls + 1)
+      "Cancelled detail was retained or could not retry";
+    (* Same digest, changed row content invalidates both reuse and publications. *)
+    let changed =
+      replace
+        response
+        "rows"
+        (`List [ replace (row "path-1" `Null) "name" (str "changed endpoint") ])
+    in
+    Out_channel.write_all (file "response.json") ~data:(Yojson.Safe.to_string changed);
+    let%bind snapshot = settled service root (inspect true) in
+    require
+      (List.is_empty snapshot.inspection_details)
+      "Changed rows retained old publication";
+    let calls = inspection_calls () in
+    let%bind snapshot = settled service root (detail_for "path-2") in
+    require
+      (inspection_calls () = calls
+       && Option.is_some (List.hd_exn snapshot.inspection_details).error)
+      "Removed row reused stale detail or queried provider";
+    let calls = inspection_calls () in
+    let%bind snapshot = settled service root detail in
+    ignore (successful_detail snapshot : Asic_inspection.Detail.t);
+    require
+      (inspection_calls () = calls + 1)
+      "Same-digest row replacement reused old detail";
+    (* Same digest/row, changed execution SHA also invalidates reuse. *)
+    Out_channel.write_all execution_file ~data:(bytes ^ " ");
+    let sha = Inspection.execution_hash ~registered ~execution_file in
+    let changed = replace changed "execution_sha256" (str sha) in
+    Out_channel.write_all (file "response.json") ~data:(Yojson.Safe.to_string changed);
+    let%bind snapshot = settled service root (inspect true) in
+    require
+      (List.is_empty snapshot.inspection_details)
+      "Changed execution SHA retained old publication";
+    let calls = inspection_calls () in
+    let%bind snapshot = settled service root detail in
+    ignore (successful_detail snapshot : Asic_inspection.Detail.t);
+    require (inspection_calls () = calls + 1) "Changed execution SHA reused old detail";
+    Out_channel.write_all execution_file ~data:bytes;
+    Out_channel.write_all (file "response.json") ~data:(Yojson.Safe.to_string response);
+    let%bind (_ : Asic.Snapshot.t) = settled service root (inspect true) in
+    (* A failed miss is never retained: repairing provider evidence permits retry. *)
+    Out_channel.write_all
+      (file "response.json")
+      ~data:
+        (Yojson.Safe.to_string
+           (replace response "source_digest" (str (String.make 64 'c'))));
+    let%bind snapshot = settled service root detail in
+    require
+      (Option.is_some (List.hd_exn snapshot.inspection_details).error)
+      "Expected failed detail";
+    Out_channel.write_all (file "response.json") ~data:(Yojson.Safe.to_string response);
+    let calls = inspection_calls () in
+    let%bind snapshot = settled service root detail in
+    let value = successful_detail snapshot in
+    require (inspection_calls () = calls + 1) "Failed detail prevented explicit retry";
+    (* Source replacement rejects requests naming the old digest before lookup. *)
+    let replacement_digest = String.make 64 'd' in
+    Out_channel.write_all
+      (file "response.json")
+      ~data:
+        (Yojson.Safe.to_string
+           (replace response "source_digest" (str replacement_digest)));
+    let%bind snapshot = settled service root (inspect true) in
+    require
+      (List.is_empty snapshot.inspection_details)
+      "Source replacement retained publications";
+    let calls = inspection_calls () in
+    let%bind snapshot = settled service root detail in
+    require
+      (inspection_calls () = calls
+       && Option.is_some (List.hd_exn snapshot.inspection_details).error)
+      "Old source digest crossed cache fence";
+    let%bind snapshot =
+      settled
+        service
+        root
+        (Inspect_detail
+           { run
+           ; domain = "timing"
+           ; stage = "routing"
+           ; source_digest = replacement_digest
+           ; row_id = "path-1"
+           })
+    in
+    ignore (successful_detail snapshot : Asic_inspection.Detail.t);
+    require (inspection_calls () = calls + 1) "Replacement source reused old detail";
+    Out_channel.write_all (file "response.json") ~data:(Yojson.Safe.to_string response);
+    let%bind (_ : Asic.Snapshot.t) = settled service root (inspect true) in
+    let payload_bytes =
+      String.length (Sexp.to_string_mach (Asic_inspection.Detail.sexp_of_t value))
+    in
+    (* Exercise daemon policy at the service boundary as well as the LRU itself. *)
+    Deferred.List.iter
+      [ 2, 4194304, 4
+      ; 64, payload_bytes * 2, 4
+      ; 0, 4194304, 5
+      ; 64, 0, 5
+      ; 64, payload_bytes - 1, 5
+      ]
+      ~how:`Sequential
+      ~f:(fun (entries, bytes, expected_calls) ->
+        let limited =
+          Service.create_with_detail_cache
+            ~state_dir
+            ~inspection_detail_cache_entries:entries
+            ~inspection_detail_cache_bytes:bytes
+            ()
+        in
+        Monitor.protect
+          ~finally:(fun () -> Service.shutdown limited)
+          (fun () ->
+            let%bind (_ : Asic.Snapshot.t) = settled limited root (inspect false) in
+            let calls = inspection_calls () in
+            let%bind () =
+              Deferred.List.iter
+                [ "path-1"; "path-2"; "path-1"; "path-3"; "path-2" ]
+                ~how:`Sequential
+                ~f:(fun row_id ->
+                  let%map snapshot = settled limited root (detail_for row_id) in
+                  ignore (successful_detail snapshot : Asic_inspection.Detail.t))
+            in
+            require
+              (inspection_calls () = calls + expected_calls)
+              (sprintf "Incorrect detail LRU limits: entries=%d bytes=%d" entries bytes);
+            Deferred.unit))
+  in
+  let index_eviction_tests () =
+    let contexts =
+      List.cartesian_product
+        [ "timing"; "clocks" ]
+        [ "synthesis"; "floorplan"; "placement"; "cts"; "signoff" ]
+      |> Fn.flip List.take 9
+    in
+    let%bind () =
+      Deferred.List.iter contexts ~how:`Sequential ~f:(fun (domain, stage) ->
+        let source =
+          replace (replace response "domain" (str domain)) "stage" (str stage)
+        in
+        Out_channel.write_all (file "response.json") ~data:(Yojson.Safe.to_string source);
+        let%bind (_ : Asic.Snapshot.t) =
+          settled service root (Inspect { run; domain; stage; refresh = true })
+        in
+        let calls = inspection_calls () in
+        let%map snapshot =
+          settled
+            service
+            root
+            (Inspect_detail
+               { run; domain; stage; source_digest = digest; row_id = "path-1" })
+        in
+        ignore (successful_detail snapshot : Asic_inspection.Detail.t);
+        require
+          (inspection_calls () = calls + 1)
+          "Detail cache crossed domain/stage identity";
+        require
+          (List.length snapshot.inspections <= 8
+           && List.length snapshot.inspection_details <= 8)
+          "Inspection publication window exceeded eight")
+    in
+    let calls = inspection_calls () in
+    let%bind snapshot = settled service root detail in
+    require
+      (inspection_calls () = calls
+       && Option.is_some (List.hd_exn snapshot.inspection_details).error)
+      "Detail hit bypassed missing current index";
+    Out_channel.write_all (file "response.json") ~data:(Yojson.Safe.to_string response);
+    let%bind (_ : Asic.Snapshot.t) = settled service root (inspect true) in
+    let calls = inspection_calls () in
+    let%map snapshot = settled service root detail in
+    ignore (successful_detail snapshot : Asic_inspection.Detail.t);
+    require (inspection_calls () = calls + 1) "Index eviction retained reusable details"
+  in
   (* WB-003 #1/#2 and WB-006 #1/#2 against the daemon: a held explicit refresh reports an
      evidence read for its whole duration; refreshing unchanged bytes moves only the
      validation time; a warm reopen reports only a cache lookup and calls no provider. *)
@@ -690,6 +957,8 @@ let observation_generation_tests () =
            "verified path detail")
         "Initial validated detail was not published";
       let%bind () = activity_and_time_tests () in
+      let%bind () = cache_tests () in
+      let%bind () = index_eviction_tests () in
       let calls = inspection_calls () in
       let%bind () = observe_cursor 2 in
       let%bind snapshot = handle service root Get in
@@ -706,7 +975,10 @@ let observation_generation_tests () =
       require
         (not (List.hd_exn snapshot.inspections).cached_unverified)
         "Explicit refresh did not revalidate index after cursor advance";
-      let%bind (_ : Asic.Snapshot.t) = settled service root detail in
+      let calls = inspection_calls () in
+      let%bind snapshot = settled service root detail in
+      ignore (successful_detail snapshot : Asic_inspection.Detail.t);
+      require (inspection_calls () = calls + 1) "Cursor advance retained reusable detail";
       hold "index";
       let%bind (_ : Asic.Snapshot.t) = handle service root (inspect true) in
       let%bind () = wait_started "index" in
@@ -730,7 +1002,7 @@ let observation_generation_tests () =
       assert_invalidated snapshot;
       release "detail";
       let%bind () = Service.completion service in
-      let%map snapshot = handle service root Get in
+      let%bind snapshot = handle service root Get in
       require
         (List.hd_exn snapshot.inspections).cached_unverified
         "Stale detail revalidated an old index";
@@ -742,10 +1014,61 @@ let observation_generation_tests () =
         (List.exists snapshot.operations ~f:(fun pending ->
            String.equal pending.kind "inspection-detail"
            && String.equal pending.state "failed"))
-        "Stale in-flight detail did not report failure")
+        "Stale in-flight detail did not report failure";
+      let%bind (_ : Asic.Snapshot.t) = settled service root (inspect true) in
+      let calls = inspection_calls () in
+      let%bind snapshot = settled service root detail in
+      ignore (successful_detail snapshot : Asic_inspection.Detail.t);
+      require (inspection_calls () = calls + 1) "Held stale load populated reusable cache";
+      (* Execution-file replacement at an unchanged cursor is an independent fence. *)
+      let execution_file = file "replacement-execution.json" in
+      Out_channel.write_all
+        execution_file
+        ~data:(In_channel.read_all (Option.value_exn registered.execution_file));
+      Out_channel.write_all (file "observed-execution") ~data:execution_file;
+      let%bind snapshot = settled service root (Observe run) in
+      require
+        (List.is_empty snapshot.inspections && List.is_empty snapshot.inspection_details)
+        "Execution-file replacement retained rich evidence";
+      let calls = inspection_calls () in
+      let%bind snapshot = settled service root detail in
+      require
+        (inspection_calls () = calls
+         && Option.is_some (List.hd_exn snapshot.inspection_details).error)
+        "Execution-file replacement reused detail without a current index";
+      Out_channel.write_all
+        (file "response.json")
+        ~data:
+          (Yojson.Safe.to_string (replace response "execution_file" (str execution_file)));
+      let%bind (_ : Asic.Snapshot.t) = settled service root (inspect true) in
+      let calls = inspection_calls () in
+      let%map snapshot = settled service root detail in
+      ignore (successful_detail snapshot : Asic_inspection.Detail.t);
+      require
+        (inspection_calls () = calls + 1)
+        "Execution-file replacement retained reusable cache")
 ;;
 
 let main () =
+  List.iter
+    [ -1, 1; 4097, 1; 1, -1; 1, 268435457 ]
+    ~f:(fun (entries, bytes) ->
+      rejects (fun () ->
+        Service.create_with_detail_cache
+          ~state_dir:"/unused"
+          ~inspection_detail_cache_entries:entries
+          ~inspection_detail_cache_bytes:bytes
+          ()));
+  List.iter
+    [ 0, 0; 4096, 268435456; 64, 4194304 ]
+    ~f:(fun (entries, bytes) ->
+      ignore
+        (Service.create_with_detail_cache
+           ~state_dir:"/unused"
+           ~inspection_detail_cache_entries:entries
+           ~inspection_detail_cache_bytes:bytes
+           ()
+         : Service.t));
   parser_tests ();
   ignore (cache_tests () : string * Asic.Run.t);
   let%bind () = cache_descriptor_tests () in

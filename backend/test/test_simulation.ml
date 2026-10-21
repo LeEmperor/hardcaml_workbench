@@ -257,6 +257,34 @@ let review_store ~root ~state_dir ~config ~catalog =
   let unexpected ~name:_ ~reservation:_ ~prepare:_ =
     failwith "Unexpected provider scheduling"
   in
+  (* Read-only hydration reuses the retained catalog, including when the old job has
+     finished or disappeared from the scheduler. No provider is scheduled. *)
+  let check_get expected_job =
+    let%map result = handle unexpected Get in
+    let snapshot = ok result in
+    require
+      (Option.equal Discovery.equal snapshot.discovery catalog.discovery
+       && Option.equal String.equal snapshot.discovery_digest catalog.discovery_digest)
+      "Get lost retained discovery";
+    require
+      (Option.equal Job_id.equal snapshot.discovery_job expected_job)
+      "Get reported inactive discovery as in flight"
+  in
+  p.discovery_job <- Some (Job_id.of_string "finished-or-pruned-discovery");
+  let%bind () = check_get None in
+  p.discovery_job <- None;
+  let%bind () = check_get None in
+  p.discovering <- true;
+  p.discovery_job <- Some (Job_id.of_string "active-discovery");
+  let%bind () = check_get p.discovery_job in
+  p.discovering <- false;
+  p.discovery_error <- Some "retained discovery failure";
+  let%bind failed_discovery = handle unexpected Get in
+  require
+    (Option.equal String.equal (ok failed_discovery).discovery_error p.discovery_error)
+    "Get lost discovery failure";
+  p.discovery_error <- None;
+  p.discovery_job <- None;
   let%bind mismatch =
     handle ~environment:(Opam_switch "different-context") unexpected operation
   in

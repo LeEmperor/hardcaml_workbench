@@ -62,6 +62,11 @@ TBD: whether checks stop at discovery or include an explicitly selected smoke te
 the default is discovery only, with no automatic run.
 
 ## Delivery notes
+
+**Owner closure — 2026-10-21:** closed under the owner's authorization to close
+the non-signoff-dependent tickets in this set, including the verified discovery
+timeout correction. No successful ASIC signoff is required by this ticket.
+
 - **CLI (new executable, CLI only, no TUI):** `hardcaml-workbench-simulation-setup`
   (`setup/simulation_main.ml`, logic in `setup/simulation_setup.ml{,i}`):
   ```sh
