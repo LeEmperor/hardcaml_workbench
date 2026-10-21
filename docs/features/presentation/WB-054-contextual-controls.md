@@ -62,6 +62,13 @@ Dense packing remains the baseline; always-visible extra chrome is not assumed.
 
 ## Follow-up resolution — 2026-10-20
 
+**Human-review status — 2026-10-21:** owner confirmed Testing and hints are fine.
+Those portions are accepted. Clock/timing detail-view review remains blocked because
+the current run failed signoff and has no corresponding published reports. Keep that
+acceptance gap open without treating missing evidence as a UI regression. The proposed
+dedicated Clocks workspace is separate future work, not a completion requirement here.
+
+
 **Code fixes delivered and automatically verified.** Full-area explorer/artifact
 breadcrumbs now render when hints and width permit without consuming evidence rows.
 Timing help follows the focused Paths/Detail/Context pane. Testing `e`/`w` keys dispatch

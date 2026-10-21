@@ -22,6 +22,7 @@
   execution_time_view
   inspection_view
   timing_workspace
+  timing_demand
   presentation
   state
   workspace_host
@@ -34,6 +35,8 @@
   plain_rpc
   launch_preferences
   presentation_preferences
+  navigation_preferences
+  retained_hydration
   asic_intents
   simulation_view
   simulation_catalog
@@ -74,7 +77,20 @@
  (modules waveform_probe)
  (libraries core terminal_presentation hardcaml hardcaml_waveterm)
  (preprocess
+   (pps ppx_jane)))
+
+(executable
+ (name navigation_hydration_probe)
+ (modules navigation_hydration_probe)
+ (libraries core async terminal_presentation hardcaml_workbench_protocol hardcaml_workbench_workspaces)
+ (preprocess
   (pps ppx_jane)))
+
+(rule
+ (alias runtest)
+ (deps test_navigation_hydration_restart.py)
+ (action
+  (run python3 %{dep:test_navigation_hydration_restart.py} %{exe:navigation_hydration_probe.exe})))
 
 (rule
  (alias runtest)

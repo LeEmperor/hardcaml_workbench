@@ -65,6 +65,12 @@ Preserve current compact presentation rather than adding a decorative badge row.
 - [Host renderer](../../../terminal/host_view.ml)
 
 ## Delivery notes
+
+**Owner closure — 2026-10-21:** closed under the owner's authorization to close
+the non-signoff-dependent tickets in this set. The subsequent `linked` styling uses
+the semantic Linked role mapped to theme success green plus bold. Custom theme-file
+support remains separate work; current custom colors are configured in OCaml.
+
 **Reproduced surface.** The Overview `live-status` (Session) tile's linkage row,
 built by `Overview_tiles.status_rows` and drawn by `Overview_tiles.render`. Captured
 before the change (any icon mode, 40 and 24 cells):
@@ -103,4 +109,3 @@ three icon modes at 40 and 24 cells. It also asserts one label colon and that on
 The same PTY acceptance run as WB-001 (`test-overview-sidebar.py`,
 `test-checklist-launch-workflow.py`, `test-launch-stage-consistency.py`) passed with the
 new wording.
-

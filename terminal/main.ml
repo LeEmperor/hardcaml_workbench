@@ -105,6 +105,16 @@ type session =
   ; logs : log_state Job_id.Table.t
   ; mutable status : string
   ; mutable polling : bool
+  ; mutable hydration : Terminal_presentation.Retained_hydration.Coordinator.t
+  ; mutable retained_reads : Terminal_presentation.Retained_hydration.t
+  ; navigation_loaded : Terminal_presentation.Retained_hydration.Load.t
+  ; mutable navigation_pending : Terminal_presentation.Navigation_preferences.t option
+  ; mutable navigation_saved : string option
+  ; mutable navigation_failed : bool
+  ; mutable navigation_revision : int
+  ; mutable navigation_restore_revision : int
+  ; mutable navigation_touched : string list
+  ; mutable navigation_focus_touched : string list
   ; mutable reconnect_delay_ms : int
   ; mutable last_dimensions : Bonsai_term.Dimensions.t option
   ; mutable show_connection_details : bool
@@ -114,6 +124,9 @@ type session =
   ; mutable asic : Asic.Snapshot.t option
   ; mutable asic_request_id : int
   ; mutable asic_applied_id : int
+  ; mutable timing_demand :
+      (Workspace.Tile.t * Http.Client.t * Terminal_presentation.Timing_demand.t ref)
+        option
   ; mutable view_on_allocation : (string * Host.launch_target) option
   ; mutable remembered_selection : Asic.Selection.t option
   ; mutable preferences_loaded : bool
@@ -288,6 +301,16 @@ let create_session
       ; logs = Job_id.Table.create ()
       ; status = "connected"
       ; polling = false
+      ; hydration = Terminal_presentation.Retained_hydration.Coordinator.create ()
+      ; retained_reads = Terminal_presentation.Retained_hydration.create ()
+      ; navigation_loaded = Terminal_presentation.Retained_hydration.Load.create ()
+      ; navigation_pending = None
+      ; navigation_saved = None
+      ; navigation_failed = false
+      ; navigation_revision = 0
+      ; navigation_restore_revision = 0
+      ; navigation_touched = []
+      ; navigation_focus_touched = []
       ; reconnect_delay_ms = 250
       ; last_dimensions = None
       ; show_connection_details = false
@@ -297,6 +320,7 @@ let create_session
       ; asic = None
       ; asic_request_id = 0
       ; asic_applied_id = 0
+      ; timing_demand = None
       ; view_on_allocation = None
       ; remembered_selection = None
       ; preferences_loaded = false
@@ -796,6 +820,147 @@ let save_waveform_preferences session =
               presentation_preference_error session "Could not save Waveforms pins" e)))
 ;;
 
+let load_navigation_preferences session =
+  let module N = Terminal_presentation.Navigation_preferences in
+  if Option.is_none session.opened
+  then return ()
+  else (
+    match Or_error.try_with (fun () -> preference_context session) with
+    | Error error ->
+      session.navigation_failed <- true;
+      presentation_preference_error session "Could not load navigation preferences" error;
+      return ()
+    | Ok (project_key, state_directory) ->
+      if Terminal_presentation.Retained_hydration.Load.loaded
+           session.navigation_loaded
+           project_key
+      then return ()
+      else (
+        let ticket =
+          Terminal_presentation.Retained_hydration.Load.begin_load
+            session.navigation_loaded
+        in
+        session.navigation_failed <- false;
+        let client = session.client in
+        let%map result =
+          In_thread.run (fun () ->
+            Or_error.try_with (fun () -> N.load ~state_directory ~project_key))
+        in
+        if phys_equal client session.client
+           && Terminal_presentation.Retained_hydration.Load.complete
+                session.navigation_loaded
+                ticket
+                project_key
+        then (
+          match result with
+          | Error error ->
+            session.navigation_failed <- true;
+            presentation_preference_error
+              session
+              "Could not load navigation preferences (file left untouched)"
+              error
+          | Ok saved ->
+            session.navigation_saved <- Option.map saved ~f:N.encode;
+            session.navigation_pending <- saved)))
+;;
+
+let apply_navigation_preferences session =
+  match session.navigation_pending, session.host.registry, current_project session with
+  | Some saved, Some _, Some project ->
+    session.navigation_pending <- None;
+    session.host
+    <- Host.restore_navigation_focus
+         saved
+         session.host
+         ~restore_active:
+           (session.navigation_revision = session.navigation_restore_revision)
+         ~preserve_focus:session.navigation_focus_touched;
+    let saved =
+      { saved with
+        workspaces =
+          List.filter saved.workspaces ~f:(fun workspace ->
+            not (List.mem session.navigation_touched workspace.id ~equal:String.equal))
+      }
+    in
+    session.host
+    <- Host.restore_navigation_selections
+         saved
+         session.host
+         ~scope:(Project_id.to_string project.id)
+  | _ -> ()
+;;
+
+let save_navigation_preferences session =
+  let module N = Terminal_presentation.Navigation_preferences in
+  if session.navigation_failed
+     || Option.is_some session.navigation_pending
+     || Terminal_presentation.Retained_hydration.Coordinator.busy session.hydration
+     || not
+          (Terminal_presentation.Retained_hydration.Load.ready session.navigation_loaded)
+  then return ()
+  else (
+    match
+      Or_error.try_with (fun () ->
+        let project_key, state_directory = preference_context session in
+        let saved = Host.navigation_preferences ~project_key session.host in
+        state_directory, saved)
+    with
+    | Error error ->
+      presentation_preference_error session "Could not save navigation preferences" error;
+      return ()
+    | Ok (_, None) -> return ()
+    | Ok (state_directory, Some saved) ->
+      (* Inactive or not-yet-hydrated panes must not erase saved investigation intent. *)
+      let baseline =
+        Option.bind session.navigation_saved ~f:(fun encoded ->
+          Or_error.try_with (fun () -> N.decode ~project_key:saved.project_key encoded)
+          |> Result.ok)
+      in
+      let valid =
+        Option.value_map baseline ~default:[] ~f:(fun baseline ->
+          Host.valid_navigation_workspaces baseline session.host)
+      in
+      let saved =
+        { saved with
+          workspaces =
+            List.map saved.workspaces ~f:(fun workspace ->
+              match List.find valid ~f:(fun old -> String.equal old.id workspace.id) with
+              | None -> workspace
+              | Some old ->
+                { workspace with
+                  testing = Option.first_some workspace.testing old.testing
+                ; timing = Option.first_some workspace.timing old.timing
+                })
+        }
+      in
+      let encoded = N.encode saved in
+      if Option.equal String.equal session.navigation_saved (Some encoded)
+      then return ()
+      else (
+        session.navigation_saved <- Some encoded;
+        let previous = session.preference_saves in
+        let finished = Ivar.create () in
+        session.preference_saves <- Ivar.read finished;
+        Monitor.protect
+          ~finally:(fun () ->
+            Ivar.fill_exn finished ();
+            return ())
+          (fun () ->
+            let%bind () = previous in
+            let%map result =
+              In_thread.run (fun () ->
+                Or_error.try_with (fun () -> N.save ~state_directory saved))
+            in
+            match result with
+            | Ok () -> ()
+            | Error error ->
+              session.navigation_failed <- true;
+              presentation_preference_error
+                session
+                "Could not save navigation preferences"
+                error)))
+;;
+
 let load_preferences session =
   if session.preferences_loaded || Option.is_none session.opened
   then return ()
@@ -886,6 +1051,22 @@ let terminal_result_context session tile =
 
 let reconcile_synthesis session =
   Option.iter session.host.registry ~f:(fun registry ->
+    (* A fresh terminal has no local Timing state. Resolve the exact tile binding and
+       choose only a retained index for that run; activation never asks a provider. *)
+    List.iter registry.tiles ~f:(fun tile ->
+      if Option.is_some (Timing_workspace.pane tile.kind)
+         && Option.is_none (Host.timing session.host tile)
+      then
+        Option.iter session.asic ~f:(fun snapshot ->
+          Workspace.resolve_tile registry tile.id
+          |> Result.ok
+          |> Option.bind ~f:(fun reference -> reference.run)
+          |> Option.iter ~f:(fun run ->
+            List.find snapshot.inspections ~f:(fun index ->
+              Run_ref.equal index.run run && String.equal index.domain "timing")
+            |> Option.iter ~f:(fun index ->
+              let view = Timing_workspace.create ~generation:0 ~run ~stage:index.stage in
+              session.host <- Host.set_timing session.host tile view))));
     let timing =
       List.filter_map session.host.timing ~f:(fun (id, view) ->
         let workspace =
@@ -915,10 +1096,10 @@ let reconcile_synthesis session =
               }
             in
             ( id
-            , Option.value_map
-                session.asic
-                ~default:view
-                ~f:(Inspection_view.reconcile view) ))))
+            , Option.value_map session.asic ~default:view ~f:(fun snapshot ->
+                if Option.is_none view.index
+                then Timing_workspace.attach_retained view snapshot
+                else Inspection_view.reconcile view snapshot) ))))
     in
     session.host <- { session.host with timing };
     List.iter registry.tiles ~f:(fun tile ->
@@ -991,7 +1172,8 @@ let reconcile_synthesis session =
           | Some (run, summary) ->
             Terminal_result_view.State.reconcile local.terminal_result ~run ~summary
         in
-        session.host <- Host.set_local session.host tile.id { local with terminal_result })))
+        session.host <- Host.set_local session.host tile.id { local with terminal_result })));
+  session.host <- Host.reconcile_navigation_timing session.host session.asic
 ;;
 
 let change_terminal_result session f =
@@ -1043,6 +1225,21 @@ let workspace_request session operation =
       | Error message ->
         session.host <- { session.host with notice = "Workspace: " ^ message }
       | Ok snapshot ->
+        if Option.exists session.host.registry ~f:(fun previous ->
+             not (Workspace.Session_id.equal previous.session_id snapshot.session_id))
+        then (
+          Terminal_presentation.Retained_hydration.Load.reconnect
+            session.navigation_loaded
+            ~replacement:true;
+          session.navigation_pending <- None;
+          session.navigation_restore_revision <- session.navigation_revision;
+          session.navigation_touched <- [];
+          session.navigation_focus_touched <- [];
+          session.waveform_preferences_loaded <- None;
+          session.waveform_preferences_pending <- None;
+          session.retained_reads <- Terminal_presentation.Retained_hydration.create ();
+          Terminal_presentation.Retained_hydration.Coordinator.invalidate
+            session.hydration);
         let host, pending =
           Presentation_preferences.receive
             session.presentation_preferences
@@ -1051,7 +1248,6 @@ let workspace_request session operation =
         in
         session.host <- host;
         session.presentation_preferences <- pending;
-        apply_waveform_preferences session;
         apply_waveform_preferences session;
         reconcile_synthesis session)
 ;;
@@ -1160,7 +1356,14 @@ let capture_artifact_request session (tile : Workspace.Tile.t) view operation =
     |> Option.map ~f:(fun ticket -> tile.id, ticket))
 ;;
 
-let asic_request ?artifact_request ?inspection_request ?plan_request session operation =
+let rec asic_request
+  ?artifact_request
+  ?inspection_request
+  ?plan_request
+  ?timing_receipt
+  session
+  operation
+  =
   match current_project session with
   | None -> return ()
   | Some project ->
@@ -1291,6 +1494,7 @@ let asic_request ?artifact_request ?inspection_request ?plan_request session ope
       | Error message ->
         if Option.is_none artifact_request
            && Option.is_none inspection_request
+           && Option.is_none timing_receipt
            && plan_current
         then session.host <- { session.host with notice = "ASIC: " ^ message }
       | Ok snapshot ->
@@ -1302,7 +1506,58 @@ let asic_request ?artifact_request ?inspection_request ?plan_request session ope
                Planned_run.receive session.host.planned_run ~revision:request_id snapshot
            };
         reconcile_synthesis session);
-    if current && Option.is_some artifact_request then reconcile_synthesis session
+    if current && Option.is_some artifact_request then reconcile_synthesis session;
+    Option.iter timing_receipt ~f:(fun receipt ->
+      receipt (Result.map response ~f:(fun _ -> ())));
+    if current then drive_timing_demand session
+
+and drive_timing_demand session =
+  match session.timing_demand with
+  | None -> ()
+  | Some (tile, client, demand) ->
+    let view = Host.inspection session.host tile.id in
+    let active =
+      phys_equal client session.client
+      && Option.exists session.host.registry ~f:(fun registry ->
+        List.exists registry.tiles ~f:(fun current ->
+          Workspace.Tile_id.equal current.id tile.id && not current.hidden))
+      && Option.exists (Host.active session.host) ~f:(fun workspace ->
+        Workspace.Workspace_id.equal workspace.id tile.workspace)
+    in
+    (match active, view, session.asic with
+     | true, Some view, Some snapshot ->
+       let next, view, request =
+         Terminal_presentation.Timing_demand.step
+           ~revision:session.asic_applied_id
+           !demand
+           ~view
+           snapshot
+       in
+       (match next with
+        | None -> session.timing_demand <- None
+        | Some next ->
+          demand := next;
+          session.host <- Host.set_inspection session.host tile.id (Some view);
+          Option.iter request ~f:(fun request ->
+            let inspection_request =
+              if request.selected
+              then Some (tile.id, Inspection_view.capture view request.operation)
+              else None
+            in
+            let timing_receipt response =
+              if Option.exists session.timing_demand ~f:(fun (_, _, current) ->
+                   phys_equal current demand)
+              then
+                demand
+                := Terminal_presentation.Timing_demand.receipt
+                     ~floor:(session.asic_request_id + 1)
+                     !demand
+                     ~ticket:request.ticket
+                     response
+            in
+            don't_wait_for
+              (asic_request ?inspection_request ~timing_receipt session request.operation)))
+     | _ -> session.timing_demand <- None)
 ;;
 
 let artifact_export_notice session tile_id message =
@@ -1587,15 +1842,8 @@ let simulation_request session tile_id (operation : Simulation.Operation.t) =
     if shared
     then (
       let scope = Project_id.to_string project.id in
-      let identity, previous, state =
-        Option.value_or_thunk (Host.testing session.host tile_id) ~default:(fun () ->
-          ref (), scope, Testing_workspace.empty)
-      in
-      let identity, state =
-        if String.equal scope previous
-        then identity, state
-        else ref (), Testing_workspace.empty
-      in
+      session.host <- Host.establish_testing_scope session.host tile_id ~scope;
+      let identity, _, state = Option.value_exn (Host.testing session.host tile_id) in
       let state =
         match operation with
         | Discover ->
@@ -1675,7 +1923,9 @@ let simulation_request session tile_id (operation : Simulation.Operation.t) =
       match Simulation_view.detail simulation with
       | Some d when simulation.logs || shared ->
         (match List.find (project_jobs session) ~f:(fun j -> Job_id.equal j.id d.job) with
-         | Some job -> read_job_log session (Some job)
+         | Some job ->
+           don't_wait_for (read_job_log session (Some job));
+           return ()
          | None ->
            (log_state session d.job).fetch
            <- Presentation.Log_fetch.Error
@@ -1687,6 +1937,8 @@ let simulation_request session tile_id (operation : Simulation.Operation.t) =
 ;;
 
 let refresh_simulation session =
+  let reads = session.retained_reads in
+  let client = session.client in
   Host.tiles session.host
   |> List.filter ~f:(fun tile -> Host.simulation_kind tile.kind)
   |> List.fold ~init:[] ~f:(fun acc tile ->
@@ -1696,26 +1948,96 @@ let refresh_simulation session =
          && Workspace.Workspace_id.equal old.workspace tile.workspace)
     then acc
     else acc @ [ tile ])
-  |> Deferred.List.iter ~how:`Sequential ~f:(fun tile ->
-    let view = Host.simulation session.host tile.id in
-    match view.attempt with
-    | _ when view.busy -> return ()
-    | Some id ->
-      (* Observe deliberately preserves a paged history list. Refresh the newest summary
-         page explicitly when not browsing older history, so another client/provider's new
-         attempts become discoverable without changing the selected attempt or the
-         independently pinned Waveforms investigation. *)
-      let%bind () =
-        if view.older then return () else simulation_request session tile.id Get
-      in
-      if Option.equal
-           String.equal
-           (Host.simulation session.host tile.id).attempt
-           (Some id)
-      then simulation_request session tile.id (Observe id)
-      else return ()
-    | None when not view.older -> simulation_request session tile.id Get
-    | None -> return ())
+  |> Deferred.List.iter ~how:`Parallel ~f:(fun tile ->
+    Option.iter (current_project session) ~f:(fun project ->
+      session.host
+      <- Host.establish_testing_scope
+           session.host
+           tile.id
+           ~scope:(Project_id.to_string project.id));
+    let identity = Host.simulation_identity session.host tile.id in
+    let project = Option.map (current_project session) ~f:(fun p -> p.id) in
+    Terminal_presentation.Retained_hydration.run
+      reads
+      ~key:
+        (Sexp.to_string_mach
+           ([%sexp_of: string * string * string * string option]
+              ( "simulation"
+              , Workspace.Workspace_id.to_string tile.workspace
+              , (if Testing_workspace.is_pane tile.kind
+                 then ""
+                 else Workspace.Tile_id.to_string tile.id)
+              , (Host.simulation session.host tile.id).attempt )))
+      (fun () ->
+        Terminal_presentation.Retained_hydration.refresh_simulation
+          ~current:(fun () ->
+            if phys_equal client session.client
+               && phys_equal identity (Host.simulation_identity session.host tile.id)
+               && Option.equal
+                    Project_id.equal
+                    project
+                    (Option.map (current_project session) ~f:(fun p -> p.id))
+            then Some (Host.simulation session.host tile.id)
+            else None)
+          ~request:(simulation_request session tile.id)))
+;;
+
+(** This retained-state lane never waits on Updates, waveform or log I/O. *)
+let hydrate_retained ?(reschedule = false) session =
+  let client = session.client in
+  Terminal_presentation.Retained_hydration.Coordinator.request
+    session.hydration
+    ~reschedule
+    ~idle:(fun () ->
+      if phys_equal client session.client
+      then save_navigation_preferences session
+      else return ())
+    (fun () ->
+      if not (phys_equal client session.client)
+      then return ()
+      else
+        Deferred.all_unit
+          [ Terminal_presentation.Retained_hydration.run
+              session.retained_reads
+              ~key:"asic"
+              (fun () -> asic_request session Get)
+          ; (let%bind () = load_preferences session in
+             let%bind () = load_presentation_preferences session in
+             let%bind () = load_waveform_display_preferences session in
+             let%bind () = load_waveform_preferences session in
+             let%bind () = load_navigation_preferences session in
+             let%bind () =
+               if phys_equal client session.client
+               then workspace_request session Get
+               else return ()
+             in
+             if not (phys_equal client session.client)
+             then return ()
+             else (
+               apply_navigation_preferences session;
+               reconcile_synthesis session;
+               refresh_simulation session))
+          ])
+;;
+
+let activate_workspace session id =
+  session.navigation_revision <- session.navigation_revision + 1;
+  session.timing_demand <- None;
+  session.waveform_visible <- false;
+  session.waveform_generation <- session.waveform_generation + 1;
+  session.host <- Host.switch session.host id;
+  reconcile_synthesis session;
+  Option.iter session.asic ~f:(fun snapshot ->
+    List.iter (Host.tiles session.host) ~f:(fun tile ->
+      Option.iter (Host.timing session.host tile) ~f:(fun view ->
+        session.host
+        <- Host.set_timing
+             session.host
+             tile
+             (Timing_workspace.attach_retained view snapshot))));
+  session.host <- Host.reconcile_navigation_timing session.host session.asic;
+  don't_wait_for (refresh_simulation session);
+  don't_wait_for (hydrate_retained ~reschedule:true session)
 ;;
 
 let new_waveform_runtime pin token previous =
@@ -1977,15 +2299,10 @@ let refresh_waveforms session =
 ;;
 
 let refresh_host session =
-  let%bind () = load_preferences session in
-  let%bind () = load_presentation_preferences session in
-  let%bind () = load_waveform_display_preferences session in
-  let%bind () = load_waveform_preferences session in
-  let%bind () = workspace_request session Get in
+  let%bind () = hydrate_retained session in
   let%bind () = initialize_host_layout session in
   let%bind () = refresh_waveforms session in
-  let%bind () = refresh_simulation session in
-  let%bind () = asic_request session Get in
+  let%bind () = save_navigation_preferences session in
   let%bind () =
     match session.view_on_allocation, session.host.registry, session.asic with
     | Some (key, target), Some registry, Some asic ->
@@ -2092,10 +2409,12 @@ let rec refresh session =
         session.polling <- false;
         return ())
       (fun () ->
+        don't_wait_for (hydrate_retained session);
         let%bind updates = poll_updates session ~timeout_ms:200 in
         match updates with
         | Error message ->
           session.status <- "disconnected: " ^ message ^ "; reconnecting...";
+          session.timing_demand <- None;
           let%bind () =
             Clock.after (Time_float.Span.of_ms (Float.of_int session.reconnect_delay_ms))
           in
@@ -2119,6 +2438,7 @@ let rec refresh session =
                  String.equal (Job_id.to_string job.id) id)))))
 
 and reconnect session =
+  session.timing_demand <- None;
   let selected_job_id = Option.map (selected_job session) ~f:(fun job -> job.id) in
   session.status <- "reconnecting...";
   let%map loaded =
@@ -2152,11 +2472,24 @@ and reconnect session =
     session.snapshot <- snapshot;
     session.host
     <- Host.reconnect session.host ~replacement:(instance_changed || project_changed);
+    session.hydration <- Terminal_presentation.Retained_hydration.Coordinator.create ();
+    Terminal_presentation.Retained_hydration.Load.reconnect
+      session.navigation_loaded
+      ~replacement:(instance_changed || project_changed);
+    session.retained_reads <- Terminal_presentation.Retained_hydration.create ();
     (* The same project's authoritative evidence remains valid while the first new
        transport poll is pending; dropping it would reset stage/result browsing. *)
     if instance_changed || project_changed then session.asic <- None;
     if instance_changed || project_changed
     then (
+      session.navigation_restore_revision <- session.navigation_revision;
+      session.navigation_touched <- [];
+      session.navigation_focus_touched <- [];
+      session.navigation_pending <- None;
+      session.navigation_saved <- None;
+      session.waveform_preferences_loaded <- None;
+      session.waveform_preferences_pending <- None;
+      session.waveform_preferences_saved <- None;
       session.view_on_allocation <- None;
       session.asic_reads <- Asic_intents.empty);
     if instance_changed || project_changed
@@ -2172,7 +2505,8 @@ and reconnect session =
     session.status
     <- (if instance_changed
         then "reconnected to new daemon instance; no jobs were resubmitted"
-        else "reconnected; no jobs were resubmitted")
+        else "reconnected; no jobs were resubmitted");
+    don't_wait_for (hydrate_retained session)
 ;;
 
 let submission_key action =
@@ -3369,6 +3703,16 @@ let session_of_baseline_fixture (fixture : Baseline_fixture.t) =
     ; logs = Job_id.Table.create ()
     ; status = fixture.status
     ; polling = false
+    ; hydration = Terminal_presentation.Retained_hydration.Coordinator.create ()
+    ; retained_reads = Terminal_presentation.Retained_hydration.create ()
+    ; navigation_loaded = Terminal_presentation.Retained_hydration.Load.create ()
+    ; navigation_pending = None
+    ; navigation_saved = None
+    ; navigation_failed = false
+    ; navigation_revision = 0
+    ; navigation_restore_revision = 0
+    ; navigation_touched = []
+    ; navigation_focus_touched = []
     ; reconnect_delay_ms = 250
     ; last_dimensions = None
     ; show_connection_details = fixture.show_connection_details
@@ -3378,6 +3722,7 @@ let session_of_baseline_fixture (fixture : Baseline_fixture.t) =
     ; asic = None
     ; asic_request_id = 0
     ; asic_applied_id = 0
+    ; timing_demand = None
     ; view_on_allocation = None
     ; remembered_selection = None
     ; preferences_loaded = true
@@ -3690,6 +4035,24 @@ let host_catalog_base session =
 
 (* WB-054: contextual actions for the focused view lead the palette and key dispatch. *)
 let host_catalog session = Host.contextual session.host (host_catalog_base session)
+let timing_prefetch_neighbors = ref 2
+
+let activate_timing_demand session tile view =
+  match session.timing_demand with
+  | Some (previous, client, demand)
+    when Workspace.Tile_id.equal previous.id tile.Workspace.Tile.id
+         && phys_equal client session.client ->
+    demand := Terminal_presentation.Timing_demand.restart !demand ~view
+  | _ ->
+    session.timing_demand
+    <- Some
+         ( tile
+         , session.client
+         , ref
+             (Terminal_presentation.Timing_demand.create
+                ~neighbors:!timing_prefetch_neighbors
+                view) )
+;;
 
 let open_timing_workspace session ~(run : Run_ref.t) ~stage =
   let instance = session.hello.instance_id in
@@ -3838,8 +4201,8 @@ let open_timing_workspace session ~(run : Run_ref.t) ~stage =
                       focus = Some tile.id
                     ; notice = "Timing investigation · captured run " ^ run.id
                     };
-                 (* Already-loaded observations are sufficient; opening does not
-                    re-extract. *)
+                 activate_timing_demand session tile view;
+                 drive_timing_demand session;
                  if Option.is_some view.index
                  then return ()
                  else (
@@ -4068,6 +4431,7 @@ let open_waveform_workspace session artifact =
         in
         match target with
         | Some workspace when current () ->
+          session.timing_demand <- None;
           session.host <- Host.set_waveform_pin session.host workspace.id pin;
           session.waveform_preferences_failed <- false;
           session.host <- Host.switch session.host workspace.id;
@@ -4140,9 +4504,15 @@ let inspection_step session tile view action =
           Option.value_map session.asic ~default:view ~f:(Inspection_view.reconcile view)
         in
         let operation =
-          match operation with
-          | Some (Asic.Operation.Inspect_detail _) when Option.is_some view.detail -> None
-          | other -> other
+          match action, operation with
+          | Inspection_view.Back, _ ->
+            session.timing_demand <- None;
+            operation
+          | _, Some (Asic.Operation.Inspect_detail _) ->
+            (* Enter is an explicit retry, including after a failed finite demand. *)
+            activate_timing_demand session tile view;
+            None
+          | _ -> operation
         in
         session.host <- Host.set_local session.host tile.id { local with scroll };
         Some view, operation
@@ -4153,6 +4523,7 @@ let inspection_step session tile view action =
         v.generation)
     in
     session.host <- Host.set_inspection session.host tile.id inspection;
+    drive_timing_demand session;
     if Option.is_none (Host.timing_pane session.host tile)
     then
       session.host
@@ -4450,9 +4821,7 @@ let execute_host session captured action ~exit =
         else return ())
     | Restore_default_layout_unavailable -> Effect.Ignore
     | Switch id ->
-      session.waveform_visible <- false;
-      session.waveform_generation <- session.waveform_generation + 1;
-      session.host <- Host.switch session.host id;
+      activate_workspace session id;
       Effect.Ignore
     | Create_testing_workspace ->
       async (fun () ->
@@ -4489,6 +4858,7 @@ let execute_host session captured action ~exit =
                        Hardcaml_workbench_workspaces.Testing.definition
                        ~workspace:workspace.id)
                 in
+                session.timing_demand <- None;
                 session.host <- Host.switch session.host workspace.id)
            | _ -> return ())
         | _ -> return ())
@@ -5364,7 +5734,7 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
      | Some (Character ('1' .. '9' as ch)) ->
        let index = Char.to_int ch - Char.to_int '1' in
        Option.bind session.host.registry ~f:(fun s -> List.nth s.workspaces index)
-       |> Option.iter ~f:(fun w -> session.host <- Host.switch session.host w.id);
+       |> Option.iter ~f:(fun w -> activate_workspace session w.id);
        Some Effect.Ignore
      | Some (Character (('[' | ']') as ch)) ->
        (match Host.focused session.host with
@@ -6047,11 +6417,31 @@ let tui session ~exit ~dimensions graph =
   in
   let handler =
     Bonsai.map update_revision ~f:(fun update event ->
+      let previous = session.host in
       let effect = handle event in
+      let active, focus, selections =
+        Host.navigation_input_changes previous session.host
+      in
+      if active || Option.is_some focus
+      then session.navigation_revision <- session.navigation_revision + 1;
+      Option.iter focus ~f:(fun id ->
+        if not (List.mem session.navigation_focus_touched id ~equal:String.equal)
+        then session.navigation_focus_touched <- id :: session.navigation_focus_touched);
+      let touched id =
+        if not (List.mem session.navigation_touched id ~equal:String.equal)
+        then session.navigation_touched <- id :: session.navigation_touched;
+        session.host <- Host.cancel_navigation_timing session.host id
+      in
+      List.iter selections ~f:touched;
       (* Publish local state immediately; publish any deferred response when it completes
          too. Do not await a provider/HTTP read before local feedback. *)
       Effect.Many
-        [ invalidate update; Effect.bind effect ~f:(fun () -> invalidate update) ])
+        [ invalidate update
+        ; Effect.bind effect ~f:(fun () ->
+            Effect.bind
+              (Effect.of_deferred_thunk (fun () -> save_navigation_preferences session))
+              ~f:(fun () -> invalidate update))
+        ])
   in
   ~view, ~handler
 ;;
@@ -6768,6 +7158,17 @@ let command =
          (optional_with_default "inherited" string)
          ~doc:"inherited|opam:SWITCH project command environment (default: inherited)"
      and plain = flag "--plain" no_arg ~doc:" print status without terminal control"
+     and timing_neighbors =
+       flag
+         "--timing-prefetch-neighbors"
+         (optional_with_default
+            2
+            (Command.Arg_type.create (fun value ->
+               let n = Int.of_string value in
+               if n < 0 || n > 2 then failwith "expected 0..2";
+               n)))
+         ~doc:
+           "0..2 speculative Timing neighbors (default 2; 0 keeps selected detail demand)"
      and api =
        flag
          "--api"
@@ -6908,6 +7309,7 @@ let command =
                       (Error (V1.Error.create Invalid_request message))));
             return (Or_error.error_string message)
         | Ok (project_root, note) ->
+          timing_prefetch_neighbors := timing_neighbors;
           if not api then Option.iter note ~f:(eprintf "hardcaml-workbench: %s\n%!");
           run
             ~endpoint

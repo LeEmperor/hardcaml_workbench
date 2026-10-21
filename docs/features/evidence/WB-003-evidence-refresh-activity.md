@@ -68,6 +68,12 @@ The indicator must distinguish evidence reading from actual producer execution.
 
 ## Follow-up resolution — 2026-10-20
 
+**Human-review status — 2026-10-21:** owner cannot exercise clock/timing inspection
+because the current run failed signoff and has no corresponding published evidence.
+Live inspection-refresh visual acceptance remains blocked on a usable retained
+fixture; this is not a reported UI failure. Implementation remains delivered.
+
+
 **Code fixes delivered and automatically verified.** Summary refreshes now carry their
 run identity and project failures into Session. Cache lookups retain concurrent error
 and prior-freshness detail. Inspection transport-error notices use the same

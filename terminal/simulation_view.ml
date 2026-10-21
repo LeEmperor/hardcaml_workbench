@@ -36,6 +36,7 @@ let select t attempt =
   ; case_id = None
   ; snapshot = Option.map t.snapshot ~f:(fun s -> { s with detail = None })
   ; request = t.request + 1
+  ; busy = false
   }
 ;;
 
@@ -52,7 +53,11 @@ let receive t ~ticket ~selected operation response =
         | _ -> false
       in
       let attempt =
-        if allocation then Option.map s.detail ~f:(fun d -> d.id) else t.attempt
+        if allocation
+        then Option.map s.detail ~f:(fun d -> d.id)
+        else if Option.is_none t.attempt && S.Operation.equal operation Get
+        then Option.map (List.hd s.attempts) ~f:(fun a -> a.id)
+        else t.attempt
       in
       let detail =
         let supplied =
@@ -93,13 +98,11 @@ let receive t ~ticket ~selected operation response =
       { t with
         snapshot = Some s
       ; attempt
-      ; case_id =
-          (match detail with
-           | None -> t.case_id
-           | Some d ->
-             Option.filter t.case_id ~f:(fun id ->
-               List.exists d.cases ~f:(fun c -> String.equal c.case_id id)))
-      ; error = None
+      ; case_id = (if allocation then None else t.case_id)
+      ; error =
+          (match operation with
+           | Get when Option.is_some t.attempt && Option.is_none detail -> t.error
+           | _ -> None)
       ; busy = false
       ; older =
           (match operation with

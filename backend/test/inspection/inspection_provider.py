@@ -27,7 +27,11 @@ elif args[:1] == ["observation"]:
             writer_active=False,
             observation_status="final",
             state={"outcome": {"status": "completed"}},
-            execution_file=str(root / "execution.json"),
+            execution_file=(
+                (root / "observed-execution").read_text()
+                if (root / "observed-execution").exists()
+                else str(root / "execution.json")
+            ),
             methodology={
                 "contract": "hardcaml-asic.historical-methodology",
                 "schema_version": 1,

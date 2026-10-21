@@ -61,6 +61,10 @@ Confirm default visibility and whether each choice is project-local or global.
 Current dense packing favors reclaiming space, without fixing all future defaults.
 
 ## Delivery notes
+
+**Owner acceptance — 2026-10-21:** owner confirmed the hints work correctly and
+authorized closure of the non-signoff-dependent tickets. WB-019 is closed/accepted.
+
 - **Default:** both hint areas visible (unchanged behavior for new and existing users).
 - **Persistence:** stored with the other global presentation choices in the existing
   per-project/environment `presentation-<digest>.sexp`. The schema moves to version 2

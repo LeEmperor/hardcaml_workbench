@@ -61,6 +61,10 @@ TBD: initial entrypoints, symlink ancestry semantics and any explicit search bou
 A VCS root alone does not establish a Dune project under this ticket.
 
 ## Delivery notes
+
+**Owner closure — 2026-10-21:** closed under the owner's authorization to close
+the non-signoff-dependent tickets in this set. Discovery remains explicit/opt-in.
+
 - **Resolver:** one shared module, `setup/project_discovery.ml{,i}`
   (`Hardcaml_workbench_setup.Project_discovery`). Marker: the nearest directory
   directly containing a **regular file** `dune-project` (a symlink to a regular file

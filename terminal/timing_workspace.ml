@@ -63,6 +63,27 @@ let create ~generation ~run ~stage =
   Inspection_view.create ~scope:run ~generation ~run ~domain:"timing" ~stage ()
 ;;
 
+(** Attach only published evidence. No Inspect operation or demand is created here. *)
+let attach_retained (t : t) snapshot =
+  let selected = t.selected in
+  let t = Inspection_view.reconcile t snapshot in
+  let t = if Option.is_none t.index then { t with selected } else t in
+  match t.index, t.selected with
+  | Some index, Some row_id when Option.is_none t.requested ->
+    if List.exists snapshot.Asic.Snapshot.inspection_details ~f:(fun detail ->
+         Run_ref.equal detail.run t.run
+         && String.equal detail.domain t.domain
+         && String.equal detail.stage t.stage
+         && String.equal detail.source_digest index.source_digest
+         && String.equal detail.row_id row_id)
+    then
+      Inspection_view.reconcile
+        { t with requested = Some (index.source_digest, row_id) }
+        snapshot
+    else t
+  | _ -> t
+;;
+
 let selection (t : t) =
   Option.bind t.index ~f:(fun index ->
     Option.map t.selected ~f:(fun row_id ->
@@ -294,7 +315,9 @@ let input ~pane ~scroll ~width ~height (t : t) action =
     let next = Option.value next ~default:browsing in
     let changed = not (Option.equal String.equal next.selected t.selected) in
     let next =
-      if changed || Option.is_some operation
+      if changed && Option.is_none operation
+      then { next with operation_key = None; error = None; pending_error = None }
+      else if Option.is_some operation
       then next
       else
         { next with
@@ -393,6 +416,78 @@ let%test_unit "ten-row selected detail leads with provider text and retains full
       ~equal:String.equal)
 ;;
 
+let%test_unit "retained attachment preserves intent until index and attaches only exact \
+               detail"
+  =
+  let run = Fs0_fixture.run_a in
+  let row : Asic_inspection.Row.t =
+    { id = "saved-row"
+    ; name = "endpoint/Q"
+    ; category = "path"
+    ; producer = "sta"
+    ; corner = None
+    ; group = None
+    ; value = Some (-1.)
+    ; unit_ = Some "ns"
+    ; status = "violated"
+    ; source = "source"
+    ; fields = []
+    }
+  in
+  let index : Asic_inspection.Index.t =
+    { run
+    ; domain = "timing"
+    ; stage = "signoff"
+    ; source_digest = "digest"
+    ; execution_file = "/execution"
+    ; execution_sha256 = "sha"
+    ; rows = [ row ]
+    ; diagnostics = []
+    ; truncated = false
+    ; cached_unverified = true
+    ; times = Evidence_time.Index.empty
+    }
+  in
+  let detail : Asic_inspection.Detail.t =
+    { run
+    ; domain = "timing"
+    ; stage = "signoff"
+    ; source_digest = "digest"
+    ; row_id = row.id
+    ; text = "retained detail"
+    ; error = None
+    }
+  in
+  let view =
+    { (create ~generation:0 ~run ~stage:"signoff") with selected = Some row.id }
+  in
+  let pending = attach_retained view Fs0_fixture.snapshot in
+  assert (Option.equal String.equal pending.selected (Some row.id));
+  let snapshot =
+    { Fs0_fixture.snapshot with
+      inspections = [ index ]
+    ; inspection_details = [ { detail with run = Fs0_fixture.run_b } ]
+    }
+  in
+  let attached = attach_retained pending snapshot in
+  assert (Option.is_some attached.index && Option.is_none attached.detail);
+  let attached =
+    attach_retained attached { snapshot with inspection_details = [ detail ] }
+  in
+  assert (String.equal (Option.value_exn attached.detail).text "retained detail");
+  assert (Option.value_exn attached.index).cached_unverified;
+  assert (Option.equal String.equal attached.operation_key view.operation_key);
+  let replaced =
+    attach_retained
+      attached
+      { snapshot with
+        inspections = [ { index with source_digest = "replacement" } ]
+      ; inspection_details = [ detail ]
+      }
+  in
+  assert (Option.is_none replaced.detail)
+;;
+
 let%test_unit "Timing investigation layout fits 120x40 without a default vertical \
                checklist"
   =
@@ -478,6 +573,7 @@ let%test_unit "cooperating panes select actual paths; browsing is local and deta
    | _ -> assert false);
   let moved, _, op = input ~pane:Paths ~scroll:0 ~width:60 ~height:12 opened Up in
   assert (Option.is_none op && Option.is_none moved.requested);
+  assert (Option.is_none moved.operation_key && Option.is_none moved.pending_error);
   assert (
     Option.is_none (Inspection_view.apply_response moved ticket (Error "late")).error);
   let independent, scroll, op =

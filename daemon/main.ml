@@ -16,7 +16,17 @@ let instance_id () =
   |> V1.Daemon_instance_id.of_string
 ;;
 
-let run ~port ~discovery_dir ~state_dir () =
+let run
+  ~port
+  ~discovery_dir
+  ~state_dir
+  ~inspection_detail_cache_entries
+  ~inspection_detail_cache_bytes
+  ()
+  =
+  Hardcaml_workbench_backend.Inspection_detail_cache.validate_limits
+    ~entries:inspection_detail_cache_entries
+    ~bytes:inspection_detail_cache_bytes;
   let instance_id = instance_id () in
   let state_dir =
     Option.value_or_thunk state_dir ~default:(fun () ->
@@ -41,7 +51,15 @@ let run ~port ~discovery_dir ~state_dir () =
   in
   let state_lock = Or_error.ok_exn state_lock in
   let log_dir = Filename_unix.temp_dir "hardcaml-workbench-" "-logs" ~perm:0o700 in
-  let%bind service = Service.create ~instance_id ~log_dir ~state_dir () in
+  let%bind service =
+    Service.create
+      ~instance_id
+      ~log_dir
+      ~state_dir
+      ~inspection_detail_cache_entries
+      ~inspection_detail_cache_bytes
+      ()
+  in
   let service = Or_error.ok_exn service in
   let rpc = Rpc_server.create ~application_version ~instance_id ~service in
   let paths = Hardcaml_workbench_native_http.Runtime.paths ?directory:discovery_dir () in
@@ -106,8 +124,26 @@ let command =
          "--state-dir"
          (optional string)
          ~doc:"DIR absolute persistent workspace/result cache directory"
+     and inspection_detail_cache_entries =
+       flag
+         "--inspection-detail-cache-entries"
+         (optional_with_default 64 int)
+         ~doc:
+           "N per-project reusable detail entries (default 64; 0 disables; maximum 4096)"
+     and inspection_detail_cache_bytes =
+       flag
+         "--inspection-detail-cache-bytes"
+         (optional_with_default 4194304 int)
+         ~doc:
+           "N per-project serialized detail payload bytes, excluding heap overhead \
+            (default 4194304; 0 disables; maximum 268435456)"
      in
-     run ~port ~discovery_dir ~state_dir)
+     run
+       ~port
+       ~discovery_dir
+       ~state_dir
+       ~inspection_detail_cache_entries
+       ~inspection_detail_cache_bytes)
 ;;
 
 let () = Command_unix.run command

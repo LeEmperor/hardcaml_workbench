@@ -399,6 +399,7 @@ let observation_qualifier = "Observation stopped; stage state unconfirmed"
 let run_selector_view
   ?indicator_frames
   ?time
+  ?time_width
   appearance
   ~width
   ~status_width
@@ -411,13 +412,25 @@ let run_selector_view
   let icon =
     indicator_view ?indicator_frames appearance status_role (run_indicator status)
   in
-  let time = Option.value_map time ~default:"" ~f:(fun time -> " | " ^ time) in
-  let time = if cell_width time + status_width + 7 <= width then time else "" in
+  let time = Option.value time ~default:"" in
+  let time_width = Option.value time_width ~default:(cell_width time) in
+  let time =
+    if time_width > 0 && time_width + status_width + View.width icon + 10 <= width
+    then " | " ^ String.make (Int.max 0 (time_width - cell_width time)) ' ' ^ time
+    else ""
+  in
   let text_width = Int.max 0 (width - View.width icon - cell_width time) in
   let row = run_selector_row ~width:text_width ~status_width ~cursor ~active run status in
   let identity_width = Int.max 0 (text_width - status_width) in
   let identity = E.text (E.clip ~width:identity_width (E.plain row)) in
   let status = E.text (E.clip ~width:status_width (E.plain status)) in
+  let status =
+    status
+    ^
+    if String.is_empty time
+    then ""
+    else String.make (status_width - cell_width status) ' '
+  in
   let attrs role =
     Role.attrs appearance role
     @ if cursor then [ Attr.bg (Role.backdrop appearance Selection) ] else []
@@ -770,8 +783,8 @@ let utility_rows ?(now = Time_ns.now ()) host data tile =
                 [ Overview_tiles.row ~role:Warning "Observation error" error ])
             else [])
          @ (if H.compact_summary host tile && not local.utility_detail
-             then Overview_tiles.checklist_rows ~compact:true ~stages ~aggregate:facts ()
-             else stages @ facts)
+            then Overview_tiles.checklist_rows ~compact:true ~stages ~aggregate:facts ()
+            else stages @ facts)
          @ interaction)
     | _ -> None)
 ;;
@@ -1955,6 +1968,16 @@ let tile_view
                 (List.fold candidates ~init:0 ~f:(fun n (_, status) ->
                    Int.max n (cell_width status)))
             in
+            let time run =
+              Execution_time_view.list_value
+                ~now
+                (Option.bind (Overview_tiles.execution ~asic:data.asic ~run) ~f:(fun r ->
+                   r.execution_timing))
+            in
+            let time_width =
+              List.fold candidates ~init:0 ~f:(fun n (run, _) ->
+                Int.max n (cell_width (time run)))
+            in
             (* [rows] already applies the selector's cursor paging. Resolve each row
                against the same typed candidate and keep status styling out of IDs. *)
             let selected =
@@ -1978,12 +2001,8 @@ let tile_view
             |> Fn.flip List.take (Int.max 0 available)
             |> List.map ~f:(fun (run, status) ->
               run_selector_view
-                ~time:
-                  (Execution_time_view.compact_line
-                     ~now
-                     (Option.bind
-                        (Overview_tiles.execution ~asic:data.asic ~run)
-                        ~f:(fun r -> r.execution_timing)))
+                ~time:(time run)
+                ~time_width
                 ?indicator_frames:
                   (if run_has_producer data run then indicator_frames else None)
                 appearance
@@ -2007,7 +2026,7 @@ let tile_view
          |> lines ~appearance ~width:body_width ~height:body_height
        | Some rows
          when String.equal tile.kind "stage-checklist"
-               && Option.value horizontal_stages ~default:(H.horizontal_stages host tile)
+              && Option.value horizontal_stages ~default:(H.horizontal_stages host tile)
               && Option.is_some (tile_run host tile) ->
          let run = Option.value_exn (tile_run host tile) in
          let stages = Overview_tiles.observed_stages ~asic:data.asic ~run in
@@ -2110,6 +2129,7 @@ let tile_view
                ~attrs:(utility_attrs appearance)
                ~width:body_width
                ~height:available
+               ~candidate_rows:rows
                (List.drop rows start)
            ]
          |> box ~width:body_width ~height:body_height
@@ -3139,7 +3159,8 @@ let%test_unit "stopped exact-run observation qualifies actual checklist layouts"
   check host ~horizontal_stages:true ();
   let registry = Option.value_exn host.registry in
   let vertical =
-    H.receive host
+    H.receive
+      host
       { registry with
         workspaces = List.map registry.workspaces ~f:(fun w -> { w with preset = None })
       }
@@ -3151,7 +3172,13 @@ let%test_unit "stopped exact-run observation qualifies actual checklist layouts"
   in
   assert (contains (render detail data tile) error);
   let operation kind state run error : Asic.Pending.t =
-    { key = "test-observation"; kind; state; run = Some run; error; activity = Unreported }
+    { key = "test-observation"
+    ; kind
+    ; state
+    ; run = Some run
+    ; error
+    ; activity = Unreported
+    }
   in
   let with_state ?(error = None) ?(stages = (List.hd_exn runs).stages) operations =
     { data with
@@ -3165,29 +3192,41 @@ let%test_unit "stopped exact-run observation qualifies actual checklist layouts"
   in
   let failed = operation "observe" "failed" Fs0_fixture.run_a (Some "reader lost") in
   let cancelled = { failed with state = "cancelled" } in
-  List.iter [ failed; cancelled; { failed with kind = "run" } ] ~f:(fun failure ->
-    assert (contains (render host (with_state [ failure ]) tile) observation_qualifier));
+  List.iter
+    [ failed; cancelled; { failed with kind = "run" } ]
+    ~f:(fun failure ->
+      assert (contains (render host (with_state [ failure ]) tile) observation_qualifier));
   List.iter
     [ with_state []
     ; with_state [ { failed with kind = "refresh" } ]
     ; with_state [ { failed with run = Some Fs0_fixture.run_b } ]
-    ; with_state [ { failed with run = Some { Fs0_fixture.run_a with backend = Backend_id.of_string "other" } } ]
+    ; with_state
+        [ { failed with
+            run = Some { Fs0_fixture.run_a with backend = Backend_id.of_string "other" }
+          }
+        ]
     ; with_state ~error:(Some "unrelated provider error") []
-    ; with_state ~error:(Some error)
+    ; with_state
+        ~error:(Some error)
         [ failed; { failed with state = "executing"; error = None } ]
-    ; with_state ~error:(Some error)
+    ; with_state
+        ~error:(Some error)
         [ failed; { failed with kind = "run"; state = "executing"; error = None } ]
-    ; with_state ~error:(Some error)
-        ~stages:(List.map (List.hd_exn runs).stages ~f:(fun s -> { s with status = Completed }))
+    ; with_state
+        ~error:(Some error)
+        ~stages:
+          (List.map (List.hd_exn runs).stages ~f:(fun s -> { s with status = Completed }))
         [ failed ]
     ]
-    ~f:(fun data ->
-      assert (not (contains (render host data tile) observation_qualifier)));
+    ~f:(fun data -> assert (not (contains (render host data tile) observation_qualifier)));
   let pinned = { tile with binding = Pin_run Fs0_fixture.run_b } in
   let pinned_host =
-    H.receive host
+    H.receive
+      host
       { registry with
-        tiles = List.map registry.tiles ~f:(fun t -> if W.Tile_id.equal t.id tile.id then pinned else t)
+        tiles =
+          List.map registry.tiles ~f:(fun t ->
+            if W.Tile_id.equal t.id tile.id then pinned else t)
       }
   in
   assert (not (contains (render pinned_host data pinned) observation_qualifier));
@@ -3203,7 +3242,8 @@ let%test_unit "stopped exact-run observation qualifies actual checklist layouts"
     |> Option.value_exn
   in
   let retained_host =
-    H.receive host
+    H.receive
+      host
       { selected_elsewhere with
         tiles =
           List.map selected_elsewhere.tiles ~f:(fun t ->
@@ -4681,7 +4721,11 @@ let%test_unit "host vertical stages preserve exact selected identity and detail"
       let image = tile_view host data tile ~width ~height in
       assert (View.width image = width && View.height image = height));
   let text = tile_view host data tile ~width:120 ~height:5 |> plain_text in
-  assert (String.is_substring text ~substring:"signoff: completed");
+  let selected_line =
+    String.split_lines text
+    |> List.find_exn ~f:(fun line -> String.is_substring line ~substring:"signoff:")
+  in
+  assert (String.is_substring selected_line ~substring:"completed");
   let detail =
     H.set_local host tile.id { (H.local host tile.id) with utility_detail = true }
   in
@@ -6045,7 +6089,7 @@ let%test_unit "checklist follows exact run and pin with selected-stage detail an
   let compact =
     tile_view compact_host data following ~width:40 ~height:10 |> plain_text
   in
-  List.iter [ "running"; "Time: unknown" ] ~f:(fun text ->
+  List.iter [ "running"; "unknown" ] ~f:(fun text ->
     assert (String.is_substring compact ~substring:text));
   let missing = { data with asic = None } in
   let fallback = utility_rows host missing following |> Option.value_exn in
@@ -7584,11 +7628,26 @@ let%test_unit "WB-054 production selection catalog promotes original runnable id
     let original = List.find_exn base ~f:(fun c -> String.equal c.id id) in
     let _, action = Option.value_exn (H.testing_dispatch selected key ~commands) in
     assert (phys_equal action original.action));
-  (* Loaded attempt, but no artifact selected: explain e/w through the same dispatch. *)
+  (* Loaded artifacts now select a default immediately. An attempt without artifacts
+     still explains e/w through the same dispatch. *)
+  assert (Option.is_some (Testing_workspace.artifact (H.testing_state loaded tile.id)));
+  let empty_artifacts =
+    H.set_simulation
+      { host with focus = Some tile.id }
+      tile.id
+      { Simulation_view.empty with
+        snapshot = Some { snapshot with detail = Some { attempt with artifacts = [] } }
+      ; attempt = Some attempt.id
+      ; case_id = Some "case"
+      }
+  in
   List.iter [ 'e'; 'w' ] ~f:(fun key ->
     let _, action =
       Option.value_exn
-        (H.testing_dispatch loaded key ~commands:(H.contextual loaded base))
+        (H.testing_dispatch
+           empty_artifacts
+           key
+           ~commands:(H.contextual empty_artifacts (H.catalog empty_artifacts ~project:None ~jobs:[])))
     in
     match action with
     | Unavailable reason -> assert (String.equal reason "no artifact selected")

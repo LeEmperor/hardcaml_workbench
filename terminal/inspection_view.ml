@@ -38,6 +38,9 @@ type detail_cache =
   ; lines : string array
   }
 
+(* The public run can advance without changing execution bytes or index rows. *)
+type observation = Asic.Reference.t * int * string option [@@deriving equal]
+
 type t =
   { run : Run_ref.t
   ; scope : Run_ref.t option
@@ -45,6 +48,7 @@ type t =
   ; domain : string
   ; stage : string
   ; index : Asic_inspection.Index.t option
+  ; observation : observation option
   ; selected : string option
   ; filter : string
   ; editing : bool
@@ -84,6 +88,7 @@ let create ?scope ?(generation = 0) ~run ~domain ~stage () =
   ; domain
   ; stage
   ; index = None
+  ; observation = None
   ; selected = None
   ; filter = ""
   ; editing = false
@@ -212,6 +217,8 @@ let same_source (a : Asic_inspection.Index.t) (b : Asic_inspection.Index.t) =
       && String.equal a.domain b.domain
       && String.equal a.stage b.stage
       && String.equal a.source_digest b.source_digest
+      && String.equal a.execution_file b.execution_file
+      && String.equal a.execution_sha256 b.execution_sha256
       && (phys_equal a.rows b.rows || List.equal Asic_inspection.Row.equal a.rows b.rows)
      )
 ;;
@@ -282,6 +289,10 @@ let normalize (t : t) =
 ;;
 
 let reconcile t (snapshot : Asic.Snapshot.t) =
+  let observation =
+    List.find snapshot.runs ~f:(fun run -> Run_ref.equal run.Asic.Run.run t.run)
+    |> Option.map ~f:(fun run -> run.reference, run.cursor, run.execution_file)
+  in
   let index =
     List.find snapshot.inspections ~f:(fun i ->
       Run_ref.equal i.Asic_inspection.Index.run t.run
@@ -297,7 +308,21 @@ let reconcile t (snapshot : Asic.Snapshot.t) =
         Option.equal String.equal t.selected (Some row.id)))
   in
   let changed =
-    (not (Option.equal String.equal (digest t.index) (digest index)))
+    (not (Option.equal equal_observation t.observation observation))
+    || (not (Option.equal String.equal (digest t.index) (digest index)))
+    || (not
+          (Option.equal
+             (fun a b ->
+               String.equal a.Asic_inspection.Index.execution_file b.execution_file
+               && String.equal a.execution_sha256 b.execution_sha256)
+             t.index
+             index))
+    || (not
+          (Option.equal
+             (fun a b ->
+               Bool.equal a.Asic_inspection.Index.cached_unverified b.cached_unverified)
+             t.index
+             index))
     || not
          (Option.equal
             Asic_inspection.Row.equal
@@ -313,6 +338,12 @@ let reconcile t (snapshot : Asic.Snapshot.t) =
       ; error = None
       ; requested = None
       ; detail = None
+      ; operation_key =
+          Option.filter
+            t.operation_key
+            ~f:
+              (String.equal
+                 (Asic_inspection.index_key ~run:t.run ~domain:t.domain ~stage:t.stage))
       ; info = false
       ; scroll = 0
       ; detail_cache = None
@@ -321,12 +352,16 @@ let reconcile t (snapshot : Asic.Snapshot.t) =
   in
   let detail =
     Option.bind t.requested ~f:(fun (source_digest, row_id) ->
-      List.find snapshot.inspection_details ~f:(fun d ->
+      let matches d =
         Run_ref.equal d.Asic_inspection.Detail.run t.run
         && String.equal d.domain t.domain
         && String.equal d.stage t.stage
         && String.equal d.source_digest source_digest
-        && String.equal d.row_id row_id))
+        && String.equal d.row_id row_id
+      in
+      Option.first_some
+        (List.find snapshot.inspection_details ~f:matches)
+        (Option.filter t.detail ~f:(fun d -> matches d && Option.is_none d.error)))
   in
   let pending_error =
     Option.bind t.operation_key ~f:(fun key ->
@@ -338,7 +373,7 @@ let reconcile t (snapshot : Asic.Snapshot.t) =
            then Some (key ^ ": " ^ op.state)
            else None)))
   in
-  normalize { t with detail; pending_error }
+  normalize { t with observation; detail; pending_error }
 ;;
 
 let cycle_axis t axis =
@@ -1131,7 +1166,10 @@ let%test_unit "1000 detail downs then one up reverses the visible viewport and r
   in
   let initial =
     normalize
-      { (create ~run ~domain:"timing" ~stage:"signoff" ()) with
+      { (reconcile
+           (create ~run ~domain:"timing" ~stage:"signoff" ())
+           { Fs0_fixture.snapshot with inspections = [ index ] })
+        with
         index = Some index
       ; selected = Some "row"
       ; requested = Some ("digest", "row")
