@@ -26,6 +26,8 @@ type timing =
   ; row_id : string option
   ; run : string option [@sexp.option]
   ; source_digest : string option [@sexp.option]
+  ; analysis : Hardcaml_workbench_protocol.Asic_inspection.Analysis_target.t option
+       [@sexp.option]
   }
 [@@deriving sexp]
 
@@ -69,7 +71,8 @@ let validate (t : t) =
   if List.length t.workspaces > 256 then fail "workspace count limit exceeded";
   let workspace_ids = List.map t.workspaces ~f:(fun w -> w.id) in
   unique workspace_ids;
-  if Option.exists t.active ~f:(fun id -> not (List.mem workspace_ids id ~equal:String.equal))
+  if Option.exists t.active ~f:(fun id ->
+       not (List.mem workspace_ids id ~equal:String.equal))
   then fail "active workspace is not saved";
   let members = List.concat_map t.workspaces ~f:(fun w -> w.members) in
   if List.length members > 1024 then fail "member count limit exceeded";
@@ -100,7 +103,16 @@ let validate (t : t) =
       check_string ~empty:true timing.filter;
       check_optional timing.row_id;
       check_optional timing.run;
-      check_optional timing.source_digest))
+      check_optional timing.source_digest;
+      Option.iter timing.analysis ~f:(fun a ->
+        List.iter
+          [ a.attempt_id
+          ; a.occurrence_id
+          ; a.analysis_id
+          ; a.source_digest
+          ; a.execution_sha256
+          ]
+          ~f:check_string)))
 ;;
 
 let encode t =
@@ -114,8 +126,7 @@ let decode ~project_key text =
   if String.length text > max_file_size then fail "file size limit exceeded";
   let t = t_of_sexp (Sexp.of_string text) in
   validate t;
-  if not (String.equal t.project_key project_key)
-  then fail "project/environment mismatch";
+  if not (String.equal t.project_key project_key) then fail "project/environment mismatch";
   t
 ;;
 
@@ -198,6 +209,7 @@ let test_fixture () =
               ; row_id = Some "path-42"
               ; run = Some "stable-run-reference"
               ; source_digest = Some "source-digest"
+              ; analysis = None
               }
         }
       ]
@@ -214,7 +226,8 @@ let%test_unit "navigation roundtrip preserves exact stable IDs and optional meta
   rejects (fun () -> decode ~project_key:"different/environment" (encode t));
   rejects (fun () -> decode ~project_key:t.project_key "((truncated");
   rejects (fun () -> encode { t with schema_version = 2 });
-  rejects (fun () -> decode ~project_key:t.project_key (String.make (max_file_size + 1) ' '))
+  rejects (fun () ->
+    decode ~project_key:t.project_key (String.make (max_file_size + 1) ' '))
 ;;
 
 let%test_unit "suite-level artifacts roundtrip without a case" =
@@ -245,9 +258,7 @@ let%test_unit "historical schema-1 timing rows decode without evidence identity"
   assert (Option.is_none timing.run);
   assert (Option.is_none timing.source_digest);
   assert (
-    Sexp.equal
-      (sexp_of_t t)
-      (sexp_of_t (decode ~project_key:t.project_key (encode t))))
+    Sexp.equal (sexp_of_t t) (sexp_of_t (decode ~project_key:t.project_key (encode t))))
 ;;
 
 let%test_unit "timing evidence identity strings obey sidecar bounds" =
@@ -283,7 +294,8 @@ let%test_unit "navigation rejects duplicate and inconsistent identities" =
     encode
       (only
          { w with
-           testing = Some { testing with artifact = Some { artifact with size = Some (-1) } }
+           testing =
+             Some { testing with artifact = Some { artifact with size = Some (-1) } }
          }));
   (* Decode must validate too, even when the invalid record bypassed encode. *)
   rejects (fun () ->
@@ -308,7 +320,8 @@ let%test_unit "navigation bounds strings, entries and total encoded size" =
         active = None
       ; workspaces =
           [ { w with
-              members = List.init 1025 ~f:(fun i -> { tile = Int.to_string i; kind = "k" })
+              members =
+                List.init 1025 ~f:(fun i -> { tile = Int.to_string i; kind = "k" })
             }
           ]
       });
@@ -326,6 +339,7 @@ let%test_unit "navigation bounds strings, entries and total encoded size" =
                   ; row_id = None
                   ; run = None
                   ; source_digest = None
+                  ; analysis = None
                   }
             })
       })
@@ -341,7 +355,8 @@ let with_test_directory f =
     ~f:(fun () -> f directory)
 ;;
 
-let%test_unit "navigation absent, corrupt and oversized sidecars stay isolated and intact" =
+let%test_unit "navigation absent, corrupt and oversized sidecars stay isolated and intact"
+  =
   with_test_directory (fun state_directory ->
     let t = test_fixture () in
     let file = path ~state_directory ~project_key:t.project_key in
@@ -349,7 +364,10 @@ let%test_unit "navigation absent, corrupt and oversized sidecars stay isolated a
     save ~state_directory t;
     assert (Option.is_none (load ~state_directory ~project_key:"other/environment"));
     List.iter
-      [ "broken("; String.make (max_file_size + 1) ' '; encode { t with project_key = "other" } ]
+      [ "broken("
+      ; String.make (max_file_size + 1) ' '
+      ; encode { t with project_key = "other" }
+      ]
       ~f:(fun corrupt ->
         Out_channel.write_all file ~data:corrupt;
         rejects (fun () -> load ~state_directory ~project_key:t.project_key);
@@ -358,7 +376,9 @@ let%test_unit "navigation absent, corrupt and oversized sidecars stay isolated a
         assert (List.length (Sys_unix.ls_dir state_directory) = 1)))
 ;;
 
-let%test_unit "navigation atomic replacement leaves old readers complete and rejects invalid writes" =
+let%test_unit "navigation atomic replacement leaves old readers complete and rejects \
+               invalid writes"
+  =
   with_test_directory (fun state_directory ->
     let t = test_fixture () in
     save ~state_directory t;

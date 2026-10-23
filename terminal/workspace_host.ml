@@ -67,9 +67,12 @@ type action =
   | Finalize_collect of Run_ref.t * string
   | Browse_artifacts of Run_ref.t
   | Browse_inspection of Run_ref.t * string * string
+  | Browse_analysis of Run_ref.t * Asic_inspection.Analysis_target.t
+  | Inspect_overview_analysis of W.Tile_id.t
   | Launch_asic of Asic.Preview.t * bool
   | Unavailable_launch
   | Prepare_stage of Asic.Stage.t * Run_ref.t
+  | Prepare_endpoint of string * Run_ref.t
   | Apply_default_layout
   | Restore_default_layout of W.Workspace_id.t * P.Definition.t
   | Restore_default_layout_unavailable
@@ -652,6 +655,47 @@ let stage_cursor local ~run ~(stages : Asic.Stage.t list) =
   Option.first_some selected (List.hd stages)
 ;;
 
+let checklist_cursor local ~run ~items =
+  let selected =
+    if Option.equal Run_ref.equal local.stage_run (Some run)
+    then
+      Option.bind local.cursor ~f:(fun id ->
+        List.find items ~f:(fun item ->
+          String.equal (Overview_tiles.checklist_id item) id))
+    else None
+  in
+  Option.first_some selected (List.hd items)
+;;
+
+let reconcile_checklist local ~run ~items =
+  let cursor =
+    Option.bind run ~f:(fun run ->
+      Option.map (checklist_cursor local ~run ~items) ~f:Overview_tiles.checklist_id)
+  in
+  if Option.equal Run_ref.equal local.stage_run run
+     && Option.equal String.equal local.cursor cursor
+  then local
+  else { local with cursor; stage_run = run; scroll = 0; utility_detail = false }
+;;
+
+let browse_checklist t id ~run ~items ~delta =
+  let l = local t id in
+  let pos =
+    Option.bind (checklist_cursor l ~run ~items) ~f:(fun selected ->
+      List.findi items ~f:(fun _ item ->
+        String.equal
+          (Overview_tiles.checklist_id item)
+          (Overview_tiles.checklist_id selected))
+      |> Option.map ~f:fst)
+    |> Option.value ~default:0
+  in
+  let cursor =
+    List.nth items (Int.max 0 (Int.min (List.length items - 1) (pos + delta)))
+    |> Option.map ~f:Overview_tiles.checklist_id
+  in
+  set_local t id { l with cursor; stage_run = Some run; scroll = 0 }
+;;
+
 let reconcile_stages local ~run ~stages =
   let cursor =
     Option.bind run ~f:(fun run ->
@@ -830,7 +874,13 @@ let receive t (s : W.Snapshot.t) =
     let notice =
       match t.palette with
       | Some { argument = Some (Simulation_selection _); _ } -> t.notice
-      | _ -> ""
+      | _ ->
+        (* Stage preparation finishes asynchronously, between registry polls and draws.
+           Its current progress/failure must survive those polls until the user clears it
+           or starts another action. Other transient notices retain their existing refresh
+           behavior. *)
+        Option.value_map t.stage_preparation ~default:"" ~f:(fun preparation ->
+          if String.equal t.notice preparation then preparation else "")
     in
     (* Invalidate at every received transition, not only when a reader happens to
        reconcile. A pin A→B→A must never resurrect the first A's pending ticket. *)
@@ -1376,6 +1426,7 @@ let navigation_preferences ~project_key t =
               ; run = Some (Sexp.to_string_mach (Run_ref.sexp_of_t view.run))
               ; source_digest =
                   Option.map view.index ~f:(fun index -> index.source_digest)
+              ; analysis = view.analysis
               })
         in
         { Navigation_preferences.id
@@ -1509,7 +1560,10 @@ let restore_navigation_selections saved t ~scope =
         |> Result.ok
         |> Option.bind ~f:(fun reference -> reference.run)
         |> Option.value_map ~default:t ~f:(fun run ->
-          let view = Timing_workspace.create ~generation:0 ~run ~stage:saved.stage in
+          let view =
+            Timing_workspace.create ~generation:0 ~run ~stage:saved.stage
+            |> fun view -> Timing_workspace.with_analysis view saved.analysis
+          in
           let t =
             set_timing t tile { view with filter = saved.filter; selected = None }
           in
@@ -1573,10 +1627,9 @@ let reconcile_navigation_timing t snapshot =
         else (
           let index =
             Option.bind snapshot ~f:(fun snapshot ->
-              List.find snapshot.Asic.Snapshot.inspections ~f:(fun index ->
-                Run_ref.equal index.run view.run
-                && String.equal index.domain view.domain
-                && String.equal index.stage view.stage))
+              List.find
+                snapshot.Asic.Snapshot.inspections
+                ~f:(Inspection_view.matches_index view))
           in
           match index with
           | None -> t
@@ -2340,6 +2393,17 @@ let matching_timing ?workspace:expected_workspace (registry : W.Snapshot.t) ~run
       match W.resolve_tile registry tile.id with
       | Ok reference -> Option.equal Run_ref.equal reference.run (Some run)
       | Error _ -> false))
+;;
+
+let matching_timing_analysis t registry ~run ~analysis =
+  List.find_map registry.W.Snapshot.workspaces ~f:(fun workspace ->
+    matching_timing ~workspace:workspace.id registry ~run
+    |> Option.filter ~f:(fun w ->
+      Option.equal
+        Asic_inspection.Analysis_target.equal
+        analysis
+        (List.Assoc.find t.timing (W.Workspace_id.to_string w.id) ~equal:String.equal
+         |> Option.bind ~f:(fun view -> view.Inspection_view.analysis))))
 ;;
 
 let%test_unit "Timing exact-run reuse preserves pins and independent investigations" =
@@ -3196,7 +3260,15 @@ let inspector_key_commands t (tile : W.Tile.t) =
            then Some "no row selected"
            else None))
     ; key "refresh" "Inspector: Refresh current evidence (r)" "reload" Refresh None
-    ; key "stage" "Inspector: Next inspection stage (t)" "stage cycle" Stage None
+    ; key
+        "stage"
+        "Inspector: Next inspection stage (t)"
+        "stage cycle"
+        Stage
+        (reason (fun v ->
+           if Option.is_some v.analysis
+           then Some "captured analysis stage is fixed"
+           else None))
     ; key
         "near"
         "Inspector: Toggle near/violated rows (v)"
@@ -3232,7 +3304,9 @@ let run_context_commands t (tile : W.Tile.t) =
         "context.inspect-timing"
         "Context: Inspect timing paths for this tile's run"
         "investigate slack signoff"
-        (action (fun run -> Browse_inspection (run, "timing", "signoff")))
+        (if String.equal tile.kind "timing" || String.equal tile.kind "stage-checklist"
+         then Inspect_overview_analysis tile.id
+         else action (fun run -> Browse_inspection (run, "timing", "signoff")))
     ; command
         ?unavailable
         "context.artifacts"

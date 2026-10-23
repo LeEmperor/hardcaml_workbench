@@ -200,6 +200,7 @@ let fixture_summary : Asic.Summary.t =
   ; timing = []
   ; metrics = []
   ; terminal = None
+  ; timing_analysis = None
   ; completion = "fixture"
   ; acceptance = "unavailable"
   ; producer = "synthetic-test"

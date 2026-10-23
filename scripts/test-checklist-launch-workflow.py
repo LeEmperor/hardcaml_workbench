@@ -156,7 +156,7 @@ def real_case(args, manifest, reference, presets, mode, check):
             save(base / 'final-snapshot.json', final)
             return
         if mode in ('stale-profile', 'nonfresh', 'unsupported-endpoint'):
-            reason = 'Selected profile unavailable' if mode == 'stale-profile' else 'No validated fresh endpoint'
+            reason = 'Selected profile unavailable' if mode == 'stale-profile' else 'Unsupported fresh endpoint'
             wait(lambda: field(http.rpc(wait=False), 'flows'), 'negative discovery completed')
             terminal.drain(1)
             terminal.open_palette('Launch')

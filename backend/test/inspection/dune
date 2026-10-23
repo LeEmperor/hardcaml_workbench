@@ -1,11 +1,29 @@
 (test
  (name test_inspection)
+ (modules test_inspection)
  (deps inspection_provider.py)
  (libraries
   async
   core
   core_unix
   cryptokit
+  yojson
+  hardcaml_workbench_backend
+  hardcaml_workbench_project_integration
+  hardcaml_workbench_protocol)
+ (preprocess
+  (pps ppx_jane))
+ (lint
+  (pps ppx_js_style)))
+
+(test
+ (name test_timing_analysis)
+ (modules test_timing_analysis)
+ (deps inspection_provider.py)
+ (libraries
+  async
+  core
+  core_unix
   yojson
   hardcaml_workbench_backend
   hardcaml_workbench_project_integration

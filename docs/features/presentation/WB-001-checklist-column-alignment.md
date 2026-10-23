@@ -3,7 +3,7 @@ id: WB-001
 title: Checklist column alignment
 category: presentation
 feature_sets: [FS5]
-status: delivered
+status: closed
 kind: defect
 priority: P2
 severity: S3

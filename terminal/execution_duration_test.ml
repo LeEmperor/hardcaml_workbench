@@ -214,7 +214,13 @@ let%test_unit "Overview actual five-row tiles show exact selected and pinned exe
       assert (not (String.is_substring pinned ~substring:("Time: " ^ expected))));
   List.iter [ "timing"; "checks" ] ~f:(fun kind ->
     let rendered = text (find kind) in
-    assert (String.is_substring rendered ~substring:("Time: unknown (stage " ^ kind ^ ")"));
+    assert (
+      String.is_substring
+        rendered
+        ~substring:
+          (if String.equal kind "timing"
+           then "not reported"
+           else "Time: unknown (stage " ^ kind ^ ")"));
     assert (not (String.is_substring rendered ~substring:"2m 07s")));
   assert (String.is_substring (text (find "finalization")) ~substring:"Time: 1h 02m 03s");
   assert (String.is_substring (text ~height:10 (find "run-selector")) ~substring:"2m 07s");
@@ -259,7 +265,12 @@ let%test_unit "Overview actual five-row tiles show exact selected and pinned exe
         then (
           let rendered = text ~width:g.width ~height:g.height tile in
           if Overview_summary.supports tile.kind
-          then assert (String.is_substring rendered ~substring:"Time: ")
+          then
+            assert (
+              String.is_substring
+                rendered
+                ~substring:
+                  (if String.equal tile.kind "timing" then "unknown" else "Time: "))
           else (
             assert (String.is_substring rendered ~substring:" | ");
             assert (not (String.is_substring rendered ~substring:"Time:"))))))

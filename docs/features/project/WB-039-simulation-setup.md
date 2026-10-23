@@ -3,7 +3,7 @@ id: WB-039
 title: Simulation provider setup assistance
 category: project
 feature_sets: [FS2, FS3]
-status: delivered
+status: closed
 kind: enhancement
 priority: P2
 severity: n/a

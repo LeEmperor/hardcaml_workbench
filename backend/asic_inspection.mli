@@ -7,10 +7,15 @@ val detail_limit : int
 val validate_selection : domain:string -> stage:string -> unit
 val validate_digest : string -> unit
 val validate_row_id : string -> unit
+val validate_analysis_target : Wire.Analysis_target.t -> unit
 val execution_hash : registered:Asic.Run.t -> execution_file:string -> string
 
+(** [analysis] is the exact captured target. Its source hash can identify an immutable
+    Timing prefix; [execution_sha256] always hashes the main execution named by the
+    provider envelope. The service validates both sources around the provider read. *)
 val parse_index
-  :  registered:Asic.Run.t
+  :  ?analysis:Wire.Analysis_target.t
+  -> registered:Asic.Run.t
   -> execution_file:string
   -> execution_sha256:string
   -> domain:string
@@ -27,8 +32,12 @@ val observe_times
   -> Wire.Index.t
   -> Wire.Index.t
 
+(** Override the envelope's main execution hash only after independently validating a
+    captured source that survives main-execution advancement. Ordinary and legacy
+    inspection retain the index's original main hash. *)
 val parse_detail
-  :  registered:Asic.Run.t
+  :  ?execution_sha256:string
+  -> registered:Asic.Run.t
   -> index:Wire.Index.t
   -> row_id:string
   -> Yojson.Safe.t

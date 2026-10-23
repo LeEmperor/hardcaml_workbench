@@ -561,6 +561,7 @@ let%expect_test "ASIC metrics round-trip and old summary sexps have no metrics" 
     ; cells = []
     ; metrics = [ metric ]
     ; terminal = Some terminal
+    ; timing_analysis = None
     ; timing = []
     ; completion = "completed"
     ; acceptance = "not_evaluated"

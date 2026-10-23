@@ -46,6 +46,10 @@ let keys (operation : Asic.Operation.t) (snapshot : Asic.Snapshot.t) =
     [ Asic_inspection.index_key ~run ~domain ~stage ]
   | Inspect_detail { run; domain; stage; source_digest; row_id } ->
     [ Asic_inspection.detail_key ~run ~domain ~stage ~source_digest ~row_id ]
+  | Inspect_analysis { run; target; refresh = _ } ->
+    [ Asic_inspection.analysis_index_key ~run ~target ]
+  | Inspect_analysis_detail { run; target; source_digest; row_id } ->
+    [ Asic_inspection.analysis_detail_key ~run ~target ~source_digest ~row_id ]
   | Cancel key ->
     [ (if List.exists snapshot.operations ~f:(fun op -> String.equal op.key key)
        then key

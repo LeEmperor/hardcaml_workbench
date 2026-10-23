@@ -3,7 +3,7 @@ id: WB-048
 title: More persistent presentation overrides
 category: presentation
 feature_sets: [FS3, FS5]
-status: delivered
+status: closed
 kind: enhancement
 priority: P2
 severity: n/a

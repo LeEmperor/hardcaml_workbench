@@ -3,13 +3,23 @@ open Hardcaml_workbench_protocol
 
 let required value ~none = Option.value_map value ~default:(Error none) ~f:(fun x -> Ok x)
 
-let resolve
-  ~(stage : Asic.Stage.t)
-  ~remembered
-  ~observed
-  ~(snapshot : Asic.Snapshot.t option)
-  =
-  match stage.action with
+type intent =
+  | Physical_stage of Asic.Stage.t
+  | Fresh_endpoint of string
+
+let endpoint = function
+  | Physical_stage stage -> stage.Asic.Stage.id
+  | Fresh_endpoint endpoint -> endpoint
+;;
+
+let advertised_selection = function
+  | Physical_stage stage -> stage.Asic.Stage.action
+  | Fresh_endpoint _ -> None
+;;
+
+let resolve_intent ~intent ~remembered ~observed ~(snapshot : Asic.Snapshot.t option) =
+  let endpoint = endpoint intent in
+  match advertised_selection intent with
   | Some selection -> Ok selection
   | None ->
     let open Result.Let_syntax in
@@ -26,7 +36,7 @@ let resolve
         |> Result.map ~f:(fun pair ->
           { Asic.Selection.flow = pair.flow
           ; profile = pair.profile
-          ; endpoint = stage.id
+          ; endpoint
           ; assignments = []
           })
     in
@@ -37,9 +47,13 @@ let resolve
     if not (List.mem flow.profiles selection.profile ~equal:String.equal)
     then
       Error ("Selected profile unavailable: " ^ selection.flow ^ "/" ^ selection.profile)
-    else if not (List.mem flow.fresh_stage_endpoints stage.id ~equal:String.equal)
-    then Error ("No validated fresh endpoint for " ^ selection.flow ^ "/" ^ stage.id)
-    else Ok { selection with endpoint = stage.id }
+    else if not (List.mem flow.fresh_stage_endpoints endpoint ~equal:String.equal)
+    then Error ("Unsupported fresh endpoint: " ^ selection.flow ^ "/" ^ endpoint)
+    else Ok { selection with endpoint }
+;;
+
+let resolve ~stage ~remembered ~observed ~snapshot =
+  resolve_intent ~intent:(Physical_stage stage) ~remembered ~observed ~snapshot
 ;;
 
 let%test_unit "fresh stage resolution captures exact inputs and rejects stale choices" =
@@ -100,4 +114,48 @@ let%test_unit "fresh stage resolution captures exact inputs and rejects stale ch
   expect
     (resolve ~stage:{ stage with action = Some selection } ~snapshot:None ())
     selection
+;;
+
+let%test_unit "fresh Timing intent preserves captured inputs and requires current catalog"
+  =
+  let observed : Asic.Selection.t =
+    { flow = "upgraded"
+    ; profile = "balanced"
+    ; endpoint = "signoff"
+    ; assignments = [ "CLOCK=9" ]
+    }
+  in
+  let flow : Asic.Flow.t =
+    { id = observed.flow
+    ; profiles = [ "balanced"; "delay" ]
+    ; default_profile = "delay"
+    ; fresh_stage_endpoints = [ "timing" ]
+    }
+  in
+  let snapshot = { Fs0_fixture.snapshot with flows = [ flow ] } in
+  let resolve ?remembered ?(snapshot = Some snapshot) () =
+    resolve_intent
+      ~intent:(Fresh_endpoint "timing")
+      ~remembered
+      ~observed:(Some observed)
+      ~snapshot
+  in
+  assert (
+    Asic.Selection.equal
+      (Result.ok_or_failwith (resolve ()))
+      { observed with endpoint = "timing" });
+  let remembered =
+    { observed with profile = "delay"; assignments = [ "CLOCK=7"; "X=a b" ] }
+  in
+  assert (
+    Asic.Selection.equal
+      (Result.ok_or_failwith (resolve ~remembered ()))
+      { remembered with endpoint = "timing" });
+  assert (Result.is_error (resolve ~snapshot:None ()));
+  assert (
+    Result.is_error
+      (resolve
+         ~snapshot:
+           (Some { snapshot with flows = [ { flow with fresh_stage_endpoints = [] } ] })
+         ()))
 ;;

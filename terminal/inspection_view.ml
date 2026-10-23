@@ -47,6 +47,7 @@ type t =
   ; workspace_epoch : string option
   ; domain : string
   ; stage : string
+  ; analysis : Asic_inspection.Analysis_target.t option
   ; index : Asic_inspection.Index.t option
   ; observation : observation option
   ; selected : string option
@@ -79,14 +80,17 @@ let defaults =
   ]
 ;;
 
-let stages = [ "synthesis"; "floorplan"; "placement"; "cts"; "routing"; "signoff" ]
+let stages =
+  [ "synthesis"; "floorplan"; "placement"; "cts"; "routing"; "timing"; "signoff" ]
+;;
 
-let create ?scope ?(generation = 0) ~run ~domain ~stage () =
+let create ?analysis ?scope ?(generation = 0) ~run ~domain ~stage () =
   { run
   ; scope
   ; workspace_epoch = None
   ; domain
   ; stage
+  ; analysis
   ; index = None
   ; observation = None
   ; selected = None
@@ -106,7 +110,11 @@ let create ?scope ?(generation = 0) ~run ~domain ~stage () =
   ; generation
   ; error = None
   ; pending_error = None
-  ; operation_key = Some (Asic_inspection.index_key ~run ~domain ~stage)
+  ; operation_key =
+      Some
+        (match analysis with
+         | Some target -> Asic_inspection.analysis_index_key ~run ~target
+         | None -> Asic_inspection.index_key ~run ~domain ~stage)
   ; cache = None
   ; detail_cache = None
   }
@@ -116,8 +124,47 @@ let reconcile_scope t ~scope =
   if Option.equal Run_ref.equal t.scope scope then Some t else None
 ;;
 
+let index_key t =
+  match t.analysis with
+  | Some target -> Asic_inspection.analysis_index_key ~run:t.run ~target
+  | None -> Asic_inspection.index_key ~run:t.run ~domain:t.domain ~stage:t.stage
+;;
+
+let detail_key t ~source_digest ~row_id =
+  match t.analysis with
+  | Some target ->
+    Asic_inspection.analysis_detail_key ~run:t.run ~target ~source_digest ~row_id
+  | None ->
+    Asic_inspection.detail_key
+      ~run:t.run
+      ~domain:t.domain
+      ~stage:t.stage
+      ~source_digest
+      ~row_id
+;;
+
+let detail_operation t ~source_digest ~row_id =
+  match t.analysis with
+  | Some target ->
+    Asic.Operation.Inspect_analysis_detail { run = t.run; target; source_digest; row_id }
+  | None ->
+    Asic.Operation.Inspect_detail
+      { run = t.run; domain = t.domain; stage = t.stage; source_digest; row_id }
+;;
+
+let matches_index t (index : Asic_inspection.Index.t) =
+  Run_ref.equal index.run t.run
+  && String.equal index.domain t.domain
+  && String.equal index.stage t.stage
+  && Option.value_map t.analysis ~default:true ~f:(fun target ->
+    Option.equal Asic_inspection.Analysis_target.equal index.analysis (Some target))
+;;
+
 let operation ?(refresh = false) t =
-  Asic.Operation.Inspect { run = t.run; domain = t.domain; stage = t.stage; refresh }
+  match t.analysis with
+  | Some target -> Asic.Operation.Inspect_analysis { run = t.run; target; refresh }
+  | None ->
+    Asic.Operation.Inspect { run = t.run; domain = t.domain; stage = t.stage; refresh }
 ;;
 
 type ticket =
@@ -137,12 +184,24 @@ let apply_response (t : t) (ticket : ticket) response =
   else (
     let matches =
       match ticket.operation with
-      | Inspect { run; domain; stage; _ } ->
+      | Inspect_analysis { run; target; _ } ->
         Run_ref.equal run t.run
+        && Option.equal Asic_inspection.Analysis_target.equal (Some target) t.analysis
+      | Inspect_analysis_detail { run; target; source_digest; row_id } ->
+        Run_ref.equal run t.run
+        && Option.equal Asic_inspection.Analysis_target.equal (Some target) t.analysis
+        && Option.equal
+             [%equal: string * string]
+             t.requested
+             (Some (source_digest, row_id))
+      | Inspect { run; domain; stage; _ } ->
+        Option.is_none t.analysis
+        && Run_ref.equal run t.run
         && String.equal domain t.domain
         && String.equal stage t.stage
       | Inspect_detail { run; domain; stage; source_digest; row_id } ->
-        Run_ref.equal run t.run
+        Option.is_none t.analysis
+        && Run_ref.equal run t.run
         && String.equal domain t.domain
         && String.equal stage t.stage
         && Option.equal
@@ -217,6 +276,7 @@ let same_source (a : Asic_inspection.Index.t) (b : Asic_inspection.Index.t) =
       && String.equal a.domain b.domain
       && String.equal a.stage b.stage
       && String.equal a.source_digest b.source_digest
+      && Option.equal Asic_inspection.Analysis_target.equal a.analysis b.analysis
       && String.equal a.execution_file b.execution_file
       && String.equal a.execution_sha256 b.execution_sha256
       && (phys_equal a.rows b.rows || List.equal Asic_inspection.Row.equal a.rows b.rows)
@@ -293,12 +353,7 @@ let reconcile t (snapshot : Asic.Snapshot.t) =
     List.find snapshot.runs ~f:(fun run -> Run_ref.equal run.Asic.Run.run t.run)
     |> Option.map ~f:(fun run -> run.reference, run.cursor, run.execution_file)
   in
-  let index =
-    List.find snapshot.inspections ~f:(fun i ->
-      Run_ref.equal i.Asic_inspection.Index.run t.run
-      && String.equal i.domain t.domain
-      && String.equal i.stage t.stage)
-  in
+  let index = List.find snapshot.inspections ~f:(matches_index t) in
   let digest index =
     Option.map index ~f:(fun i -> i.Asic_inspection.Index.source_digest)
   in
@@ -310,6 +365,12 @@ let reconcile t (snapshot : Asic.Snapshot.t) =
   let changed =
     (not (Option.equal equal_observation t.observation observation))
     || (not (Option.equal String.equal (digest t.index) (digest index)))
+    || (not
+          (Option.equal
+             (fun (a : Asic_inspection.Index.t) (b : Asic_inspection.Index.t) ->
+               Option.equal Asic_inspection.Analysis_target.equal a.analysis b.analysis)
+             t.index
+             index))
     || (not
           (Option.equal
              (fun a b ->
@@ -338,12 +399,7 @@ let reconcile t (snapshot : Asic.Snapshot.t) =
       ; error = None
       ; requested = None
       ; detail = None
-      ; operation_key =
-          Option.filter
-            t.operation_key
-            ~f:
-              (String.equal
-                 (Asic_inspection.index_key ~run:t.run ~domain:t.domain ~stage:t.stage))
+      ; operation_key = Option.filter t.operation_key ~f:(String.equal (index_key t))
       ; info = false
       ; scroll = 0
       ; detail_cache = None
@@ -663,22 +719,9 @@ let input ~width ~height t action =
              ; error = None
              ; pending_error = None
              ; operation_key =
-                 Some
-                   (Asic_inspection.detail_key
-                      ~run:t.run
-                      ~domain:t.domain
-                      ~stage:t.stage
-                      ~source_digest:index.source_digest
-                      ~row_id)
+                 Some (detail_key t ~source_digest:index.source_digest ~row_id)
              }
-         , Some
-             (Asic.Operation.Inspect_detail
-                { run = t.run
-                ; domain = t.domain
-                ; stage = t.stage
-                ; source_digest = index.source_digest
-                ; row_id
-                }) )
+         , Some (detail_operation t ~source_digest:index.source_digest ~row_id) )
        | _ -> local t)
     | (Up | Down | Page_up | Page_down) as direction ->
       let delta =
@@ -717,6 +760,14 @@ let input ~width ~height t action =
     | Cycle axis -> local (cycle_axis t axis)
     | Near -> local { t with near = String.equal t.domain "timing" && not t.near }
     | Filter -> local { t with editing = true; filter_notice = None }
+    | Stage when Option.is_some t.analysis ->
+      local
+        { t with
+          filter_notice =
+            Some
+              "Captured analysis: stage is fixed; open a generic Timing investigation to \
+               browse stages"
+        }
     | Stage ->
       let pos =
         List.findi stages ~f:(fun _ s -> String.equal s t.stage)
@@ -737,13 +788,7 @@ let input ~width ~height t action =
         ; detail_cache = None
         }
       in
-      let t =
-        { t with
-          pending_error = None
-        ; operation_key =
-            Some (Asic_inspection.index_key ~run:t.run ~domain:t.domain ~stage:t.stage)
-        }
-      in
+      let t = { t with pending_error = None; operation_key = Some (index_key t) } in
       Some t, Some (operation t)
     | Refresh ->
       ( Some
@@ -755,8 +800,7 @@ let input ~width ~height t action =
           ; generation = t.generation + 1
           ; error = None
           ; pending_error = None
-          ; operation_key =
-              Some (Asic_inspection.index_key ~run:t.run ~domain:t.domain ~stage:t.stage)
+          ; operation_key = Some (index_key t)
           }
       , Some (operation ~refresh:true t) )
     | Character _ | Text _ | Backspace -> local t)
@@ -890,6 +934,7 @@ let%test_unit "literal endpoint filtering, stable numeric selection and explicit
     ; diagnostics = [ "fixture" ]
     ; truncated = false
     ; cached_unverified = true
+    ; analysis = None
     ; times = Evidence_time.Index.empty
     }
   in
@@ -964,6 +1009,7 @@ let%test_unit "detail responses require exact digest row stage scope and request
     ; diagnostics = []
     ; truncated = false
     ; cached_unverified = true
+    ; analysis = None
     ; times = Evidence_time.Index.empty
     }
   in
@@ -1049,6 +1095,7 @@ let%test_unit "inspection memo preserves projections across scrolling repaint an
     ; diagnostics = []
     ; truncated = false
     ; cached_unverified = false
+    ; analysis = None
     ; times = Evidence_time.Index.empty
     }
   in
@@ -1147,6 +1194,7 @@ let%test_unit "1000 detail downs then one up reverses the visible viewport and r
     ; diagnostics = []
     ; truncated = false
     ; cached_unverified = false
+    ; analysis = None
     ; times = Evidence_time.Index.empty
     }
   in

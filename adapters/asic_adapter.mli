@@ -87,9 +87,11 @@ val inspect_finalization
   -> string
   -> Dune_adapter.Invocation.t
 
-(** Public read-only rich inspection. [detail] carries row ID and expected source digest. *)
+(** Public read-only rich inspection. [detail] carries row ID and expected INDEX digest.
+    Without detail, [expected_analysis_digest] pins supplementary timing evidence. *)
 val inspection
-  :  Config.t
+  :  ?expected_analysis_digest:string
+  -> Config.t
   -> root:string
   -> environment:V1.Environment_selection.t
   -> execution_file:string

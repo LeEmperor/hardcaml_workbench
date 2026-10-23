@@ -77,6 +77,7 @@ let%test_unit "inspection wire codecs preserve unknown values and provenance" =
     ; diagnostics = [ "missing corner" ]
     ; truncated = true
     ; cached_unverified = true
+    ; analysis = None
     ; times = Evidence_time.Index.empty
     }
   in

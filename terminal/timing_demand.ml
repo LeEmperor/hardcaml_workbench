@@ -63,6 +63,7 @@ let receipt ?(floor = 0) t ~ticket response =
 
 let same_source (a : Asic_inspection.Index.t) (b : Asic_inspection.Index.t) =
   String.equal a.source_digest b.source_digest
+  && Option.equal Asic_inspection.Analysis_target.equal a.analysis b.analysis
   && String.equal a.execution_file b.execution_file
   && String.equal a.execution_sha256 b.execution_sha256
   && Bool.equal a.cached_unverified b.cached_unverified
@@ -73,6 +74,7 @@ let restart t ~(view : Inspection_view.t) =
   let next = { (create ~neighbors:t.neighbors view) with serial = t.serial } in
   if Run_ref.equal t.origin.run view.run
      && String.equal t.origin.stage view.stage
+     && Option.equal Asic_inspection.Analysis_target.equal t.origin.analysis view.analysis
      && Option.equal String.equal t.origin.workspace_epoch view.workspace_epoch
      && Option.equal Inspection_view.equal_observation t.observation view.observation
      && Option.equal same_source t.source view.index
@@ -87,6 +89,7 @@ let step ?(revision = 0) t ~(view : Inspection_view.t) (snapshot : Asic.Snapshot
   let valid =
     Run_ref.equal t.origin.run view.run
     && String.equal t.origin.stage view.stage
+    && Option.equal Asic_inspection.Analysis_target.equal t.origin.analysis view.analysis
     && Option.equal String.equal t.origin.workspace_epoch view.workspace_epoch
     && ((Option.is_none t.source && Option.is_none t.observation)
         || Option.equal Inspection_view.equal_observation t.observation view.observation)
@@ -172,21 +175,13 @@ let step ?(revision = 0) t ~(view : Inspection_view.t) (snapshot : Asic.Snapshot
        | None -> Some t, view, None
        | Some row_id ->
          let operation =
-           Asic.Operation.Inspect_detail
-             { run = view.run
-             ; domain = view.domain
-             ; stage = view.stage
-             ; source_digest = index.source_digest
-             ; row_id
-             }
-         in
-         let key =
-           Asic_inspection.detail_key
-             ~run:view.run
-             ~domain:view.domain
-             ~stage:view.stage
+           Inspection_view.detail_operation
+             view
              ~source_digest:index.source_digest
              ~row_id
+         in
+         let key =
+           Inspection_view.detail_key view ~source_digest:index.source_digest ~row_id
          in
          let selected = String.equal row_id selected in
          let view =
@@ -250,6 +245,7 @@ module Fixture = struct
     ; diagnostics = []
     ; truncated = false
     ; cached_unverified = false
+    ; analysis = None
     ; times = Evidence_time.Index.empty
     }
   ;;

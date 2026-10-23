@@ -20,7 +20,10 @@ let () =
   let flows, default = Public.flow_catalog fixture in
   let flow = List.hd_exn flows in
   require
-    (List.equal String.equal flow.fresh_stage_endpoints Public.canonical_stages)
+    (List.equal
+       String.equal
+       flow.fresh_stage_endpoints
+       (Public.recipe_stages (`Assoc [ "schema_version", `Int 3 ])))
     "Production fresh-prefix capabilities lost";
   require
     (Option.equal
@@ -30,6 +33,16 @@ let () =
     "Actual catalog default lost";
   let entry = [ "declaration"; "entries"; "0" ] in
   let methodology = entry @ [ "methodology" ] in
+  let executable =
+    alter fixture (methodology @ [ "endpoints" ]) (fun _ ->
+      `List (List.map Public.canonical_stages ~f:(fun s -> `String s)))
+  in
+  require
+    (List.equal
+       String.equal
+       (List.hd_exn (Public.flows executable)).fresh_stage_endpoints
+       Public.canonical_stages)
+    "Seven-stage catalog lost executable Timing endpoint";
   let unsupported path value =
     let flows, _ = Public.flow_catalog (alter fixture path (fun _ -> value)) in
     require

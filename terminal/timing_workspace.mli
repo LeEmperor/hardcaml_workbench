@@ -29,6 +29,7 @@ type selection =
 
 val pane : string -> pane option
 val create : generation:int -> run:Run_ref.t -> stage:string -> t
+val with_analysis : t -> Asic_inspection.Analysis_target.t option -> t
 val selection : t -> selection option
 
 type line_role =

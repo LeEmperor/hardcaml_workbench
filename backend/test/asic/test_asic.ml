@@ -1641,12 +1641,71 @@ let main () =
         (List.equal
            String.equal
            (List.hd_exn discovered.flows).fresh_stage_endpoints
-           Public.canonical_stages
+           (Public.recipe_stages (`Assoc [ "schema_version", `Int 3 ]))
          && Option.equal
               Asic.Flow_default.equal
               discovered.catalog_default
               (Some { flow = "standard"; profile = "balanced" }))
         "Discovery did not publish exact capabilities/default together";
+      let timing_selection = { (selection "balanced") with endpoint = "timing" } in
+      let marker name = Filename.concat root name in
+      Out_channel.write_all (marker "timing-catalog") ~data:"";
+      let%bind unsupported = settled service root Discover in
+      require
+        (not
+           (List.mem
+              (List.hd_exn unsupported.flows).fresh_stage_endpoints
+              "timing"
+              ~equal:String.equal))
+        "Catalog alone granted executable Timing";
+      let%bind unsupported = settled service root (Plan timing_selection) in
+      require
+        (Option.is_none unsupported.preview)
+        "Legacy provider planned executable Timing";
+      Out_channel.write_all (marker "timing-capability") ~data:"";
+      let timing_service = create ~directory:(state_dir ^ "-timing") () in
+      let%bind discovered = settled timing_service root Discover in
+      require
+        (List.equal
+           String.equal
+           (List.hd_exn discovered.flows).fresh_stage_endpoints
+           Public.canonical_stages)
+        "Executable Timing capability/catalog not discovered";
+      let before = In_channel.read_all (marker "calls") in
+      let%bind planned = settled timing_service root (Plan timing_selection) in
+      let preview = Option.value_exn planned.preview in
+      require
+        (Asic.Selection.equal preview.selection timing_selection
+         && not
+              (String.is_substring
+                 (String.drop_prefix
+                    (In_channel.read_all (marker "calls"))
+                    (String.length before))
+                 ~substring:"\"run\""))
+        "Timing preparation launched execution";
+      let%bind executed =
+        settled timing_service root (Run { key = "timing-only"; preview })
+      in
+      let timing_run =
+        List.find_exn executed.runs ~f:(fun r ->
+          String.equal r.Asic.Run.run.id "stream-balanced-timing")
+      in
+      let timing =
+        List.find_exn timing_run.stages ~f:(fun s -> String.equal s.id "timing")
+      in
+      let signoff =
+        List.find_exn timing_run.stages ~f:(fun s -> String.equal s.id "signoff")
+      in
+      require
+        (List.length timing_run.stages = 7
+         && timing.requested
+         && Asic.Stage.Status.equal timing.status Completed
+         && (not signoff.requested)
+         && Asic.Stage.Status.equal signoff.status Not_requested)
+        "Standalone timing launch did not stop before Signoff";
+      Core_unix.unlink (marker "timing-catalog");
+      Core_unix.unlink (marker "timing-capability");
+      let%bind prior_reports = reports root in
       let%bind () =
         Deferred.List.iter
           [ "fail-discovery"; "invalid-discovery" ]
@@ -1742,7 +1801,7 @@ let main () =
            (Some 73))
         "R2 count";
       let%bind initial_reports = reports root in
-      require (initial_reports = 2) "Duplicate launch/materialization";
+      require (initial_reports = prior_reports + 2) "Duplicate launch/materialization";
       let run id : Run_ref.t =
         let r : Asic.Run.t =
           List.find_exn second.runs ~f:(fun r -> String.equal r.Asic.Run.run.id id)
@@ -2195,6 +2254,35 @@ let main () =
               Core_unix.unlink (Filename.concat root "race-recover")))
       in
       let%bind () = Service.shutdown race_service in
+      Out_channel.write_all (Filename.concat root "seven-stage-finalization") ~data:"";
+      let seven = create ~directory:(state_dir ^ "-seven-finalization") () in
+      let%bind registered =
+        handle
+          seven
+          root
+          (Register { attempt = physical_attempt; stream_id = "stream-terminal" })
+      in
+      let run = (List.hd_exn registered.runs).run in
+      let%bind loaded = settled seven root (Load_summary run) in
+      let execution_file = (summary loaded run.id).execution_file in
+      let%bind finalized =
+        settled
+          seven
+          root
+          (Finalize { key = "seven-stage"; run; execution_file; acceptance = None })
+      in
+      let result =
+        List.find_exn finalized.finalizations ~f:(fun f ->
+          String.equal f.Asic.Finalization.key "seven-stage")
+      in
+      require
+        (String.equal result.state "completed" && Option.is_some result.attempt)
+        "Seven-stage finalization failed eligibility/hydration";
+      require
+        (String.equal
+           (Option.value_exn (summary finalized run.id).terminal).physical_completion
+           "full")
+        "Seven-stage finalized terminal result did not hydrate";
       Deferred.unit)
 ;;
 

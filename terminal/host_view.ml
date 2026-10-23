@@ -611,9 +611,9 @@ let artifact_inspector host tile =
 
 (* Previews are project-scoped plans for NEW runs, not evidence belonging to the observed
    run. Only advertise a matching selection beside a checklist action. *)
-let checklist_selection host data run stage =
-  Stage_action.resolve
-    ~stage
+let checklist_intent_selection host data run intent =
+  Stage_action.resolve_intent
+    ~intent
     ~remembered:host.H.remembered_selection
     ~observed:
       (Option.bind data.asic ~f:(fun snapshot ->
@@ -622,18 +622,27 @@ let checklist_selection host data run stage =
     ~snapshot:data.asic
 ;;
 
+let checklist_selection host data run stage =
+  checklist_intent_selection host data run (Physical_stage stage)
+;;
+
 let checklist_preview host data tile =
   Option.bind host.H.registry ~f:(fun registry ->
     W.resolve_tile registry tile.W.Tile.id
     |> Result.ok
     |> Option.bind ~f:(fun reference -> reference.run)
     |> Option.bind ~f:(fun run ->
-      let stages = Overview_tiles.observed_stages ~asic:data.asic ~run in
+      let items = Overview_tiles.checklist_items ~asic:data.asic ~run in
       Option.bind
-        (H.stage_cursor (H.local host tile.id) ~run ~stages)
-        ~f:(fun stage ->
+        (H.checklist_cursor (H.local host tile.id) ~run ~items)
+        ~f:(fun item ->
+          let intent =
+            match item with
+            | Overview_tiles.Timing_analysis _ -> Stage_action.Fresh_endpoint "timing"
+            | Physical_stage stage -> Stage_action.Physical_stage stage
+          in
           match
-            ( checklist_selection host data run stage
+            ( checklist_intent_selection host data run intent
             , Option.bind data.asic ~f:(fun asic -> asic.preview) )
           with
           | Ok selection, Some preview
@@ -647,15 +656,32 @@ let checklist_hints host data tile =
   if not (H.policy host tile).hints
   then []
   else (
-    match checklist_preview host data tile with
-    | None -> [ "r prepare NEW run"; "j/k browse | Enter inspect" ]
-    | Some preview ->
-      [ "Space c c: Launch"
-      ; "or Launch and view"
-      ; "r prepare NEW run"
-      ; "j/k browse | Enter inspect"
-      ; "Matching plan: " ^ preview.selection.endpoint
-      ])
+    let timing =
+      Option.exists (H.tile_run host tile) ~f:(fun run ->
+        match
+          H.checklist_cursor
+            (H.local host tile.id)
+            ~run
+            ~items:(Overview_tiles.checklist_items ~asic:data.asic ~run)
+        with
+        | Some (Timing_analysis _) -> true
+        | _ -> false)
+    in
+    if timing && Option.is_none (checklist_preview host data tile)
+    then
+      [ "Enter exact historical timing evidence"
+      ; "r prepare NEW timing run (current catalog)"
+      ]
+    else (
+      match checklist_preview host data tile with
+      | None -> [ "r prepare NEW run"; "j/k browse | Enter inspect" ]
+      | Some preview ->
+        [ "Space c c: Launch"
+        ; "or Launch and view"
+        ; "r prepare NEW run"
+        ; "j/k browse | Enter inspect"
+        ; "Matching plan: " ^ preview.selection.endpoint
+        ]))
 ;;
 
 let utility_rows ?(now = Time_ns.now ()) host data tile =
@@ -667,6 +693,16 @@ let utility_rows ?(now = Time_ns.now ()) host data tile =
       |> Option.bind ~f:(fun reference -> reference.run)
     in
     match tile.kind with
+    | "timing" when (H.local host tile.id).utility_detail ->
+      Some
+        (Option.value_map selected_run ~default:[] ~f:(fun run ->
+           let stage =
+             Overview_tiles.observed_stages ~asic:data.asic ~run
+             |> List.find ~f:(fun s -> String.equal s.Asic.Stage.id "timing")
+             |> Option.map ~f:(Overview_tiles.asic_stage_row ~now ~run ~selected:false)
+           in
+           Option.to_list stage
+           @ [ Overview_tiles.analysis_row ~run ~selected:false (data.summary run) ]))
     | "live-status" when H.compact_summary host tile ->
       Some
         [ Overview_tiles.row "Connection" data.status
@@ -707,22 +743,35 @@ let utility_rows ?(now = Time_ns.now ()) host data tile =
       let local = H.local host tile.id in
       let observed =
         Option.value_map selected_run ~default:[] ~f:(fun run ->
-          Overview_tiles.observed_stages ~asic:data.asic ~run)
+          Overview_tiles.checklist_items ~asic:data.asic ~run)
       in
       let selected =
         Option.bind selected_run ~f:(fun run ->
-          H.stage_cursor local ~run ~stages:observed)
+          H.checklist_cursor local ~run ~items:observed)
       in
       let stages =
         match selected_run, observed with
         | Some run, (_ :: _ as stages) ->
           (if local.utility_detail then Option.to_list selected else stages)
-          |> List.map ~f:(fun stage ->
-            Overview_tiles.asic_stage_row
-              ~now
-              ~run
-              ~selected:(Option.exists selected ~f:(fun s -> String.equal s.id stage.id))
-              stage)
+          |> List.map ~f:(fun item ->
+            let row =
+              Overview_tiles.checklist_row
+                ~now
+                ~run
+                ~selected:
+                  (Option.exists selected ~f:(fun s ->
+                     String.equal
+                       (Overview_tiles.checklist_id s)
+                       (Overview_tiles.checklist_id item)))
+                item
+            in
+            match item with
+            | Physical_stage s when String.equal s.id "timing" ->
+              { row with
+                details =
+                  row.details @ Overview_tiles.analysis_details ~run (data.summary run)
+              }
+            | _ -> row)
         | _ ->
           Overview_tiles.stage_rows ~selected_run ~asic:data.asic ~observation:None ()
       in
@@ -738,10 +787,14 @@ let utility_rows ?(now = Time_ns.now ()) host data tile =
           [ Overview_tiles.row
               ~role:Muted
               "Interaction"
-              "Esc overview; r prepares a NEW run through advertised endpoint"
+              (match selected with
+               | Some (Timing_analysis _) ->
+                 "Esc overview; Enter exact historical evidence; r prepares NEW timing \
+                  run if current catalog supports it"
+               | _ -> "Esc overview; r prepares a NEW run through advertised endpoint")
           ]
           @ (match selected_run, selected with
-             | Some run, Some stage ->
+             | Some run, Some (Physical_stage stage) ->
                [ (match checklist_selection host data run stage with
                   | Error reason -> Overview_tiles.row ~role:Warning "New run" reason
                   | Ok selection ->
@@ -925,6 +978,7 @@ let compact_summary_enabled host tile =
   && Option.is_none local.inspection
   && Option.is_none local.artifacts
   && (not local.terminal_result.detail)
+  && (not local.utility_detail)
   && ((not (String.equal tile.kind "synthesis"))
       || Synthesis_view.Mode.equal (Synthesis_view.State.mode local.synthesis) Summary)
 ;;
@@ -2035,6 +2089,32 @@ let tile_view
        | Some rows
          when String.equal tile.kind "stage-checklist"
               && Option.value horizontal_stages ~default:(H.horizontal_stages host tile)
+              && Option.exists (tile_run host tile) ~f:(fun run ->
+                List.exists
+                  (Overview_tiles.checklist_items ~asic:data.asic ~run)
+                  ~f:(function
+                  | Timing_analysis _ -> true
+                  | _ -> false)) ->
+         Overview_tiles.render_checklist_strip
+           ?indicator_frames
+           ~indicator_fg:(Role.foreground appearance Running)
+           ~selected_bg:(Role.backdrop appearance Selection)
+           ~appearance
+           ~attrs:(utility_attrs appearance)
+           ~width:body_width
+           ~height:body_height
+           rows
+         |> box ~width:body_width ~height:body_height
+       | Some rows
+         when String.equal tile.kind "stage-checklist"
+              && (not
+                    (Option.exists (tile_run host tile) ~f:(fun run ->
+                       List.exists
+                         (Overview_tiles.checklist_items ~asic:data.asic ~run)
+                         ~f:(function
+                         | Timing_analysis _ -> true
+                         | _ -> false))))
+              && Option.value horizontal_stages ~default:(H.horizontal_stages host tile)
               && Option.is_some (tile_run host tile) ->
          let run = Option.value_exn (tile_run host tile) in
          let stages = Overview_tiles.observed_stages ~asic:data.asic ~run in
@@ -2581,7 +2661,8 @@ let scroll_run_focused host data dimensions ~delta =
 let scroll_focused host data dimensions ~delta =
   match H.focused host with
   | Some tile
-    when List.mem [ "live-status"; "stage-checklist" ] tile.kind ~equal:String.equal ->
+    when List.mem [ "live-status"; "stage-checklist" ] tile.kind ~equal:String.equal
+         || (String.equal tile.kind "timing" && (H.local host tile.id).utility_detail) ->
     let _, _, layout = tile_layout host dimensions in
     (match
        ( List.find layout ~f:(fun (t, _) -> W.Tile_id.equal t.id tile.id)
@@ -2703,6 +2784,9 @@ let main_hint_text host =
   | Some (Paths, _) ->
     "Space c c commands | Tab/Shift-Tab focus | j/k select | Enter detail | / filter | \
      Ctrl-C exit"
+  | None
+    when Option.exists (H.focused host) ~f:(fun tile -> String.equal tile.kind "timing")
+    -> "Space c c | Tab focus | Enter paths | d details | r refresh | Esc back | q exit"
   | None ->
     "Space c c commands | Tab/Shift-Tab focus | j/k browse | Enter inspect | q exit"
 ;;
@@ -4534,7 +4618,7 @@ let%test_unit "Overview renders four primary domains with shallow frames and bou
         ~substring:
           (match kind with
            | "synthesis" -> "Reported cells (agg.): 50"
-           | "timing" -> "Aggregate slack: unavailable"
+           | "timing" -> "not reported unknown"
            | "placement" -> "Aggregate resources: unavailable"
            | _ -> "Routing-stage metrics: unsupported"));
     assert (not (String.is_substring body ~substring:(String.uppercase kind))));
@@ -4616,7 +4700,7 @@ let%test_unit "two-row compact facts retain stages and stale warnings with fresh
     ~f:(fun substring -> assert (String.is_substring text ~substring));
   let checklist = find "stage-checklist" in
   let normal = utility_rows host data checklist |> Option.value_exn in
-  assert (List.length normal = 6);
+  assert (List.length normal = 7);
   assert (List.for_all normal ~f:(fun row -> Option.is_some row.Overview_tiles.status));
   let detailed =
     H.set_local host checklist.id { H.default_local with utility_detail = true }
@@ -4857,6 +4941,7 @@ let%test_unit "Timing panes render typed selection and exact scoped detail with 
     ; diagnostics = []
     ; truncated = false
     ; cached_unverified = true
+    ; analysis = None
     ; times = Evidence_time.Index.empty
     }
   in
@@ -5846,6 +5931,7 @@ let%test_unit "host semantic terminal rows preserve failure and raw evidence whe
       run = Fs0_fixture.run_a
     ; freshness = Validated
     ; terminal = Some terminal
+    ; timing_analysis = None
     }
   in
   let data =
@@ -6148,7 +6234,8 @@ let%test_unit "checklist follows exact run and pin with selected-stage detail an
       Option.map row.Overview_tiles.status ~f:(fun _ -> row.value))
   in
   assert (List.equal String.equal (projected following) [ "running" ]);
-  assert (List.equal String.equal (projected pinned) [ "completed"; "failed" ]);
+  assert (
+    List.equal String.equal (projected pinned) [ "completed"; "failed"; "not reported" ]);
   let compact_host =
     H.set_local
       host
@@ -6806,6 +6893,7 @@ let%test_unit "inspection overlay and input share full viewport and visibly reve
     ; diagnostics = []
     ; truncated = false
     ; cached_unverified = false
+    ; analysis = None
     ; times = Evidence_time.Index.empty
     }
   in
@@ -7701,8 +7789,8 @@ let%test_unit "WB-054 production selection catalog promotes original runnable id
     let original = List.find_exn base ~f:(fun c -> String.equal c.id id) in
     let _, action = Option.value_exn (H.testing_dispatch selected key ~commands) in
     assert (phys_equal action original.action));
-  (* Loaded artifacts now select a default immediately. An attempt without artifacts
-     still explains e/w through the same dispatch. *)
+  (* Loaded artifacts now select a default immediately. An attempt without artifacts still
+     explains e/w through the same dispatch. *)
   assert (Option.is_some (Testing_workspace.artifact (H.testing_state loaded tile.id)));
   let empty_artifacts =
     H.set_simulation
@@ -7720,7 +7808,10 @@ let%test_unit "WB-054 production selection catalog promotes original runnable id
         (H.testing_dispatch
            empty_artifacts
            key
-           ~commands:(H.contextual empty_artifacts (H.catalog empty_artifacts ~project:None ~jobs:[])))
+           ~commands:
+             (H.contextual
+                empty_artifacts
+                (H.catalog empty_artifacts ~project:None ~jobs:[])))
     in
     match action with
     | Unavailable reason -> assert (String.equal reason "no artifact selected")

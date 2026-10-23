@@ -121,6 +121,75 @@ module Terminal_result = struct
   ;;
 end
 
+module Timing_analysis = struct
+  (** One exact native STA observation, independent of physical-stage status and
+      finalization. [duration] is native STA runtime, not full Timing segment time.
+      [enclosing_status] describes the captured source, which may still be running;
+      [Summary.completion] describes the current overall execution. Provenance strings are
+      provider JSON, not client-readable paths. *)
+  module Status = struct
+    type t =
+      | Completed
+      | Unavailable
+    [@@deriving bin_io, compare, equal, sexp]
+  end
+
+  module Goal = struct
+    type t =
+      | Pass
+      | Fail
+      | Unknown
+    [@@deriving bin_io, compare, equal, sexp]
+  end
+
+  module Duration = struct
+    type t =
+      { seconds : float
+      ; basis : string
+      ; precision_seconds : float
+      ; source : string
+      }
+    [@@deriving bin_io, compare, equal, sexp]
+  end
+
+  module Metric = struct
+    type t =
+      { key : string
+      ; corner : string
+      ; raw_key : string
+      ; value : float option
+      ; unit_ : string option
+      ; reason : string option
+      ; provenance : string
+      }
+    [@@deriving bin_io, compare, equal, sexp]
+  end
+
+  module Corner = struct
+    type t =
+      { corner : string
+      ; measured : bool
+      ; setup_goal : Goal.t
+      ; hold_goal : Goal.t
+      }
+    [@@deriving bin_io, compare, equal, sexp]
+  end
+
+  type t =
+    { target : Asic_inspection.Analysis_target.t
+    ; status : Status.t
+    ; reason : string option
+    ; duration : Duration.t option
+    ; enclosing_status : string
+    ; producer : string option
+    ; corners : Corner.t list
+    ; metrics : Metric.t list
+    ; timing_goal : Goal.t
+    ; evidence : string
+    }
+  [@@deriving bin_io, compare, equal, sexp]
+end
+
 module Summary = struct
   module Freshness = struct
     type t =
@@ -140,6 +209,11 @@ module Summary = struct
     ; cells : (string * int) list
     ; metrics : Metric.t list [@sexp.default []]
     ; terminal : Terminal_result.t option [@sexp.default None]
+    ; timing_analysis : Timing_analysis.t option
+         [@sexp.default None] [@sexp_drop_default.equal]
+    (** [None] means no authoritative observation was published (including legacy
+        providers/records). It is neither completion nor a passing timing goal. The
+        enclosing summary's [freshness] also applies to this observation. *)
     ; timing : (string * float * string) list
     ; completion : string
     ; acceptance : string
@@ -279,7 +353,13 @@ module Operation = struct
       [Inspect] with [refresh=false] uses the bounded derived inspection cache or a
       bounded cold public read; [refresh=true] revalidates public evidence. Neither starts
       EDA. [Inspect_detail] fences the exact index digest and row. Artifact reads accept
-      only catalog IDs for the current adopted terminal attempt, never client paths. *)
+      only catalog IDs for the current adopted terminal attempt, never client paths.
+      [Inspect_analysis] captures [Timing_analysis.target] from the selected summary; its
+      index query pins the analysis digest. [Inspect_analysis_detail] requires the same
+      captured target plus the returned INDEX [source_digest] and [row_id]. Both reject
+      missing/replaced analysis identity. They use timing/[target.stage] internally, never
+      prepare a stage, and retain cache-only reopening as cached-unverified. Wait keys are
+      [Asic_inspection.analysis_index_key]/[analysis_detail_key]. *)
   type t =
     | Get
     | Discover
@@ -331,6 +411,17 @@ module Operation = struct
         ; limit : int
         }
     | Cancel of string
+    | Inspect_analysis of
+        { run : Run_ref.t
+        ; target : Asic_inspection.Analysis_target.t
+        ; refresh : bool
+        }
+    | Inspect_analysis_detail of
+        { run : Run_ref.t
+        ; target : Asic_inspection.Analysis_target.t
+        ; source_digest : string
+        ; row_id : string
+        }
   [@@deriving bin_io, compare, equal, sexp]
 end
 
@@ -353,8 +444,53 @@ module Evidence_metadata = struct
   let header = "X-Workbench-Asic-Evidence-Metadata"
   let version = "1"
   let negotiated value = Option.value_map value ~default:false ~f:(String.equal version)
+  let timing_analysis_header = "X-Workbench-Asic-Timing-Analysis"
+  let timing_analysis_version = "2"
 
-  let sexp_of_response ?(execution_timing_header_value = None) ~header_value response =
+  let sexp_of_response
+    ?(timing_analysis_header_value = None)
+    ?(execution_timing_header_value = None)
+    ~header_value
+    response
+    =
+    let response =
+      if Option.equal
+           String.equal
+           timing_analysis_header_value
+           (Some timing_analysis_version)
+      then response
+      else if negotiated timing_analysis_header_value
+      then
+        Result.map response ~f:(fun (snapshot : Snapshot.t) ->
+          { snapshot with
+            summaries =
+              List.map snapshot.summaries ~f:(fun summary ->
+                { summary with
+                  Summary.timing_analysis =
+                    Option.filter summary.timing_analysis ~f:(fun analysis ->
+                      String.equal analysis.target.stage "signoff"
+                      && Option.is_none analysis.target.execution_file)
+                })
+          ; inspections =
+              List.map snapshot.inspections ~f:(fun index ->
+                { index with
+                  Asic_inspection.Index.analysis =
+                    Option.filter index.analysis ~f:(fun target ->
+                      String.equal target.stage "signoff"
+                      && Option.is_none target.execution_file)
+                })
+          })
+      else
+        Result.map response ~f:(fun (snapshot : Snapshot.t) ->
+          { snapshot with
+            summaries =
+              List.map snapshot.summaries ~f:(fun summary ->
+                { summary with Summary.timing_analysis = None })
+          ; inspections =
+              List.map snapshot.inspections ~f:(fun index ->
+                { index with Asic_inspection.Index.analysis = None })
+          })
+    in
     let response =
       if negotiated header_value
       then response

@@ -133,6 +133,7 @@ let fixture
     ; cells = []
     ; metrics = []
     ; terminal = Some terminal
+    ; timing_analysis = None
     ; timing = []
     ; completion = "completed"
     ; acceptance = "pass"

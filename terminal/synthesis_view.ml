@@ -555,6 +555,7 @@ module%test Tests = struct
     ; timing = []
     ; metrics
     ; terminal = None
+    ; timing_analysis = None
     ; completion = "reported completion"
     ; acceptance = "reported acceptance"
     ; producer = "{\"raw-provider-sentinel\":\"untouched\"}"

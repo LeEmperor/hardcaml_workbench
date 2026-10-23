@@ -3,7 +3,7 @@ id: WB-063
 title: Testing-workspace investigation redesign
 category: presentation
 feature_sets: [FS2, FS5]
-status: delivered
+status: closed
 kind: enhancement
 priority: P2
 severity: n/a

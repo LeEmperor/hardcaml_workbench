@@ -127,6 +127,16 @@ class PrivateDaemon:
             self.log.close()
             save(self.base / 'http.json', self.histories)
 
+    def crash(self):
+        # Abrupt loss of daemon ownership is distinct from stop(): SIGTERM runs
+        # Service.shutdown, cancelling/reaping producers. Kill ONLY the daemon so
+        # this fixture actually retains an unowned, running provider observation.
+        require(self.process is not None and self.process.poll() is None, 'Crash requires a live private daemon')
+        self.process.kill()
+        self.process.wait(timeout=5)
+        self.log.close()
+        save(self.base / 'http.json', self.histories)
+
 
 def stage_status(run):
     return {field(s, 'id'): field(s, 'status') for s in field(run, 'stages')}
@@ -229,6 +239,7 @@ def synthetic_acceptance(args, check):
         '  time.sleep(.05)\n' + original.split('\n', 1)[1])
     daemon = PrivateDaemon(args, base)
     terminal = None
+    orphan_pid = None
     try:
         daemon.start()
         http, historical = composition.demo.seed(base, daemon.url, args.preset_export)
@@ -343,20 +354,56 @@ def synthetic_acceptance(args, check):
         check(field(snap(), 'launches') == before_restart, 'Daemon restart preserves authoritative exact launch ledger order and identities')
         terminal = composition.Terminal(base, args, daemon.url, 180, 55)
         terminal.capture('restart-overview', ['Overview'])
-        detail('restart-separate-durable-launch-reference', ['no current plan', 'ownership detached', detached_id, 'detach-restart'])
+        retained_attempt = Path(field(field(detached, 'reference'), 'attempt'))
+        retained_state = provider.load(retained_attempt / 'observation.json')
+        check(not retained_state['writer_active'] and retained_state['state']['outcome']['status'] == 'cancelled',
+              'SIGTERM shutdown cancels/reaps the exact owned provider before restart (not detached ownership)')
+        save(base / 'graceful-shutdown-observation.json', retained_state)
+        detail('restart-separate-durable-launch-reference', ['no current plan', 'Producer cancelled/interrupted', detached_id, 'detach-restart'])
         check(not field(snap(), 'preview'), 'Restart exposes separate durable launch reference without claiming a current ready preview')
         restored = plan('placement')
         check(restored == preview, 'Explicit post-restart replan reproduces the exact submitted preview')
-        detail('restart-detached-ownership', ['ownership detached', detached_id, 'detach-restart'])
+        detail('restart-cancelled-ownership', ['Producer cancelled/interrupted', detached_id, 'detach-restart'])
         check(field(ledger('detach-restart'), 'run_id') == [detached_id], 'Restart does not reacquire producer ownership or associate any selected historical run')
+        # Test genuine detached ownership separately: abrupt daemon-only death must
+        # leave the live producer untouched and must never replay its invocation.
+        submit('crash-restart', restored)
+        crashed = observe('crash-restart', ['Running', 'Pending', 'Pending'] + ['Not_requested'] * 3)
+        crashed_id = field(field(crashed, 'run'), 'id')
+        crashed_attempt = Path(field(field(crashed, 'reference'), 'attempt'))
+        before_crash = field(snap(), 'launches')
+        orphan_pid = next(call['pid'] for call in reversed([
+            json.loads(line) for line in (base / 'project/provider-calls.jsonl').read_text().splitlines()])
+            if call['argv'][:2] == ['flow', 'run'])
+        terminal.close(); terminal = None
+        daemon.crash()
+        crash_state = provider.load(crashed_attempt / 'observation.json')
+        check(crash_state['writer_active'] and crash_state['state']['outcome'] is None,
+              'Daemon-only SIGKILL leaves the exact synthetic producer running: true detached fixture')
+        save(base / 'abrupt-crash-observation.json', crash_state)
+        http = daemon.start()
+        check(field(snap(), 'launches') == before_crash, 'Abrupt restart retains exact durable ledger without reacquiring producer ownership')
+        terminal = composition.Terminal(base, args, daemon.url, 180, 55)
+        terminal.capture('crash-restart-overview', ['Overview'])
+        detail('crash-restart-detached-ownership', ['no current plan', 'ownership detached', crashed_id, 'crash-restart'])
+        restored = plan('placement')
+        detail('crash-restart-explicit-replan', ['ownership detached', crashed_id, 'crash-restart'])
         calls = [json.loads(line)['argv'] for line in (base / 'project/provider-calls.jsonl').read_text().splitlines()]
         producers = [a for a in calls if a[:2] == ['flow', 'run']]
-        check(len(producers) == 4, 'Exactly four successful synthetic provider invocations: initial, reuse, missing-receipt and detach/restart launches; no retry/restart/replan replay')
+        check(len(producers) == 5, 'Exactly five successful synthetic provider invocations: initial, reuse, missing-receipt, graceful-restart and crash-restart; no retry/restart/replan replay')
         check(not any(a[:1] == ['finalize'] for a in calls), 'Acceptance starts no finalization producer')
         save(base / 'final-snapshot.json', snap())
     finally:
         if terminal is not None: terminal.close()
         daemon.stop()
+        # A crashed daemon cannot reap the deliberately orphaned private fixture.
+        # Signal only PIDs logged by this private provider, never retained real PIDs.
+        if orphan_pid is not None:
+            try:
+                command = Path('/proc') / str(orphan_pid) / 'cmdline'
+                if str(base / 'project/synthetic-flow').encode() in command.read_bytes():
+                    os.kill(orphan_pid, signal.SIGTERM)
+            except (FileNotFoundError, ProcessLookupError): pass
 
 
 def main():

@@ -301,6 +301,10 @@ let handle_post t ~path ~headers ~body =
            operation_response
              (Service.asic t.service request)
              (Asic.Evidence_metadata.sexp_of_response
+                ~timing_analysis_header_value:
+                  (Cohttp.Header.get
+                     headers
+                     Asic.Evidence_metadata.timing_analysis_header)
                 ~execution_timing_header_value:
                   (Cohttp.Header.get headers Execution_timing.header)
                 ~header_value:(Cohttp.Header.get headers Asic.Evidence_metadata.header)))

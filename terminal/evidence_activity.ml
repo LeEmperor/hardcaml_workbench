@@ -44,9 +44,7 @@ type t =
       }
   | Not_updated of failure list
 
-let index_key (view : Inspection_view.t) =
-  Asic_inspection.index_key ~run:view.run ~domain:view.domain ~stage:view.stage
-;;
+let index_key (view : Inspection_view.t) = Inspection_view.index_key view
 
 let freshness (view : Inspection_view.t) =
   match view.index with
@@ -314,6 +312,7 @@ module Test = struct
     ; diagnostics = []
     ; truncated = false
     ; cached_unverified
+    ; analysis = None
     ; times = Evidence_time.Index.empty
     }
   ;;
@@ -474,15 +473,15 @@ let%test_unit "WB-003 #4: a late response cannot restore activity or evidence fo
   let routing = view () in
   let ticket = Inspection_view.capture routing (Inspection_view.operation routing) in
   (* The user moves on to the next stage while the routing read is still in flight. *)
-  let signoff, _ = Inspection_view.input ~width:80 ~height:20 routing Stage in
-  let signoff = Option.value_exn signoff in
-  assert (String.equal signoff.stage "signoff");
+  let timing, _ = Inspection_view.input ~width:80 ~height:20 routing Stage in
+  let timing = Option.value_exn timing in
+  assert (String.equal timing.stage "timing");
   let late =
     snapshot
       ~inspections:[ index ~stage:"routing" () ]
       [ op ~key:(key ~stage:"routing" ()) ~kind:"inspection" "executing" ]
   in
-  let reconciled = Inspection_view.reconcile signoff (Option.value_exn late) in
+  let reconciled = Inspection_view.reconcile timing (Option.value_exn late) in
   assert (Option.is_none reconciled.index);
   assert (is_idle (summarize [ reconciled ] late));
   (* A late failure for the old selection does not surface either. *)

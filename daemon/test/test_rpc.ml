@@ -97,6 +97,12 @@ let test_legacy_asic_server () =
          require
            (Option.equal
               String.equal
+              (Cohttp.Header.get headers Asic.Evidence_metadata.timing_analysis_header)
+              (Some "2"))
+           "ASIC client omitted independent supplementary timing opt-in";
+         require
+           (Option.equal
+              String.equal
               (Cohttp.Header.get headers "X-Workbench-Asic-Evidence-Metadata")
               (Some "1"))
            "ASIC client omitted the evidence metadata opt-in";
@@ -617,13 +623,83 @@ let run () =
              ; List []
              ])
       in
+      let timing_analysis : Asic.Timing_analysis.t =
+        Hardcaml_workbench_backend.Asic_timing_analysis.parse_for_attempt
+          ~attempt_id:"r"
+          ~execution_file:"/public/execution.json"
+          ~execution_sha256:(String.make 64 'b')
+          (`Assoc
+            [ "execution", `Assoc [ "status", `String "failed" ]
+            ; ( "timing_analysis"
+              , `Assoc
+                  [ "contract", `String "hardcaml-asic.timing-analysis"
+                  ; "schema_version", `Int 1
+                  ; "attempt_id", `String "r"
+                  ; "occurrence_id", `String "r/implementation.signoff"
+                  ; "analysis_id", `String "r/post-pnr-sta"
+                  ; "source_digest", `String (String.make 64 'a')
+                  ; "execution_sha256", `String (String.make 64 'b')
+                  ; "execution_file", `String "/public/execution.json"
+                  ; "stage", `String "signoff"
+                  ; "evidence_scope", `String "terminal_supplementary_not_checkpoint"
+                  ; "enclosing_status", `String "failed"
+                  ; "status", `String "unavailable"
+                  ; "reason", `String "STA unreached"
+                  ; "duration", `Null
+                  ; "producer", `Null
+                  ; "metrics", `List []
+                  ; "corners", `List []
+                  ; "inventory", `List []
+                  ; "timing_goal", `String "unknown"
+                  ] )
+            ])
+        |> Option.value_exn
+      in
+      let summary : Asic.Summary.t =
+        { run = (List.hd_exn runs).run
+        ; source_digest = "timing-http-fixture"
+        ; execution_file = "/public/execution.json"
+        ; plan_identity = None
+        ; cell_count = None
+        ; cells = []
+        ; metrics = []
+        ; terminal = None
+        ; timing_analysis = Some timing_analysis
+        ; timing = []
+        ; completion = "failed"
+        ; acceptance = "not_evaluated"
+        ; producer = "no synthesis checkpoint"
+        ; observed_at = "fixture"
+        ; freshness = Validated
+        }
+      in
+      let normalized_digest =
+        Hardcaml_workbench_backend.Asic_public.digest
+          (Sexp.to_string_mach (Asic.Summary.sexp_of_t summary))
+      in
+      let summary_blob =
+        Sexp.List
+          [ [%sexp "version", (5 : int)]
+          ; [%sexp "normalized_digest", (normalized_digest : string)]
+          ; [%sexp "summary", (summary : Asic.Summary.t)]
+          ]
+      in
+      Out_channel.write_all
+        (Filename.concat
+           directory
+           ("asic-"
+            ^ Hardcaml_workbench_backend.Asic_public.digest identity
+            ^ "-summary-v1-"
+            ^ Hardcaml_workbench_backend.Asic_public.digest summary.source_digest
+            ^ ".summary.sexp"))
+        ~data:(Sexp.to_string_mach summary_blob);
       let registry =
         Sexp.List
           [ [%sexp "version", (1 : int)]
           ; [%sexp "identity", (identity : string)]
           ; [%sexp "runs", (runs : Asic.Run.t list)]
           ; [%sexp "submissions", ([] : (string * Asic.Preview.t * string option) list)]
-          ; [%sexp "index", ([] : (string * string) list)]
+          ; [%sexp "index", ([ "r", summary.source_digest ] : (string * string) list)]
           ]
       in
       Out_channel.write_all
@@ -631,6 +707,58 @@ let run () =
            directory
            ("asic-" ^ Hardcaml_workbench_backend.Asic_public.digest identity ^ ".sexp"))
         ~data:(Sexp.to_string_mach registry);
+      let%bind (_ : string) =
+        post
+          rpc
+          "/api/v1/asic"
+          (Asic.Request.sexp_of_t
+             { asic_request with operation = Load_summary summary.run })
+      in
+      let rec wait_summary remaining =
+        let%bind body = post rpc "/api/v1/asic" (Asic.Request.sexp_of_t asic_request) in
+        let snapshot = decode_exn Asic.Response.t_of_sexp body |> ok in
+        if not (List.is_empty snapshot.summaries)
+        then Deferred.unit
+        else (
+          require (remaining > 0) "Cached HTTP timing summary did not hydrate";
+          let%bind () = Clock.after (Time_float.Span.of_sec 0.01) in
+          wait_summary (remaining - 1))
+      in
+      let%bind () = wait_summary 100 in
+      let%bind () =
+        Deferred.List.iter
+          ~how:`Sequential
+          [ None; Some ""; Some "0"; Some "2"; Some "1" ]
+          ~f:(fun version ->
+            let headers =
+              post_headers
+              @ Option.value_map version ~default:[] ~f:(fun v ->
+                [ Asic.Evidence_metadata.timing_analysis_header, v ])
+            in
+            let%map _, body =
+              call
+                rpc
+                ~meth:`POST
+                ~headers
+                ~body:(Sexp.to_string_mach (Asic.Request.sexp_of_t asic_request))
+                "/api/v1/asic"
+            in
+            let snapshot = decode_exn Asic.Response.t_of_sexp body |> ok in
+            let actual = (List.hd_exn snapshot.summaries).timing_analysis in
+            require
+              (Bool.equal
+                 (Option.is_some actual)
+                 (List.mem
+                    [ Some "1"; Some "2" ]
+                    version
+                    ~equal:(Option.equal String.equal)))
+              "Populated timing analysis was not independently negotiated";
+            if Option.is_none actual
+            then
+              require
+                (not (String.is_substring body ~substring:"timing_analysis"))
+                "Legacy HTTP response retained the new field")
+      in
       let%bind () =
         Deferred.List.iter
           ~how:`Sequential

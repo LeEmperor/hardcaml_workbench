@@ -67,6 +67,7 @@ let timing_snapshot ?(digest = "saved-source") run =
     ; diagnostics = []
     ; truncated = false
     ; cached_unverified = true
+    ; analysis = None
     ; times = Evidence_time.Index.empty
     }
   in

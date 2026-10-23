@@ -96,7 +96,40 @@ let metadata j =
 ;;
 
 let canonical_stages =
-  [ "synthesis"; "floorplan"; "placement"; "cts"; "routing"; "signoff" ]
+  [ "synthesis"; "floorplan"; "placement"; "cts"; "routing"; "timing"; "signoff" ]
+;;
+
+let recipe_stages plan =
+  match integer (field "schema_version" plan) with
+  | 2 | 3 -> List.filter canonical_stages ~f:(fun s -> not (String.equal s "timing"))
+  | 4 -> canonical_stages
+  | _ -> failwith "Unsupported execution stage plan"
+;;
+
+(* Schema 2 predates explicit sequences: [resume] means a synthesis checkpoint. Expand
+   only in the historical six-stage graph, without upgrading its identity. *)
+let explicit_recipe_plan plan =
+  if not (Poly.equal (field "schema_version" plan) (`Int 2))
+  then plan
+  else (
+    let canonical = recipe_stages plan in
+    let endpoint = text (field "endpoint" plan) in
+    require (List.mem canonical endpoint ~equal:String.equal) "Unknown legacy endpoint";
+    let resume =
+      match field "resume" plan with
+      | `Bool value -> value
+      | _ -> failwith "Missing legacy recipe resume boolean"
+    in
+    let prefix =
+      List.take_while canonical ~f:(fun s -> not (String.equal s endpoint)) @ [ endpoint ]
+    in
+    let requested = if resume then List.tl_exn prefix else prefix in
+    require (not (List.is_empty requested)) "Empty legacy recipe";
+    `Assoc
+      [ "schema_version", `Int 3
+      ; "stages", `List (List.map requested ~f:(fun s -> `String s))
+      ; ("initial_boundary", if resume then `String "synthesis" else `Null)
+      ])
 ;;
 
 let catalog_identity j =
@@ -167,7 +200,7 @@ let flow_catalog j =
            && matches methodology "input" "fresh"
         then (
           let endpoints =
-            catalog_list ~limit:6 (field "endpoints" methodology)
+            catalog_list ~limit:7 (field "endpoints" methodology)
             |> List.map ~f:catalog_identity
           in
           catalog_unique endpoints;
@@ -245,8 +278,8 @@ let execution_summary (r : Asic.Run.t) (preview : Asic.Preview.t) j =
     "Invalid execution status";
   ignore (integer (field "exit_code" j) : int);
   ignore (list (field "occurrences" j) : Yojson.Safe.t list);
-  let plan = field "plan" j in
-  require (integer (field "schema_version" plan) = 3) "Unsupported execution stage plan";
+  let plan = explicit_recipe_plan (field "plan" j) in
+  ignore (recipe_stages plan : string list);
   ignore (list (field "stages" plan) : Yojson.Safe.t list);
   let reference =
     envelope (field "methodology" j) "hardcaml-asic.methodology-execution-reference" 1
@@ -331,7 +364,7 @@ let validate_stages (stages : Asic.Stage.t list) =
 ;;
 
 (* CLI4 observation state is a provider-validated journal prefix, not a report or a
-   checkpoint inventory. Only schema-3 explicit recipes are interpreted here. *)
+   checkpoint inventory. Interpret explicit recipes in their historical stage order. *)
 let observation_stages j =
   let supplied name = function
     | `Assoc fields -> List.Assoc.mem fields name ~equal:String.equal
@@ -339,9 +372,15 @@ let observation_stages j =
   in
   let state = field "state" j in
   let plan = field "plan" state in
-  if not (Poly.equal (field "schema_version" plan) (`Int 3))
+  if not
+       (List.mem
+          [ `Int 2; `Int 3; `Int 4 ]
+          (field "schema_version" plan)
+          ~equal:Poly.equal)
   then []
   else (
+    let canonical_stages = recipe_stages plan in
+    let plan = explicit_recipe_plan plan in
     let stream = text (field "stream_id" j) in
     require
       (String.equal (text (field "attempt_id" state)) stream)
@@ -369,7 +408,9 @@ let observation_stages j =
       )
       "Invalid explicit stage recipe";
     let occurrences = list (field "occurrences" state) in
-    require (List.length occurrences <= 6) "Stage occurrence budget exceeded";
+    require
+      (List.length occurrences <= List.length canonical_stages)
+      "Stage occurrence budget exceeded";
     let seen = String.Hash_set.create () in
     let occurrences =
       List.map occurrences ~f:(fun occurrence ->
@@ -748,19 +789,26 @@ let summary (r : Asic.Run.t) ~expected_plan ~execution_file j : Asic.Summary.t =
   require
     (String.equal (text (field "attempt_id" (field "execution" j))) r.reference.stream_id)
     "Report execution identity mismatch";
-  let methodology =
-    envelope (field "methodology" j) "hardcaml-asic.historical-methodology" 1
-  in
-  require
-    (Poly.equal (field "state" methodology) (`String "recorded")
-     && String.equal
-          (text (field "attempt_id" (field "reference" methodology)))
-          r.reference.stream_id)
-    "Report methodology identity mismatch";
+  let methodology = field "methodology" j in
+  if Poly.equal methodology `Null && not (Poly.equal (field "timing_analysis" j) `Null)
+  then
+    (* Direct stage executions and failed supplementary-only records can have no
+       methodology. Do not project checkpoint metrics without that identity. *)
+    require (Option.is_none expected_plan) "Report missing expected methodology"
+  else (
+    ignore (envelope methodology "hardcaml-asic.historical-methodology" 1 : Yojson.Safe.t);
+    require
+      (Poly.equal (field "state" methodology) (`String "recorded")
+       && String.equal
+            (text (field "attempt_id" (field "reference" methodology)))
+            r.reference.stream_id)
+      "Report methodology identity mismatch");
   let plan_identity = optional_text (field "plan_identity" methodology) in
   Option.iter expected_plan ~f:(fun p ->
     require (Option.equal String.equal plan_identity (Some p)) "Report plan mismatch");
-  let checkpoints = list (field "checkpoints" j) in
+  let checkpoints =
+    if Poly.equal methodology `Null then [] else list (field "checkpoints" j)
+  in
   let checkpoint =
     match
       List.filter checkpoints ~f:(fun c ->
@@ -805,6 +853,7 @@ let summary (r : Asic.Run.t) ~expected_plan ~execution_file j : Asic.Summary.t =
   ; cells
   ; metrics = project_metrics metrics
   ; terminal = None
+  ; timing_analysis = None
   ; timing = [] (* CLI4 has no normalized timing attribution/units contract. *)
   ; completion = text (field "status" (field "execution" j))
   ; acceptance = text (field "acceptance" j)
@@ -821,7 +870,7 @@ let summary (r : Asic.Run.t) ~expected_plan ~execution_file j : Asic.Summary.t =
 let validate_physical_selection (s : Asic.Selection.t) description =
   require
     (List.mem
-       [ "floorplan"; "placement"; "cts"; "routing"; "signoff" ]
+       [ "floorplan"; "placement"; "cts"; "routing"; "timing"; "signoff" ]
        s.endpoint
        ~equal:String.equal)
     "Unsupported physical endpoint";

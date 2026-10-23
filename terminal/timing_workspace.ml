@@ -63,6 +63,15 @@ let create ~generation ~run ~stage =
   Inspection_view.create ~scope:run ~generation ~run ~domain:"timing" ~stage ()
 ;;
 
+let with_analysis t analysis =
+  let stage =
+    Option.value_map analysis ~default:t.Inspection_view.stage ~f:(fun a ->
+      a.Asic_inspection.Analysis_target.stage)
+  in
+  let t = { t with Inspection_view.analysis; stage } in
+  { t with operation_key = Some (Inspection_view.index_key t) }
+;;
+
 (** Attach only published evidence. No Inspect operation or demand is created here. *)
 let attach_retained (t : t) snapshot =
   let selected = t.selected in
@@ -164,6 +173,13 @@ let semantic_prefix ?(now = Time_ns.now ()) ~pane ~width (t : t) =
         @ List.map i.diagnostics ~f:(fun diagnostic -> field "Diagnostic" diagnostic)
     in
     [ field "Run" t.run.id; field "Domain" (t.domain ^ " · Stage: " ^ t.stage) ]
+    @ Option.value_map t.analysis ~default:[] ~f:(fun a ->
+      [ field "Captured analysis" a.analysis_id
+      ; field "Attempt / occurrence" (a.attempt_id ^ " / " ^ a.occurrence_id)
+      ; field "Analysis digest" a.source_digest
+      ; field "Captured stage" a.stage
+      ; Metadata, "Exact STA evidence; current execution may have failed downstream"
+      ])
     @ observation
     @
       (match selected_row t with
@@ -362,6 +378,7 @@ let%test_unit "ten-row selected detail leads with provider text and retains full
     ; diagnostics = [ "provider diagnostic" ]
     ; truncated = false
     ; cached_unverified = false
+    ; analysis = None
     ; times = Evidence_time.Index.empty
     }
   in
@@ -445,6 +462,7 @@ let%test_unit "retained attachment preserves intent until index and attaches onl
     ; diagnostics = []
     ; truncated = false
     ; cached_unverified = true
+    ; analysis = None
     ; times = Evidence_time.Index.empty
     }
   in
@@ -548,6 +566,7 @@ let%test_unit "cooperating panes select actual paths; browsing is local and deta
     ; diagnostics = []
     ; truncated = false
     ; cached_unverified = false
+    ; analysis = None
     ; times = Evidence_time.Index.empty
     }
   in
@@ -705,6 +724,7 @@ let%test_unit "WB-006: evidence times keep their meanings through refresh, cache
     ; diagnostics = []
     ; truncated = false
     ; cached_unverified = false
+    ; analysis = None
     ; times =
         Evidence_time.Index.with_validated
           { production = [ routed, Supplied { at = ago (60. *. 50.) } ]

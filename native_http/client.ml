@@ -185,6 +185,8 @@ let asic t request =
   post
     ~extra_headers:
       [ Asic.Evidence_metadata.header, Asic.Evidence_metadata.version
+      ; ( Asic.Evidence_metadata.timing_analysis_header
+        , Asic.Evidence_metadata.timing_analysis_version )
       ; Execution_timing.header, Execution_timing.version
       ]
     t

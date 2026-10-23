@@ -63,6 +63,11 @@ not claimed. WB-048 remains delivered.
 
 ## How this directory works
 
+**2026-10-21 status vocabulary:** owner-accepted tickets now carry `status: closed`
+rather than `delivered` plus acceptance prose: WB-001, WB-019, WB-024, WB-039,
+WB-048, WB-050, WB-063 and WB-066. `delivered` now means implemented and awaiting
+owner acceptance.
+
 **2026-10-21:** WB-007's opt-in hierarchy tile is **delivered** at the
 implementation/automated-validation level. Independent trees, shared reads,
 current/historical provenance and exact-node inspector handoff pass native HTTP/PTY
@@ -77,8 +82,7 @@ Clock/timing inspection review and broader WB-027/WB-065 coverage are not implie
 
 **2026-10-21 owner acceptance:** Testing and hints were confirmed satisfactory.
 The owner authorized closure of this set's non-signoff-dependent tickets:
-**WB-001, WB-019, WB-024, WB-039, WB-048 and WB-050** remain `delivered` and are now
-closed/accepted. This is closure authorization, not a claim that every automated
+**WB-001, WB-019, WB-024, WB-039, WB-048 and WB-050** are now closed/accepted. This is closure authorization, not a claim that every automated
 case was repeated manually. Testing execution-duration behavior and the Testing/hint
 portions of WB-054 are accepted. WB-003/WB-006/WB-054 remain implemented/delivered,
 with their clock/timing inspection human-review portions blocked on usable evidence:
@@ -119,7 +123,7 @@ flow's wall-clock duration is a test-cost consideration, not a story-point formu
 
 | Field | Convention |
 | --- | --- |
-| Status | `proposed`, `needs-design`, `needs-triage`, `partial`, or `delivered` |
+| Status | `proposed`, `needs-design`, `needs-triage`, `partial`, `delivered` (implemented, awaiting owner acceptance), or `closed` (delivered and owner-accepted; reopening returns it to `delivered` or `partial`) |
 | Kind | `feature`, `enhancement`, `defect`, `research`, `epic`, or `validation` |
 | Priority | P0 emergency (none assigned); P1 near-term unblocker/foundation; P2 valuable followup; P3 exploratory/later |
 | Severity | S1 critical loss/outage; S2 substantial workflow impairment; S3 cosmetic/usability defect; `n/a` for non-defects. Reported defects remain unconfirmed until reproduced. |
@@ -210,7 +214,7 @@ needed; References. A dependency needs a reason, not just a list of IDs.
 | [WB-022](evidence/WB-022-signal-name-annotations.md) | Provenance-safe generated-net naming annotations | FS1, FS4 | P3 | 21 | low |
 | [WB-023](evidence/WB-023-provider-evidence.md) | Additional typed provider evidence | FS1 | P2 | 13 | low |
 | [WB-026](evidence/WB-026-power-analysis.md) | Activity/corner-qualified power analysis | FS1 | P3 | 34 | low |
-| [WB-069](evidence/WB-069-timing-checklist-stage.md) | Timing as a distinct stage on the stage checklist | FS1, FS5 | P2 | 8 | low |
+| [WB-069](evidence/WB-069-timing-checklist-stage.md) | Timing as a distinct stage on the stage checklist | FS1, FS5 | P2 | 13 | medium |
 
 ## Verification and simulation
 

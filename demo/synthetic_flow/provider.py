@@ -17,6 +17,10 @@ import uuid
 
 SCENARIOS = json.loads(Path(__file__).with_name('scenarios.json').read_text())
 STAGES = SCENARIOS['stages']
+SETTINGS = Path(__file__).resolve().parent.parent / 'synthetic-settings.json'
+EXECUTABLE_TIMING = SETTINGS.exists() and json.loads(SETTINGS.read_text()).get('executable_timing', False)
+if EXECUTABLE_TIMING:
+    STAGES = STAGES[:-1] + ['timing', STAGES[-1]]
 LABEL = SCENARIOS['label']
 BUNDLE = hashlib.sha256(Path(__file__).with_name('scenarios.json').read_bytes()).hexdigest()
 
@@ -117,18 +121,22 @@ def finish(attempt, state, status):
     code = {'completed': 0, 'failed': 1, 'cancelled': 130}[status]
     execution = dict(attempt_id=attempt.name, execution_file=str(attempt / 'execution.json'), synthetic=True, label=LABEL,
                      status='interrupted' if status == 'cancelled' else status, exit_code=code,
-                     plan=dict(schema_version=3, initial_boundary=None,
+                      plan=dict(schema_version=4 if EXECUTABLE_TIMING else 3, initial_boundary=None,
                                stages=STAGES[:STAGES.index(selected['endpoint']) + 1]),
                      artifacts=artifacts, occurrences=[dict(
                          action_key='implementation.' + s['id'],
                          occurrence_id=attempt.name + '/implementation.' + s['id'],
-                         status=s['status'], exit_code=0 if s['status'] == 'completed' else code)
+                          status=s['status'], exit_code=0 if s['status'] == 'completed' else code,
+                          **(dict(duration_seconds=2.798826) if s['id'] == 'timing' else {}))
                          for s in state['stage_plan']['stages'] if s['requested']],
                      methodology=envelope('methodology-execution-reference',
                          **state['methodology']['reference'], expected_plan_identity=snapshot['plan_identity']))
     save(attempt / 'execution.json', execution)
     state.update(writer_active=False, observation_status='final',
                  execution_file=str(attempt / 'execution.json'), state=dict(outcome=dict(status=status, exit_code=code)))
+    if EXECUTABLE_TIMING:
+        state['state'].update(attempt_id=attempt.name, plan=execution['plan'],
+            occurrences=[dict(o, best_effort=False, verdict=None) for o in execution['occurrences']])
     state['methodology']['state'] = 'recorded'
     # Finalization is precomputed synthetic collection evidence, never an EDA claim.
     if artifacts:
@@ -328,10 +336,14 @@ def main():
     def emit(value):
         print(json.dumps(value), flush=True)
     if args == ['--version', '--json']:
-        emit(dict(cli_contract=dict(version=4, capabilities=dict(namedflow1=True)), synthetic=True))
+        emit(dict(cli_contract=dict(version=4, capabilities=dict(namedflow1=True,
+            **(dict(timing_stage1=True, timing_analysis1=True) if EXECUTABLE_TIMING else {}))), synthetic=True))
     elif args[:2] == ['flow', 'list']:
-        emit(envelope('flow-list', declaration=envelope('flow-catalog',
-            entries=[dict(methodology=dict(id='synthetic', name=LABEL), default_profile='success',
+        emit(envelope('flow-list', **(dict(capabilities=dict(backend_recipe='librelane.classic.v1',
+            input='fresh', stage_selection='complete-prefix-through-declared-endpoint', continuation=False)) if EXECUTABLE_TIMING else {}),
+            declaration=envelope('flow-catalog',
+            entries=[dict(methodology=dict(id='synthetic', name=LABEL,
+                **(dict(backend_recipe='librelane.classic.v1', input='fresh', endpoints=STAGES) if EXECUTABLE_TIMING else {})), default_profile='success',
                           profiles=[dict(id=p) for p in SCENARIOS['profiles']])],
             default=dict(flow='synthetic', profile='success'))))
     elif args[:2] == ['flow', 'describe']:
@@ -374,7 +386,10 @@ def main():
         if cancelled:
             sys.exit(130)
     elif args[:2] == ['observation', 'inspect']:
-        emit(load(Path(args[2]) / 'observation.json'))
+        observation = load(Path(args[2]) / 'observation.json')
+        if EXECUTABLE_TIMING and 'plan' in observation['state']:
+            observation.pop('stage_plan', None)
+        emit(observation)
     elif args[:2] == ['observation', 'read-updates']:
         state = load(Path(args[2]) / 'observation.json')
         after = int(option('--after'))

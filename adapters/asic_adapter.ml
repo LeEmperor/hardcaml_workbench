@@ -94,12 +94,26 @@ let report config ~root ~environment execution_file =
   provider config ~root ~environment [ "report"; execution_file; "--json" ]
 ;;
 
-let inspection config ~root ~environment ~execution_file ~domain ~stage ~detail =
+let inspection
+  ?expected_analysis_digest
+  config
+  ~root
+  ~environment
+  ~execution_file
+  ~domain
+  ~stage
+  ~detail
+  =
   provider
     config
     ~root
     ~environment
     ([ "inspect"; execution_file; "--domain"; domain; "--stage"; stage; "--json" ]
+     @ (if Option.is_some detail
+        then []
+        else
+          Option.value_map expected_analysis_digest ~default:[] ~f:(fun digest ->
+            [ "--expected-digest"; digest ]))
      @ Option.value_map detail ~default:[] ~f:(fun (row_id, digest) ->
        [ "--row-id"; row_id; "--expected-digest"; digest ]))
 ;;

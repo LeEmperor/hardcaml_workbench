@@ -25,12 +25,20 @@ let occurrence ?(stage = "synthesis") status exit =
     ]
 ;;
 
-let recipe ?(initial = `Null) stages =
-  `Assoc
-    [ "schema_version", `Int 3
-    ; "stages", `List (List.map stages ~f:(fun s -> `String s))
-    ; "initial_boundary", initial
-    ]
+let recipe ?(version = 3) ?(initial = `Null) stages =
+  if version = 2
+  then
+    `Assoc
+      [ "schema_version", `Int 2
+      ; "endpoint", `String (Option.value (List.last stages) ~default:"signoff")
+      ; "resume", `Bool (not (Poly.equal initial `Null))
+      ]
+  else
+    `Assoc
+      [ "schema_version", `Int version
+      ; "stages", `List (List.map stages ~f:(fun s -> `String s))
+      ; "initial_boundary", initial
+      ]
 ;;
 
 let observation ?(plan = recipe [ "synthesis" ]) occurrences =
@@ -312,17 +320,67 @@ let fixtures () =
            [ occurrence "failed" (`Int 1); occurrence ~stage:"floorplan" "running" `Null ]))
   in
   unknown (synthesis unrequested_failure);
-  let full =
+  List.iter [ 2; 3; 4 ] ~f:(fun version ->
+    let canonical = Public.recipe_stages (recipe ~version []) in
+    let full =
+      stages
+        (observation
+           ~plan:(recipe ~version canonical)
+           (List.map canonical ~f:(fun stage -> occurrence ~stage "completed" (`Int 0))))
+    in
+    require
+      (List.for_all full ~f:(fun s ->
+         s.requested && Asic.Stage.Status.equal s.status Completed))
+      "Full-run explicit evidence lost";
+    require
+      (List.length full = if version = 4 then 7 else 6)
+      "Recipe-specific stage count changed";
+    require
+      (Bool.equal
+         (version = 4)
+         (List.exists full ~f:(fun s -> String.equal s.id "timing")))
+      "Legacy recipe gained fabricated Timing occurrence");
+  let prefix = List.take Public.canonical_stages 6 in
+  let stopped =
     stages
       (observation
-         ~plan:(recipe Public.canonical_stages)
-         (List.map Public.canonical_stages ~f:(fun stage ->
-            occurrence ~stage "completed" (`Int 0))))
+         ~plan:(recipe ~version:4 prefix)
+         (List.map prefix ~f:(fun stage -> occurrence ~stage "completed" (`Int 0))))
+  in
+  let timing = List.find_exn stopped ~f:(fun s -> String.equal s.id "timing") in
+  let signoff = List.last_exn stopped in
+  require
+    (timing.requested
+     && Asic.Stage.Status.equal timing.status Completed
+     && (not signoff.requested)
+     && Asic.Stage.Status.equal signoff.status Not_requested)
+    "Timing endpoint invented downstream execution";
+  List.iter
+    [ "routing", "timing"; "timing", "signoff" ]
+    ~f:(fun (source, target) ->
+      let resumed =
+        stages
+          (observation
+             ~plan:(recipe ~version:4 ~initial:(`String source) [ target ])
+             [ occurrence ~stage:target "completed" (`Int 0) ])
+      in
+      require
+        ((List.find_exn resumed ~f:(fun s -> String.equal s.id target)).requested
+         && not (List.find_exn resumed ~f:(fun s -> String.equal s.id source)).requested)
+        "Exact continuation stage identity lost");
+  let legacy_resume =
+    stages
+      (observation
+         ~plan:(recipe ~version:2 ~initial:(`String "synthesis") [ "signoff" ])
+         (List.map
+            [ "floorplan"; "placement"; "cts"; "routing"; "signoff" ]
+            ~f:(fun stage -> occurrence ~stage "completed" (`Int 0))))
   in
   require
-    (List.for_all full ~f:(fun s ->
-       s.requested && Asic.Stage.Status.equal s.status Completed))
-    "Full-run explicit evidence lost";
+    (List.length legacy_resume = 6
+     && (not (List.hd_exn legacy_resume).requested)
+     && List.for_all (List.tl_exn legacy_resume) ~f:(fun s -> s.requested))
+    "Historical schema-2 resume was expanded using new Timing graph";
   let next, _ = Public.inspection run ~cursor:3 j in
   require
     (List.is_empty next.stages && next.cursor = 3)
@@ -335,7 +393,7 @@ let fixtures () =
     Public.inspection run ~cursor:4 (set j "stream_id" (`String "other")));
   List.iter
     [ `Null
-    ; `Assoc [ "schema_version", `Int 2 ]
+    ; `Assoc [ "schema_version", `Int 1 ]
     ; (recipe [] |> fun p -> set p "schema_version" (`Int 99))
     ]
     ~f:(fun plan ->

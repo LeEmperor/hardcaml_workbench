@@ -11,7 +11,9 @@ with (root / "inspection-calls").open("a") as calls:
     calls.write(json.dumps(args) + "\n")
 
 if args == ["--version", "--json"]:
-    result = {"cli_contract": {"version": 4, "capabilities": {"namedflow1": True}}}
+    result = {"cli_contract": {"version": 4, "capabilities": {"namedflow1": True, "timing_analysis1": True}}}
+elif args[:1] == ["report"]:
+    result = json.loads((root / "report.json").read_text())
 elif args[:1] == ["observation"]:
     cursor = int((root / "cursor").read_text())
     result = {
@@ -50,6 +52,10 @@ elif args[:1] == ["inspect"]:
             raise RuntimeError("Fixture hold timed out")
         time.sleep(0.01)
     result = json.loads((root / "response.json").read_text())
+    if kind == "index" and "--expected-digest" in args and not (root / "ignore-pin").exists():
+        expected = args[args.index("--expected-digest") + 1]
+        if expected != result.get("analysis_digest"):
+            raise RuntimeError("Analysis digest fence mismatch")
     if kind == "detail":
         row = args[args.index("--row-id") + 1]
         expected = args[args.index("--expected-digest") + 1]

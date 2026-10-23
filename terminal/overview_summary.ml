@@ -8,7 +8,7 @@ let supports = function
   | _ -> false
 ;;
 
-let rows
+let legacy_rows
   ?(now = Time_ns.now ())
   ?(finalizations = [])
   ?(compact = false)
@@ -221,6 +221,156 @@ let rows
     | first :: rest -> (first :: stage :: time :: rest) @ freshness_rows)
 ;;
 
+let rows
+  ?now
+  ?finalizations
+  ?(compact = false)
+  ?freshness
+  ?stage_id
+  ~kind
+  ~run
+  ~summary
+  ~stages
+  ()
+  =
+  if not (String.equal kind "timing")
+  then
+    legacy_rows
+      ?now
+      ?finalizations
+      ~compact
+      ?freshness
+      ?stage_id
+      ~kind
+      ~run
+      ~summary
+      ~stages
+      ()
+  else (
+    let summary =
+      Option.filter summary ~f:(fun (s : Asic.Summary.t) -> Run_ref.equal s.run run)
+    in
+    let analysis = Option.bind summary ~f:(fun s -> s.Asic.Summary.timing_analysis) in
+    let details = O.analysis_details ~run summary in
+    let fact ?(role = O.Role.Muted) label value = O.row ~role ~details label value in
+    let physical = List.find stages ~f:(fun s -> String.equal s.Asic.Stage.id "timing") in
+    let stage =
+      Option.value_map
+        physical
+        ~default:(O.analysis_row ~run ~selected:false summary)
+        ~f:(O.asic_stage_row ?now ~run ~selected:false)
+    in
+    let time =
+      fact
+        (if Option.is_some physical then "Stage time" else "Time")
+        (Option.value stage.time ~default:"unknown")
+    in
+    let sta_runtime =
+      if Option.is_none physical
+      then []
+      else
+        [ fact
+            "STA runtime"
+            (Option.value_map analysis ~default:"unknown" ~f:O.analysis_duration)
+        ]
+    in
+    let evidence =
+      match analysis with
+      | None -> [ fact "Analysis" "not yet observed; no authoritative STA evidence" ]
+      | Some a ->
+        [ fact
+            ~role:
+              (match a.timing_goal with
+               | Fail -> Failure
+               | Pass -> Success
+               | Unknown -> Muted)
+            "Goal"
+            (O.goal_label a.timing_goal ^ " · " ^ a.target.stage ^ " / post-PNR STA")
+        ]
+        @ List.map a.metrics ~f:(fun m ->
+          fact
+            (m.key ^ " / " ^ m.corner)
+            (Option.value_map m.value ~default:"unavailable" ~f:(fun v ->
+               if Float.is_finite v then sprintf "%g" v else "unavailable")
+             ^ " "
+             ^ Option.value m.unit_ ~default:"unit unknown"))
+        @ [ fact "Source" (a.target.stage ^ " / post-PNR STA")
+          ; fact "Current execution" (Option.value_exn summary).completion
+          ; fact "Captured source" a.enclosing_status
+          ]
+    in
+    let freshness =
+      Option.value_map summary ~default:"not loaded" ~f:(fun s ->
+        fst (O.freshness_label s.freshness))
+    in
+    if compact
+    then (
+      (* At the stock five-cell height there are only three body rows. Keep status AND
+         time on the first row, ahead of metrics and verbose provenance. *)
+      let stale =
+        not
+          (Option.exists summary ~f:(fun s ->
+             Asic.Summary.Freshness.equal s.freshness Validated))
+      in
+      let compact_evidence =
+        match analysis with
+        | None -> (if stale then [ fact "Evidence" freshness ] else []) @ evidence
+        | Some a ->
+          let goal = List.hd_exn evidence in
+          ({ goal with
+             value = (goal.value ^ if stale then " [" ^ freshness ^ "]" else "")
+           }
+           :: List.map a.corners ~f:(fun c ->
+             let metrics =
+               List.filter_map a.metrics ~f:(fun m ->
+                 if not (String.equal m.corner c.corner)
+                 then None
+                 else (
+                   let label =
+                     match m.key with
+                     | "setup_slack" -> "setup"
+                     | "hold_slack" -> "hold"
+                     | "setup_violations" -> "setup violations"
+                     | "hold_violations" -> "hold violations"
+                     | key -> key
+                   in
+                   Some
+                     (label
+                      ^ " "
+                      ^ Option.value_map m.value ~default:"unavailable" ~f:(fun v ->
+                        if Float.is_finite v then sprintf "%g" v else "unavailable")
+                      ^ Option.value_map
+                          m.unit_
+                          ~default:" (unit unknown)"
+                          ~f:(fun unit_ -> " " ^ unit_))))
+             in
+             fact
+               c.corner
+               (if List.is_empty metrics
+                then "unavailable"
+                else String.concat ~sep:" · " metrics)))
+          @ [ fact "Source" (a.target.stage ^ " / post-PNR STA")
+            ; fact "Current execution" (Option.value_exn summary).completion
+            ; fact "Captured source" a.enclosing_status
+            ]
+      in
+      ({ stage with
+         label = ""
+       ; status = None
+       ; time = None
+       ; value =
+           (stage.value
+            ^ " "
+            ^ time.value
+            ^ " · "
+            ^ if Option.is_some physical then "stage time" else "STA runtime")
+       ; details
+       }
+       :: sta_runtime)
+      @ compact_evidence)
+    else (stage :: time :: sta_runtime) @ (fact "Evidence" freshness :: evidence))
+;;
+
 let%test_unit "typed metrics preserve zero, units, missing and nonfinite without a \
                verdict"
   =
@@ -257,6 +407,7 @@ let%test_unit "typed metrics preserve zero, units, missing and nonfinite without
     ; cells = []
     ; metrics = []
     ; terminal = Some (terminal metrics)
+    ; timing_analysis = None
     ; timing = []
     ; completion = "completed"
     ; acceptance = "pass"
@@ -273,7 +424,7 @@ let%test_unit "typed metrics preserve zero, units, missing and nonfinite without
     ]
     ~f:(fun (value, availability, expected) ->
       let rs =
-        rows
+        legacy_rows
           ~kind:"timing"
           ~run
           ~summary:(Some (summary [ metric value availability ]))
@@ -318,13 +469,16 @@ let%test_unit "typed metrics preserve zero, units, missing and nonfinite without
       ()
   in
   let first = List.hd_exn compact in
-  assert (String.is_substring first.value ~substring:"0 ns");
-  assert (String.is_substring first.value ~substring:"refresh failed");
+  assert (not (String.is_substring first.value ~substring:"0 ns"));
+  assert (String.is_substring first.value ~substring:"unknown");
   assert (Option.is_none first.status);
-  assert (O.Status.equal (Option.value_exn (List.nth_exn compact 1).status) Failed);
+  assert (String.is_substring first.value ~substring:"failed");
+  assert (
+    List.exists compact ~f:(fun r ->
+      String.is_substring r.value ~substring:"refresh failed"));
   let inspected = O.inspection_lines compact |> String.concat ~sep:"\n" in
-  assert (String.is_substring inspected ~substring:"tool failed");
-  assert (String.is_substring inspected ~substring:"Refresh error: offline");
+  assert (not (String.is_substring inspected ~substring:"tool failed"));
+  assert (String.is_substring inspected ~substring:"offline");
   let quiet =
     rows
       ~compact:true
@@ -335,7 +489,9 @@ let%test_unit "typed metrics preserve zero, units, missing and nonfinite without
       ~stages:[ failed ]
       ()
   in
-  assert (String.is_substring (List.hd_exn quiet).value ~substring:"refresh failed");
+  assert (
+    List.exists quiet ~f:(fun r ->
+      String.is_substring r.value ~substring:"refresh failed"));
   assert (List.exists quiet ~f:(fun row -> String.equal row.label "Evidence"));
   let failed_summary =
     { (summary []) with
@@ -366,6 +522,7 @@ let%test_unit "typed compact facts fence run, availability and acceptance" =
     ; cells = []
     ; metrics = []
     ; terminal = None
+    ; timing_analysis = None
     ; timing = []
     ; completion = "completed"
     ; acceptance = "pass"
@@ -469,7 +626,7 @@ let%test_unit "execution duration never guesses aliases or ambiguous stage ident
   List.iter
     [ "synthesis", "2m 07s"; "placement", "14s"; "routing", "1m 01s" ]
     ~f:(fun (kind, expected) -> assert (String.equal (time kind stages).value expected));
-  assert (String.equal (time "timing" stages).value "unknown (stage timing)");
+  assert (String.equal (time "timing" stages).value "unknown");
   assert (String.equal (time "checks" stages).value "unknown (stage checks)");
   assert (String.equal (time "finalization" stages).value "unknown");
   assert (String.equal (time "synthesis" (stage "synthesis" 0. :: stages)).value "unknown");

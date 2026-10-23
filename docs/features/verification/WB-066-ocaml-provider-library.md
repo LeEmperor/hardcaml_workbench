@@ -3,7 +3,7 @@ id: WB-066
 title: Shared OCaml simulation provider library
 category: verification
 feature_sets: [FS2, FS3]
-status: delivered
+status: closed
 kind: feature
 priority: P2
 severity: n/a

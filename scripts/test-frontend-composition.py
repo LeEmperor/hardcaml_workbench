@@ -460,7 +460,7 @@ def full_acceptance(t, check, http, runs, presets):
                   for attrs in [failed.cells[y][line.index('fail')][1]]]
     check(bool(valid_attrs and fail_attrs) and valid_attrs[0][0][0] != fail_attrs[0][0], 'Validated freshness and explicit failed timing verdict have distinct ANSI foreground colors')
     t.command('Inspect timing paths ' + field(runs[0], 'id'))
-    source = t.capture('timing-workspace-source', ['Timing · Paths', 'Timing · Selected path', 'Timing · Provenance', 'signoff', '12 paths'],
+    source = t.capture('timing-workspace-source', ['Timing · Paths', 'Timing · Selected path', 'Timing · Provenance', 'signoff', '12 paths', 'No tool report or binary layout is claimed.', 'Evidence: idle'],
                        ['Waiting for explicitly requested index'])
     t.open_palette('ap col')
     t.capture('inspector-overlay', ['COMMAND PALETTE'])
@@ -503,7 +503,8 @@ def full_acceptance(t, check, http, runs, presets):
     check(True, 'Renamed Overview remains the exact active workspace despite clipped navigation labels')
 
 
-def run(args, acceptance=full_acceptance, extra_runs=(3, 4, 5, 6), startup_check=None, focused=False):
+def run(args, acceptance=full_acceptance, extra_runs=(3, 4, 5, 6), startup_check=None, focused=False,
+        restart_acceptance=None):
     base = demo.prepare(args.evidence, manual=True, delay=.05)
     print('Evidence: ' + str(base), flush=True)
     # Six real registered synthetic observations make the four-row selector
@@ -563,6 +564,22 @@ def run(args, acceptance=full_acceptance, extra_runs=(3, 4, 5, 6), startup_check
         if not focused:
             palette_acceptance(terminal, check, http)
         final_title = 'Overview' if args.palette_only else (acceptance(terminal, check, http, runs, presets) or 'Renamed dashboard')
+        if restart_acceptance is not None:
+            # Optional retained-state acceptance: restart both real native processes
+            # against the same private directories. Never reseed or rewrite sidecars.
+            terminal.close(); terminal = None
+            (base / 'pre-restart-http.json').write_text(json.dumps(http.history, indent=2))
+            os.killpg(daemon.pid, signal.SIGTERM)
+            daemon.wait(timeout=15)
+            metadata.unlink(missing_ok=True)
+            daemon = subprocess.Popen(demo.switch_command([args.daemon, '--port', '0', '--discovery-dir', base / 'discovery', '--state-dir', base / 'state']),
+                stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            wait(lambda: metadata.exists() or daemon.poll() is not None, 'restarted daemon metadata')
+            require(daemon.poll() is None, 'Restarted daemon failed; see daemon.log')
+            url = field(parse(metadata.read_text()), 'endpoint')
+            http = demo.Client(url, base / 'project', switch=demo.switch_name())
+            terminal = Terminal(base, args, url, 180, 55)
+            restart_acceptance(terminal, check, http, runs, presets)
         if not focused:
             final_registry = http.rpc(domain='workspace')
             final_workspaces = [w for w in field(final_registry, 'workspaces') if field(w, 'name') == final_title]

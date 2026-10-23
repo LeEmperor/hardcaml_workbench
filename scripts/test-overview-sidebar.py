@@ -12,6 +12,7 @@ from pathlib import Path
 import secrets
 import signal
 import sys
+import time
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
@@ -51,12 +52,31 @@ def acceptance(t, check, http, runs, presets):
                 ('synthesis', 'timing', 'placement', 'routing', 'checks', 'finalization')]
 
     screen = t.capture('sidebar-overview-120x40', ['planned-run', 'empty:', 'Reported cells (agg.): 128',
-        'Aggregate Setup slack: 0.42 ns', 'Check drc: pass', 'Acceptance (agg.): not_evaluated'])
+        'not reported unknown', 'Analysis: not yet observed; no authoritative STA evidence',
+        'Check drc: pass', 'Acceptance (agg.): not_evaluated'], ['Aggregate Setup slack: 0.42 ns'])
+    # This fixture intentionally has successful terminal slack but no authoritative
+    # supplementary STA observation. Check actual Timing-pane cells, not just text
+    # somewhere else on the screen: WB069 must not borrow finalization's metrics.
+    left, top, right, bottom = pane_rect(screen, 'timing')
+    timing_body = '\n'.join(line[left + 1:right - 1]
+                            for line in screen.lines()[top + 1:bottom - 1])
+    check('not reported unknown' in timing_body and 'no authoritative STA evidence' in timing_body
+          and '0.42' not in timing_body and 'completed' not in timing_body,
+          'Timing pane explicitly reports absent authoritative STA and never borrows terminal slack/completion')
     refinement.sidebar_geometry(screen, check)
     stages = [composition.status_text(line) for line in pane_body(screen, 'stage checklist')]
+    # The stable initial cursor can remain on Timing if it was first observed
+    # before physical stages hydrated. WB001 clips only a selected long label at
+    # this width. Require each canonical row exactly once, accepting that precise
+    # bounded selected-label fallback rather than assuming a hydration order.
     names = ['Synthesis', 'Floorplan', 'Placement', 'CTS', 'Routing', 'Signoff']
-    check(all(sum(name + ': completed' in line for line in stages) == 1 for name in names),
-          'All six explicit stages are visible as vertical checklist rows at120x40')
+    def rendered_stage(line, name):
+        return name + ': completed' in line or (
+            len(name) > 7 and '> ' in line and name[:6] + '…: completed' in line)
+    check(all(sum(rendered_stage(line, name) for line in stages) == 1 for name in names),
+           'All six explicit stages are visible as vertical checklist rows at120x40')
+    check(sum('Timing: not reported' in line and 'unknown' in line for line in stages) == 1,
+          'Supplementary Timing row remains unknown independently of six completed physical stages')
     check(not any('(agg.)' in line for line in stages), 'Compact checklist prioritizes stages over aggregate preamble')
     before = registry()
     t.command('Run selector: More visible rows (+1)')
@@ -80,6 +100,24 @@ def acceptance(t, check, http, runs, presets):
     mutate('(Set_tile_binding (tile %s) (binding (Pin_run %s)))' % (sexp(field(pinned, 'id')), sexp(runs[0])))
     scheme_samples = {}
     def schemes(workspace, titles):
+        # Opening Timing starts a finite selected/neighbor detail demand. Pane
+        # titles can render before those explicit reads finish. Settle that demand
+        # BEFORE freezing the no-I/O appearance baseline, rather than attributing
+        # navigation's late detail reads to a subsequent color-scheme command.
+        previous, stable_since = None, None
+        deadline = time.monotonic() + 20
+        while True:
+            t.drain()
+            current = calls()
+            pending = any(field(op, 'state') in ('pending', 'executing')
+                          for op in field(http.rpc(wait=False), 'operations'))
+            if current == previous and not pending:
+                stable_since = stable_since or time.monotonic()
+                if time.monotonic() - stable_since >= .6: break
+            else:
+                stable_since = None
+            previous = current
+            require(time.monotonic() < deadline, 'Finite inspection demand did not settle before appearance baseline')
         baseline = registry()
         provider_before = calls()
         geometry = None
@@ -148,6 +186,7 @@ def acceptance(t, check, http, runs, presets):
         '        raise SystemExit("INJECTED private synthetic Plan failure")\n' + original_wrapper.split('\n', 1)[1])
     zoom('stage-checklist')
     t.capture('sidebar-stage-focus', ['Synthesis: completed', 'Placement: completed'])
+    t.key(b'k' * 10)  # Establish Synthesis explicitly, independent of startup hydration.
     t.key(b'j'); t.key(b'j'); t.key(b'r')
     ready_preview = wait(lambda: preview(), 'placement stage exact plan')[0]
     check(dict(field(ready_preview, 'selection')) == dict(flow='synthetic', profile='success', endpoint='placement', assignments=[]),

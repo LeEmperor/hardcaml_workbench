@@ -1,5 +1,46 @@
 # Hardcaml Workbench — Demo construction plan
 
+## Active executable Timing stage — 2026-10-21
+
+Owner authorized extending WB-069 into a true provider stage/checkpoint. The
+[executable Timing plan](executable_timing_stage_plan.md) owns boundaries, legacy
+compatibility, agent ownership and verification. This supersedes the earlier
+non-runnable restriction for new capable providers, while retaining historical
+supplementary observations.
+
+- [x] Provider seven-stage planning, execution/checkpoints and six-stage compatibility.
+- [x] Workbench discovery, execution/analysis ingestion and exact-source inspection.
+- [x] Single actionable Timing checklist row and explicit prepare/launch acceptance.
+- [x] Integrated verification and updated controls/evidence documentation.
+
+Full Workbench build/lint/tests, provider continuation/finalization/legacy suites,
+11-check executable HTTP/PTY acceptance and complete checklist launch regression
+passed. Historical selections can prepare NEW Timing runs using the current catalog.
+The real example provider/project bindings and retained Workbench binaries are
+refreshed; live daemon/client restart remains manual. See
+[controls, deployment and evidence](executable_timing_stage.md). No physical EDA
+flow was run; global formatting retains unrelated baseline differences.
+
+## Active WB-069 Timing checklist and Overview — 2026-10-21
+
+Owner authorized implementation of the [Timing plan](timing_checklist_overview_plan.md).
+Delivery uses a supplementary end-of-segment STA observation, preserving completed
+timing evidence after later signoff failure without adding an execution endpoint.
+
+- [x] Provider retained STA observation and exact-source inspection.
+- [x] Workbench typed ingestion, compatibility, refresh and cache fencing.
+- [x] Separate Timing checklist item and richer Overview Timing tile.
+- [x] Exact-source navigation, read-only actions and compact-layout verification.
+- [x] Integrated regression checks and recorded acceptance evidence.
+
+Three implementation agents maximum; shared worker limit 20; no staging, commits or
+pushes. The detailed plan owns file ownership, contract decisions and test matrix.
+Implementation and automated acceptance are complete: full Workbench build/lint/tests,
+20-check final WB-069 HTTP/PTY acceptance, 135-check sidebar and 30-check launch-stage
+regressions passed. See [controls and evidence](timing_checklist_overview.md) for exact
+receipts, existing formatting failures and terminal-only/no-historical-backfill limits.
+Owner visual acceptance and refresh of previously installed providers remain separate.
+
 ## Active WB-007 hierarchy tile — 2026-10-21
 
 Owner authorized implementation on `bpurtell/hier`. The

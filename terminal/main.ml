@@ -1169,10 +1169,13 @@ let reconcile_synthesis session =
         in
         let stages =
           Option.value_map run ~default:[] ~f:(fun run ->
-            Terminal_presentation.Overview_tiles.observed_stages ~asic:session.asic ~run)
+            Terminal_presentation.Overview_tiles.checklist_items ~asic:session.asic ~run)
         in
         session.host
-        <- Host.set_local session.host tile.id (Host.reconcile_stages local ~run ~stages))
+        <- Host.set_local
+             session.host
+             tile.id
+             (Host.reconcile_checklist local ~run ~items:stages))
       else if Terminal_result_view.supports tile.kind
       then (
         let local = Host.local session.host tile.id in
@@ -4325,7 +4328,7 @@ let activate_timing_demand session tile view =
                 view) )
 ;;
 
-let open_timing_workspace session ~(run : Run_ref.t) ~stage =
+let open_timing_workspace ?analysis session ~(run : Run_ref.t) ~stage =
   let instance = session.hello.instance_id in
   let client = session.client in
   let project = Option.map (current_project session) ~f:(fun p -> p.Project.id) in
@@ -4343,7 +4346,7 @@ let open_timing_workspace session ~(run : Run_ref.t) ~stage =
         Workspace.Session_id.equal initial.session_id s.session_id)
     in
     let%bind workspace =
-      match Host.matching_timing initial ~run with
+      match Host.matching_timing_analysis session.host initial ~run ~analysis with
       | Some workspace -> return (Some workspace.id)
       | None ->
         let template =
@@ -4354,9 +4357,7 @@ let open_timing_workspace session ~(run : Run_ref.t) ~stage =
           mutate_workspace
             session
             (Instantiate_template
-               { window = active.window
-               ; template = { template with name }
-               })
+               { window = active.window; template = { template with name } })
         in
         if not (valid ())
         then return None
@@ -4411,77 +4412,87 @@ let open_timing_workspace session ~(run : Run_ref.t) ~stage =
     in
     (match workspace with
      | None -> return ()
-      | Some workspace when valid () ->
-        (match session.host.registry with
-         | None -> return ()
-         | Some registry ->
-           (match Host.matching_timing ~workspace registry ~run with
-            | Some matching when Workspace.Workspace_id.equal matching.id workspace ->
-              (match
-                 List.find registry.tiles ~f:(fun tile ->
-                   Workspace.Workspace_id.equal tile.workspace workspace
-                   && String.equal tile.kind "timing-paths"
-                   && Option.value_map
-                        matching.zoomed_tile
-                        ~default:true
-                        ~f:(Workspace.Tile_id.equal tile.id)
-                   && not tile.hidden)
-               with
-               | None -> return ()
-               | Some tile ->
-                 let generation =
-                   List.Assoc.find
-                     session.host.timing
-                     (Workspace.Workspace_id.to_string workspace)
-                     ~equal:String.equal
-                   |> Option.value_map ~default:1 ~f:(fun view ->
-                     view.Inspection_view.generation + 1)
-                 in
-                 let view =
-                   Host.timing session.host tile
-                   |> Option.filter ~f:(fun view ->
-                     String.equal view.stage stage && Run_ref.equal view.run run)
-                   |> Option.value
-                        ~default:(Timing_workspace.create ~generation ~run ~stage)
-                 in
-                 let view =
-                   { view with
-                     Inspection_view.workspace_epoch =
-                       Some (Host.timing_epoch registry workspace)
-                   }
-                 in
-                 let view =
-                   Option.value_map
-                     session.asic
-                     ~default:view
-                     ~f:(Inspection_view.reconcile view)
-                 in
-                  activate_workspace session workspace;
-                  session.host <- Host.set_timing session.host tile view;
-                 session.host
-                 <- Host.set_local
-                      session.host
-                      tile.id
-                      { (Host.local session.host tile.id) with
-                        artifacts = None
-                      ; inspection = None
-                      };
-                 session.host
-                 <- { session.host with
-                      focus = Some tile.id
-                    ; notice = "Timing investigation · captured run " ^ run.id
-                    };
-                 activate_timing_demand session tile view;
-                 drive_timing_demand session;
-                 if Option.is_some view.index
-                 then return ()
-                 else (
-                   let operation = Inspection_view.operation view in
-                   asic_request
-                     ~inspection_request:(tile.id, Inspection_view.capture view operation)
-                     session
-                     operation))
-            | _ -> return ()))
+     | Some workspace when valid () ->
+       (match session.host.registry with
+        | None -> return ()
+        | Some registry ->
+          (match Host.matching_timing ~workspace registry ~run with
+           | Some matching when Workspace.Workspace_id.equal matching.id workspace ->
+             (match
+                List.find registry.tiles ~f:(fun tile ->
+                  Workspace.Workspace_id.equal tile.workspace workspace
+                  && String.equal tile.kind "timing-paths"
+                  && Option.value_map
+                       matching.zoomed_tile
+                       ~default:true
+                       ~f:(Workspace.Tile_id.equal tile.id)
+                  && not tile.hidden)
+              with
+              | None -> return ()
+              | Some tile ->
+                let generation =
+                  List.Assoc.find
+                    session.host.timing
+                    (Workspace.Workspace_id.to_string workspace)
+                    ~equal:String.equal
+                  |> Option.value_map ~default:1 ~f:(fun view ->
+                    view.Inspection_view.generation + 1)
+                in
+                let view =
+                  Host.timing session.host tile
+                  |> Option.filter ~f:(fun view ->
+                    String.equal view.stage stage
+                    && Run_ref.equal view.run run
+                    && Option.equal
+                         Asic_inspection.Analysis_target.equal
+                         view.analysis
+                         analysis)
+                  |> Option.value
+                       ~default:
+                         (Timing_workspace.with_analysis
+                            (Timing_workspace.create ~generation ~run ~stage)
+                            analysis)
+                in
+                let view =
+                  { view with
+                    Inspection_view.workspace_epoch =
+                      Some (Host.timing_epoch registry workspace)
+                  }
+                in
+                let view =
+                  Option.value_map
+                    session.asic
+                    ~default:view
+                    ~f:(Inspection_view.reconcile view)
+                in
+                activate_workspace session workspace;
+                session.host <- Host.set_timing session.host tile view;
+                session.host
+                <- Host.set_local
+                     session.host
+                     tile.id
+                     { (Host.local session.host tile.id) with
+                       artifacts = None
+                     ; inspection = None
+                     };
+                session.host
+                <- { session.host with
+                     focus = Some tile.id
+                   ; notice = "Timing investigation · captured run " ^ run.id
+                   };
+                activate_timing_demand session tile view;
+                drive_timing_demand session;
+                if Option.is_some view.index
+                then return ()
+                else (
+                  let operation =
+                    Inspection_view.operation ~refresh:(Option.is_some analysis) view
+                  in
+                  asic_request
+                    ~inspection_request:(tile.id, Inspection_view.capture view operation)
+                    session
+                    operation))
+           | _ -> return ()))
      | Some _ -> return ())
   | _ -> return ()
 ;;
@@ -4778,7 +4789,7 @@ let inspection_step session tile view action =
           | Inspection_view.Back, _ ->
             session.timing_demand <- None;
             operation
-          | _, Some (Asic.Operation.Inspect_detail _) ->
+          | _, Some (Asic.Operation.Inspect_detail _ | Inspect_analysis_detail _) ->
             (* Enter is an explicit retry, including after a failed finite demand. *)
             activate_timing_demand session tile view;
             None
@@ -5204,7 +5215,14 @@ let execute_host session captured action ~exit =
     | Load_hierarchy id -> async (fun () -> load_tile_hierarchy session id)
     | Hierarchy_detail id -> async (fun () -> detail_tile_hierarchy session id)
     | Discover_asic -> async (fun () -> asic_request session Discover)
-    | Prepare_stage (stage, run) ->
+    | (Prepare_stage _ | Prepare_endpoint _) as preparation ->
+      let intent, run =
+        match preparation with
+        | Prepare_stage (stage, run) -> Stage_action.Physical_stage stage, run
+        | Prepare_endpoint (endpoint, run) -> Stage_action.Fresh_endpoint endpoint, run
+        | _ -> assert false
+      in
+      let endpoint = Stage_action.endpoint intent in
       let remembered = session.remembered_selection in
       let observed =
         Option.bind session.asic ~f:(fun snapshot ->
@@ -5215,7 +5233,7 @@ let execute_host session captured action ~exit =
       let instance = session.hello.instance_id in
       let message =
         "Preparing NEW run through "
-        ^ stage.id
+        ^ endpoint
         ^ "; discovering capabilities if needed; reopen palette when ready"
       in
       session.host
@@ -5255,7 +5273,7 @@ let execute_host session captured action ~exit =
                    Option.equal String.equal flow (Some candidate.id)
                    && List.mem
                         candidate.fresh_stage_endpoints
-                        stage.id
+                        endpoint
                         ~equal:String.equal)))
           in
           let rec discover remaining =
@@ -5276,7 +5294,7 @@ let execute_host session captured action ~exit =
                 discover (remaining - 1)))
           in
           let%bind () =
-            if Option.is_none stage.action && missing ()
+            if Option.is_none (Stage_action.advertised_selection intent) && missing ()
             then (
               let%bind () = asic_request session Discover in
               discover 50)
@@ -5288,7 +5306,11 @@ let execute_host session captured action ~exit =
             return ())
           else (
             match
-              Stage_action.resolve ~stage ~remembered ~observed ~snapshot:session.asic
+              Stage_action.resolve_intent
+                ~intent
+                ~remembered
+                ~observed
+                ~snapshot:session.asic
             with
             | Error reason ->
               fail ("Stage preparation failed: " ^ reason ^ "; press r to retry");
@@ -5404,6 +5426,32 @@ let execute_host session captured action ~exit =
        | _ -> Effect.Ignore)
     | Browse_inspection (run, "timing", stage) ->
       async (fun () -> open_timing_workspace session ~run ~stage)
+    | Browse_analysis (run, target) ->
+      async (fun () ->
+        open_timing_workspace ~analysis:target session ~run ~stage:target.stage)
+    | Inspect_overview_analysis id ->
+      let target =
+        Option.bind session.host.registry ~f:(fun registry ->
+          Workspace.resolve_tile registry id
+          |> Result.ok
+          |> Option.bind ~f:(fun reference -> reference.run)
+          |> Option.bind ~f:(fun run ->
+            Terminal_presentation.Overview_tiles.timing_summary ~asic:session.asic ~run
+            |> Option.bind ~f:(fun s -> s.Asic.Summary.timing_analysis)
+            |> Option.map ~f:(fun a -> run, a.target)))
+      in
+      (match target with
+       | Some (run, target) ->
+         async (fun () ->
+           open_timing_workspace ~analysis:target session ~run ~stage:target.stage)
+       | None ->
+         session.host
+         <- { session.host with
+              notice =
+                "Timing analysis unavailable: no authoritative observation; no \
+                 replacement selected"
+            };
+         Effect.Ignore)
     | Browse_inspection (run, domain, stage) ->
       (match Host.focused session.host, session.host.registry with
        | Some tile, Some registry ->
@@ -5676,9 +5724,10 @@ let browse_host session delta =
        |> Option.bind ~f:(fun reference -> reference.run)
        |> Option.iter ~f:(fun run ->
          let stages =
-           Terminal_presentation.Overview_tiles.observed_stages ~asic:session.asic ~run
+           Terminal_presentation.Overview_tiles.checklist_items ~asic:session.asic ~run
          in
-         session.host <- Host.browse_stages session.host tile.id ~run ~stages ~delta))
+         session.host
+         <- Host.browse_checklist session.host tile.id ~run ~items:stages ~delta))
    | _ -> scroll_host session delta);
   change_synthesis session (fun tile local ->
     let synthesis =
@@ -5781,6 +5830,25 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
   reconcile_synthesis session;
   match effect with
   | Host.Execute (capture, action) -> Some (execute_host session capture action ~exit)
+  | Host.Activate
+    when Option.exists (Host.focused host) ~f:(fun tile ->
+           String.equal tile.kind "timing"
+           || (String.equal tile.kind "stage-checklist"
+               && Option.exists (Host.tile_run host tile) ~f:(fun run ->
+                 Host.checklist_cursor
+                   (Host.local host tile.id)
+                   ~run
+                   ~items:
+                     (Terminal_presentation.Overview_tiles.checklist_items
+                        ~asic:session.asic
+                        ~run)
+                 |> Option.exists ~f:(function
+                   | Timing_analysis _ -> true
+                   | Physical_stage stage -> String.equal stage.id "timing")))) ->
+    (match Host.focused host, captured with
+     | Some tile, Some capture ->
+       Some (execute_host session capture (Inspect_overview_analysis tile.id) ~exit)
+     | _ -> Some Effect.Ignore)
   | Host.Activate ->
     Option.iter (Host.focused host) ~f:(fun tile ->
       if List.mem
@@ -5886,6 +5954,32 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
          <- Host.set_local session.host tile.id { local with simulation; scroll = 0 };
          Some Effect.Ignore)
      | Some (Character 'b') -> dispatch "project.build"
+     | Some (Character (('d' | 'e') as key))
+       when Option.exists (Host.focused session.host) ~f:(fun tile ->
+              String.equal tile.kind "timing"
+              || (String.equal tile.kind "stage-checklist" && Char.equal key 'd')) ->
+       Option.iter (Host.focused session.host) ~f:(fun tile ->
+         session.host
+         <- Host.set_local
+              session.host
+              tile.id
+              { (Host.local session.host tile.id) with utility_detail = true; scroll = 0 });
+       Some Effect.Ignore
+     | Some (Character 'r')
+       when Option.exists (Host.focused session.host) ~f:(fun tile ->
+              String.equal tile.kind "timing") ->
+       (match Host.focused session.host, captured with
+        | Some tile, Some capture ->
+          (match
+             session.host.registry
+             |> Option.bind ~f:(fun registry ->
+               Workspace.resolve_tile registry tile.id
+               |> Result.ok
+               |> Option.bind ~f:(fun r -> r.run))
+           with
+           | Some run -> Some (execute_host session capture (Asic (Refresh run)) ~exit)
+           | None -> Some Effect.Ignore)
+        | _ -> Some Effect.Ignore)
      | Some (Character 'd')
        when Option.exists (Host.focused session.host) ~f:(fun tile ->
               Host.simulation_kind tile.kind) -> dispatch "simulation.discover"
@@ -5930,15 +6024,15 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
              |> Option.bind ~f:(fun reference -> reference.run)
              |> Option.bind ~f:(fun run ->
                let stages =
-                 Terminal_presentation.Overview_tiles.observed_stages
+                 Terminal_presentation.Overview_tiles.checklist_items
                    ~asic:session.asic
                    ~run
                in
-               Host.stage_cursor (Host.local session.host tile.id) ~run ~stages
+               Host.checklist_cursor (Host.local session.host tile.id) ~run ~items:stages
                |> Option.map ~f:(fun stage -> stage, run))))
        in
        (match selected, captured with
-        | Some (stage, run), Some capture ->
+        | Some (Physical_stage stage, run), Some capture ->
           session.host
           <- { session.host with
                notice =
@@ -5946,6 +6040,8 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
                   view"
              };
           Some (execute_host session capture (Prepare_stage (stage, run)) ~exit)
+        | Some (Timing_analysis _, run), Some capture ->
+          Some (execute_host session capture (Prepare_endpoint ("timing", run)) ~exit)
         | None, _ ->
           session.host
           <- { session.host with notice = "No explicit stage observation selected" };
@@ -7442,13 +7538,13 @@ let command =
                    with
                    | Some () -> failwith "Workspace configuration exceeds 4 MiB"
                    | None -> Buffer.contents buffer)
-                in
-                let module P = Hardcaml_workbench_workspaces.Presets in
-                let config =
-                  P.decode text |> Or_error.bind ~f:P.resolve |> Or_error.ok_exn
-                in
-                Workspace_config.Resolved.encode config |> Or_error.ok_exn |> ignore;
-                config)))
+               in
+               let module P = Hardcaml_workbench_workspaces.Presets in
+               let config =
+                 P.decode text |> Or_error.bind ~f:P.resolve |> Or_error.ok_exn
+               in
+               Workspace_config.Resolved.encode config |> Or_error.ok_exn |> ignore;
+               config)))
          ~doc:"FILE read a workspace spec on this client; initialize fresh sessions once"
      and discover_project =
        flag

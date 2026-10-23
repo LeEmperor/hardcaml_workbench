@@ -3,7 +3,7 @@ id: WB-019
 title: Independently hideable window/palette controls
 category: presentation
 feature_sets: [FS5]
-status: delivered
+status: closed
 kind: enhancement
 priority: P2
 severity: n/a

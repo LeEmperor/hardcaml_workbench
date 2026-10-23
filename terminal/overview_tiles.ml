@@ -139,6 +139,10 @@ let asic_stage_row ?(now = Time_ns.now ()) ~run ~selected (stage : Asic.Stage.t)
        ; sprintf "Requested: %b" stage.requested
        ; "Reason: " ^ Option.value stage.reason ~default:"not reported"
        ]
+       @ Option.to_list
+           (Option.bind stage.execution_timing ~f:(fun t ->
+              Option.map t.measured_seconds ~f:(fun seconds ->
+                sprintf "Stage time: %.9g s (full execution segment)" seconds)))
        @ (match stage.status, stage.action with
           | Unsupported, _ -> [ "Action: unavailable (unsupported stage)" ]
           | _, None -> [ "Action: unavailable (no advertised stage selection)" ]
@@ -193,6 +197,176 @@ let execution ~asic ~run =
 
 let observed_stages ~asic ~run =
   execution ~asic ~run |> Option.value_map ~default:[] ~f:(fun run -> run.stages)
+;;
+
+(** Supplementary observations are deliberately not [Asic.Stage.t]: they have no launch
+    endpoint and must never enter physical stage action inference. *)
+type checklist_item =
+  | Physical_stage of Asic.Stage.t
+  | Timing_analysis of Asic.Summary.t option
+
+let checklist_id = function
+  | Physical_stage s -> s.Asic.Stage.id
+  | Timing_analysis _ -> "analysis:post-pnr-sta"
+;;
+
+let timing_summary ~asic ~run =
+  Option.bind asic ~f:(fun (snapshot : Asic.Snapshot.t) ->
+    List.find snapshot.summaries ~f:(fun s -> Run_ref.equal s.run run))
+;;
+
+let checklist_items ~asic ~run =
+  let stages = observed_stages ~asic ~run in
+  let timing = Timing_analysis (timing_summary ~asic ~run) in
+  let rec insert = function
+    | [] -> [ timing ]
+    | (s : Asic.Stage.t) :: rest when String.equal s.id "routing" ->
+      Physical_stage s :: timing :: List.map rest ~f:(fun s -> Physical_stage s)
+    | s :: rest when String.equal s.id "signoff" ->
+      timing :: List.map (s :: rest) ~f:(fun s -> Physical_stage s)
+    | s :: rest -> Physical_stage s :: insert rest
+  in
+  if List.exists stages ~f:(fun s -> String.equal s.Asic.Stage.id "timing")
+  then
+    List.map stages ~f:(fun s ->
+      let s =
+        if String.equal s.id "timing" && Option.is_none s.action
+        then (
+          let observed = Option.bind (execution ~asic ~run) ~f:(fun r -> r.selection) in
+          match
+            Stage_action.resolve ~stage:s ~remembered:None ~observed ~snapshot:asic
+          with
+          | Ok selection -> { s with action = Some selection }
+          | Error _ -> s)
+        else s
+      in
+      Physical_stage s)
+  else insert stages
+;;
+
+let goal_label : Asic.Timing_analysis.Goal.t -> string = function
+  | Pass -> "pass"
+  | Fail -> "fail"
+  | Unknown -> "unknown"
+;;
+
+let analysis_duration (a : Asic.Timing_analysis.t) =
+  Option.value_map a.duration ~default:"unknown" ~f:(fun d ->
+    Option.value_map
+      (Execution_timing.seconds (Some d.seconds))
+      ~default:"unknown"
+      ~f:(fun seconds -> sprintf "%gs" seconds))
+;;
+
+let analysis_details ~run (summary : Asic.Summary.t option) =
+  [ "Run: " ^ run_identity run
+  ; "Analysis: post-PNR STA (independent of physical stage completion)"
+  ]
+  @ Option.value_map
+      summary
+      ~default:[ "No authoritative analysis observation" ]
+      ~f:(fun s ->
+        [ ("Evidence freshness: "
+           ^
+           match s.freshness with
+           | Validated -> "validated"
+           | Cached_unverified -> "cached/unverified"
+           | Missing_source -> "missing source"
+           | Refresh_failed _ -> "refresh failed (details below)")
+        ]
+        @ Option.value_map
+            s.timing_analysis
+            ~default:
+              ([ "Analysis not yet observed; no status, duration or metrics inferred" ]
+               @
+               match s.freshness with
+               | Refresh_failed reason -> [ "Refresh error: " ^ reason ]
+               | _ -> [])
+            ~f:(fun a ->
+              [ "Stage: " ^ a.target.stage ^ " / post-PNR STA"
+              ; "Attempt: " ^ a.target.attempt_id
+              ; "Occurrence: " ^ a.target.occurrence_id
+              ; "Analysis ID: " ^ a.target.analysis_id
+              ; "Analysis source digest: " ^ a.target.source_digest
+              ; "Execution SHA256: " ^ a.target.execution_sha256
+              ; "Current execution outcome: " ^ s.completion
+              ; "Captured source status: " ^ a.enclosing_status
+              ; "Timing goal: "
+                ^ goal_label a.timing_goal
+                ^ " (independent of analysis completion and signoff acceptance)"
+              ; (if String.equal a.target.stage "timing"
+                 then
+                   "Action: Enter exact evidence; physical Timing r prepares advertised \
+                    endpoint"
+                 else
+                   "Action: Enter exact historical evidence; r prepares a NEW timing run \
+                    only if current catalog supports it")
+              ]
+              @ Evidence_time_view.summary_lines s.observed_at
+              @ Option.to_list (Option.map a.reason ~f:(fun r -> "Reason: " ^ r))
+              @ Option.value_map a.duration ~default:[ "Duration: unknown" ] ~f:(fun d ->
+                [ sprintf
+                    "Duration: %g s; basis: %s; precision: %g s; source: %s"
+                    d.seconds
+                    d.basis
+                    d.precision_seconds
+                    d.source
+                ])
+              @ List.map a.corners ~f:(fun c ->
+                sprintf
+                  "Corner %s: measured=%b; setup=%s; hold=%s"
+                  c.corner
+                  c.measured
+                  (goal_label c.setup_goal)
+                  (goal_label c.hold_goal))
+              @ List.map a.metrics ~f:(fun m ->
+                sprintf
+                  "Metric %s / %s: %s %s; raw key: %s; source: %s%s"
+                  m.key
+                  m.corner
+                  (Option.value_map m.value ~default:"unavailable" ~f:(sprintf "%g"))
+                  (Option.value m.unit_ ~default:"unit unknown")
+                  m.raw_key
+                  m.provenance
+                  (Option.value_map m.reason ~default:"" ~f:(fun r -> "; " ^ r)))
+              @ [ "Producer: " ^ Option.value a.producer ~default:"unknown"
+                ; "Evidence: " ^ a.evidence
+                ]
+              @
+              match s.freshness with
+              | Refresh_failed reason -> [ "Refresh error: " ^ reason ]
+              | _ -> []))
+;;
+
+let analysis_row ~run ~selected summary =
+  let analysis = Option.bind summary ~f:(fun s -> s.Asic.Summary.timing_analysis) in
+  let status =
+    match analysis with
+    | Some { status = Completed; _ } -> Status.Completed
+    | Some { status = Unavailable; _ } | None -> Status.Unknown
+  in
+  row
+    ~status
+    ~active:selected
+    ~role:(status_role status)
+    ~time:(Option.value_map analysis ~default:"unknown" ~f:analysis_duration)
+    ~details:(analysis_details ~run summary)
+    "Timing"
+    (match analysis with
+     | Some { status = Unavailable; _ } -> "unavailable"
+     | _ -> Status.label status)
+;;
+
+let checklist_row ?now ~run ~selected = function
+  | Physical_stage s -> asic_stage_row ?now ~run ~selected s
+  | Timing_analysis summary ->
+    let row = analysis_row ~run ~selected summary in
+    { row with
+      details =
+        "Historical supplementary STA: no physical Timing occurrence in this record; r \
+         checks current catalog for a NEW timing run"
+        :: row.details
+    }
 ;;
 
 (** Only shorten ASCII opaque identifiers. Human/provider labels remain intact and are
@@ -610,7 +784,9 @@ let row_spans
       let budget = column - cell_width prefix - 2 in
       let label = fit_cells ~width:budget row.label in
       label ^ ": " ^ String.make (Int.max 0 (budget - cell_width label)) ' '
-    | _ -> row.label ^ if String.is_empty row.value then "" else ": "
+    | _ ->
+      row.label
+      ^ if String.is_empty row.value || String.is_empty row.label then "" else ": "
   in
   let value =
     Option.value_map row.display_run ~default:row.value ~f:(fun run ->
@@ -764,6 +940,55 @@ let render
       view
   in
   View.zcat [ view; View.rectangle ~width ~height () ]
+;;
+
+let render_checklist_strip
+  ?indicator_frames
+  ?indicator_fg
+  ?selected_bg
+  ~appearance
+  ~attrs
+  ~width
+  ~height
+  rows
+  =
+  let rows = List.filter rows ~f:(fun row -> Option.is_some row.status) in
+  let packed, current, _, active =
+    List.fold rows ~init:([], [], 0, false) ~f:(fun (packed, current, used, active) row ->
+      let natural =
+        cell_width (row_prefix ~appearance ~indent:"" row ^ row.label ^ ": " ^ row.value)
+        + Option.value_map row.time ~default:0 ~f:(fun time -> 3 + cell_width time)
+      in
+      let cells = Int.min (Int.max 0 width) natural in
+      let item =
+        render_row
+          ?indicator_frames
+          ?indicator_fg
+          ?selected_bg
+          ~appearance
+          ~attrs
+          ~width:cells
+          ~indent:""
+          row
+      in
+      if used > 0 && used + 3 + cells > width
+      then (View.hcat (List.rev current), active) :: packed, [ item ], cells, row.active
+      else
+        ( packed
+        , item :: (if used = 0 then current else View.text " · " :: current)
+        , used + (if used = 0 then 0 else 3) + cells
+        , active || row.active ))
+  in
+  let lines = List.rev ((View.hcat (List.rev current), active) :: packed) in
+  let selected =
+    List.findi lines ~f:(fun _ (_, active) -> active)
+    |> Option.value_map ~default:0 ~f:fst
+  in
+  let start = Int.max 0 (selected - Int.max 1 height + 1) in
+  List.drop lines start
+  |> Fn.flip List.take (Int.max 0 height)
+  |> List.map ~f:fst
+  |> View.vcat
 ;;
 
 let inspection_lines rows =
@@ -1104,6 +1329,7 @@ let%test_unit "cached summary facts retain freshness and do not acquire stage st
     ; cells = []
     ; metrics = []
     ; terminal = None
+    ; timing_analysis = None
     ; timing = []
     ; completion = "completed"
     ; acceptance = "unknown"

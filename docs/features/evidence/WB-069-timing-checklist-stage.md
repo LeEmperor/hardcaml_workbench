@@ -3,14 +3,14 @@ id: WB-069
 title: Timing as a distinct stage on the stage checklist
 category: evidence
 feature_sets: [FS1, FS5]
-status: needs-design
+status: delivered
 kind: enhancement
 priority: P2
 severity: n/a
 requested_size: Unspecified
-size: M
-points: 8
-confidence: low
+size: L
+points: 13
+confidence: medium
 estimate_scope: incremental
 origin: owner-intake
 tags: [checklist, timing, signoff, stages]
@@ -45,7 +45,7 @@ Signoff        failed       10m 07s
 Here `completed` means the timing analysis ran and produced its output. It does not
 automatically mean timing constraints passed or signoff was accepted.
 
-## Current baseline
+## Baseline before implementation
 The checklist uses the provider's canonical physical stages `synthesis, floorplan,
 placement, cts, routing, signoff` (`backend/asic_public.ml`). Timing evidence (the
 signoff timing index) is reached through the signoff stage and the Timing workspace.
@@ -75,50 +75,80 @@ by the provider if the enclosing signoff segment fails.
 - Keep signoff checks and finalization rows separate from it.
 
 ## Out of scope
-Automatically rerunning STA, creating a separately runnable/restartable Timing
-checkpoint, renaming canonical execution stages, or implementing the separate Clocks
-workspace. Targeted provider plumbing to expose retained STA observations is **in
-scope**. A seventh true execution boundary would require a separate design decision.
+Automatic reruns, implicit restart of a selected historical execution, or the
+separate Clocks workspace. The original supplementary increment excluded a runnable
+Timing boundary; the owner subsequently authorized that boundary and it is now
+implemented by the [executable Timing follow-on](../../executable_timing_stage.md).
 
 ## Acceptance criteria
-- [ ] Overview's stage checklist tile visibly includes Timing as its own row with
+- [x] Overview's stage checklist tile visibly includes Timing as its own row with
   independently sourced status and duration; signoff status does not imply timing status.
-- [ ] Overview's Timing tile shows the same analysis's status/duration and available
+- [x] Overview's Timing tile shows the same analysis's status/duration and available
   metrics/verdicts with source context; it is not left as a generic signoff-only summary.
-- [ ] Completed STA followed by failed/timed-out DRC shows Timing completed and Signoff
+- [x] Completed STA followed by failed/timed-out DRC shows Timing completed and Signoff
   failed, while retaining access to the exact completed timing evidence in both surfaces.
-- [ ] Analysis completion, timing-constraint verdict and signoff acceptance remain
+- [x] Analysis completion, timing-constraint verdict and signoff acceptance remain
   separate facts; neither index presence nor successful execution alone means passed.
-- [ ] Missing timing evidence shows as unavailable or not requested, never as passed.
-- [ ] The row's goal status comes from reported timing evidence and names its stage/corner source.
-- [ ] Enter/inspect from the checklist row or Overview Timing tile opens the matching
+- [x] Missing timing evidence shows as unavailable or not requested, never as passed.
+- [x] The row's goal status comes from reported timing evidence and names its stage/corner source.
+- [x] Enter/inspect from the checklist row or Overview Timing tile opens the matching
   Timing view without silently retargeting to another run, stage or report.
-- [ ] Run selection/pins and refresh update both Overview surfaces coherently; stale
+- [x] Run selection/pins and refresh update both Overview surfaces coherently; stale
   or missing analysis evidence cannot borrow another attempt's status, duration or metrics.
-- [ ] Alignment (WB-001) and launch/checklist consistency checks still pass.
+- [x] Alignment (WB-001) and launch/checklist consistency checks still pass.
+
+## Delivery — 2026-10-21
+
+**Follow-on delivered:** Timing is now a real seventh provider stage/checkpoint,
+ending at `OpenROAD.STAPostPNR`, with Signoff continuing immediately afterward.
+`r` prepares a new Timing run through the current catalog and requires explicit
+Launch, including when historical six-stage evidence is selected. Historical
+execution facts remain unchanged; incompatible old checkpoints fail continuation
+explicitly. The Overview tile distinguishes stage duration from native STA runtime.
+
+[Executable Timing controls and acceptance](../../executable_timing_stage.md) record
+provider recipe-4/analysis-2 compatibility, full build/lint/tests, continuation and
+11-check native HTTP/PTY evidence. The configured real-example provider/project and
+retained Workbench binaries were refreshed without starting a physical flow or
+restarting live user processes.
+
+### Original supplementary increment
+
+Implemented and automatically verified across `hardcaml_asic` and Workbench. The
+provider publishes an immutable supplementary observation after the enclosing segment
+ends, including failure/timeout/cancellation. Both Overview surfaces consume the same
+typed observation and retain exact-source inspection, pins and restart fencing.
+Timing `r` in the checklist cannot prepare a run; the six physical stages are unchanged.
+
+[Controls and acceptance evidence](../../timing_checklist_overview.md) record the full
+build/lint/tests, provider failure fixtures and final 20-check native HTTP/PTY result.
+No new physical flow was run. Live STA updates, historical backfill, installation
+refresh and owner visual acceptance are not claimed by these automated checks.
 
 ## Dependencies
 None required. WB-004 adds preparation rows (elaboration/bundle) to the same
 checklist; agree a shared row order. WB-009 may change what timing evidence is trustworthy.
 
 ## Estimate rationale
-8 points is the original low-confidence estimate. Re-estimate before implementation:
-the clarified scope includes provider-supported partial STA evidence and two Overview
-surfaces, not merely inserting a label into the checklist.
+Re-estimated from 8 low-confidence points to 13 medium-confidence points before
+implementation: the clarified scope includes provider-supported partial STA evidence,
+wire/cache compatibility, exact-source navigation and two Overview surfaces.
 
-## Assumptions and decisions needed
+## Decisions
 - Owner-facing intent is settled: a separate Timing row in Overview's checklist and
   richer information in Overview's Timing tile are both required.
-- Recommended implementation: a provider-backed **supplementary post-PNR STA
-  observation**, presented as a checklist stage-like item without advertising a new
-  launch endpoint or checkpoint. Do not infer completion from directory existence or
-  inherited metrics alone.
-- Decide whether the first delivery publishes the observation only after the enclosing
-  segment ends, or reports STA completion live while later signoff work is still running.
+- Retain a provider-backed **post-PNR STA observation**, separate from physical
+  segment completion. Do not infer it from directory existence or inherited metrics.
+- The executable follow-on publishes immutable timing evidence at Timing completion,
+  before Signoff begins. Historical supplementary analyses keep their original
+  signoff attribution; the earlier end-of-Signoff limitation is superseded for new runs.
 - Start with one Timing row for post-PNR STA; additional per-stage timing analyses and
   independent stop/resume semantics require an explicit scope decision.
 
 ## References
+- [Executable Timing stage and refreshed deployment](../../executable_timing_stage.md)
+- [Executable-stage implementation plan](../../executable_timing_stage_plan.md)
+- [Implementation plan](../../timing_checklist_overview_plan.md)
 - [Checklist projection](../../../terminal/overview_tiles.ml)
 - [Canonical stages](../../../backend/asic_public.ml)
 - [Launch/checklist consistency](../../launch_stage_consistency.md)

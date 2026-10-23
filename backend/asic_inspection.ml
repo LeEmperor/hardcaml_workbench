@@ -10,7 +10,7 @@ let validate_selection ~domain ~stage =
   Public.require
     (List.mem [ "timing"; "clocks"; "physical"; "routing" ] domain ~equal:String.equal
      && List.mem
-          [ "synthesis"; "floorplan"; "placement"; "cts"; "routing"; "signoff" ]
+          [ "synthesis"; "floorplan"; "placement"; "cts"; "routing"; "timing"; "signoff" ]
           stage
           ~equal:String.equal)
     "Invalid inspection domain/stage"
@@ -29,6 +29,21 @@ let validate_row_id id =
   Public.require
     ((not (String.is_empty id)) && String.length id <= 4096)
     "Invalid inspection row ID"
+;;
+
+let validate_analysis_target (target : Wire.Analysis_target.t) =
+  validate_digest target.source_digest;
+  validate_digest target.execution_sha256;
+  Option.iter target.execution_file ~f:(fun path ->
+    ignore (Public.absolute path : string));
+  Public.require
+    ((not (String.is_empty target.attempt_id))
+     && List.mem [ "signoff"; "timing" ] target.stage ~equal:String.equal
+     && String.equal
+          target.occurrence_id
+          (target.attempt_id ^ "/implementation." ^ target.stage)
+     && String.equal target.analysis_id (target.attempt_id ^ "/post-pnr-sta"))
+    "Invalid timing analysis identity"
 ;;
 
 let boolean = function
@@ -207,6 +222,14 @@ let validate_index (index : Wire.Index.t) =
   validate_selection ~domain:index.domain ~stage:index.stage;
   validate_digest index.source_digest;
   validate_digest index.execution_sha256;
+  Option.iter index.analysis ~f:(fun analysis ->
+    validate_analysis_target analysis;
+    Public.require
+      (String.equal index.domain "timing"
+       && String.equal index.stage analysis.stage
+       && (Option.is_some analysis.execution_file
+           || String.equal analysis.execution_sha256 index.execution_sha256))
+      "Invalid cached analysis inspection");
   ignore (Public.absolute index.execution_file : string);
   Public.require (List.length index.rows <= 4096) "Inspection exceeds 4096 rows";
   Public.require
@@ -227,7 +250,38 @@ let validate_index (index : Wire.Index.t) =
     "Normalized inspection exceeds 2MiB"
 ;;
 
-let parse_index ~registered ~execution_file ~execution_sha256 ~domain ~stage j =
+let analysis_target ?captured ~attempt_id ~execution_sha256 ~stage j =
+  match Public.field "analysis_id" j, Public.field "analysis_digest" j with
+  | `Null, `Null -> None
+  | `String analysis_id, `String source_digest ->
+    validate_digest source_digest;
+    Public.require
+      (String.equal analysis_id (attempt_id ^ "/post-pnr-sta"))
+      "Inspection analysis ID mismatch";
+    let target =
+      { Wire.Analysis_target.attempt_id
+      ; occurrence_id = attempt_id ^ "/implementation." ^ stage
+      ; analysis_id
+      ; source_digest
+      ; execution_sha256
+      ; stage
+      ; execution_file = None
+      }
+    in
+    Some
+      (Option.value_map captured ~default:target ~f:(fun captured ->
+         validate_analysis_target captured;
+         Public.require
+           (String.equal captured.attempt_id attempt_id
+            && String.equal captured.stage stage
+            && String.equal captured.analysis_id analysis_id
+            && String.equal captured.source_digest source_digest)
+           "Captured analysis inspection identity mismatch";
+         captured))
+  | _ -> failwith "Incomplete inspection analysis identity"
+;;
+
+let parse_index ?analysis ~registered ~execution_file ~execution_sha256 ~domain ~stage j =
   Public.require
     (String.length (Yojson.Safe.to_string j) <= index_limit)
     "Inspection response exceeds 2MiB";
@@ -245,6 +299,13 @@ let parse_index ~registered ~execution_file ~execution_sha256 ~domain ~stage j =
     ; diagnostics = List.map (Public.list (Public.field "diagnostics" j)) ~f:Public.text
     ; truncated = boolean (Public.field "truncated" j)
     ; cached_unverified = false
+    ; analysis =
+        analysis_target
+          ?captured:analysis
+          ~attempt_id:registered.reference.stream_id
+          ~execution_sha256
+          ~stage
+          j
     ; times = { Evidence_time.Index.empty with production = production_times j }
     }
   in
@@ -271,7 +332,7 @@ let observe_times ~execution_file ~validated_at (index : Wire.Index.t) =
   { index with times }
 ;;
 
-let parse_detail ~registered ~(index : Wire.Index.t) ~row_id j =
+let parse_detail ?execution_sha256 ~registered ~(index : Wire.Index.t) ~row_id j =
   validate_row_id row_id;
   Public.require
     (Run_ref.equal registered.Asic.Run.run index.run)
@@ -280,11 +341,22 @@ let parse_detail ~registered ~(index : Wire.Index.t) ~row_id j =
     identity
       ~registered
       ~execution_file:index.execution_file
-      ~execution_sha256:index.execution_sha256
+      ~execution_sha256:(Option.value execution_sha256 ~default:index.execution_sha256)
       ~domain:index.domain
       ~stage:index.stage
       j
   in
+  Public.require
+    (Option.equal
+       Wire.Analysis_target.equal
+       index.analysis
+       (analysis_target
+          ?captured:index.analysis
+          ~attempt_id:registered.reference.stream_id
+          ~execution_sha256:index.execution_sha256
+          ~stage:index.stage
+          j))
+    "Inspection detail analysis changed";
   Public.require
     (String.equal digest index.source_digest
      && Poly.equal (Public.field "row_id" j) (`String row_id)
@@ -337,11 +409,14 @@ let read_cache ~state_dir ~identity =
     let bytes = Asic_evidence_file.read_bounded path ((8 * index_limit) + 65536) in
     let cache = Cache.t_of_sexp (Sexp.of_string bytes) in
     Public.require
-      (cache.version = 1
+      ((cache.version = 1 || cache.version = 2)
        && String.equal cache.identity identity
        && List.length cache.entries <= 8)
       "Incompatible inspection cache identity/budget";
     List.iter cache.entries ~f:(fun blob ->
+      Public.require
+        (cache.version >= 2 || Option.is_none blob.index.analysis)
+        "Analysis inspection requires cache version 2";
       validate_index blob.index;
       Public.require
         (String.equal blob.digest (index_digest blob.index))
@@ -381,7 +456,12 @@ let save ?(rebuild_invalid = false) ~state_dir ~identity index =
        :: List.filter entries ~f:(fun b -> not (String.equal (key b.index) (key index))))
       8
   in
-  let data = Sexp.to_string_mach (Cache.sexp_of_t { version = 1; identity; entries }) in
+  let version =
+    if List.exists entries ~f:(fun blob -> Option.is_some blob.index.analysis)
+    then 2
+    else 1
+  in
+  let data = Sexp.to_string_mach (Cache.sexp_of_t { version; identity; entries }) in
   Public.require
     (String.length data <= (8 * index_limit) + 65536)
     "Inspection cache exceeds byte budget";

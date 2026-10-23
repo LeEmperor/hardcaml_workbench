@@ -3,7 +3,7 @@ id: WB-050
 title: Upward project discovery
 category: project
 feature_sets: [FS3]
-status: delivered
+status: closed
 kind: enhancement
 priority: P2
 severity: n/a

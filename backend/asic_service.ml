@@ -59,6 +59,10 @@ module Summary_blob = struct
   [@@deriving sexp]
 end
 
+(* Schema-1 analysis metadata is bounded at 1MiB; the typed metric provenance and sexp
+   escaping also occupy space. Keep the complete observation within one blob. *)
+let summary_limit = 4 * 1024 * 1024
+
 let summary_digest summary =
   Public.digest (Sexp.to_string_mach (Asic.Summary.sexp_of_t summary))
 ;;
@@ -71,7 +75,7 @@ let decode_summary_blob sexp =
   let blob = Summary_blob.t_of_sexp sexp in
   let valid =
     match blob.version with
-    | 3 | 4 -> String.equal blob.normalized_digest (summary_digest blob.summary)
+    | 3 | 4 | 5 -> String.equal blob.normalized_digest (summary_digest blob.summary)
     | (1 | 2) as version ->
       let legacy =
         match Asic.Summary.sexp_of_t blob.summary with
@@ -89,6 +93,12 @@ let decode_summary_blob sexp =
     | _ -> false
   in
   Public.require valid "Corrupt/incompatible normalized summary";
+  Public.require
+    (blob.version >= 5 || Option.is_none blob.summary.timing_analysis)
+    "Timing analysis requires summary cache version 5";
+  Option.iter
+    blob.summary.timing_analysis
+    ~f:(Asic_timing_analysis.validate_cached ~execution_file:blob.summary.execution_file);
   Public.require (List.length blob.summary.metrics <= 64) "Metric cache exceeds budget";
   Option.iter blob.summary.terminal ~f:(fun terminal ->
     Public.require
@@ -162,6 +172,7 @@ type project =
   ; mutable desired_description : string option
   ; read_tails : unit Deferred.t String.Table.t
   ; mutable provider_check : (unit, exn) Result.t Deferred.t option
+  ; mutable timing_stage : bool
   ; mutable cache_error : string option
   ; mutable registry_writable : bool
   ; mutable save_tail : unit Deferred.t
@@ -364,6 +375,7 @@ let load_project t ~root ~environment =
     ; desired_description = None
     ; read_tails = String.Table.create ()
     ; provider_check = None
+    ; timing_stage = false
     ; cache_error = None
     ; registry_writable = true
     ; save_tail = Deferred.unit
@@ -501,7 +513,13 @@ let check_provider t p cancel =
       let checked =
         Monitor.try_with (fun () ->
           let%map metadata = query t p cancel (invoke p Adapter.metadata) in
-          Public.metadata metadata)
+          Public.metadata metadata;
+          p.timing_stage
+          <- Poly.equal
+               (Public.field
+                  "timing_stage1"
+                  (Public.field "capabilities" (Public.field "cli_contract" metadata)))
+               (`Bool true))
       in
       p.provider_check <- Some checked;
       checked
@@ -816,54 +834,97 @@ let materialize_unlocked ?attempt t p cancel (run : Run_ref.t) =
         let summary =
           Public.summary r ~expected_plan:(expected_plan p run) ~execution_file report
         in
+        let%bind summary =
+          if Poly.equal (Public.field "timing_analysis" report) `Null
+          then return summary
+          else
+            In_thread.run (fun () ->
+              let execution_sha256 =
+                Inspection.execution_hash ~registered:r ~execution_file
+              in
+              let execution_bytes =
+                read_public_bounded execution_file (8 * 1024 * 1024)
+              in
+              Public.require
+                (String.equal (Public.digest execution_bytes) execution_sha256)
+                "Execution changed during timing report read";
+              let actual_execution = Public.decode execution_bytes in
+              Public.require
+                (Poly.equal
+                   (Public.canonical_json actual_execution)
+                   (Public.canonical_json (Public.field "execution" report)))
+                "Timing report execution content mismatch";
+              let timing_analysis =
+                Asic_timing_analysis.parse
+                  ~registered:r
+                  ~execution_file
+                  ~execution_sha256
+                  report
+              in
+              { summary with timing_analysis })
+        in
         let attempt =
           match attempt with
           | Some _ -> attempt
           | None -> List.Assoc.find p.terminal_attempts run.id ~equal:String.equal
         in
-        match attempt with
-        | None -> return summary
-        | Some attempt ->
-          let%bind receipt =
-            query
-              t
-              p
-              cancel
-              (invoke p (fun c ~root ~environment ->
-                 Adapter.inspect_finalization c ~root ~environment attempt))
-          in
-          let results_file = Public.terminal_results_file receipt in
-          let%map terminal =
-            In_thread.run (fun () ->
-              let execution_file = Filename_unix.realpath execution_file in
-              let execution_bytes =
-                read_public_bounded execution_file (8 * 1024 * 1024)
+        let%bind terminal_summary =
+          Monitor.try_with (fun () ->
+            match attempt with
+            | None -> return summary
+            | Some attempt ->
+              let%bind receipt =
+                query
+                  t
+                  p
+                  cancel
+                  (invoke p (fun c ~root ~environment ->
+                     Adapter.inspect_finalization c ~root ~environment attempt))
               in
-              let results_bytes = read_public_bounded results_file (128 * 1024) in
-              let terminal =
-                Public.terminal_result
-                  ~attempt
-                  ~execution_file
-                  ~execution_bytes
-                  ~report
-                  ~receipt
-                  ~results_bytes
+              let results_file = Public.terminal_results_file receipt in
+              let%map terminal =
+                In_thread.run (fun () ->
+                  let execution_file = Filename_unix.realpath execution_file in
+                  let execution_bytes =
+                    read_public_bounded execution_file (8 * 1024 * 1024)
+                  in
+                  let results_bytes = read_public_bounded results_file (128 * 1024) in
+                  let terminal =
+                    Public.terminal_result
+                      ~attempt
+                      ~execution_file
+                      ~execution_bytes
+                      ~report
+                      ~receipt
+                      ~results_bytes
+                  in
+                  let snapshot_bytes =
+                    Option.map
+                      (Public.declared_clock_snapshot report)
+                      ~f:(fun (path, _) -> read_public_bounded path (256 * 1024))
+                  in
+                  let clock =
+                    Public.declared_clock_metric ~report ~receipt ~snapshot_bytes
+                  in
+                  { terminal with metrics = terminal.metrics @ [ clock ] })
               in
-              let snapshot_bytes =
-                Option.map (Public.declared_clock_snapshot report) ~f:(fun (path, _) ->
-                  read_public_bounded path (256 * 1024))
-              in
-              let clock = Public.declared_clock_metric ~report ~receipt ~snapshot_bytes in
-              { terminal with metrics = terminal.metrics @ [ clock ] })
-          in
-          { summary with
-            terminal = Some terminal
-          ; source_digest =
-              Public.digest
-                (summary.source_digest
-                 ^ terminal.evidence
-                 ^ Sexp.to_string_mach ([%sexp_of: Asic.Metric.t list] terminal.metrics))
-          })
+              { summary with
+                terminal = Some terminal
+              ; source_digest =
+                  Public.digest
+                    (summary.source_digest
+                     ^ terminal.evidence
+                     ^ Sexp.to_string_mach
+                         ([%sexp_of: Asic.Metric.t list] terminal.metrics))
+              })
+        in
+        match terminal_summary with
+        | Ok summary -> return summary
+        | Error exn when Option.is_some summary.timing_analysis ->
+          (* Supplementary completion does not depend on finalization hydration. Never
+             borrow old terminal metrics if its adopted source cannot be validated. *)
+          return { summary with freshness = Refresh_failed (Exn.to_string exn) }
+        | Error exn -> raise exn)
     in
     (match result with
      | Error exn ->
@@ -881,10 +942,10 @@ let materialize_unlocked ?attempt t p cancel (run : Run_ref.t) =
          "Observation advanced during report read; refresh again";
        let data = Sexp.to_string (Asic.Summary.sexp_of_t summary) in
        Public.require
-         (String.length data <= 256 * 1024)
-         "Normalized ASIC summary exceeds 256KiB";
+         (String.length data <= summary_limit)
+         "Normalized ASIC summary exceeds 4MiB";
        let blob : Summary_blob.t =
-         { version = 4; normalized_digest = summary_digest summary; summary }
+         { version = 5; normalized_digest = summary_digest summary; summary }
        in
        let data = Sexp.to_string (Summary_blob.sexp_of_t blob) in
        hot p summary;
@@ -942,7 +1003,7 @@ let load_summary t p cancel (run : Run_ref.t) =
             let s =
               decode_summary_blob
                 (Sexp.of_string
-                   (read_bounded (summary_path t p digest) ((256 * 1024) + 1024)))
+                   (read_bounded (summary_path t p digest) (summary_limit + 1024)))
             in
             Public.require
               (Run_ref.equal s.run run && String.equal s.source_digest digest)
@@ -1228,9 +1289,8 @@ let finalization_eligibility t p cancel (f : Finalization_stored.t) =
       let bytes = read_public_bounded v.execution_file (8 * 1024 * 1024) in
       let execution = Public.decode bytes in
       let field = Public.field in
-      let stages =
-        [ "synthesis"; "floorplan"; "placement"; "cts"; "routing"; "signoff" ]
-      in
+      let stages = Public.recipe_stages (field "plan" execution) in
+      let plan = Public.explicit_recipe_plan (field "plan" execution) in
       Public.require
         (Poly.equal
            (Public.canonical_json execution)
@@ -1238,20 +1298,19 @@ let finalization_eligibility t p cancel (f : Finalization_stored.t) =
          && Poly.equal (field "physical" (field "completion" report)) (`String "full")
          && Poly.equal (field "status" execution) (`String "completed")
          && Poly.equal (field "exit_code" execution) (`Int 0)
-         && Poly.equal (field "initial_boundary" (field "plan" execution)) `Null
-         && Poly.equal (field "schema_version" (field "plan" execution)) (`Int 3)
+         && Poly.equal (field "initial_boundary" plan) `Null
          && Poly.equal
-              (field "stages" (field "plan" execution))
+              (field "stages" plan)
               (`List (List.map stages ~f:(fun s -> `String s))))
-        "Finalize requires an exact completed fresh six-stage physical execution";
+        "Finalize requires an exact completed fresh physical execution";
       let occurrences = Public.list (field "occurrences" execution) in
       let artifacts = Public.list (field "artifacts" execution) in
       let checkpoints = Public.list (field "checkpoints" report) in
       Public.require
-        (List.length occurrences = 6
-         && List.length artifacts = 6
-         && List.length checkpoints = 6)
-        "Finalize requires all six selected stage publications";
+        (List.length occurrences = List.length stages
+         && List.length artifacts = List.length stages
+         && List.length checkpoints = List.length stages)
+        "Finalize requires all selected stage publications";
       List.iteri stages ~f:(fun i stage ->
         let occurrence = List.nth_exn occurrences i in
         let artifact = List.nth_exn artifacts i in
@@ -1775,7 +1834,17 @@ let inspection_hash t p cancel registered execution_file =
     In_thread.run (fun () -> Inspection.execution_hash ~registered ~execution_file))
 ;;
 
-let load_inspection t p cancel ~run ~domain ~stage ~refresh ~on_read =
+let check_analysis_target registered analysis (index : Inspection_wire.Index.t) =
+  Option.iter analysis ~f:(fun target ->
+    Asic_timing_analysis.validate_target target;
+    Public.require
+      (String.equal target.attempt_id registered.Asic.Run.reference.stream_id
+       && Option.equal Inspection_wire.Analysis_target.equal (Some target) index.analysis
+      )
+      "Captured timing analysis changed or is unavailable")
+;;
+
+let load_inspection t p cancel ~analysis ~run ~domain ~stage ~refresh ~on_read =
   serialized p "inspection-publication" (fun () ->
     let registered = find_run p run in
     let execution_file =
@@ -1792,6 +1861,10 @@ let load_inspection t p cancel ~run ~domain ~stage ~refresh ~on_read =
            else index);
       let%bind () = check_provider t p cancel in
       let%bind execution_sha256 = inspection_hash t p cancel registered execution_file in
+      let%bind () =
+        In_thread.run (fun () ->
+          Option.iter analysis ~f:(Asic_timing_analysis.validate_source ~execution_file))
+      in
       let%bind response =
         query
           ~max_bytes:Inspection.index_limit
@@ -1801,6 +1874,9 @@ let load_inspection t p cancel ~run ~domain ~stage ~refresh ~on_read =
           cancel
           (invoke p (fun c ~root ~environment ->
              Adapter.inspection
+               ?expected_analysis_digest:
+                 (Option.map analysis ~f:(fun target ->
+                    target.Inspection_wire.Analysis_target.source_digest))
                c
                ~root
                ~environment
@@ -1811,6 +1887,7 @@ let load_inspection t p cancel ~run ~domain ~stage ~refresh ~on_read =
       in
       let index =
         Inspection.parse_index
+          ?analysis
           ~registered
           ~execution_file
           ~execution_sha256
@@ -1818,10 +1895,15 @@ let load_inspection t p cancel ~run ~domain ~stage ~refresh ~on_read =
           ~stage
           response
       in
+      check_analysis_target registered analysis index;
       let%bind after = inspection_hash t p cancel registered execution_file in
       Public.require
         (String.equal after execution_sha256)
         "Execution bytes changed during inspection";
+      let%bind () =
+        In_thread.run (fun () ->
+          Option.iter analysis ~f:(Asic_timing_analysis.validate_source ~execution_file))
+      in
       let validated_at = Timestamp.of_time_ns (Time_ns.now ()) in
       let%bind index =
         In_thread.run (fun () ->
@@ -1841,26 +1923,33 @@ let load_inspection t p cancel ~run ~domain ~stage ~refresh ~on_read =
     in
     let started_refresh = !refresh in
     let cached () =
-      match
-        List.find p.inspections ~f:(fun index ->
-          inspection_matches index ~run ~domain ~stage)
-      with
-      | Some index ->
-        Public.require
-          (String.equal index.execution_file execution_file)
-          "Stale inspection execution";
-        return index
-      | None ->
-        Throttle.enqueue t.queries (fun () ->
-          check_inspection_current p cancel registered;
-          In_thread.run (fun () ->
-            Inspection.load
-              ~state_dir:t.state_dir
-              ~identity:p.identity
-              ~run
-              ~execution_file
-              ~domain
-              ~stage))
+      let%map index =
+        match
+          List.find p.inspections ~f:(fun index ->
+            inspection_matches index ~run ~domain ~stage)
+        with
+        | Some index ->
+          Public.require
+            (String.equal index.execution_file execution_file)
+            "Stale inspection execution";
+          return index
+        | None ->
+          Throttle.enqueue t.queries (fun () ->
+            check_inspection_current p cancel registered;
+            In_thread.run (fun () ->
+              Inspection.load
+                ~state_dir:t.state_dir
+                ~identity:p.identity
+                ~run
+                ~execution_file
+                ~domain
+                ~stage))
+      in
+      (* The generic slot can contain checkpoint-backed evidence or another analysis. Such
+         an entry is a miss for a captured target, not proof that its source changed. The
+         fallback fetch remains pinned and validates the reply below. *)
+      check_analysis_target registered analysis index;
+      index
     in
     let%bind initial =
       Monitor.try_with (fun () -> if started_refresh then fetch () else cached ())
@@ -1879,11 +1968,23 @@ let load_inspection t p cancel ~run ~domain ~stage ~refresh ~on_read =
         | Error exn -> raise exn)
     in
     check_inspection_current p cancel registered;
+    check_analysis_target registered analysis index;
     publish_inspection p index;
     Deferred.unit)
 ;;
 
-let load_inspection_detail t p cancel ~run ~domain ~stage ~source_digest ~row_id ~on_read =
+let load_inspection_detail
+  t
+  p
+  cancel
+  ~analysis
+  ~run
+  ~domain
+  ~stage
+  ~source_digest
+  ~row_id
+  ~on_read
+  =
   serialized p "inspection-publication" (fun () ->
     let registered = find_run p run in
     let index =
@@ -1891,6 +1992,7 @@ let load_inspection_detail t p cancel ~run ~domain ~stage ~source_digest ~row_id
         inspection_matches index ~run ~domain ~stage)
       |> Option.value_exn ~message:"Load inspection index before requesting detail"
     in
+    check_analysis_target registered analysis index;
     Public.require
       (String.equal index.source_digest source_digest
        && Option.equal String.equal registered.execution_file (Some index.execution_file)
@@ -1906,8 +2008,16 @@ let load_inspection_detail t p cancel ~run ~domain ~stage ~source_digest ~row_id
       on_read ();
       let%bind () = check_provider t p cancel in
       let%bind hash = inspection_hash t p cancel registered index.execution_file in
+      let%bind () =
+        In_thread.run (fun () ->
+          Option.iter
+            index.analysis
+            ~f:(Asic_timing_analysis.validate_source ~execution_file:index.execution_file))
+      in
       Public.require
-        (String.equal hash index.execution_sha256)
+        (String.equal hash index.execution_sha256
+         || Option.exists index.analysis ~f:(fun target ->
+           Option.is_some target.execution_file))
         "Inspection execution bytes changed";
       let%bind response =
         query
@@ -1926,17 +2036,37 @@ let load_inspection_detail t p cancel ~run ~domain ~stage ~source_digest ~row_id
                ~stage
                ~detail:(Some (row_id, source_digest))))
       in
-      let detail = Inspection.parse_detail ~registered ~index ~row_id response in
-      let%map after = inspection_hash t p cancel registered index.execution_file in
+      let detail =
+        Inspection.parse_detail ~execution_sha256:hash ~registered ~index ~row_id response
+      in
+      let%bind after = inspection_hash t p cancel registered index.execution_file in
       Public.require
         (String.equal after hash)
         "Execution bytes changed during detail read";
+      let%map () =
+        In_thread.run (fun () ->
+          Option.iter
+            index.analysis
+            ~f:(Asic_timing_analysis.validate_source ~execution_file:index.execution_file))
+      in
       check_inspection_current p cancel registered;
       Inspection_detail_cache.add p.detail_cache ~identity detail;
       publish_detail p detail)
 ;;
 
 let handle_operation t p operation =
+  let analysis, operation =
+    match operation with
+    | Asic.Operation.Inspect_analysis { run; target; refresh } ->
+      ( Some target
+      , Asic.Operation.Inspect { run; domain = "timing"; stage = target.stage; refresh } )
+    | Inspect_analysis_detail { run; target; source_digest; row_id } ->
+      ( Some target
+      , Asic.Operation.Inspect_detail
+          { run; domain = "timing"; stage = target.stage; source_digest; row_id } )
+    | operation -> None, operation
+  in
+  Option.iter analysis ~f:Asic_timing_analysis.validate_target;
   let enqueue ~key ~kind f =
     schedule t p ~key ~kind ~execution:false (fun task -> f (Ivar.read task.cancel))
   in
@@ -1948,10 +2078,15 @@ let handle_operation t p operation =
   in
   match operation with
   | Asic.Operation.Get -> Deferred.unit
+  | Inspect_analysis _ | Inspect_analysis_detail _ -> assert false
   | Inspect { run; domain; stage; refresh } ->
     ignore (find_run p run : Asic.Run.t);
     Inspection.validate_selection ~domain ~stage;
-    let key = Inspection_wire.index_key ~run ~domain ~stage in
+    let key =
+      match analysis with
+      | None -> Inspection_wire.index_key ~run ~domain ~stage
+      | Some target -> Inspection_wire.analysis_index_key ~run ~target
+    in
     (match Hashtbl.find p.inspection_refreshes key with
      | Some requested -> if refresh then requested := true
      | None ->
@@ -1975,6 +2110,7 @@ let handle_operation t p operation =
                   t
                   p
                   (Ivar.read task.cancel)
+                  ~analysis
                   ~run
                   ~domain
                   ~stage
@@ -1994,42 +2130,47 @@ let handle_operation t p operation =
     schedule
       t
       p
-      ~key:(Inspection_wire.detail_key ~run ~domain ~stage ~source_digest ~row_id)
+      ~key:
+        (match analysis with
+         | None -> Inspection_wire.detail_key ~run ~domain ~stage ~source_digest ~row_id
+         | Some target ->
+           Inspection_wire.analysis_detail_key ~run ~target ~source_digest ~row_id)
       ~kind:"inspection-detail"
       ~execution:false
       (fun task ->
-         task.pending
-         <- { task.pending with run = Some run; activity = Evidence_cache_lookup };
-         let cancel = Ivar.read task.cancel in
-         let%bind result =
-           Monitor.try_with (fun () ->
-             load_inspection_detail
-               t
-               p
-               cancel
-               ~run
-               ~domain
-               ~stage
-               ~source_digest
-               ~row_id
-               ~on_read:(fun () ->
-                 task.pending <- { task.pending with activity = Evidence_read }))
-         in
-         match result with
-         | Ok () -> Deferred.unit
-         | Error exn ->
-           let detail : Inspection_wire.Detail.t =
-             { run
-             ; domain
-             ; stage
-             ; source_digest
-             ; row_id
-             ; text = ""
-             ; error = Some (Exn.to_string exn)
-             }
-           in
-           publish_detail p detail;
-           raise exn);
+        task.pending
+        <- { task.pending with run = Some run; activity = Evidence_cache_lookup };
+        let cancel = Ivar.read task.cancel in
+        let%bind result =
+          Monitor.try_with (fun () ->
+            load_inspection_detail
+              t
+              p
+              cancel
+              ~analysis
+              ~run
+              ~domain
+              ~stage
+              ~source_digest
+              ~row_id
+              ~on_read:(fun () ->
+                task.pending <- { task.pending with activity = Evidence_read }))
+        in
+        match result with
+        | Ok () -> Deferred.unit
+        | Error exn ->
+          let detail : Inspection_wire.Detail.t =
+            { run
+            ; domain
+            ; stage
+            ; source_digest
+            ; row_id
+            ; text = ""
+            ; error = Some (Exn.to_string exn)
+            }
+          in
+          publish_detail p detail;
+          raise exn);
     Deferred.unit
   | Finalize { key; run; execution_file; acceptance } ->
     reserve_finalization t p ~key ~run ~execution_file ~acceptance
@@ -2218,7 +2359,13 @@ let handle_operation t p operation =
       let%map j = query ~max_bytes:(1024 * 1024) t p cancel invocation in
       Public.require (not (Deferred.is_determined cancel)) "ASIC discovery cancelled";
       let flows, catalog_default = Public.flow_catalog j in
-      p.flows <- flows;
+      p.flows
+      <- List.map flows ~f:(fun flow ->
+           { flow with
+             Asic.Flow.fresh_stage_endpoints =
+               List.filter flow.fresh_stage_endpoints ~f:(fun endpoint ->
+                 p.timing_stage || not (String.equal endpoint "timing"))
+           });
       p.catalog_default <- catalog_default);
     Deferred.unit
   | Describe flow ->
@@ -2236,13 +2383,36 @@ let handle_operation t p operation =
   | Plan selection ->
     p.desired_plan <- Some selection;
     p.preview <- None;
-    public_query
+    enqueue
       ~key:
         ("plan:"
          ^ Public.digest (Sexp.to_string_mach (Asic.Selection.sexp_of_t selection)))
       ~kind:"plan"
-      (invoke p (fun c ~root ~environment -> Adapter.plan c ~root ~environment selection))
-      (fun j ->
+      (fun cancel ->
+        let%bind () = check_provider t p cancel in
+        let%bind () =
+          if not (String.equal selection.endpoint "timing")
+          then Deferred.unit
+          else (
+            Public.require p.timing_stage "Provider does not advertise executable Timing";
+            let%map description =
+              query
+                t
+                p
+                cancel
+                (invoke p (fun c ~root ~environment ->
+                   Adapter.describe c ~root ~environment selection.flow))
+            in
+            Public.validate_physical_selection selection description)
+        in
+        let%map j =
+          query
+            t
+            p
+            cancel
+            (invoke p (fun c ~root ~environment ->
+               Adapter.plan c ~root ~environment selection))
+        in
         let preview = Public.preview selection j in
         if Option.equal Asic.Selection.equal p.desired_plan (Some selection)
         then p.preview <- Some preview);
@@ -2335,6 +2505,9 @@ let handle_operation t p operation =
         let deadline = Clock.after (Time_float.Span.of_sec 1800.) in
         let cancel = Deferred.any [ Ivar.read task.cancel; deadline ] in
         let%bind () = check_provider t p cancel in
+        Public.require
+          (p.timing_stage || not (String.equal preview.selection.endpoint "timing"))
+          "Provider does not advertise executable Timing";
         let%bind () =
           if String.equal preview.selection.endpoint "synthesis"
           then Deferred.unit

@@ -3,7 +3,7 @@ id: WB-024
 title: Context-link wording and semantic emphasis
 category: presentation
 feature_sets: [FS5]
-status: delivered
+status: closed
 kind: defect
 priority: P2
 severity: S3

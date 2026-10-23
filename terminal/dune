@@ -33,6 +33,7 @@
   host_view
   evidence_session_test
   execution_duration_test
+  timing_analysis_test
   plain_rpc
   launch_preferences
   presentation_preferences
@@ -78,12 +79,17 @@
  (modules waveform_probe)
  (libraries core terminal_presentation hardcaml hardcaml_waveterm)
  (preprocess
-   (pps ppx_jane)))
+  (pps ppx_jane)))
 
 (executable
  (name navigation_hydration_probe)
  (modules navigation_hydration_probe)
- (libraries core async terminal_presentation hardcaml_workbench_protocol hardcaml_workbench_workspaces)
+ (libraries
+  core
+  async
+  terminal_presentation
+  hardcaml_workbench_protocol
+  hardcaml_workbench_workspaces)
  (preprocess
   (pps ppx_jane)))
 
@@ -91,7 +97,10 @@
  (alias runtest)
  (deps test_navigation_hydration_restart.py)
  (action
-  (run python3 %{dep:test_navigation_hydration_restart.py} %{exe:navigation_hydration_probe.exe})))
+  (run
+   python3
+   %{dep:test_navigation_hydration_restart.py}
+   %{exe:navigation_hydration_probe.exe})))
 
 (rule
  (alias runtest)

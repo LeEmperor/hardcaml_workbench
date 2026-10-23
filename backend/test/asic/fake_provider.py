@@ -53,7 +53,8 @@ elif args[:1] in [['lifecycle-wait'], ['lifecycle-output'], ['lifecycle-malforme
             sys.stdout.flush()
     time.sleep(30)
 elif args == ['--version', '--json']:
-    emit(dict(cli_contract=dict(version=4, capabilities=dict(namedflow1=True))))
+    emit(dict(cli_contract=dict(version=4, capabilities=dict(
+        namedflow1=True, timing_stage1=os.path.exists('timing-capability')))))
 elif args[:2] == ['flow', 'list']:
     if os.path.exists('fail-discovery'):
         sys.exit(1)
@@ -62,16 +63,23 @@ elif args[:2] == ['flow', 'list']:
         value = json.load(src)
     if os.path.exists('invalid-discovery'):
         value['declaration']['default']['profile'] = 'missing'
+    if os.path.exists('timing-catalog'):
+        for entry in value['declaration']['entries']:
+            entry['methodology']['endpoints'].insert(-1, 'timing')
     emit(value)
 elif args[:2] == ['flow', 'describe']:
     emit(envelope('flow-describe', entry=dict(
-        methodology=dict(id=option('--flow'), endpoints=['synthesis', 'signoff']),
+        methodology=dict(id=option('--flow'), endpoints=(
+            ['synthesis', 'timing', 'signoff'] if os.path.exists('timing-catalog')
+            else ['synthesis', 'signoff'])),
         profiles=[dict(id='balanced'), dict(id='synth_delay')]),
         capabilities=dict(stage_selection='complete-prefix-through-declared-endpoint')))
 elif args[:2] == ['flow', 'plan']:
     emit(plan())
 elif args[:2] == ['flow', 'run']:
     profile = option('--profile')
+    if option('--endpoint') == 'timing':
+        profile += '-timing'
     attempt = os.path.join(root, 'attempt-' + profile)
     os.makedirs(attempt, exist_ok=True)
     stream = 'stream-' + profile
@@ -97,6 +105,25 @@ elif args[:2] == ['flow', 'run']:
     time.sleep(0.6 if not os.path.exists('hold') else 30)
     with open(os.path.join(attempt, 'done'), 'w') as out:
         out.write('done')
+    if option('--endpoint') == 'timing':
+        stages = ['synthesis', 'floorplan', 'placement', 'cts', 'routing', 'timing']
+        execution = dict(attempt_id=stream, status='completed', exit_code=0,
+                         plan=dict(schema_version=4, initial_boundary=None, stages=stages),
+                         artifacts=[], occurrences=[dict(
+                             occurrence_id=stream + '/implementation.' + stage,
+                             action_key='implementation.' + stage, status='completed',
+                             exit_code=0, duration_seconds=1.0, best_effort=False,
+                             verdict=None) for stage in stages])
+        method = envelope('historical-methodology', state='recorded',
+                          plan_identity='a' * 64, bundle_identity='b' * 64,
+                          reference=dict(attempt_id=stream))
+        with open(os.path.join(attempt, 'execution.json'), 'w') as out:
+            json.dump(execution, out)
+        with open(os.path.join(attempt, 'observation.json'), 'w') as out:
+            json.dump(envelope('stage-observation', 2, stream_id=stream, cursor=0,
+                               writer_active=False, observation_status='final',
+                               state=dict(execution, outcome=dict(status='completed', exit_code=0)),
+                               methodology=method, execution_file=os.path.join(attempt, 'execution.json')), out)
     emit(envelope('stage-observation', event='observation_terminal',
                   execution_file=os.path.join(attempt, 'execution.json')))
 elif args[:2] == ['observation', 'read-updates']:
@@ -163,6 +190,15 @@ elif args[:1] == ['report']:
     attempt = os.path.dirname(args[1])
     profile = os.path.basename(attempt).removeprefix('attempt-')
     stream = 'stream-' + profile
+    if profile.endswith('-timing'):
+        with open(args[1]) as src:
+            execution = json.load(src)
+        emit(envelope('report', execution=execution, checkpoints=[],
+                      completion=dict(physical='partial'), acceptance='not_evaluated',
+                      methodology=envelope('historical-methodology', state='recorded',
+                          plan_identity='a' * 64, bundle_identity='b' * 64,
+                          reference=dict(attempt_id=stream))))
+        sys.exit(0)
     count = 50 if profile == 'balanced' else 73
     if os.path.exists('revision'):
         count += 1
@@ -170,9 +206,12 @@ elif args[:1] == ['report']:
     reference = dict(path=attempt, boundary=boundary, identity=str(count))
     references = [reference]
     if profile == 'terminal':
+        stages = ['synthesis', 'floorplan', 'placement', 'cts', 'routing', 'signoff']
+        if os.path.exists('seven-stage-finalization'):
+            stages.insert(-1, 'timing')
         references = [dict(path=os.path.join(attempt, stage) if stage != 'signoff' else attempt,
                            boundary=stage, identity=str(count))
-                      for stage in ['synthesis', 'floorplan', 'placement', 'cts', 'routing', 'signoff']]
+                      for stage in stages]
     methodology_reference = dict(attempt_id=stream)
     if profile == 'terminal':
         snapshot_path = os.path.join(attempt, 'methodology-plan.json')
@@ -194,7 +233,7 @@ elif args[:1] == ['report']:
                                            status='failed', exit_code=2)])
     if profile == 'terminal':
         stages = [ref['boundary'] for ref in references]
-        execution.update(exit_code=0, plan=dict(schema_version=3, initial_boundary=None, stages=stages),
+        execution.update(exit_code=0, plan=dict(schema_version=(4 if os.path.exists('seven-stage-finalization') else 3), initial_boundary=None, stages=stages),
                          occurrences=[dict(action_key='implementation.' + stage,
                                            occurrence_id=stream + '/implementation.' + stage,
                                            status='completed', exit_code=0) for stage in stages])

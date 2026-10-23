@@ -262,6 +262,7 @@ module%test Wb006_timestamp_presentation = struct
     ; diagnostics = []
     ; truncated = false
     ; cached_unverified = true
+    ; analysis = None
     ; times
     }
   ;;
