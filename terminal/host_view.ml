@@ -291,11 +291,30 @@ let fit_label ~width text =
     E.text (E.clip ~width:(width - cell_width tail - 1) (E.plain text)) ^ "~" ^ tail)
 ;;
 
-let run_selector_row ~width ~status_width ~cursor ~active run status =
+let run_selector_row
+  ?(string_compression = true)
+  ~width
+  ~status_width
+  ~cursor
+  ~active
+  run
+  status
+  =
   let marker = (if cursor then ">" else " ") ^ if active then "*" else " " in
   let status = E.text (E.clip ~width:status_width (E.plain status)) in
   let label_width = Int.max 0 (width - 3 - status_width - 1) in
-  let label = fit_label ~width:label_width (run_label run) in
+  let identity =
+    Backend_id.to_string run.Run_ref.backend
+    ^ "/"
+    ^ Presentation.identifier ~compress:string_compression run.id
+  in
+  let identity =
+    match run.label with
+    | Some label when (not (String.equal label run.id)) && not (String.is_empty label) ->
+      label ^ " · " ^ identity
+    | _ -> identity
+  in
+  let label = fit_label ~width:label_width identity in
   marker
   ^ " "
   ^ label
@@ -397,6 +416,7 @@ let stopped_observation data run =
 let observation_qualifier = "Observation stopped; stage state unconfirmed"
 
 let run_selector_view
+  ?(string_compression = true)
   ?indicator_frames
   ?time
   ?time_width
@@ -420,7 +440,16 @@ let run_selector_view
     else ""
   in
   let text_width = Int.max 0 (width - View.width icon - cell_width time) in
-  let row = run_selector_row ~width:text_width ~status_width ~cursor ~active run status in
+  let row =
+    run_selector_row
+      ~string_compression
+      ~width:text_width
+      ~status_width
+      ~cursor
+      ~active
+      run
+      status
+  in
   let identity_width = Int.max 0 (text_width - status_width) in
   let identity = E.text (E.clip ~width:identity_width (E.plain row)) in
   let status = E.text (E.clip ~width:status_width (E.plain status)) in
@@ -705,7 +734,10 @@ let utility_rows ?(now = Time_ns.now ()) host data tile =
            @ [ Overview_tiles.analysis_row ~run ~selected:false (data.summary run) ]))
     | "live-status" when H.compact_summary host tile ->
       Some
-        [ Overview_tiles.row "Connection" data.status
+        [ Overview_tiles.row
+            ~role:(Overview_tiles.connection_role data.status)
+            "Connection"
+            data.status
         ; Overview_tiles.row
             "Project"
             (Option.value_map data.project ~default:"none" ~f:(fun p -> p.Project.name))
@@ -714,6 +746,7 @@ let utility_rows ?(now = Time_ns.now ()) host data tile =
     | "live-status" ->
       Some
         (Overview_tiles.status_rows
+           ~string_compression:(H.policy host tile).string_compression
            ~snapshot:registry
            ~active_workspace:host.active
            ~project:data.project
@@ -1481,6 +1514,7 @@ let rows host data tile ~width ~height =
     |> Fn.flip List.take (Int.max 0 available)
     |> List.map ~f:(fun (run, label) ->
       run_selector_row
+        ~string_compression:(H.policy host tile).string_compression
         ~width
         ~status_width
         ~cursor:(Option.equal String.equal selected (Some (run_label run)))
@@ -1541,7 +1575,13 @@ let rows host data tile ~width ~height =
        | kind when Option.is_some (Timing_workspace.pane kind) ->
          (match Timing_workspace.pane kind, H.timing host tile with
           | Some pane, Some view ->
-            Timing_workspace.rows ~pane ~scroll:local.scroll ~width ~height view
+            Timing_workspace.rows
+              ~presentation:(H.policy host tile)
+              ~pane
+              ~scroll:local.scroll
+              ~width
+              ~height
+              view
           | _ ->
             [ "No matching Timing investigation"
             ; "Use Inspect timing paths for this exact run"
@@ -1656,10 +1696,12 @@ let timing_line_role : Timing_workspace.line_role -> Role.t = function
   | Metadata -> Muted
   | Pending -> Warning
   | Failure -> Failure
+  | Success -> Success
+  | Source -> Focus
 ;;
 
-let timing_semantic_prefix ~pane ~width view =
-  Timing_workspace.semantic_prefix ~pane ~width view
+let timing_semantic_prefix ?(presentation = T.defaults) ~pane ~width view =
+  Timing_workspace.semantic_prefix ~presentation ~pane ~width view
   |> List.concat_map ~f:(fun (role, line) ->
     Artifact_view.wrap ~width (Artifact_view.safe line)
     |> List.map ~f:(fun line -> timing_line_role role, line))
@@ -1667,8 +1709,16 @@ let timing_semantic_prefix ~pane ~width view =
 
 (* Use typed fields and selection, never keywords found in producer report text. Paths
    retains C's four-row viewport budget; tiny panes give selection priority. *)
-let timing_body appearance ~pane ~scroll ~width ~height (view : Timing_workspace.t) =
-  let source = Timing_workspace.rows ~pane ~scroll ~width ~height view in
+let timing_body
+  ?(presentation = T.defaults)
+  appearance
+  ~pane
+  ~scroll
+  ~width
+  ~height
+  (view : Timing_workspace.t)
+  =
+  let source = Timing_workspace.rows ~presentation ~pane ~scroll ~width ~height view in
   let text role value =
     View.text ~attrs:(Role.attrs appearance role) (Artifact_view.safe value)
   in
@@ -1733,7 +1783,7 @@ let timing_body appearance ~pane ~scroll ~width ~height (view : Timing_workspace
       in
       let numeric =
         Option.value_map row.value ~default:"—" ~f:(fun value ->
-          if Float.is_finite value then sprintf "%.6g" value else "invalid")
+          Presentation.decimal ~places:presentation.decimal_places value)
         ^ Option.value_map row.unit_ ~default:"" ~f:(fun unit_ -> " " ^ unit_)
       in
       let suffix = numeric ^ " · " ^ row.status in
@@ -1758,13 +1808,7 @@ let timing_body appearance ~pane ~scroll ~width ~height (view : Timing_workspace
     in
     let body =
       if List.is_empty page
-      then
-        [ text
-            Warning
-            (if Option.is_none view.index
-             then observation
-             else "No paths match the current filters")
-        ]
+      then [ text Warning (Timing_workspace.empty_paths_message view) ]
       else List.map page ~f:path
     in
     let error = Option.first_some view.error view.pending_error in
@@ -1777,13 +1821,28 @@ let timing_body appearance ~pane ~scroll ~width ~height (view : Timing_workspace
   | Detail | Context ->
     (* Scroll offsets are those of C's actual wrapped output. Only the canonical semantic
        prefix receives role styling; provider payload is always neutral. *)
-    let full = Timing_workspace.rows ~pane ~scroll:0 ~width ~height:Int.max_value view in
+    let full =
+      Timing_workspace.rows
+        ~presentation
+        ~pane
+        ~scroll:0
+        ~width
+        ~height:Int.max_value
+        view
+    in
     let start = Int.min scroll (Int.max 0 (List.length full - height)) in
-    let prefix = timing_semantic_prefix ~pane ~width view |> Array.of_list in
+    let prefix =
+      timing_semantic_prefix ~presentation ~pane ~width view |> Array.of_list
+    in
     List.mapi source ~f:(fun i line ->
       let offset = start + i in
       if offset < Array.length prefix && String.equal (snd prefix.(offset)) line
-      then text (fst prefix.(offset)) line
+      then (
+        let role = fst prefix.(offset) in
+        match role, String.lsplit2 line ~on:':' with
+        | Focus, Some (label, value) ->
+          View.hcat [ text Muted (label ^ ":"); text Focus value ]
+        | _ -> text role line)
       else text Foreground line)
     |> View.vcat
     |> box ~width ~height
@@ -1985,7 +2044,13 @@ let tile_view
           ~width:body_width
           ~height:1
           [ "Run: "
-            ^ Option.value_map (tile_run host tile) ~default:"none selected" ~f:run_label
+            ^ Option.value_map
+                (tile_run host tile)
+                ~default:"none selected"
+                ~f:(fun run ->
+                  Backend_id.to_string run.backend
+                  ^ "/"
+                  ^ Presentation.identifier ~compress:policy.string_compression run.id)
           ]
       ]
     else []
@@ -2063,6 +2128,7 @@ let tile_view
             |> Fn.flip List.take (Int.max 0 available)
             |> List.map ~f:(fun (run, status) ->
               run_selector_view
+                ~string_compression:policy.string_compression
                 ~time:(time run)
                 ~time_width
                 ?indicator_frames:
@@ -2082,6 +2148,20 @@ let tile_view
             |> box ~width:body_width ~height:body_height
             |> colored appearance Foreground)
        | Some rows when local.utility_detail ->
+         let rows =
+           if String.equal tile.kind "live-status"
+           then
+             List.map rows ~f:(fun row ->
+               { row with
+                 Overview_tiles.details =
+                   List.map
+                     row.Overview_tiles.details
+                     ~f:
+                       (Presentation.identity_metadata_line
+                          ~compress:policy.string_compression)
+               })
+           else rows
+         in
          Overview_tiles.inspection_lines rows
          |> List.concat_map ~f:(wrap_cells ~width:body_width)
          |> Fn.flip List.drop local.scroll
@@ -2336,6 +2416,7 @@ let tile_view
       match Timing_workspace.pane tile.kind, H.timing host tile with
       | Some pane, Some view ->
         timing_body
+          ~presentation:policy
           appearance
           ~pane
           ~scroll:local.scroll
@@ -4910,7 +4991,7 @@ let%test_unit "Timing panes render typed selection and exact scoped detail with 
   and dg = cell detail
   and cg = cell context in
   assert (pg.x < dg.x && dg.x = cg.x && dg.y < cg.y);
-  assert (dg.width > pg.width && dg.height > cg.height);
+  assert (Int.abs (dg.width - pg.width) <= 1 && dg.height > cg.height);
   List.iter [ paths; detail; context ] ~f:(fun tile ->
     let g = cell tile in
     let panel = panel_geometry host tile ~width:g.width ~height:g.height in
@@ -4969,7 +5050,7 @@ let%test_unit "Timing panes render typed selection and exact scoped detail with 
   assert (
     String.is_substring
       (tile_view host data detail ~width:70 ~height:14 |> plain_text)
-      ~substring:"Slack: 28 ns · violated");
+      ~substring:"Slack: 28.000 ns · violated");
   assert (
     String.is_substring
       (tile_view host data context ~width:70 ~height:14 |> plain_text)
@@ -4981,7 +5062,7 @@ let%test_unit "Timing panes render typed selection and exact scoped detail with 
   assert (
     String.is_substring
       (tile_view host data context ~width:70 ~height:14 |> plain_text)
-      ~substring:"exact-source-digest");
+      ~substring:"exac…gest");
   List.iter [ Timing_workspace.Detail; Context ] ~f:(fun pane ->
     List.iter
       [ 12, 3; 40, 7; 70, 14 ]
@@ -5000,7 +5081,7 @@ let%test_unit "Timing panes render typed selection and exact scoped detail with 
   assert (
     List.exists prefix ~f:(fun (role, text) ->
       match role with
-      | Metric -> String.equal text "Slack: 28 ns · violated"
+      | Metric -> String.equal text "Slack: 28.000 ns · violated"
       | _ -> false));
   let prefix = timing_semantic_prefix ~pane:Context ~width:70 state in
   assert (
@@ -5008,6 +5089,40 @@ let%test_unit "Timing panes render typed selection and exact scoped detail with 
       match role with
       | Warning -> String.equal text "CACHED UNVERIFIED"
       | _ -> false));
+  let verified = { state with index = Some { index with cached_unverified = false } } in
+  let verified_prefix = timing_semantic_prefix ~pane:Context ~width:70 verified in
+  let verified_image =
+    timing_body host.appearance ~pane:Context ~scroll:0 ~width:70 ~height:40 verified
+  in
+  let check_token ~line ~x role token =
+    let y =
+      List.findi_exn verified_prefix ~f:(fun _ (_, text) -> String.equal text line) |> fst
+    in
+    let ansi view =
+      let buffer = Buffer.create 128 in
+      Notty.Render.to_buffer
+        buffer
+        Notty.Cap.ansi
+        (0, 0)
+        (cell_width token, 1)
+        (View.Private.notty_image view);
+      Buffer.contents buffer
+    in
+    let actual =
+      View.crop ~l:x ~t:y verified_image |> box ~width:(cell_width token) ~height:1
+    in
+    assert (
+      String.equal
+        (ansi actual)
+        (ansi (View.text ~attrs:(Role.attrs host.appearance role) token)))
+  in
+  check_token
+    ~line:"Verified cached observation"
+    ~x:0
+    Success
+    "Verified cached observation";
+  check_token ~line:"Source digest: exac…gest" ~x:0 Muted "Source digest:";
+  check_token ~line:"Source digest: exac…gest" ~x:14 Focus " exac…gest";
   List.iter [ Timing_workspace.Detail; Context ] ~f:(fun pane ->
     let typed = timing_semantic_prefix ~pane ~width:70 state |> List.map ~f:snd in
     let actual =
@@ -5071,7 +5186,11 @@ let%test_unit "Timing panes render typed selection and exact scoped detail with 
   in
   assert (String.equal (ansi scrolled) (ansi expected));
   let full_context =
-    timing_semantic_prefix ~pane:Context ~width:40 loaded
+    timing_semantic_prefix
+      ~presentation:{ T.defaults with string_compression = false }
+      ~pane:Context
+      ~width:40
+      loaded
     |> List.map ~f:snd
     |> String.concat
   in
@@ -5307,18 +5426,71 @@ let%test_unit "every hint area is restorable by keyboard while all are hidden" =
   assert ((not dismissed.main_hints) && not dismissed.palette_hints)
 ;;
 
+let%test_unit "Timing Session connected uses shared success theme attributes" =
+  let host, data, find = refinement_fixture P.Timing.definition in
+  let tile = find "live-status" in
+  let host =
+    { host with appearance = { host.appearance with density = Compact; icons = None_ } }
+  in
+  let host =
+    H.set_local
+      host
+      tile.id
+      { (H.local host tile.id) with
+        presentation =
+          { T.inherit_ with
+            header = Some false
+          ; frame = Some false
+          ; padding = Some 0
+          ; hints = Some false
+          }
+      }
+  in
+  let image =
+    tile_view host { data with status = "Connected" } tile ~width:60 ~height:7
+  in
+  let ansi image =
+    let buffer = Buffer.create 128 in
+    Notty.Render.to_buffer buffer Notty.Cap.ansi (0, 0) (9, 1) image;
+    Buffer.contents buffer
+  in
+  let actual =
+    View.crop ~l:12 image |> box ~width:9 ~height:1 |> View.Private.notty_image
+  in
+  let expected =
+    View.text ~attrs:(Role.attrs host.appearance Success) "Connected"
+    |> View.Private.notty_image
+  in
+  assert (String.equal (ansi actual) (ansi expected));
+  assert (Overview_tiles.Role.equal (Overview_tiles.connection_role "Connected") Success)
+;;
+
 let%test_unit "selector width budget preserves useful IDs and aligns compact status" =
   let run =
     { Fs0_fixture.run_a with id = "long-distinguishable-selected-run-abcdefghijklmnop" }
   in
   let wide =
-    run_selector_row ~width:90 ~status_width:9 ~cursor:true ~active:true run "completed"
+    run_selector_row
+      ~string_compression:false
+      ~width:90
+      ~status_width:9
+      ~cursor:true
+      ~active:true
+      run
+      "completed"
   in
   assert (String.is_substring wide ~substring:(run_label run));
   assert (String.is_prefix wide ~prefix:">* ");
   assert (cell_width wide = 90);
   let narrow =
-    run_selector_row ~width:36 ~status_width:9 ~cursor:true ~active:false run "completed"
+    run_selector_row
+      ~string_compression:false
+      ~width:36
+      ~status_width:9
+      ~cursor:true
+      ~active:false
+      run
+      "completed"
   in
   assert (cell_width narrow = 36);
   assert (String.is_suffix narrow ~suffix:" completed");
@@ -5457,6 +5629,7 @@ let%test_unit "actual utility and selector token images carry independent attrib
         and status_width = cell_width status in
         let image =
           run_selector_view
+            ~string_compression:false
             appearance
             ~width
             ~status_width

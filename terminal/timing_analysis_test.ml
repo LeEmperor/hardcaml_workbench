@@ -4,6 +4,33 @@ open Bonsai_term
 module O = Overview_tiles
 module H = Workspace_host
 
+let%test_unit "generic Timing chooses observed stage when no analysis is published" =
+  let asic = Fs0_fixture.snapshot in
+  let run = Fs0_fixture.run_a in
+  let legacy, analysis = O.timing_inspection_target ~asic:(Some asic) ~run in
+  assert (String.equal legacy "signoff" && Option.is_none analysis);
+  let runs =
+    List.map asic.runs ~f:(fun r ->
+      if Run_ref.equal r.run run
+      then
+        { r with
+          stages =
+            [ { Asic.Stage.id = "timing"
+              ; name = "Timing"
+              ; status = Not_requested
+              ; requested = false
+              ; reason = None
+              ; action = None
+              ; execution_timing = None
+              }
+            ]
+        }
+      else r)
+  in
+  let stage, analysis = O.timing_inspection_target ~asic:(Some { asic with runs }) ~run in
+  assert (String.equal stage "timing" && Option.is_none analysis)
+;;
+
 let%test_unit "asynchronous unsupported Timing feedback survives registry polls before \
                draw"
   =
@@ -107,6 +134,137 @@ let fixture () =
     }
   in
   host, data, find, summary
+;;
+
+let%test_unit "hidden builtin follows exact resolved analysis without navigation or pin \
+               edits"
+  =
+  let module W = Workspace in
+  let initial = W.initial ~session_id:(W.Session_id.of_string "hidden-builtin") in
+  let registry =
+    W.apply
+      initial
+      (Hardcaml_workbench_workspaces.Presets.startup_operation initial |> Option.value_exn)
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let mutate registry mutation =
+    W.apply
+      registry
+      (Mutate { expected_revision = registry.W.Snapshot.revision; mutation })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let main = List.hd_exn registry.workspaces in
+  let choose registry run =
+    let c = W.context registry main.context in
+    mutate
+      registry
+      (Select_run
+         { workspace = main.id
+         ; context = c.id
+         ; expected_selection_revision = c.selection_revision
+         ; run = Some run
+         })
+  in
+  let registry = choose registry Fs0_fixture.run_a in
+  let host = H.receive H.empty registry in
+  let workspace =
+    H.builtin_timing_in_window registry ~window:main.window |> Option.value_exn
+  in
+  let tile =
+    List.find_exn registry.tiles ~f:(fun tile ->
+      W.Workspace_id.equal tile.workspace workspace.id
+      && String.equal tile.kind "timing-paths")
+  in
+  let target =
+    { target with stage = "timing"; execution_file = Some "/exact/frozen-source" }
+  in
+  let snapshot =
+    { Fs0_fixture.snapshot with
+      summaries =
+        [ { (Fs0_fixture.summary Fs0_fixture.run_a 1 []) with
+            timing_analysis = Some { analysis with target }
+          }
+        ]
+    }
+  in
+  let prepared = H.reconcile_builtin_timing host (Some snapshot) in
+  assert (Option.equal W.Snapshot.equal prepared.registry host.registry);
+  assert (Option.equal W.Workspace_id.equal prepared.active host.active);
+  assert (Option.equal W.Tile_id.equal prepared.focus host.focus);
+  let view = H.timing prepared tile |> Option.value_exn in
+  assert (String.equal view.stage "timing");
+  assert (Option.equal Asic_inspection.Analysis_target.equal view.analysis (Some target));
+  let legacy =
+    H.set_timing
+      prepared
+      tile
+      (Timing_workspace.create ~generation:10 ~run:Fs0_fixture.run_a ~stage:"signoff")
+  in
+  let recovered = H.reconcile_builtin_timing legacy (Some snapshot) in
+  assert (String.equal (Option.value_exn (H.timing recovered tile)).stage "timing");
+  let prepared =
+    H.set_timing prepared tile { view with filter = "keep"; selected = Some "old-row" }
+  in
+  let again = H.reconcile_builtin_timing prepared (Some snapshot) in
+  assert (String.equal (Option.value_exn (H.timing again tile)).filter "keep");
+  let target2 = { target with source_digest = String.make 64 'c' } in
+  let snapshot2 =
+    { snapshot with
+      summaries =
+        List.map snapshot.summaries ~f:(fun s ->
+          { s with timing_analysis = Some { analysis with target = target2 } })
+    }
+  in
+  let changed = H.reconcile_builtin_timing again (Some snapshot2) in
+  let view2 = H.timing changed tile |> Option.value_exn in
+  assert (Option.is_none view2.selected && String.is_empty view2.filter);
+  assert (view2.generation > view.generation);
+  let switched_registry = choose registry Fs0_fixture.run_b in
+  let switched =
+    H.reconcile_builtin_timing (H.receive changed switched_registry) (Some snapshot)
+  in
+  let switched_view = H.timing switched tile |> Option.value_exn in
+  assert (Run_ref.equal switched_view.run Fs0_fixture.run_b);
+  assert (
+    String.equal switched_view.stage "signoff" && Option.is_none switched_view.analysis);
+  let pinned_registry =
+    mutate
+      switched_registry
+      (Set_tile_binding { tile = tile.id; binding = Pin_run Fs0_fixture.run_a })
+  in
+  let pinned =
+    H.reconcile_builtin_timing (H.receive switched pinned_registry) (Some snapshot)
+  in
+  assert (Option.equal W.Snapshot.equal pinned.registry (Some pinned_registry));
+  assert (
+    Option.is_none
+      (H.matching_timing ~workspace:workspace.id pinned_registry ~run:Fs0_fixture.run_b));
+  assert (
+    Option.is_none
+      (H.matching_timing ~workspace:workspace.id pinned_registry ~run:Fs0_fixture.run_a))
+;;
+
+let%test_unit "generic Timing captures complete authoritative identity including legacy" =
+  let _, data, _, summary = fixture () in
+  let stage, captured = O.timing_inspection_target ~asic:data.asic ~run:summary.run in
+  assert (String.equal stage "signoff");
+  assert (Option.equal Asic_inspection.Analysis_target.equal captured (Some target));
+  let target =
+    { target with stage = "timing"; execution_file = Some "/frozen/timing-source" }
+  in
+  let asic = Option.value_exn data.asic in
+  let summaries = [ { summary with timing_analysis = Some { analysis with target } } ] in
+  let stage, captured =
+    O.timing_inspection_target ~asic:(Some { asic with summaries }) ~run:summary.run
+  in
+  assert (String.equal stage "timing");
+  assert (Option.equal Asic_inspection.Analysis_target.equal captured (Some target));
+  let _, other =
+    O.timing_inspection_target ~asic:(Some { asic with summaries }) ~run:Fs0_fixture.run_b
+  in
+  assert (Option.is_none other)
 ;;
 
 let executable_fixture status =

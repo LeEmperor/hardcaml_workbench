@@ -6,6 +6,24 @@ where its status and linked acceptance record explicitly say so.
 FS0/FS1 delivered scope and the accepted FS2 milestone remain closed. FS3 adoption
 and native icons/spinners are delivered foundations for several enhancements below.
 
+**Timing delivery reconciliation:** [WB-069](evidence/WB-069-timing-checklist-stage.md)
+records the executable Timing stage and subsequent precision/compression/colors,
+built-in navigation, guarded separate/close controls and background-index loading
+with explicit-only mode. Implementation and automated acceptance are delivered;
+owner acceptance is not inferred. [Controls and receipts](../timing_workspace_usability.md).
+
+- [WB-009](evidence/WB-009-timing-coherency.md): **partial**. The actual a023 wrong-stage
+  palette defect is diagnosed/fixed; the original unspecified report still needs
+  identification or owner confirmation.
+- [WB-071](workspaces/WB-071-workspace-order-synthesis.md): **partial**. Timing catalog
+  removal, four-workspace order and ID/pin-preserving saved migration are delivered;
+  dedicated Synthesis workspace and its restore/export coverage remain open.
+- [WB-073](presentation/WB-073-identifier-compression.md): **partial**. Persistent
+  per-tile compression is delivered for Timing/Session identities; global/workspace
+  runtime controls, full original Testing coverage and collision handling remain open.
+- [WB-048](presentation/WB-048-presentation-persistence.md): original scope remains
+  **closed**; its notes now describe schema-4/5 precision/compression/loading extensions.
+
 **Current delivery update:** WB-032 catalog and WB-034 genuine FIFO adoption are
 implemented and automatically verified. WB-063's cooperative Testing implementation
 is verified and owner-accepted following the reconnect and Attempts-pane fixes. See

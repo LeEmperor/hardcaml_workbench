@@ -169,7 +169,8 @@ class Terminal:
         self.master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', height, width, 0, 0))
         self.process = subprocess.Popen(demo.switch_command([args.client, '--connect', url,
-            '--project-root', base / 'project', '--environment', 'opam:' + demo.switch_name()]),
+            '--project-root', base / 'project', '--environment', 'opam:' + demo.switch_name()] +
+            (['--timing-preload', args.timing_preload] if getattr(args, 'timing_preload', None) else [])),
             stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
             env=dict(os.environ, TERM='xterm-256color', HOME=str(base / 'home'),
                      OPAMROOT=os.environ.get('OPAMROOT', str(Path.home() / '.opam')),

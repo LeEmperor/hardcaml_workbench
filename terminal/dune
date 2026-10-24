@@ -23,6 +23,7 @@
   inspection_view
   timing_workspace
   timing_demand
+  timing_preload
   presentation
   state
   hierarchy_view
@@ -59,6 +60,7 @@
   bonsai_term
   notty-community
   cryptokit
+  yojson
   hardcaml
   hardcaml_waveterm)
  (preprocess

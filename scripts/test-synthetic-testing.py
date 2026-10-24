@@ -343,8 +343,8 @@ def native(base, args):
                for p in starter_mappings] == expected_instances and
               {field(p, 'workspace') for p in starter_mappings} ==
               {field(w, 'id') for w in field(layout, 'workspaces')},
-              'fresh seed initializes exactly the canonical three workspace instances and their provenance')
-        for identity in ('overview', 'timing', 'testing'):
+               'fresh seed initializes exactly the canonical four workspace instances and their provenance')
+        for identity in ('overview', 'testing', 'waveforms', 'timing'):
             workspaces = [w for w in field(layout, 'workspaces') if field(w, 'preset') == [identity]]
             check(len(workspaces) == 1, 'one stable ' + identity + ' workspace')
             definition = next(d for d in field(presets.config, 'definitions')

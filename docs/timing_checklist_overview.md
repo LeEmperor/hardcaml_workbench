@@ -44,11 +44,13 @@ execution. Unsupported providers show an explicit explanation instead of silentl
 ignoring the key. Ordinary stage preparation and launch semantics remain unchanged.
 
 Both inspection entry points capture the resolved run/pin, attempt, analysis and
-source digest. An investigation is reused only for the same captured target. If
-evidence changes, a new analysis can open separately; an old investigation does
-not silently switch reports. Refresh of a changed/missing captured source fails
-explicitly. Restored caches retain their exact identity and show cached-unverified
-until revalidated. A filter hiding all paths is distinct from unavailable evidence.
+source digest. Normal inspection now uses the built-in Timing workspace; its state
+tracks the selected source and clears incompatible path/detail state. Explicit
+separate investigations retain their captured source and reject replacement.
+Restored caches retain exact identity and show cached-unverified until revalidated.
+A filter hiding all paths is distinct from unavailable evidence. See
+[Timing usability and preloading](timing_workspace_usability.md) for current routing,
+background index loading, compression and decimal settings.
 
 ## Provider availability
 

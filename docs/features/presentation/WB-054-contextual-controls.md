@@ -183,6 +183,12 @@ open findings; the review did not repeat the reported stale-script baseline comp
     failure.
 
 ## References
+- [Timing workspace navigation and close controls](../../timing_workspace_usability.md):
+  normal inspection now reuses built-in Timing; optional **Separate Timing
+  investigation** and guarded **Close separate investigation** are discoverable
+  palette actions. This is workspace lifecycle, distinct from closing an inspector.
+  Native repeat/source-change, conflicting-pin and separate/close tests passed;
+  this does not imply owner acceptance of the original contextual-controls ticket.
 - [Frontend composition](../../frontend_composition.md)
 - [Investigation contract](../../fs1_investigation.md)
 - [Simulation contract](../../fs2_simulation_contract.md)

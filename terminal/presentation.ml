@@ -10,6 +10,155 @@ module Log_fetch = struct
   [@@deriving equal, sexp]
 end
 
+(* Display only: never feed these strings back into evidence or numeric ordering. *)
+let decimal ~places value =
+  let places = Int.max 0 (Int.min 9 places) in
+  if not (Float.is_finite value)
+  then Float.to_string value
+  else (
+    let scale = Float.(10. ** of_int places) in
+    let scaled = value *. scale in
+    let truncated =
+      if Float.is_finite scaled then Float.round_towards_zero scaled /. scale else value
+    in
+    (* Explicit sign preserves tiny negative violations, including at precision zero. *)
+    let text = sprintf "%.*f" places truncated in
+    if Float.(value < 0.) && not (String.is_prefix text ~prefix:"-")
+    then "-" ^ text
+    else text)
+;;
+
+let identifier ~compress value =
+  if not compress
+  then value
+  else (
+    let rec scalars offset acc =
+      if offset >= String.length value
+      then List.rev acc
+      else (
+        let decoded = Stdlib.String.get_utf_8_uchar value offset in
+        let length = Stdlib.Uchar.utf_decode_length decoded in
+        scalars (offset + length) (String.sub value ~pos:offset ~len:length :: acc))
+    in
+    let parts = scalars 0 [] in
+    if List.length parts > 12
+    then
+      String.concat (List.take parts 4)
+      ^ "…"
+      ^ String.concat (List.drop parts (List.length parts - 4))
+    else value)
+;;
+
+let source_path ~compress value =
+  if compress && String.contains value '/'
+  then (
+    let components = String.split value ~on:'/' in
+    let source =
+      List.find components ~f:(fun part ->
+        String.is_prefix part ~prefix:"execution-"
+        || String.is_prefix part ~prefix:"timing-"
+        || String.is_prefix part ~prefix:"attempt-")
+    in
+    Option.value_map source ~default:"…" ~f:(identifier ~compress)
+    ^ "/"
+    ^ Filename.basename value)
+  else value
+;;
+
+let source_metadata ~compress value =
+  if not compress
+  then value
+  else (
+    match Or_error.try_with (fun () -> Yojson.Safe.from_string value) with
+    | Error _ -> source_path ~compress value
+    | Ok json ->
+      let rec compact = function
+        | `String value -> `String (source_path ~compress value)
+        | `Assoc fields ->
+          `Assoc
+            (List.map fields ~f:(fun (key, value) ->
+               ( key
+               , match value with
+                 | `String text
+                   when String.is_substring key ~substring:"sha"
+                        || String.is_substring key ~substring:"digest" ->
+                   `String (identifier ~compress text)
+                 | _ -> compact value )))
+        | `List values -> `List (List.map values ~f:compact)
+        | value -> value
+      in
+      Yojson.Safe.to_string (compact json))
+;;
+
+(* Only provider source headers, never arbitrary technical body lines. *)
+let report_source_header ~compress line =
+  List.find_map
+    [ "Source: "; "Report: "; "Report source: "; "source: " ]
+    ~f:(fun prefix ->
+      Option.map (String.chop_prefix line ~prefix) ~f:(fun value ->
+        prefix ^ source_metadata ~compress value))
+  |> Option.value ~default:line
+;;
+
+let identity_metadata_line ~compress line =
+  match String.lsplit2 line ~on:':' with
+  | Some (label, value) ->
+    let value = String.strip value in
+    let shown =
+      match label with
+      | "Run"
+      | "Context"
+      | "Workspace"
+      | "Source digest"
+      | "Execution SHA256"
+      | "Analysis digest"
+      | "Attempt" -> identifier ~compress value
+      | "Execution" | "Execution file" | "Source" -> source_metadata ~compress value
+      | _ -> value
+    in
+    label ^ ": " ^ shown
+  | None -> line
+;;
+
+let%test_unit "display precision truncates toward zero, preserving violations and \
+               nonfinite values"
+  =
+  [%test_result: string] (decimal ~places:3 0.125029) ~expect:"0.125";
+  [%test_result: string] (decimal ~places:3 (-0.000029)) ~expect:"-0.000";
+  [%test_result: string] (decimal ~places:0 (-0.125029)) ~expect:"-0";
+  [%test_result: string] (decimal ~places:3 0.) ~expect:"0.000";
+  [%test_result: string] (decimal ~places:9 0.1250299879) ~expect:"0.125029987";
+  assert (
+    String.is_substring (String.lowercase (decimal ~places:3 Float.nan)) ~substring:"nan");
+  assert (
+    String.is_substring
+      (String.lowercase (decimal ~places:3 Float.infinity))
+      ~substring:"inf")
+;;
+
+let%test_unit "compact identity and structured sources are reversible display choices" =
+  let id = "a02325d9895a428aa7b90734314e4e4a" in
+  [%test_result: string] (identifier ~compress:true id) ~expect:"a023…4e4a";
+  [%test_result: string] (identifier ~compress:false id) ~expect:id;
+  [%test_result: string]
+    (identifier ~compress:true "界界界界abcdefgh界界界界")
+    ~expect:"界界界界…界界界界";
+  let path =
+    "/retained/timing-817177-2eeaceb51e3413c008ecd50516122412/reports/sta/max.rpt"
+  in
+  let json =
+    Yojson.Safe.to_string (`Assoc [ "path", `String path; "sha256", `String id ])
+  in
+  let compact = source_metadata ~compress:true json in
+  assert (String.is_substring compact ~substring:"max.rpt");
+  assert (String.is_substring compact ~substring:"a023…4e4a");
+  assert (not (String.is_substring compact ~substring:"/retained/"));
+  [%test_result: string] (source_metadata ~compress:false json) ~expect:json;
+  [%test_result: string] (source_path ~compress:false path) ~expect:path;
+  let body = "42: cell/technical/report_path 0.125029 ns" in
+  [%test_result: string] (report_source_header ~compress:true body) ~expect:body
+;;
+
 let middle_truncate ~width text =
   if width <= 0
   then ""

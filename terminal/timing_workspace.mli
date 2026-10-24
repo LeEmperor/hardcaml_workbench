@@ -17,7 +17,8 @@ type path_item =
   ; label : string
   }
 
-val path_items : t -> path_item list
+val path_items : ?presentation:Tile_presentation.t -> t -> path_item list
+val empty_paths_message : t -> string
 
 type selection =
   { run : Run_ref.t
@@ -38,19 +39,23 @@ type line_role =
   | Metadata
   | Pending
   | Failure
+  | Success
+  | Source
 
 (** Width-bounded four-line Detail summary, or complete Context provenance. Provider text
     follows the Detail prefix in [rows] and must remain neutrally styled. Context lists
     labelled evidence times; [now] (default: the current time) only computes their ages. *)
 val semantic_prefix
-  :  ?now:Time_ns.t
+  :  ?presentation:Tile_presentation.t
+  -> ?now:Time_ns.t
   -> pane:pane
   -> width:int
   -> t
   -> (line_role * string) list
 
 val input
-  :  pane:pane
+  :  ?presentation:Tile_presentation.t
+  -> pane:pane
   -> scroll:int
   -> width:int
   -> height:int
@@ -59,7 +64,8 @@ val input
   -> t * int * Asic.Operation.t option
 
 val rows
-  :  ?now:Time_ns.t
+  :  ?presentation:Tile_presentation.t
+  -> ?now:Time_ns.t
   -> pane:pane
   -> scroll:int
   -> width:int

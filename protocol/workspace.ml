@@ -251,6 +251,11 @@ module Mutation = struct
         ; tiles : (string * Geometry.t) list
         }
     | Apply_config of Workspace_config.Resolved.t
+    | Reorder_workspace of
+        { workspace : Workspace_id.t
+        ; before : Workspace_id.t option
+        }
+    | Close_separate_investigation of Workspace_id.t
   [@@deriving bin_io, compare, equal, sexp]
 end
 
@@ -776,6 +781,49 @@ let apply_mutation (s : Snapshot.t) (mutation : Mutation.t) =
   | Move_workspace { workspace = id; window = window_id } ->
     ignore (window s window_id : Window.t);
     update_workspace s id ~f:(fun w -> { w with window = window_id })
+  | Reorder_workspace { workspace = id; before } ->
+    let w = workspace s id in
+    Option.iter before ~f:(fun other ->
+      let target = workspace s other in
+      require (not (Workspace_id.equal id other)) "Cannot reorder before itself";
+      require (Window_id.equal w.window target.window) "Reorder requires same window");
+    let remaining =
+      List.filter s.workspaces ~f:(fun w -> not (Workspace_id.equal w.id id))
+    in
+    let rec insert = function
+      | [] -> [ w ]
+      | next :: rest
+        when Option.equal Workspace_id.equal before (Some next.Arrangement.id) ->
+        w :: next :: rest
+      | next :: rest -> next :: insert rest
+    in
+    { s with workspaces = insert remaining }
+  | Close_separate_investigation id ->
+    let w = workspace s id in
+    require
+      (String.is_prefix w.name ~prefix:"Timing · captured ")
+      "Only an explicitly separate Timing investigation can be closed";
+    require (not (Context_id.equal w.context s.main_context)) "Cannot close Main context";
+    require
+      (List.count s.workspaces ~f:(fun other -> Context_id.equal other.context w.context)
+       = 1)
+      "Investigation context is shared; unlink explicitly before closing";
+    require
+      (List.exists s.workspaces ~f:(fun other ->
+         Window_id.equal other.window w.window && not (Workspace_id.equal other.id id)))
+      "Cannot close the last workspace in a window";
+    require
+      (not
+         (List.exists s.config_workspaces ~f:(fun origin ->
+            Workspace_id.equal origin.workspace id)))
+      "Cannot close a configured workspace as a separate investigation";
+    { s with
+      workspaces = List.filter s.workspaces ~f:(fun w -> not (Workspace_id.equal w.id id))
+    ; tiles =
+        List.filter s.tiles ~f:(fun tile -> not (Workspace_id.equal tile.workspace id))
+    ; contexts =
+        List.filter s.contexts ~f:(fun c -> not (Context_id.equal c.id w.context))
+    }
   | Create_tile { workspace = workspace_id; kind; geometry } ->
     ignore (workspace s workspace_id : Arrangement.t);
     valid_name kind;

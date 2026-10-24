@@ -266,23 +266,24 @@ def pty_check(base, client_path, http):
         drain(2)
         overview_screen = screen('full-overview', ['Overview', 'Timing', 'Session', 'Runs',
             'Stage checklist', 'Synthesis', 'Reported cells (agg.): 128',
-             'timing', 'Aggregate Setup slack: 0.42 ns', 'placement', 'routing', 'checks', 'Check drc: pass'])
+              'timing', 'no authoritative STA evidence', 'placement', 'routing', 'checks', 'Check drc: pass'])
         require('[1 Overview]'.casefold() in overview_screen.casefold(), 'Overview workspace tab is not active')
         palette('Switch to Timing')
         timing_screen = screen('full-timing', ['Overview', 'Timing', 'Session', 'Runs',
-             'Timing · Paths', 'Timing · Selected path', 'Timing · Provenance', 'Use Inspect timing paths'])
-        require('[2 Timing]'.casefold() in timing_screen.casefold(), 'Timing workspace switch did not apply')
+              'Timing · Paths', 'Timing · Selected path', 'Timing · Provenance', '12 paths'])
+        require('[4 Timing]'.casefold() in timing_screen.casefold(), 'Timing workspace switch did not apply')
         palette('Inspect timing paths asic/synthetic-reference')
         screen('path-workspace', ['Timing · Paths', 'Timing · Selected path', 'Timing · Provenance', '12 paths'])
         current = http.rpc(domain='workspace')
         require(field(next(c for c in field(current, 'contexts') if field(c, 'id') == context_id), 'selected_run') ==
                 field(context_before, 'selected_run'), 'Timing inspection changed Main selection')
-        # Opening Timing is an explicit additive arrangement action. Subsequent browsing
-        # remains read-only; preserve its new authoritative registry as the baseline.
+        require(field(current, 'tiles') == field(ws, 'tiles') and
+                field(current, 'workspaces') == field(ws, 'workspaces'),
+                'Ordinary inspection must reuse the existing built-in workspace and tile IDs')
         ws = current
         palette('Zoom focused tile')
         ascending = screen('path-index', ['Timing · Paths', '12 paths',
-            'SYNTHETIC setup path clk:reg0 -> reg7', '0.42 ns', 'available'])
+            'SYNTHETIC setup path clk:reg0 -> reg7', '0.420 ns', 'available'])
         require(ascending.index('hold path clk:reg16 -> reg23') < ascending.index('setup path clk:reg5 -> reg12'),
                 'Timing table is not numerically ascending')
         keys(b's')
@@ -294,10 +295,10 @@ def pty_check(base, client_path, http):
         keys(b'clk:reg0 -> reg7')
         keys(b'\r')
         screen('path-filtered', ['Timing · Paths', '1 paths', 'Filter: clk:reg0 -> reg7',
-            'SYNTHETIC setup path clk:reg0 -> reg7', '0.42 ns'], ['hold path clk:reg16 -> reg23'])
+             'SYNTHETIC setup path clk:reg0 -> reg7', '0.420 ns'], ['hold path clk:reg16 -> reg23'])
         keys(b'\r')
         palette('Unzoom workspace')
-        screen('path-detail', ['Timing · Paths', 'Timing · Selected path', 'Path: SYNTHETIC setup path clk:reg0 -> reg7', 'Slack: 0.42 ns', 'signoff: completed', 'No tool report or binary layout is claimed.'])
+        screen('path-detail', ['Timing · Paths', 'Timing · Selected path', 'Path: SYNTHETIC setup path clk:reg0 -> reg7', 'Slack: 0.420 ns', 'signoff: completed', 'No tool report or binary layout is claimed.'])
         reference_run = field(context_before, 'selected_run')[0]
         details = field(http.rpc(wait=False), 'inspection_details')
         detail = next(d for d in details if field(d, 'run') == reference_run and
@@ -311,7 +312,7 @@ def pty_check(base, client_path, http):
         # inspector. The filtered path table remains present alongside exact detail.
         screen('path-index-retained', ['Timing · Paths', '1 paths', 'Timing · Provenance'])
         palette('Switch to Overview')
-        screen('full-overview-restored', ['Stage checklist', 'Reported cells (agg.): 128', 'Aggregate Setup slack: 0.42 ns'])
+        screen('full-overview-restored', ['Stage checklist', 'Reported cells (agg.): 128', 'no authoritative STA evidence'])
         no_launch('Unzoomed Overview/Timing browsing and timing path inspection')
         # Only after the physical demo proof, zoom the actual checklist for the
         # existing deterministic interaction/launch scenario.
@@ -598,7 +599,7 @@ def main():
     smoke(base)
     if args.preset_export:
         presets = demo.workspace_presets(args.preset_export)
-        require(set(presets) == {'overview', 'timing', 'testing', 'waveforms'}, 'Shared stable exported preset identities (Waveforms is explicit, not a bootstrap starter)')
+        require(set(presets) == {'overview', 'timing', 'testing', 'waveforms'}, 'Shared stable exported preset identities')
         for definition in presets.values():
             tiles = field(definition, 'tiles')
             require(len({field(t, 'kind') for t in tiles}) == len(tiles), 'Unique default tile kinds')

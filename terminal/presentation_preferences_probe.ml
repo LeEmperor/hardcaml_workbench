@@ -50,6 +50,8 @@ let () =
         ; "tile.presentation.padding"
         ; "tile.presentation.rows.more"
         ; "tile.presentation.rows.more"
+        ; "tile.presentation.strings.full"
+        ; "tile.presentation.decimals.9"
         ]
         ~init:host
         ~f:(fun host id ->

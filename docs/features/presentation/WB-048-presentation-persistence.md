@@ -25,7 +25,7 @@ Make more per-tile presentation settings persistent. Both identical presentation
 persistence bullets in the owner intake are consolidated here as one ticket.
 Requested size: **Unspecified** for both occurrences; scope and points count once.
 
-## Current baseline
+## Baseline before original delivery
 Global appearance, layout mode and chrome already persist; explicit tile-header
 overrides persist with session/tile/workspace/kind identity guards and reset support.
 Other override fields remain transient, including title, badge, padding and row count.
@@ -75,12 +75,25 @@ tree's full `dune build -j20`, `dune runtest -j20` and `dune build -j20 @lint` p
 This is implementation/automated-validation sign-off, not an interactive visual review.
 
 ## References
+- [Subsequent Timing preference extension](../../timing_workspace_usability.md)
 - [Persistent presentation baseline](../../fs3_adoption.md#persistent-presentation-preferences)
 - [Preference schema](../../../terminal/presentation_preferences.ml)
 - [Override fields](../../../terminal/tile_presentation.mli)
 
 ## Delivery notes
 Delivered 2026-10-19.
+
+**Subsequent extension:** the Timing usability increment adds persistent per-tile
+`decimal_places` (0–9, inherited default 3) and `string_compression` (inherited
+default true). Schema 4 introduced those fields; current schema 5 additionally
+persists the project-level Timing background-index/explicit-only policy and reads
+schemas 1–4. Tile identity guards and reset-to-inherit are retained. CLI loading
+policy overrides apply initially; later palette changes persist. Fresh-process and
+legacy-schema tests passed. [Controls and evidence](../../timing_workspace_usability.md).
+The original owner-accepted scope remains closed; this note does not claim new
+owner acceptance for the later extension or completion of all WB-073 controls.
+
+The schema-v3 record below is historical evidence for the original delivery.
 
 **Persisted per-tile fields** (explicit overrides only; absent = inherited):
 header (unchanged, `tile_headers`), title, binding badge, hints, frame, padding and

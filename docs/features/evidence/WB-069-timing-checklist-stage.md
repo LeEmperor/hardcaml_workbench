@@ -15,7 +15,7 @@ estimate_scope: incremental
 origin: owner-intake
 tags: [checklist, timing, signoff, stages]
 depends_on: []
-related: [WB-004, WB-009, WB-001, WB-006]
+related: [WB-004, WB-009, WB-001, WB-006, WB-071, WB-073, WB-048]
 ---
 
 # WB-069 — Timing as a distinct stage on the stage checklist
@@ -112,6 +112,30 @@ provider recipe-4/analysis-2 compatibility, full build/lint/tests, continuation 
 retained Workbench binaries were refreshed without starting a physical flow or
 restarting live user processes.
 
+### Subsequent Timing usability and preloading delivery
+
+The owner-authorized [usability/preload increment](../../timing_workspace_usability.md)
+is implemented and automatically verified:
+
+- [x] Three-decimal truncation by default, configurable per tile from 0–9; raw sort,
+  comparison and constraint values retain full precision.
+- [x] Persistent default-on compact identifiers/source paths with full-string toggle,
+  semantic Session/provenance colors and a wider paths column.
+- [x] Ordinary inspection uses built-in Timing; separate investigations are explicit
+  and have a discoverable guarded close command. WB-071 records ordering/membership.
+- [x] Default background index loading for completed selected/followed analyses,
+  including hidden Timing; persistent explicit-only mode and initial CLI override.
+- [x] One speculative request at a time, exact-source/selection fences, interactive
+  coalescing, finite failure attempts and no hidden detail fan-out or off-screen drawing.
+- [x] Actual a023 retained data: 1,021 index rows, one provider index read, zero hidden
+  detail reads, unchanged focus/pins and no further read on switching to Timing.
+
+Full build/lint/tests passed serially at `-j 1` after crash recovery. Native warm-up
+acceptance passed 20 assertions; changed-file formatting passed. The saved built-in
+order and retained daemon/client/exporter were updated; receipts and remaining
+verification limitations are in the delivery guide. Status remains **delivered**
+(awaiting owner acceptance), not closed. Broader WB-071/WB-073 scope is not implied.
+
 ### Original supplementary increment
 
 Implemented and automatically verified across `hardcaml_asic` and Workbench. The
@@ -146,6 +170,8 @@ wire/cache compatibility, exact-source navigation and two Overview surfaces.
   independent stop/resume semantics require an explicit scope decision.
 
 ## References
+- [Current Timing controls, close command, preloading and acceptance](../../timing_workspace_usability.md)
+- [Usability/preload agent plan](../../timing_usability_preload_plan.md)
 - [Executable Timing stage and refreshed deployment](../../executable_timing_stage.md)
 - [Executable-stage implementation plan](../../executable_timing_stage_plan.md)
 - [Implementation plan](../../timing_checklist_overview_plan.md)

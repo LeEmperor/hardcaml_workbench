@@ -19,6 +19,8 @@ type t =
   ; padding : int
   (** Horizontal inset. Vertical spacing is independently budgeted by Panel. *)
   ; run_selector_rows : int
+  ; string_compression : bool
+  ; decimal_places : int
   }
 [@@deriving equal, sexp]
 
@@ -34,6 +36,8 @@ type overrides =
   ; frame : bool option
   ; padding : int option
   ; run_selector_rows : int option
+  ; string_compression : bool option
+  ; decimal_places : int option
   }
 [@@deriving equal, sexp]
 

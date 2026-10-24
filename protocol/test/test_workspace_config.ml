@@ -58,6 +58,32 @@ let invalid (t : C.t) =
 
 let with_definition (d : C.Definition.t) = { config with definitions = [ d ] }
 
+let%test_unit "portable per-tile compression and bounded precision roundtrip" =
+  let configured places =
+    with_definition
+      { definition with
+        tiles =
+          List.mapi definition.tiles ~f:(fun i tile ->
+            if i <> 0
+            then tile
+            else
+              { tile with
+                presentation =
+                  Some
+                    { C.Presentation.inherit_defaults with
+                      string_compression = Some false
+                    ; decimal_places = Some places
+                    }
+              })
+      }
+  in
+  List.iter (List.init 10 ~f:Fn.id) ~f:(fun places ->
+    let config = configured places in
+    assert (
+      C.equal config (C.decode (C.encode config |> Or_error.ok_exn) |> Or_error.ok_exn)));
+  List.iter [ -1; 10; Int.max_value ] ~f:(fun places -> invalid (configured places))
+;;
+
 let%test_unit "composition roundtrips duplicate kinds, keyed leaves, sparse defaults and \
                extras"
   =

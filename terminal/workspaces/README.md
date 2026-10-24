@@ -87,7 +87,7 @@ or focused-tile fallback without changing saved geometry or membership.
 FS3 portable templates carry the stable preset ID alongside exact membership and
 requested geometry. `Definition.template` supplies the same definitions to CLI
 `starter overview|timing|testing`; imports do not fill/reset sparse arrangements.
-Fresh startup uses `Initialize_config` with the Overview/Timing/Testing window in
+Fresh startup uses `Initialize_config` with the Overview/Testing/Waveforms/Timing window in
 `stock.sexp`. `Presets.bootstrap` completes only unfinished legacy Overview/Timing
 placeholders through a single idempotent daemon operation, even after a CLI import
 has advanced registry revision. It does not add Testing to existing sessions. Legacy
@@ -101,8 +101,8 @@ tiles: `waveform-session`, `waveform-signals`, `waveform-waves`, `waveform-picke
 the existing workspace tabs. Signals and Waves share the upper band; VCD picker and
 Logs share the lower band. All use normal host layout, focus, hiding, zoom and
 appearance. `Presets.all` is the complete catalog; `Presets.starters` remains the
-Overview/Timing/Testing startup definitions from `stock.sexp`. Waveforms is
-instantiated explicitly.
+Overview/Testing/Waveforms/Timing startup definitions from `stock.sexp`. Existing
+saved sessions retain their membership; Waveforms can also be instantiated explicitly.
 
 `Waveforms.create ~window` returns one `Instantiate_template` registry mutation.
 Submit through the normal daemon transport, await acknowledgement, then identify

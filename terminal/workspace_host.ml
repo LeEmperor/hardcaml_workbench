@@ -67,7 +67,9 @@ type action =
   | Finalize_collect of Run_ref.t * string
   | Browse_artifacts of Run_ref.t
   | Browse_inspection of Run_ref.t * string * string
+  | Browse_default_timing of Run_ref.t
   | Browse_analysis of Run_ref.t * Asic_inspection.Analysis_target.t
+  | Browse_separate_timing of Run_ref.t
   | Inspect_overview_analysis of W.Tile_id.t
   | Launch_asic of Asic.Preview.t * bool
   | Unavailable_launch
@@ -83,6 +85,7 @@ type action =
   | Toggle_chrome
   | Toggle_main_hints
   | Toggle_palette_hints
+  | Set_timing_preload of bool
   | Set_appearance of Appearance.t
   | Set_layout_mode of layout_mode
   | Synthesis_mode of Synthesis_view.Mode.t
@@ -153,6 +156,7 @@ type t =
   ; chrome : bool
   ; main_hints : bool
   ; palette_hints : bool
+  ; timing_preload : bool
   ; notice : string
   ; editing_filter : bool
   ; workspace_focus : (string * W.Tile_id.t option) list
@@ -168,6 +172,7 @@ type t =
   ; waveforms : (string * (unit ref * P.Waveforms.pin)) list
   ; planned_run : Planned_run.t
   ; stage_preparation : string option
+  ; timing_navigation_notice : string option
   ; stage_generation : int
   ; remembered_selection : Asic.Selection.t option
   }
@@ -184,6 +189,7 @@ let empty =
   ; chrome = true
   ; main_hints = true
   ; palette_hints = true
+  ; timing_preload = true
   ; notice = "Loading workspace registry"
   ; editing_filter = false
   ; workspace_focus = []
@@ -199,6 +205,7 @@ let empty =
   ; waveforms = []
   ; planned_run = Planned_run.empty
   ; stage_preparation = None
+  ; timing_navigation_notice = None
   ; stage_generation = 0
   ; remembered_selection = None
   }
@@ -879,8 +886,11 @@ let receive t (s : W.Snapshot.t) =
            Its current progress/failure must survive those polls until the user clears it
            or starts another action. Other transient notices retain their existing refresh
            behavior. *)
-        Option.value_map t.stage_preparation ~default:"" ~f:(fun preparation ->
-          if String.equal t.notice preparation then preparation else "")
+        Option.value_map
+          (Option.first_some t.timing_navigation_notice t.stage_preparation)
+          ~default:""
+          ~f:(fun preparation ->
+            if String.equal t.notice preparation then preparation else "")
     in
     (* Invalidate at every received transition, not only when a reader happens to
        reconcile. A pin A→B→A must never resurrect the first A's pending ticket. *)
@@ -1005,6 +1015,7 @@ let reconnect t ~replacement =
     ; editing_filter = false
     ; stage_generation = t.stage_generation + 1
     ; stage_preparation = None
+    ; timing_navigation_notice = None
     ; planned_run = Planned_run.reset t.planned_run ~scope:""
     ; timing = List.map t.timing ~f:(fun (id, view) -> id, invalidate_inspection view)
     ; testing =
@@ -1618,6 +1629,12 @@ let reconcile_navigation_timing t snapshot =
                       saved.run
                       (Some (Sexp.to_string_mach (Run_ref.sexp_of_t view.run)))))
                 || Option.is_none saved.source_digest
+                || (not (String.equal saved.stage view.stage))
+                || not
+                     (Option.equal
+                        Asic_inspection.Analysis_target.equal
+                        saved.analysis
+                        view.analysis)
         then
           reject
             t
@@ -2406,6 +2423,94 @@ let matching_timing_analysis t registry ~run ~analysis =
          |> Option.bind ~f:(fun view -> view.Inspection_view.analysis))))
 ;;
 
+(** Config identity survives renaming. Legacy saved stock workspaces have no mapping. *)
+let builtin_timing_workspaces (registry : W.Snapshot.t) =
+  List.filter registry.workspaces ~f:(fun workspace ->
+    List.exists registry.config_workspaces ~f:(fun origin ->
+      W.Workspace_id.equal origin.workspace workspace.id
+      && String.equal origin.config_id "stock"
+      && String.equal origin.workspace_key "timing")
+    || ((not
+           (List.exists registry.config_workspaces ~f:(fun origin ->
+              W.Workspace_id.equal origin.workspace workspace.id)))
+        && String.equal workspace.name "Timing"
+        && Option.equal String.equal workspace.preset (Some "timing")))
+;;
+
+let builtin_timing_in_window registry ~window =
+  List.find (builtin_timing_workspaces registry) ~f:(fun workspace ->
+    W.Window_id.equal workspace.window window)
+;;
+
+(** Pure, provider-free hidden hydration. Only coherent pane bindings may share state. No
+    activation, focus, registry selection or pin mutation. Exact target changes reset all
+    source-local state; unchanged targets retain filters/selection and cached rows. *)
+let reconcile_builtin_timing t snapshot =
+  match t.registry with
+  | None -> t
+  | Some _ when Option.is_none snapshot -> t
+  | Some registry ->
+    List.fold (builtin_timing_workspaces registry) ~init:t ~f:(fun t workspace ->
+      let panes =
+        List.filter registry.tiles ~f:(fun tile ->
+          W.Workspace_id.equal tile.workspace workspace.id
+          && Option.is_some (Timing_workspace.pane tile.kind))
+      in
+      match List.find panes ~f:(fun tile -> String.equal tile.kind "timing-paths") with
+      | None -> t
+      | Some tile ->
+        let run =
+          W.resolve_tile registry tile.id
+          |> Result.ok
+          |> Option.bind ~f:(fun reference -> reference.run)
+        in
+        (match run with
+         | None -> t
+         | Some run ->
+           if not
+                (List.for_all panes ~f:(fun pane ->
+                   match W.resolve_tile registry pane.id with
+                   | Ok reference -> Option.equal Run_ref.equal reference.run (Some run)
+                   | Error _ -> false))
+           then t
+           else (
+             let stage, analysis =
+               Overview_tiles.timing_inspection_target ~asic:snapshot ~run
+             in
+             let previous =
+               List.Assoc.find
+                 t.timing
+                 (W.Workspace_id.to_string workspace.id)
+                 ~equal:String.equal
+             in
+             let view =
+               timing t tile
+               |> Option.filter ~f:(fun view ->
+                 String.equal view.stage stage
+                 && Option.equal
+                      Asic_inspection.Analysis_target.equal
+                      view.analysis
+                      analysis)
+               |> Option.value
+                    ~default:
+                      (Timing_workspace.with_analysis
+                         (Timing_workspace.create
+                            ~generation:
+                              (Option.value_map previous ~default:0 ~f:(fun v ->
+                                 v.generation + 1))
+                            ~run
+                            ~stage)
+                         analysis)
+             in
+             let view =
+               Option.value_map snapshot ~default:view ~f:(fun snapshot ->
+                 if Option.is_none view.index
+                 then Timing_workspace.attach_retained view snapshot
+                 else Inspection_view.reconcile view snapshot)
+             in
+             set_timing t tile view)))
+;;
+
 let%test_unit "Timing exact-run reuse preserves pins and independent investigations" =
   let apply s mutation =
     W.apply s (Mutate { expected_revision = s.W.Snapshot.revision; mutation })
@@ -2561,6 +2666,8 @@ let preset_presentation (p : P.Common.presentation) : T.overrides =
   ; frame = p.frame
   ; padding = p.padding
   ; run_selector_rows = p.visible_rows
+  ; string_compression = p.string_compression
+  ; decimal_places = p.decimal_places
   ; badge =
       Option.bind p.binding_badge ~f:(function
         | "hidden" -> Some T.Badge.Hidden
@@ -2771,7 +2878,20 @@ let presentation_commands t (tile : W.Tile.t) =
       "Run selector: Fewer visible rows (-1)"
       { o with run_selector_rows = Some (Int.max 1 (p.run_selector_rows - 1)) }
   ; set "reset" "Reset presentation overrides (inherit)" T.inherit_
+  ; set
+      "strings.compact"
+      "Strings: Compress identifiers and source paths"
+      { o with string_compression = Some true }
+  ; set
+      "strings.full"
+      "Strings: Show full identifiers and source paths"
+      { o with string_compression = Some false }
   ]
+  @ List.init 10 ~f:(fun places ->
+    set
+      ("decimals." ^ Int.to_string places)
+      (sprintf "Timing: Truncate to %d decimal places" places)
+      { o with decimal_places = Some places })
 ;;
 
 let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
@@ -2823,6 +2943,17 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
         "toggle bottom footer keys help hints show restore"
         Toggle_palette_hints
     ; command
+        "timing.preload.background-index"
+        ("Timing preload: Background index"
+         ^ if t.timing_preload then " (selected)" else "")
+        "project persistent completed hidden cache warm loading"
+        (Set_timing_preload true)
+    ; command
+        "timing.preload.explicit-only"
+        ("Timing preload: Explicit only" ^ if t.timing_preload then "" else " (selected)")
+        "project persistent no speculative provider reads"
+        (Set_timing_preload false)
+    ; command
         "layout.fit"
         "Layout: Fit tiles to window"
         "dashboard fill screen grid"
@@ -2866,6 +2997,14 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
     let geometry : W.Geometry.t = { x = 0; y = 0; width = 40; height = 10 } in
     base
     @ restore_commands w
+    @ (if String.is_prefix w.name ~prefix:"Timing · captured "
+       then
+         [ mutation
+             "workspace.close-separate-timing"
+             "Close separate investigation"
+             (Close_separate_investigation w.id)
+         ]
+       else [])
     @ List.map P.Presets.all ~f:(fun d ->
       mutation
         ("workspace.create-builtin." ^ d.P.Definition.id)
@@ -3306,7 +3445,7 @@ let run_context_commands t (tile : W.Tile.t) =
         "investigate slack signoff"
         (if String.equal tile.kind "timing" || String.equal tile.kind "stage-checklist"
          then Inspect_overview_analysis tile.id
-         else action (fun run -> Browse_inspection (run, "timing", "signoff")))
+         else action (fun run -> Browse_default_timing run))
     ; command
         ?unavailable
         "context.artifacts"

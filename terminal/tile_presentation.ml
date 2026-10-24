@@ -18,6 +18,8 @@ type t =
   ; frame : bool
   ; padding : int
   ; run_selector_rows : int
+  ; string_compression : bool
+  ; decimal_places : int
   }
 [@@deriving equal, sexp]
 
@@ -31,6 +33,8 @@ type overrides =
   ; frame : bool option
   ; padding : int option
   ; run_selector_rows : int option
+  ; string_compression : bool option
+  ; decimal_places : int option
   }
 [@@deriving equal, sexp]
 
@@ -44,6 +48,8 @@ let inherit_ : overrides =
   ; frame = None
   ; padding = None
   ; run_selector_rows = None
+  ; string_compression = None
+  ; decimal_places = None
   }
 ;;
 
@@ -61,6 +67,8 @@ let defaults : t =
   ; frame = true
   ; padding = 0
   ; run_selector_rows = 4
+  ; string_compression = true
+  ; decimal_places = 3
   }
 ;;
 
@@ -79,6 +87,10 @@ let apply (base : t) (o : overrides) : t =
   ; padding = Int.max 0 (Option.value o.padding ~default:base.padding)
   ; run_selector_rows =
       Int.max 1 (Option.value o.run_selector_rows ~default:base.run_selector_rows)
+  ; string_compression =
+      Option.value o.string_compression ~default:base.string_compression
+  ; decimal_places =
+      Int.max 0 (Int.min 9 (Option.value o.decimal_places ~default:base.decimal_places))
   }
 ;;
 

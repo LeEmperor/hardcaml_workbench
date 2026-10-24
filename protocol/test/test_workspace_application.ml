@@ -8,6 +8,78 @@ let ok = function
   | Error error -> raise_s [%sexp (error : V1.Error.t)]
 ;;
 
+let%test_unit "targeted reorder and guarded separate close preserve remaining user work" =
+  let initial = W.initial ~session_id:(W.Session_id.of_string "lifecycle") in
+  let mutate s mutation =
+    W.apply s (Mutate { expected_revision = s.W.Snapshot.revision; mutation }) |> ok
+  in
+  let main = List.hd_exn initial.workspaces in
+  let s =
+    mutate
+      initial
+      (Create_workspace
+         { window = main.window
+         ; name = "Timing · captured exact-source"
+         ; context = main.context
+         })
+  in
+  let separate = List.last_exn s.workspaces in
+  let close s =
+    W.apply
+      s
+      (Mutate
+         { expected_revision = s.W.Snapshot.revision
+         ; mutation = Close_separate_investigation separate.id
+         })
+  in
+  assert (Result.is_error (close s));
+  let s = mutate s (Make_independent separate.id) in
+  let s =
+    mutate
+      s
+      (Create_tile
+         { workspace = separate.id
+         ; kind = "timing-paths"
+         ; geometry = { x = 0; y = 0; width = 80; height = 10 }
+         })
+  in
+  let before_tiles =
+    List.filter s.tiles ~f:(fun tile ->
+      not (W.Workspace_id.equal tile.workspace separate.id))
+  in
+  let s =
+    mutate s (Reorder_workspace { workspace = separate.id; before = Some main.id })
+  in
+  assert (W.Workspace_id.equal (List.hd_exn s.workspaces).id separate.id);
+  assert (
+    List.equal
+      W.Context.equal
+      s.contexts
+      (mutate s (Reorder_workspace { workspace = main.id; before = Some separate.id }))
+        .contexts);
+  let stale =
+    W.apply
+      s
+      (Mutate
+         { expected_revision = initial.revision
+         ; mutation = Close_separate_investigation separate.id
+         })
+  in
+  assert (Result.is_error stale);
+  let closed = close s |> ok in
+  assert (List.equal W.Tile.equal closed.tiles before_tiles);
+  assert (List.equal W.Arrangement.equal closed.workspaces initial.workspaces);
+  assert (List.equal W.Context.equal closed.contexts initial.contexts);
+  assert (
+    Result.is_error
+      (W.apply
+         closed
+         (Mutate
+            { expected_revision = closed.revision
+            ; mutation = Close_separate_investigation main.id
+            })))
+;;
+
 let definition kinds : C.Definition.t =
   let d =
     C.definition_of_template ~key:"desk" (Workspace_template.starter "Desk" kinds)

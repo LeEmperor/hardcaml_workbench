@@ -14,6 +14,8 @@ type presentation = Workspace_config.Presentation.t =
   ; visible_rows : int option
   ; compact_summary : bool option [@sexp.default None]
   ; horizontal_stages : bool option [@sexp.default None]
+  ; string_compression : bool option [@sexp.default None]
+  ; decimal_places : int option [@sexp.default None]
   }
 [@@deriving sexp]
 

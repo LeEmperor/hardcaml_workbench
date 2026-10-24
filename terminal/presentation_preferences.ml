@@ -26,6 +26,8 @@ type tile_appearance =
   ; frame : bool option [@sexp.option]
   ; padding : int option [@sexp.option]
   ; run_selector_rows : int option [@sexp.option]
+  ; string_compression : bool option [@sexp.option]
+  ; decimal_places : int option [@sexp.option]
   }
 [@@deriving sexp]
 
@@ -37,6 +39,7 @@ type t =
   ; chrome : bool
   ; main_hints : bool option [@sexp.option]
   ; palette_hints : bool option [@sexp.option]
+  ; timing_preload : bool option [@sexp.option]
   ; session : W.Session_id.t option
   ; tile_headers : tile_headers list
   ; tile_appearance : tile_appearance list option [@sexp.option]
@@ -52,7 +55,11 @@ let path ~state_directory ~project_key =
 (* Schema 2 adds the independent main-window/palette hint choices (WB-019). Schema 1 files
    remain readable: they predate the choices, so both hint areas stay visible. Schema 3
    adds [tile_appearance] (WB-048); schema 1/2 files predate it, so those tiles inherit. *)
-let schema_version = 3
+(* Schema 4 adds optional compression/precision. Schema 3 entries retain their explicit
+   choices and inherit compact strings and three decimals for these absent fields. *)
+(* Schema 5 adds the optional project Timing index preload policy. Schemas 1–4 inherit
+   background-index; newly captured preferences always record the choice. *)
+let schema_version = 5
 
 let appearance_of_overrides (o : T.overrides) ~tile ~workspace ~kind =
   match T.persisted { o with header = None } with
@@ -68,6 +75,8 @@ let appearance_of_overrides (o : T.overrides) ~tile ~workspace ~kind =
       ; frame = o.frame
       ; padding = o.padding
       ; run_selector_rows = o.run_selector_rows
+      ; string_compression = o.string_compression
+      ; decimal_places = o.decimal_places
       }
 ;;
 
@@ -79,6 +88,7 @@ let capture ~project_key (host : Host.t) =
   ; chrome = host.chrome
   ; main_hints = Some host.main_hints
   ; palette_hints = Some host.palette_hints
+  ; timing_preload = Some host.timing_preload
   ; session = Option.map host.registry ~f:(fun registry -> registry.session_id)
   ; tile_headers =
       Option.value_map host.registry ~default:[] ~f:(fun registry ->
@@ -103,11 +113,12 @@ let decode ~project_key content =
   then failwith "Terminal presentation preference size limit exceeded";
   let stored = t_of_sexp (Sexp.of_string content) in
   (match stored.schema_version, stored.main_hints, stored.palette_hints with
-   | 1, None, None | (2 | 3), Some _, Some _ -> ()
-   | (1 | 2 | 3), _, _ -> failwith "Terminal presentation hint fields do not match schema"
+   | 1, None, None | (2 | 3 | 4 | 5), Some _, Some _ -> ()
+   | (1 | 2 | 3 | 4 | 5), _, _ ->
+     failwith "Terminal presentation hint fields do not match schema"
    | _ -> failwith "Unsupported terminal presentation preference schema");
   (match stored.schema_version, stored.tile_appearance with
-   | (1 | 2), None | 3, Some _ -> ()
+   | (1 | 2), None | (3 | 4 | 5), Some _ -> ()
    | _ -> failwith "Terminal tile appearance fields do not match schema");
   let appearance = Option.value stored.tile_appearance ~default:[] in
   if not (String.equal stored.project_key project_key)
@@ -131,8 +142,12 @@ let decode ~project_key content =
          ; Option.is_none pref.frame
          ; Option.is_none pref.padding
          ; Option.is_none pref.run_selector_rows
+         ; Option.is_none pref.string_compression
+         ; Option.is_none pref.decimal_places
          ]
     then failwith "Empty terminal tile appearance preference";
+    if Option.exists pref.decimal_places ~f:(fun n -> n < 0 || n > 9)
+    then failwith "Terminal decimal places must be between 0 and 9";
     if Option.exists pref.padding ~f:(fun padding -> padding < 0)
     then failwith "Terminal tile padding preference must be non-negative";
     if Option.exists pref.run_selector_rows ~f:(fun rows -> rows < 1)
@@ -184,6 +199,8 @@ let apply_tiles t (host : Host.t) =
             ; frame = get (fun pref -> pref.frame)
             ; padding = get (fun pref -> pref.padding)
             ; run_selector_rows = get (fun pref -> pref.run_selector_rows)
+            ; string_compression = get (fun pref -> pref.string_compression)
+            ; decimal_places = get (fun pref -> pref.decimal_places)
             }
         })
 ;;
@@ -197,7 +214,27 @@ let apply t (host : Host.t) =
     ; chrome = t.chrome
     ; main_hints = Option.value t.main_hints ~default:true
     ; palette_hints = Option.value t.palette_hints ~default:true
+    ; timing_preload = Option.value t.timing_preload ~default:true
     }
+;;
+
+let%test_unit "preload schema migration and durable explicit policy" =
+  let project_key = "preload/project" in
+  let stored = capture ~project_key { Host.empty with timing_preload = false } in
+  let restore stored = apply (decode ~project_key (encode stored)) Host.empty in
+  assert (not (restore stored).timing_preload);
+  List.iter [ 1; 2; 3; 4 ] ~f:(fun schema_version ->
+    let legacy =
+      { stored with
+        schema_version
+      ; timing_preload = None
+      ; main_hints = (if schema_version = 1 then None else Some true)
+      ; palette_hints = (if schema_version = 1 then None else Some true)
+      ; tile_appearance = (if schema_version < 3 then None else Some [])
+      }
+    in
+    assert (restore legacy).timing_preload);
+  assert (restore { stored with timing_preload = Some true }).timing_preload
 ;;
 
 (** Restoration is a one-shot handoff, not a policy replayed on every poll. Consume even a
@@ -326,7 +363,7 @@ let%test_unit "strict schema validation and isolated identities" =
       Result.is_error (Or_error.try_with (fun () -> decode ~project_key:"root/env" value)))
   in
   rejects "(";
-  rejects (encode { stored with schema_version = 4 });
+  rejects (encode { stored with schema_version = 6 });
   rejects (encode { stored with schema_version = 99 });
   rejects (encode { stored with main_hints = None });
   (* Schema 3 requires the appearance list; earlier schemas predate it. *)
@@ -369,6 +406,8 @@ let%test_unit "strict schema validation and isolated identities" =
     ; frame = None
     ; padding = None
     ; run_selector_rows = None
+    ; string_compression = None
+    ; decimal_places = None
     }
   in
   let in_session = { stored with session = Some (W.Session_id.of_string "s") } in
@@ -542,29 +581,32 @@ let%test_unit "every persisted tile appearance field round-trips, resets and is 
     stored, apply stored (Host.receive Host.empty registry)
   in
   let explicit : T.overrides list =
-    [ { T.inherit_ with title = Some false }
-    ; { T.inherit_ with title = Some true }
-    ; { T.inherit_ with badge = Some Exceptions }
-    ; { T.inherit_ with badge = Some Always }
-    ; { T.inherit_ with badge = Some Hidden }
-    ; { T.inherit_ with hints = Some false }
-    ; { T.inherit_ with hints = Some true }
-    ; { T.inherit_ with frame = Some false }
-    ; { T.inherit_ with frame = Some true }
-    ; { T.inherit_ with padding = Some 0 }
-    ; { T.inherit_ with padding = Some 3 }
-    ; { T.inherit_ with run_selector_rows = Some 1 }
-    ; { T.inherit_ with run_selector_rows = Some 9 }
-    ; { T.inherit_ with
-        header = Some false
-      ; title = Some false
-      ; badge = Some Hidden
-      ; hints = Some false
-      ; frame = Some false
-      ; padding = Some 2
-      ; run_selector_rows = Some 7
-      }
-    ]
+    List.init 10 ~f:(fun n -> { T.inherit_ with decimal_places = Some n })
+    @ [ { T.inherit_ with title = Some false }
+      ; { T.inherit_ with title = Some true }
+      ; { T.inherit_ with badge = Some Exceptions }
+      ; { T.inherit_ with badge = Some Always }
+      ; { T.inherit_ with badge = Some Hidden }
+      ; { T.inherit_ with hints = Some false }
+      ; { T.inherit_ with hints = Some true }
+      ; { T.inherit_ with frame = Some false }
+      ; { T.inherit_ with frame = Some true }
+      ; { T.inherit_ with padding = Some 0 }
+      ; { T.inherit_ with padding = Some 3 }
+      ; { T.inherit_ with run_selector_rows = Some 1 }
+      ; { T.inherit_ with run_selector_rows = Some 9 }
+      ; { T.inherit_ with string_compression = Some false }
+      ; { T.inherit_ with string_compression = Some true }
+      ; { T.inherit_ with
+          header = Some false
+        ; title = Some false
+        ; badge = Some Hidden
+        ; hints = Some false
+        ; frame = Some false
+        ; padding = Some 2
+        ; run_selector_rows = Some 7
+        }
+      ]
   in
   List.iter explicit ~f:(fun overrides ->
     let host, save = set base overrides in
@@ -580,6 +622,18 @@ let%test_unit "every persisted tile appearance field round-trips, resets and is 
     assert (T.equal_overrides (Host.local restarted tile.id).presentation T.inherit_));
   (* Absent fields inherit: only the explicit field is written for a sparse override. *)
   let sparse, _ = set base { T.inherit_ with padding = Some 3 } in
+  let legacy_v3 = { (capture ~project_key:"root/env" sparse) with schema_version = 3 } in
+  let migrated =
+    decode ~project_key:"root/env" (encode legacy_v3)
+    |> fun saved -> apply saved (Host.receive Host.empty registry)
+  in
+  assert ((Host.policy migrated tile).padding = 3);
+  assert ((Host.policy migrated tile).decimal_places = 3);
+  assert (Host.policy migrated tile).string_compression;
+  assert (
+    T.equal_overrides
+      (Host.local migrated tile.id).presentation
+      { T.inherit_ with padding = Some 3 });
   let encoded = encode (capture ~project_key:"root/env" sparse) in
   assert (String.is_substring encoded ~substring:"(padding 3)");
   assert (not (String.is_substring encoded ~substring:"(title"));

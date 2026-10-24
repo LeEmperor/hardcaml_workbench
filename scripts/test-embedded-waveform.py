@@ -417,15 +417,16 @@ def pty_acceptance(args, evidence, fixture, check):
             terminal.drain(.1)
         # Native startup consumes the canonical stock window composition. The
         # explicit Testing action also supports older saved two-workspace sessions.
-        check(not any(field(w, 'preset') == ['waveforms'] for w in field(initial_registry, 'workspaces')),
-              'ordinary startup never creates an empty Waveforms workspace')
+        check([field(w, 'preset') for w in field(initial_registry, 'workspaces')] ==
+              [['overview'], ['testing'], ['waveforms'], ['timing']],
+              'ordinary fresh startup opens the four ordered built-in workspaces')
         has_testing = any(field(w, 'preset') == ['testing'] for w in field(initial_registry, 'workspaces'))
         terminal.palette('Switch to Testing' if has_testing else 'Create Testing workspace')
         terminal.capture('testing', ['simulation-catalog', 'simulation-artifacts'])
         testing_registry = session.api(domain='workspace')
-        check(len(field(testing_registry, 'workspaces')) == 3 and
-              {field(w, 'preset')[0] for w in field(testing_registry, 'workspaces')} == {'overview', 'timing', 'testing'},
-              'Testing setup contains exactly three starter workspaces; Waveforms remains explicit')
+        check(len(field(testing_registry, 'workspaces')) == 4 and
+              {field(w, 'preset')[0] for w in field(testing_registry, 'workspaces')} == {'overview', 'timing', 'testing', 'waveforms'},
+              'Testing setup preserves the four starter workspaces')
         for _ in range(5):
             terminal.key(b'\t')  # Navigation, Session, Tests, Execution, Catalog, Attempts
         terminal.palette('Simulation: Reopen ' + aid + ' fixture')

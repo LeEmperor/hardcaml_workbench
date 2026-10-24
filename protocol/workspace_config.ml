@@ -19,6 +19,8 @@ module Presentation = struct
     ; visible_rows : int option [@sexp.default None]
     ; compact_summary : bool option [@sexp.default None]
     ; horizontal_stages : bool option [@sexp.default None]
+    ; string_compression : bool option [@sexp.default None]
+    ; decimal_places : int option [@sexp.default None]
     }
   [@@deriving bin_io, compare, equal, sexp]
 
@@ -33,6 +35,8 @@ module Presentation = struct
     ; visible_rows = None
     ; compact_summary = None
     ; horizontal_stages = None
+    ; string_compression = None
+    ; decimal_places = None
     }
   ;;
 end
@@ -148,6 +152,8 @@ let validate_definition (d : Definition.t) =
     unique_keys (List.map d.tiles ~f:(fun t -> t.Tile.key));
     List.iter d.tiles ~f:(fun tile ->
       Option.iter tile.presentation ~f:(fun p ->
+        Option.iter p.decimal_places ~f:(fun n ->
+          require (n >= 0 && n <= 9) "Decimal places must be between 0 and 9");
         List.iter [ p.padding; p.visible_rows ] ~f:(fun n ->
           Option.iter n ~f:(fun n ->
             require (n >= 0 && n <= max_dimension) "Invalid presentation dimension"));

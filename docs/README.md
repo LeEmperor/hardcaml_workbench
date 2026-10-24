@@ -39,6 +39,8 @@ Project/provider commands remain useful without the application.
 | [Hierarchy tile](hierarchy_tile.md) / [implementation plan](hierarchy_tile_plan.md) | WB-007 controls, shared evidence, independent browsing, agent work packages and acceptance |
 | [Timing checklist and Overview](timing_checklist_overview.md) / [implementation plan](timing_checklist_overview_plan.md) | WB-069: independent STA status/duration, corner metrics, exact-source drilldown and failed-signoff evidence |
 | [Executable Timing stage](executable_timing_stage.md) / [plan](executable_timing_stage_plan.md) | Real Routing → Timing → Signoff checkpoints, `r` preparation, historical compatibility and refreshed example deployment |
+| [Timing workspace diagnosis and loading](timing_workspace_loading.md) | Real a023 empty-path fix, saved catalog removal, cache investigation and background warm-up rationale |
+| [Timing usability and preloading](timing_workspace_usability.md) / [plan](timing_usability_preload_plan.md) | Three-decimal/compact presentation, built-in navigation, reordered tabs and default background index loading with explicit-only mode |
 | [FS1 acceptance](fs1_acceptance.md) | Aggregate timing/resources/checks, declared-clock context, finalization import, real physical/acceptance/cancellation evidence and remaining scope |
 | [Finalization and artifacts](fs1_lifecycle_and_artifacts.md) | Workbench-owned collect/accept, live phases, cancel/reconnect, bounded report paging and explicit external text export |
 | [FS1 investigation](fs1_investigation.md) | Completed adopted-evidence scope: paths, measured clocks, physical/routing tables, binary handoff, verified provider generation and activation |

@@ -215,6 +215,22 @@ let timing_summary ~asic ~run =
     List.find snapshot.summaries ~f:(fun s -> Run_ref.equal s.run run))
 ;;
 
+(** Generic inspection follows this run's observed schema, never the current provider
+    catalog. Prefer the complete captured analysis identity (including frozen source).
+    Six-stage retained executions still inspect Signoff. *)
+let timing_inspection_target ~asic ~run =
+  match Option.bind (timing_summary ~asic ~run) ~f:(fun s -> s.timing_analysis) with
+  | Some analysis -> analysis.target.stage, Some analysis.target
+  | None ->
+    let stage =
+      if List.exists (observed_stages ~asic ~run) ~f:(fun s ->
+           String.equal s.Asic.Stage.id "timing")
+      then "timing"
+      else "signoff"
+    in
+    stage, None
+;;
+
 let checklist_items ~asic ~run =
   let stages = observed_stages ~asic ~run in
   let timing = Timing_analysis (timing_summary ~asic ~run) in
@@ -628,7 +644,7 @@ let navigation_rows ~(snapshot : Workspace.Snapshot.t) ~active_workspace =
         (if active then "active" else ""))
   in
   existing
-  @ List.filter_map [ "Overview"; "Timing"; "Testing" ] ~f:(fun name ->
+  @ List.filter_map [ "Overview"; "Testing"; "Waveforms"; "Timing" ] ~f:(fun name ->
     if List.exists snapshot.workspaces ~f:(fun w -> String.equal w.name name)
     then None
     else Some (row ~role:Muted name "not created"))
@@ -636,7 +652,16 @@ let navigation_rows ~(snapshot : Workspace.Snapshot.t) ~active_workspace =
 
 (** Connection is verbatim: no green/connected inference from an arbitrary transport
     string. Project and run are explicit host inputs, never guessed from other runs. *)
+let connection_role connection : Role.t =
+  match String.lowercase (String.strip connection) with
+  | "connected" -> Success
+  | "disconnected" | "error" | "failed" -> Failure
+  | "connecting" | "reconnecting" -> Warning
+  | _ -> Muted
+;;
+
 let status_rows
+  ~string_compression
   ~(snapshot : Workspace.Snapshot.t)
   ~active_workspace
   ~(project : Project.t option)
@@ -676,7 +701,10 @@ let status_rows
            "Context"
            (keyword ^ (if shared then " to " else " ") ^ context.name))
   in
-  [ row "Connection" (if String.is_empty connection then "not reported" else connection)
+  [ row
+      ~role:(connection_role connection)
+      "Connection"
+      (if String.is_empty connection then "not reported" else connection)
   ; row
       ~details:
         (Option.to_list
@@ -685,12 +713,17 @@ let status_rows
       (Option.value_map project ~default:"none open" ~f:(fun p -> p.name))
   ; linkage
   ; row
-      ?display_run:selected_run
       ~details:
         (Option.to_list
            (Option.map selected_run ~f:(fun run -> "Run: " ^ run_identity run)))
       "Run"
-      (Option.value_map selected_run ~default:"none selected" ~f:run_label)
+      (Option.value_map selected_run ~default:"none selected" ~f:(fun run ->
+         let id = Presentation.identifier ~compress:string_compression run.id in
+         match run.label with
+         | Some label
+           when (not (String.is_empty label)) && not (String.equal label run.id) ->
+           label ^ " · " ^ id
+         | _ -> id))
   ]
 ;;
 
@@ -1680,6 +1713,7 @@ let%expect_test "context linkage avoids nested colons and keeps names visible" =
   List.iter [ snapshot; independent ] ~f:(fun snapshot ->
     let rows =
       status_rows
+        ~string_compression:true
         ~snapshot
         ~active_workspace:(Some overview)
         ~project:None

@@ -1,5 +1,44 @@
 # Hardcaml Workbench — Demo construction plan
 
+## Active Timing usability and preloading — 2026-10-23
+
+Owner authorized the [Timing usability/preload plan](timing_usability_preload_plan.md):
+configurable three-decimal display and compression, semantic colors, wider paths,
+built-in Timing inspection, Overview/Testing/Waveforms/Timing order and bounded
+background index preparation with explicit-only mode.
+
+- [x] Presentation traits, colors and layout.
+- [x] Built-in navigation/order and optional separate investigation lifecycle.
+- [x] Source-fenced background index loading and explicit-only preference.
+- [x] Integrated real-run verification, saved-state adjustments and deployment.
+
+Delivered with serial single-job final verification after server-crash recovery.
+Full build/lint/tests and changed-file formatting passed. Actual a023 hidden warm-up
+loaded its 1,021 index rows with one provider read and zero detail reads, without
+changing Overview focus or pins; switching required no further index read. Saved
+built-ins now order Overview/Testing/Waveforms/Timing, with extras preserved, and
+retained daemon/client/exporter binaries are refreshed. See
+[controls and acceptance](timing_workspace_usability.md) for settings, receipts and
+the pre-reboot VCD fixture limitation on full waveform acceptance.
+
+## Active Timing workspace follow-up — 2026-10-23
+
+Owner reports an unwanted simulation catalog in Timing and empty paths for the
+latest `a023` Timing run. The [follow-up plan](timing_workspace_followup_plan.md)
+owns membership/navigation diagnosis, retained real evidence and loading-policy
+research. No physical rerun or new automatic preloading policy is implied.
+
+- [x] Remove simulation catalog from Timing and verify saved-layout behavior.
+- [x] Diagnose/fix actual-run empty paths and verify native inspection navigation.
+- [x] Document current cache/loading behavior and recommend a warm-up policy.
+
+Generic inspection incorrectly requested Signoff for the Timing-only a023 run.
+Fixed exact target selection; private native UI displays its 1,020 paths plus input
+reference. Hid only saved Timing catalog `tile-38`, preserving Testing and layout.
+Full build/lint/tests and current/legacy native regressions passed. Retained client
+is refreshed; only client restart is required. Background index warm-up remains a
+proposal, not implemented behavior. See [findings and policy](timing_workspace_loading.md).
+
 ## Active executable Timing stage — 2026-10-21
 
 Owner authorized extending WB-069 into a true provider stage/checkpoint. The

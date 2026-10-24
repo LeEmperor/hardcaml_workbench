@@ -67,18 +67,13 @@ type t =
   ; generation : int
   ; error : string option
   ; pending_error : string option
+  ; index_loading : bool
   ; operation_key : string option
   ; cache : cache option
   ; detail_cache : detail_cache option
   }
 
-let defaults =
-  [ "timing", "signoff"
-  ; "clocks", "signoff"
-  ; "physical", "placement"
-  ; "routing", "routing"
-  ]
-;;
+let defaults = [ "clocks", "signoff"; "physical", "placement"; "routing", "routing" ]
 
 let stages =
   [ "synthesis"; "floorplan"; "placement"; "cts"; "routing"; "timing"; "signoff" ]
@@ -110,6 +105,7 @@ let create ?analysis ?scope ?(generation = 0) ~run ~domain ~stage () =
   ; generation
   ; error = None
   ; pending_error = None
+  ; index_loading = false
   ; operation_key =
       Some
         (match analysis with

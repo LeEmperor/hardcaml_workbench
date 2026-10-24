@@ -208,12 +208,52 @@ def acceptance(t, check, http, runs, presets):
     statuses = {field(s, 'id'): field(s, 'status') for s in field(launched, 'stages')}
     check(statuses['timing'] == 'Completed' and statuses['signoff'] == 'Not_requested', 'Explicit launch stops at Timing; Signoff not requested')
     (base / 'executable-launched.sexp').write_text(sexp(launched))
+    # Exercise the generic palette on the Timing-only run, before either Overview
+    # Enter surface can warm its evidence. A stage-only lookup lacks expected-digest
+    # and the fixture rejects it, so this also proves exact analysis capture.
+    launched_run = field(launched, 'run')
+    http.rpc('(Refresh %s)' % sexp(launched_run))
+    wait(lambda: any(field(s, 'run') == launched_run and field(s, 'timing_analysis')
+                     for s in field(native(http), 'summaries')), 'Timing-only analysis summary')
+    generic_before = len(calls())
+    builtin_before = registry()
+    main_context = next(x for x in field(builtin_before, 'contexts') if field(x, 'id') == field(overview, 'context'))
+    mutate('(Select_run (workspace %s)(context %s)(expected_selection_revision %s)(run (%s)))' %
+           (sexp(wid), sexp(field(main_context, 'id')), field(main_context, 'selection_revision'), sexp(launched_run)))
+    t.command('Inspect timing paths asic/%s' % field(launched_run, 'id'))
+    generic = t.capture('executable-generic-timing-only',
+        ['exact-executable-timing-path', 'Exact executable Timing retained detail'])
+    check('simulation-catalog' not in generic.text(), 'Timing generic inspection has no simulation catalog')
+    t.command('Inspect timing paths asic/%s' % field(launched_run, 'id'))
+    t.capture('executable-repeat-builtin', ['exact-executable-timing-path', 'Exact executable Timing retained detail'])
+    check(len(field(registry(), 'workspaces')) == len(field(builtin_before, 'workspaces')) and
+          field(registry(), 'tiles') == field(builtin_before, 'tiles'),
+          'Repeated ordinary inspection reuses all built-in tile IDs and creates no workspace')
+    timing_workspaces = [field(w, 'id') for w in field(registry(), 'workspaces') if field(w, 'preset') == ['timing']]
+    check(not any(field(x, 'workspace') in timing_workspaces and field(x, 'kind') == 'simulation-catalog'
+                  for x in field(registry(), 'tiles')), 'Stock and captured Timing membership exclude simulation catalog')
+    generic_calls = [a for a in calls()[generic_before:] if a[:1] == ['inspect']]
+    launched_summary = next(s for s in field(native(http), 'summaries') if field(s, 'run') == launched_run)
+    launched_target = field(field(launched_summary, 'timing_analysis')[0], 'target')
+    check(generic_calls and all(a[a.index('--stage') + 1] == 'timing' and '--expected-digest' in a
+                               and a[1] == field(launched, 'execution_file')[0] for a in generic_calls)
+          and any(field(i, 'run') == launched_run and field(i, 'analysis') == [launched_target]
+                  for i in field(native(http), 'inspections')),
+          'Generic palette inspects exact Timing-only frozen source, stage and captured digest')
+    t.command('Switch to Overview')
+    t.focus_view('stage checklist')
     t.key(b'\r')
+    t.capture('executable-pinned-conflict', ['Built-in Timing has a different selected run'])
+    context_after = next(x for x in field(registry(), 'contexts') if field(x, 'id') == field(overview, 'context'))
+    check(field(context_after, 'selected_run') == [launched_run], 'Pinned unrelated run inspection never changes Main')
+    t.command('Separate Timing investigation asic/%s' % field(run, 'id'))
     t.capture('executable-checklist-exact', ['exact-executable-timing-path', 'Exact executable Timing retained detail'])
     t.command('Switch to Overview')
     mutate('(Set_zoom (workspace %s)(tile ()))' % sexp(wid))
     zoom('timing')
     t.key(b'\r')
+    t.capture('executable-pinned-tile-conflict', ['Built-in Timing has a different selected run'])
+    t.command('Separate Timing investigation asic/%s' % field(run, 'id'))
     t.capture('executable-tile-exact', ['exact-executable-timing-path', 'Exact executable Timing retained detail'])
     exact = [a for a in calls()[len(before):] if a[:1] == ['inspect']]
     check(exact and all(a[a.index('--stage') + 1] == 'timing' and '--expected-digest' in a for a in exact), 'Both surfaces inspect stage-aware exact source and index digests')

@@ -14,6 +14,9 @@ module Terminal_result_view = Terminal_presentation.Terminal_result_view
 module Plain_rpc = Terminal_presentation.Plain_rpc
 module Launch_preferences = Terminal_presentation.Launch_preferences
 module Presentation_preferences = Terminal_presentation.Presentation_preferences
+
+let timing_preload_override = ref None
+
 module Asic_intents = Terminal_presentation.Asic_intents
 module Artifact_view = Terminal_presentation.Artifact_view
 module Artifact_export = Terminal_presentation.Artifact_export
@@ -134,6 +137,9 @@ type session =
   ; mutable timing_demand :
       (Workspace.Tile.t * Http.Client.t * Terminal_presentation.Timing_demand.t ref)
         option
+  ; mutable timing_preload : Terminal_presentation.Timing_preload.t
+  ; mutable timing_index_inflight : (string * unit Deferred.t) list
+  ; mutable timing_preload_receipt : (string * string * int) option
   ; mutable view_on_allocation : (string * Host.launch_target) option
   ; mutable remembered_selection : Asic.Selection.t option
   ; mutable preferences_loaded : bool
@@ -331,6 +337,9 @@ let create_session
       ; asic_request_id = 0
       ; asic_applied_id = 0
       ; timing_demand = None
+      ; timing_preload = Terminal_presentation.Timing_preload.empty
+      ; timing_index_inflight = []
+      ; timing_preload_receipt = None
       ; view_on_allocation = None
       ; remembered_selection = None
       ; preferences_loaded = false
@@ -626,6 +635,7 @@ let load_presentation_preferences session =
              ; chrome = true
              ; main_hints = true
              ; palette_hints = true
+             ; timing_preload = true
              ; locals = []
              };
         session.presentation_preferences_loaded <- Some project_key;
@@ -636,18 +646,20 @@ let load_presentation_preferences session =
             Or_error.try_with (fun () ->
               Presentation_preferences.load ~state_directory ~project_key))
         in
-        match result with
-        | Ok preferences ->
-          session.presentation_preferences
-          <- (if Option.is_none session.host.registry then preferences else None);
-          Option.iter preferences ~f:(fun preferences ->
-            session.host <- Presentation_preferences.apply preferences session.host)
-        | Error error ->
-          presentation_preference_error
-            session
-            "Could not load presentation preferences; using defaults (file left \
-             untouched)"
-            error))
+        (match result with
+         | Ok preferences ->
+           session.presentation_preferences
+           <- (if Option.is_none session.host.registry then preferences else None);
+           Option.iter preferences ~f:(fun preferences ->
+             session.host <- Presentation_preferences.apply preferences session.host)
+         | Error error ->
+           presentation_preference_error
+             session
+             "Could not load presentation preferences; using defaults (file left \
+              untouched)"
+             error);
+        Option.iter !timing_preload_override ~f:(fun timing_preload ->
+          session.host <- { session.host with timing_preload })))
 ;;
 
 let save_presentation_preferences session =
@@ -1060,11 +1072,15 @@ let terminal_result_context session tile =
 ;;
 
 let reconcile_synthesis session =
+  session.host <- Host.reconcile_builtin_timing session.host session.asic;
   Option.iter session.host.registry ~f:(fun registry ->
     (* A fresh terminal has no local Timing state. Resolve the exact tile binding and
        choose only a retained index for that run; activation never asks a provider. *)
     List.iter registry.tiles ~f:(fun tile ->
       if Option.is_some (Timing_workspace.pane tile.kind)
+         && (not
+               (List.exists (Host.builtin_timing_workspaces registry) ~f:(fun w ->
+                  Workspace.Workspace_id.equal w.id tile.workspace)))
          && Option.is_none (Host.timing session.host tile)
       then
         Option.iter session.asic ~f:(fun snapshot ->
@@ -1084,8 +1100,15 @@ let reconcile_synthesis session =
             String.equal id (Workspace.Workspace_id.to_string w.id))
         in
         Option.bind workspace ~f:(fun workspace ->
-          let context = Workspace.context registry workspace.context in
-          Option.map context.selected_run ~f:(fun run ->
+          let resolved_run =
+            List.find registry.tiles ~f:(fun tile ->
+              Workspace.Workspace_id.equal tile.workspace workspace.id
+              && String.equal tile.kind "timing-paths")
+            |> Option.bind ~f:(fun tile ->
+              Workspace.resolve_tile registry tile.id |> Result.ok)
+            |> Option.bind ~f:(fun reference -> reference.run)
+          in
+          Option.map resolved_run ~f:(fun run ->
             let view =
               if Run_ref.equal run view.Inspection_view.run
                  && Option.equal
@@ -1369,7 +1392,52 @@ let capture_artifact_request session (tile : Workspace.Tile.t) view operation =
     |> Option.map ~f:(fun ticket -> tile.id, ticket))
 ;;
 
+let timing_preload_scope session =
+  Sexp.to_string
+    ([%sexp_of: V1.Daemon_instance_id.t * Project_id.t option]
+       (session.hello.instance_id, Option.map (current_project session) ~f:(fun p -> p.id)))
+;;
+
 let rec asic_request
+  ?artifact_request
+  ?inspection_request
+  ?plan_request
+  ?timing_receipt
+  session
+  operation
+  =
+  let key =
+    match operation with
+    | Asic.Operation.Inspect_analysis { run; target; _ } ->
+      Some (timing_preload_scope session ^ Asic_inspection.analysis_index_key ~run ~target)
+    | _ -> None
+  in
+  match
+    Option.bind key ~f:(fun key ->
+      List.Assoc.find session.timing_index_inflight key ~equal:String.equal)
+  with
+  | Some pending -> pending
+  | None ->
+    let finished = Ivar.create () in
+    Option.iter key ~f:(fun key ->
+      session.timing_index_inflight
+      <- (key, Ivar.read finished) :: session.timing_index_inflight);
+    let%map () =
+      perform_asic_request
+        ?artifact_request
+        ?inspection_request
+        ?plan_request
+        ?timing_receipt
+        session
+        operation
+    in
+    Option.iter key ~f:(fun key ->
+      session.timing_index_inflight
+      <- List.Assoc.remove session.timing_index_inflight key ~equal:String.equal);
+    Ivar.fill_exn finished ();
+    drive_timing_preload session
+
+and perform_asic_request
   ?artifact_request
   ?inspection_request
   ?plan_request
@@ -1571,6 +1639,137 @@ and drive_timing_demand session =
             don't_wait_for
               (asic_request ?inspection_request ~timing_receipt session request.operation)))
      | _ -> session.timing_demand <- None)
+
+and drive_timing_preload session =
+  let scope = timing_preload_scope session in
+  (* The HTTP receipt only acknowledges queued work. Keep the speculative lane occupied
+     until a later snapshot publishes the index or a terminal failure. *)
+  Option.iter session.timing_preload_receipt ~f:(fun (flight_scope, key, floor) ->
+    if not (String.equal scope flight_scope)
+    then session.timing_preload_receipt <- None
+    else if session.asic_applied_id >= floor
+    then
+      Option.iter session.asic ~f:(fun snapshot ->
+        let operation =
+          List.find snapshot.operations ~f:(fun op -> String.equal op.key key)
+        in
+        let terminal =
+          Option.value_map operation ~default:true ~f:(fun op ->
+            not (List.mem [ "pending"; "executing" ] op.state ~equal:String.equal))
+        in
+        if terminal
+        then (
+          session.timing_preload_receipt <- None;
+          session.timing_preload
+          <- Terminal_presentation.Timing_preload.finish
+               session.timing_preload
+               ~scope
+               ~key;
+          session.host
+          <- { session.host with
+               timing =
+                 List.map session.host.timing ~f:(fun (id, view) ->
+                   if String.equal (Inspection_view.index_key view) key
+                   then
+                     ( id
+                     , { view with
+                         index_loading = false
+                       ; error =
+                           (if Option.is_some view.index
+                            then None
+                            else
+                              Some
+                                (Option.bind operation ~f:(fun op -> op.error)
+                                 |> Option.value
+                                      ~default:
+                                        "Timing index unavailable · Inspect/refresh to \
+                                         retry"))
+                       } )
+                   else id, view)
+             })));
+  let candidates =
+    Option.value_map session.host.registry ~default:[] ~f:(fun registry ->
+      Host.builtin_timing_workspaces registry
+      |> List.filter_map ~f:(fun workspace ->
+        List.find registry.tiles ~f:(fun tile ->
+          Workspace.Workspace_id.equal tile.workspace workspace.id
+          && String.equal tile.kind "timing-paths"
+          && not tile.hidden)
+        |> Option.bind ~f:(fun tile ->
+          Host.timing session.host tile
+          |> Option.bind ~f:(fun view ->
+            let completed =
+              Option.exists session.asic ~f:(fun snapshot ->
+                List.exists snapshot.summaries ~f:(fun summary ->
+                  Run_ref.equal summary.run view.run
+                  && Option.exists summary.timing_analysis ~f:(fun analysis ->
+                    Asic.Timing_analysis.Status.equal analysis.status Completed
+                    && Option.equal
+                         Asic_inspection.Analysis_target.equal
+                         (Some analysis.target)
+                         view.analysis)))
+            in
+            if not completed || Option.is_some view.index
+            then None
+            else Some (Inspection_view.index_key view, (tile, view))))))
+  in
+  let planner, next =
+    Terminal_presentation.Timing_preload.step
+      session.timing_preload
+      ~scope
+      ~enabled:
+        (session.host.timing_preload
+         && Option.is_some session.presentation_preferences_loaded)
+      ~interactive:
+        ((not (List.is_empty session.timing_index_inflight))
+         || Option.is_some session.timing_demand
+         || Option.exists session.asic ~f:(fun snapshot ->
+           List.exists snapshot.operations ~f:(fun op ->
+             List.mem [ "inspection"; "inspection-detail" ] op.kind ~equal:String.equal
+             && List.mem [ "pending"; "executing" ] op.state ~equal:String.equal)))
+      ~candidates:(List.map candidates ~f:fst)
+  in
+  session.timing_preload <- planner;
+  Option.iter next ~f:(fun key ->
+    let client = session.client in
+    let tile, view = List.Assoc.find_exn candidates key ~equal:String.equal in
+    let epoch = view.workspace_epoch in
+    session.host
+    <- Host.set_timing session.host tile { view with index_loading = true; error = None };
+    let timing_receipt response =
+      (match response with
+       | Ok () ->
+         session.timing_preload_receipt <- Some (scope, key, session.asic_request_id + 1)
+       | Error _ ->
+         session.timing_preload
+         <- Terminal_presentation.Timing_preload.finish session.timing_preload ~scope ~key);
+      if phys_equal client session.client
+         && String.equal scope (timing_preload_scope session)
+      then
+        Option.iter (Host.timing session.host tile) ~f:(fun current ->
+          if String.equal (Inspection_view.index_key current) key
+             && Option.equal String.equal epoch current.workspace_epoch
+          then (
+            let error =
+              match response, current.index with
+              | Error message, _ -> Some message
+              | Ok (), None -> None
+              | Ok (), Some _ -> None
+            in
+            session.host
+            <- Host.set_timing
+                 session.host
+                 tile
+                 { current with
+                   index_loading = Result.is_ok response && Option.is_none current.index
+                 ; error
+                 }))
+    in
+    don't_wait_for
+      (asic_request
+         ~timing_receipt
+         session
+         (Inspection_view.operation ~refresh:false view)))
 ;;
 
 let artifact_export_notice session tile_id message =
@@ -3997,6 +4196,9 @@ let session_of_baseline_fixture (fixture : Baseline_fixture.t) =
     ; asic_request_id = 0
     ; asic_applied_id = 0
     ; timing_demand = None
+    ; timing_preload = Terminal_presentation.Timing_preload.empty
+    ; timing_index_inflight = []
+    ; timing_preload_receipt = None
     ; view_on_allocation = None
     ; remembered_selection = None
     ; preferences_loaded = true
@@ -4282,6 +4484,24 @@ let host_catalog_base session =
           "catalog report bounded text"
           (Browse_artifacts run.run)
       ]
+      @ (let stage, analysis =
+           Terminal_presentation.Overview_tiles.timing_inspection_target
+             ~asic:session.asic
+             ~run:run.run
+         in
+         [ Host.command
+             ("asic.inspection.timing." ^ Host_view.run_label run.run)
+             ("Inspect timing paths " ^ Host_view.run_label run.run ^ " · " ^ stage)
+             "typed rows endpoints corner group producer exact captured analysis"
+             (match analysis with
+              | Some target -> Browse_analysis (run.run, target)
+              | None -> Browse_inspection (run.run, "timing", stage))
+         ; Host.command
+             ("asic.inspection.separate-timing." ^ Host_view.run_label run.run)
+             ("Separate Timing investigation " ^ Host_view.run_label run.run)
+             "explicit captured independent workspace exact source"
+             (Browse_separate_timing run.run)
+         ])
       @ List.map Inspection_view.defaults ~f:(fun (domain, stage) ->
         Host.command
           ("asic.inspection." ^ domain ^ "." ^ Host_view.run_label run.run)
@@ -4328,7 +4548,7 @@ let activate_timing_demand session tile view =
                 view) )
 ;;
 
-let open_timing_workspace ?analysis session ~(run : Run_ref.t) ~stage =
+let open_timing_workspace ?analysis ?(separate = false) session ~(run : Run_ref.t) ~stage =
   let instance = session.hello.instance_id in
   let client = session.client in
   let project = Option.map (current_project session) ~f:(fun p -> p.Project.id) in
@@ -4346,8 +4566,31 @@ let open_timing_workspace ?analysis session ~(run : Run_ref.t) ~stage =
         Workspace.Session_id.equal initial.session_id s.session_id)
     in
     let%bind workspace =
-      match Host.matching_timing_analysis session.host initial ~run ~analysis with
+      match
+        if separate
+        then
+          Host.matching_timing_analysis
+            session.host
+            { initial with
+              workspaces =
+                List.filter initial.workspaces ~f:(fun w ->
+                  String.is_prefix w.name ~prefix:"Timing · captured ")
+            }
+            ~run
+            ~analysis
+        else
+          Host.builtin_timing_in_window initial ~window:active.window
+          |> Option.bind ~f:(fun w -> Host.matching_timing ~workspace:w.id initial ~run)
+      with
       | Some workspace -> return (Some workspace.id)
+      | None when not separate ->
+        let notice =
+          "Built-in Timing has a different selected run / pin, or hidden panes. Fix \
+           bindings/visibility; Separate Timing investigation."
+        in
+        session.host
+        <- { session.host with notice; timing_navigation_notice = Some notice };
+        return None
       | None ->
         let template =
           (Hardcaml_workbench_workspaces.Presets.builtins "timing" |> Or_error.ok_exn)
@@ -4479,15 +4722,14 @@ let open_timing_workspace ?analysis session ~(run : Run_ref.t) ~stage =
                 <- { session.host with
                      focus = Some tile.id
                    ; notice = "Timing investigation · captured run " ^ run.id
+                   ; timing_navigation_notice = None
                    };
                 activate_timing_demand session tile view;
                 drive_timing_demand session;
                 if Option.is_some view.index
                 then return ()
                 else (
-                  let operation =
-                    Inspection_view.operation ~refresh:(Option.is_some analysis) view
-                  in
+                  let operation = Inspection_view.operation ~refresh:false view in
                   asic_request
                     ~inspection_request:(tile.id, Inspection_view.capture view operation)
                     session
@@ -4779,7 +5021,14 @@ let inspection_step session tile view action =
       | Some pane ->
         let local = Host.local session.host tile.id in
         let view, scroll, operation =
-          Timing_workspace.input ~pane ~scroll:local.scroll ~width ~height view action
+          Timing_workspace.input
+            ~presentation:(Host.policy session.host tile)
+            ~pane
+            ~scroll:local.scroll
+            ~width
+            ~height
+            view
+            action
         in
         let view =
           Option.value_map session.asic ~default:view ~f:(Inspection_view.reconcile view)
@@ -5426,6 +5675,20 @@ let execute_host session captured action ~exit =
        | _ -> Effect.Ignore)
     | Browse_inspection (run, "timing", stage) ->
       async (fun () -> open_timing_workspace session ~run ~stage)
+    | Browse_separate_timing run ->
+      let stage, analysis =
+        Terminal_presentation.Overview_tiles.timing_inspection_target
+          ~asic:session.asic
+          ~run
+      in
+      async (fun () -> open_timing_workspace ?analysis ~separate:true session ~run ~stage)
+    | Browse_default_timing run ->
+      let stage, analysis =
+        Terminal_presentation.Overview_tiles.timing_inspection_target
+          ~asic:session.asic
+          ~run
+      in
+      async (fun () -> open_timing_workspace ?analysis session ~run ~stage)
     | Browse_analysis (run, target) ->
       async (fun () ->
         open_timing_workspace ~analysis:target session ~run ~stage:target.stage)
@@ -5627,6 +5890,17 @@ let execute_host session captured action ~exit =
               then "Command palette control hints shown"
               else "Command palette control hints hidden; Space c p restores")
          };
+      Effect.of_deferred_thunk (fun () -> save_presentation_preferences session)
+    | Set_timing_preload timing_preload ->
+      session.host
+      <- { session.host with
+           timing_preload
+         ; notice =
+             (if timing_preload
+              then "Timing preload: Background index"
+              else "Timing preload: Explicit only")
+         };
+      drive_timing_preload session;
       Effect.of_deferred_thunk (fun () -> save_presentation_preferences session)
     | Set_appearance appearance ->
       session.host <- Host.set_appearance session.host appearance;
@@ -7571,6 +7845,17 @@ let command =
                n)))
          ~doc:
            "0..2 speculative Timing neighbors (default 2; 0 keeps selected detail demand)"
+     and timing_preload =
+       flag
+         "--timing-preload"
+         (optional
+            (Command.Arg_type.create (function
+              | "background-index" -> true
+              | "explicit-only" -> false
+              | _ -> failwith "expected background-index|explicit-only")))
+         ~doc:
+           "background-index|explicit-only initial project policy override (saved \
+            preference otherwise; palette changes persist)"
      and api =
        flag
          "--api"
@@ -7712,6 +7997,7 @@ let command =
             return (Or_error.error_string message)
         | Ok (project_root, note) ->
           timing_prefetch_neighbors := timing_neighbors;
+          timing_preload_override := timing_preload;
           if not api then Option.iter note ~f:(eprintf "hardcaml-workbench: %s\n%!");
           run
             ~endpoint
