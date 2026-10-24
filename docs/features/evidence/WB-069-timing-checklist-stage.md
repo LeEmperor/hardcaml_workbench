@@ -3,7 +3,7 @@ id: WB-069
 title: Timing as a distinct stage on the stage checklist
 category: evidence
 feature_sets: [FS1, FS5]
-status: delivered
+status: closed
 kind: enhancement
 priority: P2
 severity: n/a
@@ -19,6 +19,11 @@ related: [WB-004, WB-009, WB-001, WB-006, WB-071, WB-073, WB-048]
 ---
 
 # WB-069 — Timing as a distinct stage on the stage checklist
+
+**Owner verification/closure:** the owner explicitly confirmed “consider 069 closed
+and verified” after reviewing the executable Timing and usability/preloading
+changes. WB-069 is closed. Separate remaining WB-009/WB-073 scope is not included
+in that acceptance.
 
 ## Request
 **Owner clarification: both surfaces are required in the Overview workspace.**
@@ -133,8 +138,8 @@ is implemented and automatically verified:
 Full build/lint/tests passed serially at `-j 1` after crash recovery. Native warm-up
 acceptance passed 20 assertions; changed-file formatting passed. The saved built-in
 order and retained daemon/client/exporter were updated; receipts and remaining
-verification limitations are in the delivery guide. Status remains **delivered**
-(awaiting owner acceptance), not closed. Broader WB-071/WB-073 scope is not implied.
+verification limitations are in the delivery guide. The owner subsequently verified
+and closed WB-069. Broader WB-071/WB-073 scope is not implied.
 
 ### Original supplementary increment
 

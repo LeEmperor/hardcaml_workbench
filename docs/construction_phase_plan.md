@@ -1,5 +1,17 @@
 # Hardcaml Workbench — Demo construction plan
 
+## Active WB-009 / WB-073 completion
+
+Owner verified and closed **WB-069**, then authorized the remaining timing-report
+triage and identifier-compression work. The
+[completion plan](timing_triage_identifier_completion_plan.md) owns exact-evidence
+boundaries, three-scope compression, collision handling and agent assignments.
+
+- [x] WB-069 explicitly closed/verified by owner.
+- [ ] Resolve original WB-009 report from retained evidence or identify missing input.
+- [ ] Complete WB-073 scope/persistence and collision-safe Testing/identity rendering.
+- [ ] Serial one-job integration checks, deployment and status/evidence reconciliation.
+
 ## Active Timing usability and preloading — 2026-10-23
 
 Owner authorized the [Timing usability/preload plan](timing_usability_preload_plan.md):

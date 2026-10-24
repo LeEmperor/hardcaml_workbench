@@ -9,8 +9,8 @@ and native icons/spinners are delivered foundations for several enhancements bel
 **Timing delivery reconciliation:** [WB-069](evidence/WB-069-timing-checklist-stage.md)
 records the executable Timing stage and subsequent precision/compression/colors,
 built-in navigation, guarded separate/close controls and background-index loading
-with explicit-only mode. Implementation and automated acceptance are delivered;
-owner acceptance is not inferred. [Controls and receipts](../timing_workspace_usability.md).
+with explicit-only mode. **WB-069 is closed and owner-verified** by explicit owner
+instruction. [Controls and receipts](../timing_workspace_usability.md).
 
 - [WB-009](evidence/WB-009-timing-coherency.md): **partial**. The actual a023 wrong-stage
   palette defect is diagnosed/fixed; the original unspecified report still needs
