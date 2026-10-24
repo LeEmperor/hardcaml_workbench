@@ -118,6 +118,8 @@ def run(args):
         session.start()
         terminal = Terminal(session)
         terminal.capture('startup', ['Overview'])
+        # This suite checks exact provenance; compact rendering has its own WB-073 suite.
+        terminal.palette('Strings (global): Show full identifiers')
         terminal.palette('Create Testing workspace')
         wait_for(lambda: any(field(w, 'preset') == ['testing'] for w in field(workspace(), 'workspaces')),
                  'Testing bootstrap')

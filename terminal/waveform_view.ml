@@ -471,10 +471,7 @@ let shorten ~width text =
 
 (* Opaque IDs stay exact in the identity inspector. In compact Session metadata keep
    literal first/last four characters, including the actual "sim-" prefix. *)
-let abbreviate_attempt id =
-  if String.length id <= 9 then id else String.prefix id 4 ^ "…" ^ String.suffix id 4
-;;
-
+let abbreviate_attempt id = Presentation.identifier ~compress:true id
 let lane_height (s : D.signal) = if s.width = 1 then 2 else 3
 
 let lane_page signals ~focused ~height =
@@ -942,6 +939,7 @@ let prepare_waves t ~width =
 let render_session
   ?(appearance = Appearance.default)
   ?(hints = true)
+  ?(string_compression = true)
   t
   ~project_label
   ~width
@@ -950,7 +948,9 @@ let render_session
   let open Bonsai_term in
   let module R = Host_view.Role in
   let field = Int.max 4 (width / 4) in
-  let attempt = abbreviate_attempt t.artifact.attempt_id in
+  let attempt =
+    Presentation.identifier ~compress:string_compression t.artifact.attempt_id
+  in
   let state =
     match t.loaded with
     | Loading -> "Loading"
@@ -1057,6 +1057,7 @@ let picker_initial_index ~pinned artifacts =
 let render_waveform
   ?(appearance = Appearance.default)
   ?(value_layout = Inline)
+  ?(string_compression = true)
   t
   (dimensions : Bonsai_term.Dimensions.t)
   =
@@ -1076,16 +1077,22 @@ let render_waveform
   in
   let label = shorten ~width:label_width t.artifact.label in
   let title = prefix ^ label ^ suffix in
+  let identity =
+    Presentation.identifiers
+      ~compress:string_compression
+      (t.artifact.attempt_id :: Option.to_list t.artifact.sha256)
+  in
   let header =
     [ sprintf
         "Case %s · attempt %s · %s %s"
         (shorten ~width:24 (Option.value t.artifact.case_id ~default:"(attempt)"))
-        (shorten ~width:16 t.artifact.attempt_id)
+         (identity t.artifact.attempt_id)
         (match t.loaded with
          | Ready _ -> "SHA"
          | _ -> "expected SHA")
-        (Option.value_map t.artifact.sha256 ~default:"missing" ~f:(shorten ~width:12))
+         (Option.value_map t.artifact.sha256 ~default:"missing" ~f:identity)
     ]
+    |> List.concat_map ~f:(fun line -> Artifact_view.wrap ~width (safe line))
   in
   let body =
     match t.loaded with
@@ -1097,7 +1104,7 @@ let render_waveform
            ~f:(line ~role:R.Failure))
     | Ready data ->
       let side_width = sidebar_width t ~width in
-      let body_height = Int.min 80 (Int.max 3 (height - 6)) in
+      let body_height = Int.min 80 (Int.max 3 (height - 5 - List.length header)) in
       let graph_width = Int.min 1024 (Int.max 7 (width - side_width - 1)) in
       let sidebar =
         render_signals ~appearance ~value_layout t ~width:side_width ~height:body_height
@@ -1208,11 +1215,12 @@ let identity_lines t ~width =
 let render
   ?(appearance = Appearance.default)
   ?(value_layout = Inline)
+  ?(string_compression = true)
   t
   (dimensions : Bonsai_term.Dimensions.t)
   =
   match t.identity_scroll with
-  | None -> render_waveform ~appearance ~value_layout t dimensions
+  | None -> render_waveform ~appearance ~value_layout ~string_compression t dimensions
   | Some scroll ->
     let open Bonsai_term in
     let module R = Host_view.Role in
@@ -1387,7 +1395,7 @@ let%test_unit "80x24 shows bus value and Back even with long artifact metadata" 
     ; ">[*]"
     ; "= 10101"
     ; "Value 0..5/5: 10101"
-    ; "SHA " ^ String.make 11 'd' ^ "…"
+     ; "SHA dddd…dddd"
     ]
     ~f:(fun substring ->
       if not (String.is_substring text ~substring)
@@ -2044,7 +2052,7 @@ let%test_unit "resolved quiet policy hides idle hints but keeps prompts, errors 
 
 let%test_unit "narrow Session keeps literal four/four attempt ID and concise metadata" =
   assert (String.equal (abbreviate_attempt "sim-0123456789abcdef") "sim-…cdef");
-  assert (String.equal (abbreviate_attempt "abcdefghij") "abcd…ghij");
+  assert (String.equal (abbreviate_attempt "abcdefghij") "abcdefghij");
   assert (String.equal (abbreviate_attempt "short") "short");
   let artifact : Hardcaml_workbench_protocol.Simulation.Artifact.t =
     { id = "artifact"

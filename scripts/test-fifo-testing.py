@@ -196,6 +196,8 @@ class TestingTerminal(native.Terminal):
 
 def cooperative(session, evidence, expected, passed):
     terminal = TestingTerminal(session)
+    # Exact provenance assertions below deliberately request full display identities.
+    terminal.palette('Strings (global): Show full identifiers')
     checks = []
     result = dict(status='failed', checks=checks)
     focus_index = 0

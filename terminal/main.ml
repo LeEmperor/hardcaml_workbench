@@ -1709,7 +1709,7 @@ and drive_timing_preload session =
                          (Some analysis.target)
                          view.analysis)))
             in
-            if not completed || Option.is_some view.index
+            if (not completed) || Option.is_some view.index
             then None
             else Some (Inspection_view.index_key view, (tile, view))))))
   in
@@ -3981,6 +3981,7 @@ let waveform_pane session (tile : Workspace.Tile.t) ~width ~height =
          Waveform_view.render_session
            ~appearance
            ~hints
+           ~string_compression:(Host.policy session.host tile).string_compression
            rt.view
            ~project_label
            ~width
@@ -4129,6 +4130,12 @@ let render ?(now = Time_ns.now ()) ?indicator_frames session dimensions =
       (Waveform_view.render
          ~appearance
          ~value_layout:session.waveform_value_layout
+         ~string_compression:
+           (Option.value_map
+              (Host.focused session.host)
+              ~default:
+                (Option.value session.host.presentation.string_compression ~default:true)
+              ~f:(fun tile -> (Host.policy session.host tile).string_compression))
          view
          dimensions)
   | _ ->
@@ -5901,6 +5908,14 @@ let execute_host session captured action ~exit =
               else "Timing preload: Explicit only")
          };
       drive_timing_preload session;
+      Effect.of_deferred_thunk (fun () -> save_presentation_preferences session)
+    | Set_global_compression value ->
+      session.host <- Host.set_global_compression session.host value;
+      session.host <- { session.host with notice = Host.compression_hint session.host };
+      Effect.of_deferred_thunk (fun () -> save_presentation_preferences session)
+    | Set_workspace_compression (workspace, value) ->
+      session.host <- Host.set_workspace_compression session.host workspace value;
+      session.host <- { session.host with notice = Host.compression_hint session.host };
       Effect.of_deferred_thunk (fun () -> save_presentation_preferences session)
     | Set_appearance appearance ->
       session.host <- Host.set_appearance session.host appearance;

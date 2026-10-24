@@ -279,19 +279,12 @@ let receive t ~ticket ~selected operation response =
 
 let atom = Simulation_view.atom
 let row = Simulation_view.row
+let attempt_label id = Presentation.identifier ~compress:true id
 
-let attempt_label id =
-  if String.equal (Overview_tiles.short_id id) id
-  then id
-  else
-    Overview_tiles.short_id
-      (Option.value (String.chop_prefix id ~prefix:"sim-") ~default:id)
-;;
-
-let artifact_details (a : S.Artifact.t) =
-  [ row ("Selected artifact: " ^ a.id)
+let artifact_details ~identity (a : S.Artifact.t) =
+  [ row ("Selected artifact: " ^ identity a.id)
   ; row ("Artifact label: " ^ a.label)
-  ; row ("Artifact attempt: " ^ a.attempt_id)
+  ; row ("Artifact attempt: " ^ identity a.attempt_id)
   ; row ("Artifact case: " ^ Option.value a.case_id ~default:"suite")
   ; row
       ~spans:
@@ -302,12 +295,12 @@ let artifact_details (a : S.Artifact.t) =
         ]
       ("Availability: " ^ atom S.Artifact.Availability.sexp_of_t a.availability)
   ; row ("Kind: " ^ a.kind ^ "; media type: " ^ a.media_type)
-  ; row ("SHA256: " ^ Option.value a.sha256 ~default:"unavailable")
+  ; row ("SHA256: " ^ Option.value_map a.sha256 ~default:"unavailable" ~f:identity)
   ; row ("Artifact bytes: " ^ Option.value_map a.size ~default:"unknown" ~f:Int.to_string)
   ]
 ;;
 
-let detail_rows ?(now = Time_ns.now ()) t (d : S.Attempt.t) =
+let detail_rows ?(now = Time_ns.now ()) ~identity t (d : S.Attempt.t) =
   [ row
       ~indicator:(Simulation_view.attempt_indicator d.lifecycle d.outcome)
       ~spans:
@@ -336,10 +329,10 @@ let detail_rows ?(now = Time_ns.now ()) t (d : S.Attempt.t) =
       @ List.map (Option.to_list c.message) ~f:row
     else [])
   @ List.map (Option.to_list d.diagnostic) ~f:row
-  @ Option.value_map (artifact t) ~default:[] ~f:artifact_details
-  @ [ row ("Attempt: " ^ d.id)
+  @ Option.value_map (artifact t) ~default:[] ~f:(artifact_details ~identity)
+  @ [ row ("Attempt: " ^ identity d.id)
     ; row ("Project: " ^ d.project_root)
-    ; row ("Job: " ^ Job_id.to_string d.job)
+    ; row ("Job: " ^ identity (Job_id.to_string d.job))
     ; row ("Created: " ^ d.created_at)
     ; row ("Suite: " ^ d.captured.selection.suite)
     ; row ~indicator:Seed ("Seed: " ^ d.captured.selection.seed)
@@ -348,7 +341,7 @@ let detail_rows ?(now = Time_ns.now ()) t (d : S.Attempt.t) =
         ("Parameters: "
          ^ Sexp.to_string_mach
              ([%sexp_of: (string * string) list] d.captured.selection.parameters))
-    ; row ("Discovery: " ^ d.captured.discovery_digest)
+    ; row ("Discovery: " ^ identity d.captured.discovery_digest)
     ; row ("Provider: " ^ d.captured.provider_executable)
     ; row
         ("Provider arguments: "
@@ -360,18 +353,48 @@ let detail_rows ?(now = Time_ns.now ()) t (d : S.Attempt.t) =
          ^ Option.value_map d.exit_code ~default:"unreported" ~f:Int.to_string)
     ]
   @ Option.value_map d.parent ~default:[] ~f:(fun p ->
-    [ row ("Rerun parent attempt: " ^ p.attempt_id)
-    ; row ("Rerun parent job: " ^ Job_id.to_string p.job)
+    [ row ("Rerun parent attempt: " ^ identity p.attempt_id)
+    ; row ("Rerun parent job: " ^ identity (Job_id.to_string p.job))
     ])
   @ List.map d.captured.selection.asic_inputs ~f:(fun input ->
     row ("Explicit ASIC reference: " ^ atom S.Asic_input.sexp_of_t input))
 ;;
 
-let rows ?(now = Time_ns.now ()) t pane ~log_lines =
+let rows
+  ?(now = Time_ns.now ())
+  ?(string_compression = true)
+  ?identifier_width
+  t
+  pane
+  ~log_lines
+  =
   let detail = Simulation_view.detail t.view in
+  let population =
+    Option.value_map t.view.snapshot ~default:[] ~f:(fun s ->
+      List.map s.attempts ~f:(fun a -> a.id))
+    @ Option.value_map
+        (if Poly.equal pane Attempts then None else detail)
+        ~default:[]
+        ~f:(fun d ->
+          [ d.id; Job_id.to_string d.job; d.captured.discovery_digest ]
+          @ Option.value_map d.parent ~default:[] ~f:(fun p ->
+            [ p.attempt_id; Job_id.to_string p.job ])
+          @ List.concat_map d.artifacts ~f:(fun a ->
+            [ a.id; a.attempt_id ] @ Option.to_list a.sha256))
+  in
+  let identity =
+    let bounded =
+      Presentation.identifiers
+        ?width:(if Poly.equal pane Attempts then identifier_width else None)
+        ~compress:string_compression
+        population
+    in
+    let unbounded = Presentation.identifiers ~compress:string_compression population in
+    fun id -> if Presentation.compressible id then bounded id else unbounded id
+  in
   let rows =
     match pane with
-    | Catalog -> Simulation_catalog.rows t.catalog
+    | Catalog -> Simulation_catalog.rows ~string_compression t.catalog
     | Attempts ->
       (if t.view.busy && Option.is_none t.view.snapshot
        then [ row ~indicator:Running "Loading simulation history" ]
@@ -387,7 +410,7 @@ let rows ?(now = Time_ns.now ()) t pane ~log_lines =
                 (if Option.equal String.equal t.view.attempt (Some a.id)
                  then "> "
                  else "  ")
-                ^ attempt_label a.id
+                ^ identity a.id
                 ^ " "
               in
               [ row
@@ -430,7 +453,7 @@ let rows ?(now = Time_ns.now ()) t pane ~log_lines =
       Option.value_map
         detail
         ~default:[ row "Select an attempt for outcome and captured inputs" ]
-        ~f:(detail_rows ~now t)
+        ~f:(detail_rows ~now ~identity t)
     | Artifacts ->
       Option.value_map
         detail
@@ -467,7 +490,11 @@ let rows ?(now = Time_ns.now ()) t pane ~log_lines =
             (atom S.Lifecycle.sexp_of_t d.lifecycle
              ^ "/"
              ^ atom S.Outcome.sexp_of_t d.outcome)
-          :: row ("Attempt: " ^ d.id ^ "; job: " ^ Job_id.to_string d.job)
+          :: row
+               ("Attempt: "
+                ^ identity d.id
+                ^ "; job: "
+                ^ identity (Job_id.to_string d.job))
           :: List.map (log_lines d.job) ~f:row)
   in
   let rows = List.map (Option.to_list (selection_unavailable t)) ~f:row @ rows in
@@ -563,6 +590,47 @@ module Test_data = struct
       (Ok snapshot)
   ;;
 end
+
+let%test_unit "detail resolves typed identities together without rewriting provider \
+               labels or selectors"
+  =
+  let aid = "same000000000000tail" in
+  let jid = "same111111111111tail" in
+  let digest = "same222222222222tail" in
+  let label = "Human provider label with a long meaningful description 試験" in
+  let d =
+    { Test_data.attempt with
+      id = aid
+    ; job = Job_id.of_string jid
+    ; captured = { Test_data.attempt.captured with discovery_digest = digest }
+    ; artifacts = [ { Test_data.artifact with attempt_id = aid; label } ]
+    }
+  in
+  let t =
+    set_view
+      empty
+      { Simulation_view.empty with
+        attempt = Some aid
+      ; snapshot = Some { Test_data.snapshot with detail = Some d }
+      }
+  in
+  let project compact =
+    rows ~string_compression:compact t Detail ~log_lines:(fun _ -> assert false)
+    |> List.map ~f:(fun r -> r.Simulation_view.text)
+  in
+  let compact = project true in
+  let token prefix = List.find_map_exn compact ~f:(String.chop_prefix ~prefix) in
+  let tokens = [ token "Attempt: "; token "Job: "; token "Discovery: " ] in
+  assert (not (List.contains_dup tokens ~compare:String.compare));
+  assert (List.for_all tokens ~f:(fun s -> String.is_substring s ~substring:"…"));
+  assert (List.mem compact ("Artifact label: " ^ label) ~equal:String.equal);
+  List.iter
+    [ "Attempt: " ^ aid; "Job: " ^ jid; "Discovery: " ^ digest ]
+    ~f:(fun line -> assert (List.mem (project false) line ~equal:String.equal));
+  assert (Option.equal String.equal t.view.attempt (Some aid));
+  assert (S.Attempt.equal (Option.value_exn (Simulation_view.detail t.view)) d);
+  assert (String.equal (Option.value_exn (artifact t)).attempt_id aid)
+;;
 
 let%test_unit "restoring during Get releases busy and ignores the held response" =
   let pending = begin_request empty in
@@ -860,7 +928,7 @@ let%test_unit "cooperative rows keep facts typed full provenance and logs separa
     assert (Option.equal Poly.equal (pane (pane_kind p)) (Some p)));
   assert (not (is_pane "simulation"));
   let no_logs _ = assert false in
-  let detail = rows t Detail ~log_lines:no_logs in
+  let detail = rows ~string_compression:false t Detail ~log_lines:no_logs in
   let text =
     String.concat ~sep:"\n" (List.map detail ~f:(fun r -> r.Simulation_view.text))
   in
@@ -951,7 +1019,10 @@ let%test_unit "large navigators expose a unique typed cursor; artifact identity 
     assert (List.length rows = 1);
     (List.hd_exn rows).text
   in
-  assert (String.equal (only Attempts t) "> attemp...entity Finished/Failed");
+  let identity =
+    Presentation.identifiers ~compress:true (List.map attempts ~f:(fun a -> a.id))
+  in
+  assert (String.equal (only Attempts t) ("> " ^ identity attempt.id ^ " Finished/Failed"));
   let navigator = rows t Attempts ~log_lines:(fun _ -> assert false) in
   assert (List.length navigator = 2 * List.length attempts);
   List.iteri navigator ~f:(fun i r ->
@@ -974,7 +1045,7 @@ let%test_unit "large navigators expose a unique typed cursor; artifact identity 
     List.for_all navigator ~f:(fun r ->
       not (String.is_substring r.text ~substring:"SHA256:")));
   let detail =
-    rows t Detail ~log_lines:(fun _ -> assert false)
+    rows ~string_compression:false t Detail ~log_lines:(fun _ -> assert false)
     |> List.map ~f:(fun r -> r.Simulation_view.text)
     |> String.concat ~sep:"\n"
   in
@@ -997,7 +1068,7 @@ let%test_unit "compact attempt labels preserve short and non-ASCII identities" =
   List.iter [ "sim-42"; "Passed-ID"; "simulation-試験-long-identity" ] ~f:(fun id ->
     assert (String.equal (attempt_label id) id));
   let id = "sim-3a91c2abcdef0123456789e84b" in
-  assert (String.equal (attempt_label id) "3a91c2...89e84b");
+  assert (String.equal (attempt_label id) "sim-…e84b");
   let attempt = { Test_data.attempt with id } in
   let summary : S.Summary.t =
     { id
@@ -1027,7 +1098,7 @@ let%test_unit "compact attempt labels preserve short and non-ASCII identities" =
     List.equal
       String.equal
       (List.map navigator ~f:(fun r -> r.Simulation_view.text))
-      [ "> 3a91c2...89e84b Finished/Failed"
+      [ "> sim-…e84b Finished/Failed"
       ; "    Time: unknown · controlled-fifo · seed=18446744073709551615"
       ]);
   assert (List.hd_exn navigator).selected;
@@ -1037,7 +1108,7 @@ let%test_unit "compact attempt labels preserve short and non-ASCII identities" =
   assert (
     List.exists
       (rows t Detail ~log_lines:(fun _ -> assert false))
-      ~f:(fun r -> String.equal r.text ("Attempt: " ^ id)))
+      ~f:(fun r -> String.equal r.text ("Attempt: " ^ attempt_label id)))
 ;;
 
 let%test_unit "attempts show durable durations independently of selected detail and clock"

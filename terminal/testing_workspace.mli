@@ -68,10 +68,14 @@ val receive
 (** Typed, sanitized rows. [Simulation_view.row.selected] marks only the first physical
     line of the pane's cursor for viewport following. Indicators derive from protocol
     facts only. Artifacts lists all cases in protocol order, with label/case/availability;
-    Detail carries the selected artifact's full identity, digest and provenance.
+    Detail carries the selected artifact's identity, digest and provenance, using the
+    effective compression choice (full mode reveals exact values). [identifier_width]
+    reserves a stable list-local ordinal for long attempt tokens that cannot fit.
     Selection/export helpers always use exact source IDs. *)
 val rows
   :  ?now:Time_ns.t
+  -> ?string_compression:bool
+  -> ?identifier_width:int
   -> t
   -> pane
   -> log_lines:(Job_id.t -> string list)

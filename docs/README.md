@@ -41,6 +41,7 @@ Project/provider commands remain useful without the application.
 | [Executable Timing stage](executable_timing_stage.md) / [plan](executable_timing_stage_plan.md) | Real Routing → Timing → Signoff checkpoints, `r` preparation, historical compatibility and refreshed example deployment |
 | [Timing workspace diagnosis and loading](timing_workspace_loading.md) | Real a023 empty-path fix, saved catalog removal, cache investigation and background warm-up rationale |
 | [Timing usability and preloading](timing_workspace_usability.md) / [plan](timing_usability_preload_plan.md) | Three-decimal/compact presentation, built-in navigation, reordered tabs and default background index loading with explicit-only mode |
+| [Identifier compression](identifier_compression.md) / [completion plan](timing_triage_identifier_completion_plan.md) | WB-073 global/workspace/tile controls, collision-safe identities, persistence and WB-009/WB-069 owner closure |
 | [FS1 acceptance](fs1_acceptance.md) | Aggregate timing/resources/checks, declared-clock context, finalization import, real physical/acceptance/cancellation evidence and remaining scope |
 | [Finalization and artifacts](fs1_lifecycle_and_artifacts.md) | Workbench-owned collect/accept, live phases, cancel/reconnect, bounded report paging and explicit external text export |
 | [FS1 investigation](fs1_investigation.md) | Completed adopted-evidence scope: paths, measured clocks, physical/routing tables, binary handoff, verified provider generation and activation |
@@ -130,8 +131,9 @@ of an implemented Workbench feature.
   [native indicator evidence](terminal_indicators_plan.md). Preset identity,
   atomic defaults and selected persistent presentation choices are foundations,
   not outstanding catalog tasks.
-- The owner's new report of empty Timing paths is separately tracked as
-  [WB-009](features/evidence/WB-009-timing-coherency.md), with no asserted root cause
-  or implicit authorization for a new physical flow.
+- [WB-009](features/evidence/WB-009-timing-coherency.md) is now owner-verified/closed:
+  the actual a023 wrong-stage defect was fixed, and after read-only historical triage
+  the owner confirmed recent fixes resolve the older report. Its original exact
+  execution identity remains unasserted; no new physical flow was used for diagnosis.
 
 Build, launch and check commands are in the repository [README](../README.md).

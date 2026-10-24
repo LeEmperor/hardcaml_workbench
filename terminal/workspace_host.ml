@@ -81,6 +81,8 @@ type action =
   | Create_testing_workspace
   | Local_headers
   | Set_presentation of W.Tile_id.t * T.overrides
+  | Set_global_compression of bool option
+  | Set_workspace_compression of W.Workspace_id.t * bool option
   | Resume_log
   | Toggle_chrome
   | Toggle_main_hints
@@ -551,17 +553,51 @@ let set_filter t id filter =
 (** The catalog captures sparse overrides. A change to any persisted appearance field
     ([T.persisted]) is durable; run reference/freshness remain local even when they travel
     in the same action. *)
-let set_presentation t id presentation =
+let set_presentation t id (presentation : T.overrides) =
   if not
        (Option.exists t.registry ~f:(fun registry ->
           List.exists registry.tiles ~f:(fun tile -> W.Tile_id.equal tile.id id)))
   then t, false
   else (
     let previous = local t id in
-    ( set_local t id { previous with presentation; scroll = 0 }
+    let compression_only =
+      T.equal_overrides
+        { previous.presentation with string_compression = presentation.string_compression }
+        presentation
+    in
+    ( set_local
+        t
+        id
+        { previous with presentation; scroll = (if compression_only then previous.scroll else 0) }
     , not
         (T.equal_overrides (T.persisted previous.presentation) (T.persisted presentation))
     ))
+;;
+
+let set_global_compression t string_compression =
+  { t with presentation = { t.presentation with string_compression } }
+;;
+
+let set_workspace_compression t workspace string_compression =
+  if not
+       (Option.exists t.registry ~f:(fun registry ->
+          List.exists registry.workspaces ~f:(fun w ->
+            W.Workspace_id.equal w.id workspace)))
+  then t
+  else (
+    let key = W.Workspace_id.to_string workspace in
+    let previous =
+      List.Assoc.find t.workspace_presentation key ~equal:String.equal
+      |> Option.value ~default:T.inherit_
+    in
+    let overrides = { previous with string_compression } in
+    let remaining = List.Assoc.remove t.workspace_presentation key ~equal:String.equal in
+    { t with
+      workspace_presentation =
+        (if T.equal_overrides overrides T.inherit_
+         then remaining
+         else (key, overrides) :: remaining)
+    })
 ;;
 
 let timing_epoch registry workspace =
@@ -2812,8 +2848,8 @@ let policy t (tile : W.Tile.t) =
     else density_defaults
   in
   let defaults = preset_presentation (composition_policy t tile) in
-  (* Compiled kind/preset settings are defaults. Every explicit client setting wins over
-     them, with workspace and tile overrides becoming more specific. *)
+  (* Most compiled settings are defaults under client settings. Compression's authored
+     tile choice instead has tile specificity, resolved separately below. *)
   let app = T.apply (T.apply base defaults) t.presentation in
   let workspace =
     List.Assoc.find
@@ -2823,7 +2859,105 @@ let policy t (tile : W.Tile.t) =
     |> Option.value ~default:T.inherit_
   in
   let local = local t tile.id in
-  T.apply (T.apply app workspace) local.presentation
+  let resolved = T.apply (T.apply app workspace) local.presentation in
+  (* Compression alone gives authored tile settings tile specificity. *)
+  { resolved with
+    string_compression =
+      Option.first_some
+        local.presentation.string_compression
+        (Option.first_some
+           defaults.string_compression
+           (Option.first_some
+              workspace.string_compression
+              t.presentation.string_compression))
+      |> Option.value ~default:true
+  }
+;;
+
+let compression_hint t =
+  Option.value_map (focused t) ~default:"" ~f:(fun tile ->
+    let source =
+      if Option.is_some (local t tile.id).presentation.string_compression
+      then "tile override"
+      else if Option.is_some (composition_policy t tile).string_compression
+      then "configured tile override"
+      else if Option.exists
+                (List.Assoc.find
+                   t.workspace_presentation
+                   (W.Workspace_id.to_string tile.workspace)
+                   ~equal:String.equal)
+                ~f:(fun o -> Option.is_some o.T.string_compression)
+      then "workspace"
+      else if Option.is_some t.presentation.string_compression
+      then "global"
+      else "built-in default"
+    in
+    sprintf
+      "Focused tile: %s (%s); tile overrides take precedence"
+      (if (policy t tile).string_compression then "compressed" else "full")
+      source)
+;;
+
+let compression_commands t =
+  let choices =
+    [ "compact", "Compress identifiers", Some true
+    ; "full", "Show full identifiers", Some false
+    ; "reset", "Reset compression (inherit)", None
+    ]
+  in
+  let make scope action =
+    List.map choices ~f:(fun (key, label, value) ->
+      command
+        (scope ^ ".strings." ^ key)
+        ("Strings (" ^ scope ^ "): " ^ label ^ " — " ^ compression_hint t)
+        "compression presentation identifiers global project workspace inherit reset"
+        (action value))
+  in
+  make "global" (fun v -> Set_global_compression v)
+  @ Option.value_map t.active ~default:[] ~f:(fun workspace ->
+    make "workspace" (fun v -> Set_workspace_compression (workspace, v)))
+;;
+
+let%test_unit "scoped compression actions preserve loaded data and navigation" =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "compression-local-only") in
+  let tile = List.hd_exn registry.tiles in
+  let host = receive empty registry in
+  let original =
+    { default_local with
+      cursor = Some "raw-selection"
+    ; filter = "keep-filter"
+    ; scroll = 17
+    ; presentation = { T.inherit_ with decimal_places = Some 7; hints = Some false }
+    }
+  in
+  let host = set_local host tile.id original in
+  let actions = compression_commands host in
+  List.iter actions ~f:(fun c ->
+    let changed =
+      match c.action with
+      | Set_global_compression value -> set_global_compression host value
+      | Set_workspace_compression (workspace, value) ->
+        set_workspace_compression host workspace value
+      | _ -> assert false
+    in
+    assert (phys_equal changed.locals host.locals);
+    assert (phys_equal changed.registry host.registry);
+    assert (phys_equal changed.timing host.timing);
+    assert (phys_equal changed.testing host.testing);
+    assert (phys_equal changed.waveforms host.waveforms);
+    assert (phys_equal changed.planned_run host.planned_run));
+  List.iter [ Some true; Some false; None ] ~f:(fun string_compression ->
+    let changed, _ =
+      set_presentation host tile.id { original.presentation with string_compression }
+    in
+    let local = local changed tile.id in
+    assert (local.scroll = original.scroll);
+    assert (Option.equal String.equal local.cursor original.cursor);
+    assert (String.equal local.filter original.filter);
+    assert (phys_equal local.simulation original.simulation);
+    assert (phys_equal local.inspection original.inspection);
+    assert (phys_equal changed.registry host.registry);
+    assert (phys_equal changed.planned_run host.planned_run))
 ;;
 
 let binding_kind (tile : W.Tile.t) : T.Binding.t =
@@ -2835,6 +2969,74 @@ let binding_kind (tile : W.Tile.t) : T.Binding.t =
     match tile.binding with
     | Pin_run _ -> Pinned
     | Follow -> if project_scoped_kind tile.kind then Project else Follow)
+;;
+
+let%test_unit "configured compression has tile specificity over workspace and global" =
+  List.iter [ true; false ] ~f:(fun configured ->
+    let config = P.Presets.custom_example () |> Or_error.ok_exn in
+    let config =
+      { config with
+        definitions =
+          List.map config.definitions ~f:(fun d ->
+            { d with
+              tiles =
+                List.map d.tiles ~f:(fun tile ->
+                  let p =
+                    Option.value
+                      tile.presentation
+                      ~default:Workspace_config.Presentation.inherit_defaults
+                  in
+                  { tile with
+                    presentation = Some { p with string_compression = Some configured }
+                  })
+            })
+      }
+      |> P.Presets.resolve
+      |> Or_error.ok_exn
+    in
+    let registry =
+      W.initial ~session_id:(W.Session_id.of_string "configured-compression")
+    in
+    let registry =
+      W.apply registry (Initialize_config config) |> Result.ok |> Option.value_exn
+    in
+    let p = List.hd_exn registry.config_workspaces in
+    let tile = W.tile registry (List.Assoc.find_exn p.tiles "left" ~equal:String.equal) in
+    let host =
+      receive empty registry
+      |> fun h ->
+      set_global_compression h (Some (not configured))
+      |> fun h -> set_workspace_compression h tile.workspace (Some (not configured))
+    in
+    assert (Bool.equal (policy host tile).string_compression configured);
+    let overridden, _ =
+      set_presentation
+        host
+        tile.id
+        { T.inherit_ with string_compression = Some (not configured) }
+    in
+    assert (Bool.equal (policy overridden tile).string_compression (not configured));
+    let reset, _ = set_presentation overridden tile.id T.inherit_ in
+    assert (Bool.equal (policy reset tile).string_compression configured);
+    let destination = W.Workspace_id.of_string "moved-destination" in
+    let moved =
+      { registry with
+        tiles =
+          List.map registry.tiles ~f:(fun t ->
+            if W.Tile_id.equal t.id tile.id then { t with workspace = destination } else t)
+      }
+    in
+    let host = receive overridden moved in
+    assert (Option.is_none (local host tile.id).presentation.string_compression);
+    let retyped =
+      { registry with
+        tiles =
+          List.map registry.tiles ~f:(fun t ->
+            if W.Tile_id.equal t.id tile.id then { t with kind = "log" } else t)
+      }
+    in
+    let host = receive overridden retyped in
+    assert (Option.is_none (local host tile.id).presentation.string_compression))
 ;;
 
 let presentation_commands t (tile : W.Tile.t) =
@@ -2880,12 +3082,16 @@ let presentation_commands t (tile : W.Tile.t) =
   ; set "reset" "Reset presentation overrides (inherit)" T.inherit_
   ; set
       "strings.compact"
-      "Strings: Compress identifiers and source paths"
+      "Strings (focused tile): Compress identifiers and source paths"
       { o with string_compression = Some true }
   ; set
       "strings.full"
-      "Strings: Show full identifiers and source paths"
+      "Strings (focused tile): Show full identifiers and source paths"
       { o with string_compression = Some false }
+  ; set
+      "strings.reset"
+      "Strings (focused tile): Reset compression (inherit)"
+      { o with string_compression = None }
   ]
   @ List.init 10 ~f:(fun places ->
     set
@@ -2966,6 +3172,7 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
     ; command "host.exit" "Exit client" "quit" Exit
     ]
     @ appearance_commands t
+    @ compression_commands t
     @ List.filter_map jobs ~f:(fun job ->
       if Job.is_terminal job
       then None

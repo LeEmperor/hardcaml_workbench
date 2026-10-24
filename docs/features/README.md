@@ -12,15 +12,17 @@ built-in navigation, guarded separate/close controls and background-index loadin
 with explicit-only mode. **WB-069 is closed and owner-verified** by explicit owner
 instruction. [Controls and receipts](../timing_workspace_usability.md).
 
-- [WB-009](evidence/WB-009-timing-coherency.md): **partial**. The actual a023 wrong-stage
-  palette defect is diagnosed/fixed; the original unspecified report still needs
-  identification or owner confirmation.
+- [WB-009](evidence/WB-009-timing-coherency.md): **closed, owner-verified**. The actual
+  a023 wrong-stage defect is fixed. After additional read-only historical triage,
+  the owner confirmed recent fixes resolve the older report; its original exact
+  identity was not fabricated.
 - [WB-071](workspaces/WB-071-workspace-order-synthesis.md): **partial**. Timing catalog
   removal, four-workspace order and ID/pin-preserving saved migration are delivered;
   dedicated Synthesis workspace and its restore/export coverage remain open.
-- [WB-073](presentation/WB-073-identifier-compression.md): **partial**. Persistent
-  per-tile compression is delivered for Timing/Session identities; global/workspace
-  runtime controls, full original Testing coverage and collision handling remain open.
+- [WB-073](presentation/WB-073-identifier-compression.md): **delivered**, awaiting owner
+  acceptance. Global/workspace/tile inheritance, schema-6 persistence, shared Testing/
+  Waveforms identity rendering and collision handling pass native verification.
+  [Controls and evidence](../identifier_compression.md).
 - [WB-048](presentation/WB-048-presentation-persistence.md): original scope remains
   **closed**; its notes now describe schema-4/5 precision/compression/loading extensions.
 
@@ -283,7 +285,8 @@ needed; References. A dependency needs a reason, not just a list of IDs.
 
 ## Review priorities, not an implementation commitment
 
-1. Reproduce WB-009 (timing coherency) without launching another physical flow.
+1. WB-009 timing coherency is now owner-verified/closed after read-only triage and
+   confirmation of resolution by the recent fixes; preserve those evidence boundaries.
 2. Confirm small UX intent: WB-001, WB-003, WB-019 and WB-024.
 3. Review delivered WB-032/WB-034 and the implemented WB-063 workflow. Remaining
    foundation choices include WB-015 layout-file UX, WB-027 measurements and WB-042

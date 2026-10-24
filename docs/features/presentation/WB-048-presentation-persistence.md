@@ -83,15 +83,17 @@ This is implementation/automated-validation sign-off, not an interactive visual 
 ## Delivery notes
 Delivered 2026-10-19.
 
-**Subsequent extension:** the Timing usability increment adds persistent per-tile
+**Subsequent extensions:** the Timing usability increment adds persistent per-tile
 `decimal_places` (0–9, inherited default 3) and `string_compression` (inherited
-default true). Schema 4 introduced those fields; current schema 5 additionally
+default true). Schema 4 introduced those fields; schema 5 additionally
 persists the project-level Timing background-index/explicit-only policy and reads
-schemas 1–4. Tile identity guards and reset-to-inherit are retained. CLI loading
+schemas 1–4. WB-073's completed scope adds global/workspace compression in **schema 6**,
+which reads schemas 1–5 and retains scoped identity guards and reset-to-inherit.
+See [compression controls and evidence](../../identifier_compression.md). CLI loading
 policy overrides apply initially; later palette changes persist. Fresh-process and
 legacy-schema tests passed. [Controls and evidence](../../timing_workspace_usability.md).
 The original owner-accepted scope remains closed; this note does not claim new
-owner acceptance for the later extension or completion of all WB-073 controls.
+owner acceptance for the later extensions or for WB-073's completed implementation.
 
 The schema-v3 record below is historical evidence for the original delivery.
 

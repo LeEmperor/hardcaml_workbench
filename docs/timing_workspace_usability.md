@@ -10,7 +10,7 @@ active. Presentation and loading choices persist across client restarts.
   `0.125029 ns` displays as `0.125 ns`. Sorting, comparisons, constraints and stored
   evidence retain their original precision. Tiny negatives keep a minus sign, such
   as `-0.000`, rather than appearing to be a passing zero.
-- Long identities default to **first four / last four** compression, for example
+- Long opaque ASCII identities default to **first four / last four** compression, for example
   `a023…4e4a`. Source paths retain a recognizable filename and shortened source
   identity. Provider report-source headers are compacted for display; technical
   report bodies, exports, selectors and stored raw evidence remain intact.
@@ -26,14 +26,18 @@ Focus the relevant tile, open **Space c c**, and choose:
 | Palette command | Effect |
 | --- | --- |
 | `Timing: Truncate to 3 decimal places` | Set focused-tile precision; choices 0–9 are available |
-| `Strings: Compress identifiers and source paths` | Enable compact strings for the focused tile |
-| `Strings: Show full identifiers and source paths` | Reveal full strings; scrolling uses the full wrapped content |
+| `Strings (focused tile): Compress identifiers and source paths` | Enable compact strings for the focused tile |
+| `Strings (focused tile): Show full identifiers and source paths` | Reveal full strings; scrolling uses the full wrapped content |
 | `Reset presentation overrides (inherit)` | Restore defaults/inheritance for the focused tile |
 
 Portable workspace-config presentation fields are `decimal_places : int option`
 and `string_compression : bool option`. Explicit per-tile client overrides persist
-with session/workspace/tile/kind identity checks. Preferences use schema 5 and read
-schemas 1–4; older records inherit three decimals, compression and background indexes.
+with session/workspace/tile/kind identity checks. Preferences now use schema 6 and read
+schemas 1–5; older records inherit three decimals, compression and background indexes.
+The [completed compression controls](identifier_compression.md) add global/workspace
+defaults and independent compression-only reset, resolve list collisions, and preserve
+short/non-ASCII IDs and human labels. Those controls supersede the initial tile-only
+compression scope described by the original implementation record.
 
 ## Where inspection opens
 

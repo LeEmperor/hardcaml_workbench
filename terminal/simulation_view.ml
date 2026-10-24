@@ -340,7 +340,17 @@ let case_indicator ~lifecycle : S.Case_status.t -> Indicator.t = function
 (** Canonical presentation projection. Metadata comes only from typed facts or explicit
     context; provider messages and logs remain plain text. [value_start] is a
     terminal-cell offset into the sanitized text, keeping case identities label-neutral. *)
-let annotated_rows ?(now = Time_ns.now ()) t ~log_lines =
+let annotated_rows ?(now = Time_ns.now ()) ?(string_compression = true) t ~log_lines =
+  let population =
+    Option.value_map t.snapshot ~default:[] ~f:(fun s ->
+      List.map s.attempts ~f:(fun a -> a.id)
+      @ Option.value_map s.discovery_job ~default:[] ~f:(fun j -> [ Job_id.to_string j ])
+      @ Option.value_map s.detail ~default:[] ~f:(fun d ->
+        [ d.id; Job_id.to_string d.job; d.captured.discovery_digest ]
+        @ Option.value_map d.parent ~default:[] ~f:(fun p -> [ p.attempt_id ])
+        @ List.map d.artifacts ~f:(fun a -> a.id)))
+  in
+  let identity = Presentation.identifiers ~compress:string_compression population in
   let request_indicator = if t.busy then Some Indicator.Running else None in
   let rows =
     [ row ?indicator:request_indicator "Structured simulation — project scoped"
@@ -363,11 +373,15 @@ let annotated_rows ?(now = Time_ns.now ()) t ~log_lines =
       ]
       @ plain_rows (Option.to_list s.discovery_error @ Option.to_list s.history_error)
       @ Option.value_map s.discovery_job ~default:[] ~f:(fun j ->
-        [ row ("Discovery job: " ^ Job_id.to_string j) ])
+        [ row ("Discovery job: " ^ identity (Job_id.to_string j)) ])
       @ (match detail t with
          | None -> [ row "Select an attempt from the palette (no job is launched)" ]
          | Some d ->
-           [ row ~indicator:(attempt_indicator d.lifecycle d.outcome) ("Attempt: " ^ d.id)
+           [ row
+               ~indicator:(attempt_indicator d.lifecycle d.outcome)
+               ("Attempt: " ^ identity d.id)
+           ; row ("Job: " ^ identity (Job_id.to_string d.job))
+           ; row ("Discovery: " ^ identity d.captured.discovery_digest)
            ; row (Execution_time_view.line ~now d.execution_timing)
            ; row
                (sprintf
@@ -391,7 +405,7 @@ let annotated_rows ?(now = Time_ns.now ()) t ~log_lines =
                   (List.length d.captured.selection.asic_inputs))
            ]
            @ Option.value_map d.parent ~default:[] ~f:(fun p ->
-             [ row ("Rerun of " ^ p.attempt_id ^ " on current project") ])
+             [ row ("Rerun of " ^ identity p.attempt_id ^ " on current project") ])
            @ plain_rows (Option.to_list d.diagnostic)
            @ Option.value_map d.progress ~default:[] ~f:(fun p ->
              [ row ("Progress: " ^ progress p) ])
@@ -424,7 +438,7 @@ let annotated_rows ?(now = Time_ns.now ()) t ~log_lines =
                ~indicator:Artifact
                (sprintf
                   "Artifact %s: %s [%s]"
-                  a.id
+                  (identity a.id)
                   a.label
                   (atom S.Artifact.Availability.sexp_of_t a.availability)))
            @
@@ -439,7 +453,7 @@ let annotated_rows ?(now = Time_ns.now ()) t ~log_lines =
           ~indicator:(attempt_indicator a.lifecycle a.outcome)
           (sprintf
              "%s %s; %s seed=%s %s/%s"
-             a.id
+             (identity a.id)
              (Execution_time_view.line ~now a.execution_timing)
              a.suite
              a.seed

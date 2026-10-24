@@ -1215,6 +1215,8 @@ def pty_acceptance(args, evidence, fixture, check):
 
         terminal.palette('Switch to Testing')
         terminal.palette('Simulation: Newest history page')
+        # This oracle verifies exact history metadata, independently of compact labels.
+        terminal.palette('Strings (workspace): Show full identifiers')
         terminal.capture('testing-explicit-newest-history', [second_id, 'fixture seed=99'])
         terminal.palette('Simulation: Reopen ' + second_id + ' fixture')
         terminal.palette('Switch to Overview')

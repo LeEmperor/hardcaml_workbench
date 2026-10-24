@@ -192,7 +192,7 @@ let launch t =
     Ok (s, selection, Option.value_exn t.captured_digest)
 ;;
 
-let rows t =
+let rows ?(string_compression = true) t =
   let row = Simulation_view.row in
   let reason = disabled_reason t in
   let readiness =
@@ -243,7 +243,10 @@ let rows t =
   @ [ row ("Selected cases: " ^ String.concat ~sep:", " t.selected)
     ; row
         ("Captured discovery: "
-         ^ Option.value_map t.captured_digest ~default:"none" ~f:Overview_tiles.short_id)
+         ^ Option.value_map
+             t.captured_digest
+             ~default:"none"
+             ~f:(Presentation.identifier ~compress:string_compression))
     ]
   |> List.concat_map ~f:(fun r ->
     String.split_lines r.Simulation_view.text
@@ -297,7 +300,7 @@ let%test_unit "catalog captures exact subset defaults and digest; filter only br
   assert (Option.equal String.equal t.captured_digest (Some exact_digest));
   assert (
     List.exists (rows t) ~f:(fun row ->
-      String.equal row.Simulation_view.text "Captured discovery: 012345...abcdef"));
+      String.equal row.Simulation_view.text "Captured discovery: 0123…cdef"));
   (* Even a refresh with the same condensed label must invalidate the capture. *)
   let changed_digest =
     String.prefix exact_digest 10 ^ "changed" ^ String.suffix exact_digest 10

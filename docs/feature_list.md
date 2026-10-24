@@ -28,8 +28,10 @@ estimates; epic estimates exclude separately ticketed prerequisites.
 | [Integrations](features/README.md#external-providers-and-clients) |3 | Vivado, Ches and Git/Mercurial |
 | [Exploration](features/README.md#design-space-exploration) |2 | Design/build sweeping and Quick-Harn comparative editing |
 
-**WB-009 is a newly reported, unconfirmed Timing-coherency defect.** Earlier accepted
-FS1 evidence remains valid; it does not diagnose the owner's new execution. WB-002
+**WB-009 is owner-verified/closed** after the a023 wrong-stage fix, read-only historical
+triage and owner confirmation that recent fixes resolve the older report. The original
+exact run identity was not fabricated. WB-069 is also owner-verified/closed; WB-073's
+three-scope collision-safe compression is delivered awaiting acceptance. WB-002
 is further icon expansion over the native indicators already delivered in the
 current tree, not a request to implement those foundations again.
 

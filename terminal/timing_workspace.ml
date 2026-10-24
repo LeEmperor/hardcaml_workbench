@@ -142,7 +142,14 @@ let semantic_prefix
   (t : t)
   =
   let compress = presentation.string_compression in
-  let identity = Presentation.identifier ~compress in
+  let population =
+    [ t.run.id ]
+    @ Option.value_map t.index ~default:[] ~f:(fun i ->
+      [ i.source_digest; i.execution_sha256 ] @ List.map i.rows ~f:(fun row -> row.id))
+    @ Option.value_map t.analysis ~default:[] ~f:(fun a ->
+      [ a.analysis_id; a.attempt_id; a.occurrence_id; a.source_digest ])
+  in
+  let identity = Presentation.identifiers ~compress population in
   let path = Presentation.source_path ~compress in
   let field label value = Source, label ^ ": " ^ value in
   match pane with
@@ -241,7 +248,7 @@ let semantic_prefix
           ; field "Group" (Option.value row.group ~default:"(none)")
           ; field "Source" (Presentation.source_metadata ~compress row.source)
           ]
-        @ List.map row.fields ~f:(fun (key, value) -> field key (path value)))
+        @ List.map row.fields ~f:(fun (key, value) -> field key value))
 ;;
 
 let detail_body (t : t) =

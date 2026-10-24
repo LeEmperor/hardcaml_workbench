@@ -3,7 +3,7 @@ id: WB-073
 title: Identifier compression with global, workspace and tile toggles
 category: presentation
 feature_sets: [FS5, FS2]
-status: partial
+status: delivered
 kind: enhancement
 priority: P2
 severity: n/a
@@ -30,8 +30,9 @@ The Timing follow-on added reusable `Presentation.identifier/source_path` displa
 helpers and a default-on `string_compression` per-tile trait. Timing, Session and
 run-selector identities use first-four/last-four compression; source paths retain
 recognizable filenames. Focused-tile compact/full/reset palette controls persist,
-and portable workspace configuration can provide inherited defaults. Original
-Testing helper consolidation and global/workspace-wide runtime toggles remain open.
+and portable workspace configuration can provide inherited defaults. Testing helper
+consolidation and global/workspace runtime controls are now delivered; the completion
+record below supersedes the initial partial-delivery notes.
 
 ## Scope
 - Apply compression to simulation-detail's attempt, job and discovery IDs, and
@@ -45,14 +46,42 @@ Testing helper consolidation and global/workspace-wide runtime toggles remain op
 Human/provider labels (never compressed), and copy-to-clipboard.
 
 ## Acceptance criteria
-- [ ] simulation-detail shows compressed attempt/job/discovery IDs by default.
-- [ ] Global, workspace and tile toggles each work; the most specific setting wins.
+- [x] simulation-detail shows compressed attempt/job/discovery IDs by default.
+- [x] Global, workspace and tile toggles each work; the most specific setting wins.
 - [x] Delivered per-tile compression settings and resets survive restart through the preferences file.
-- [ ] Future global/workspace runtime overrides persist with the required precedence.
-- [ ] Compressed IDs stay unique within a visible list; collisions fall back to longer forms.
-- [ ] Non-ASCII and short IDs are unchanged.
+- [x] Global/workspace runtime overrides persist with the required precedence.
+- [x] Compressed IDs stay distinct within the displayed population; collisions extend tokens and narrow selectors reserve distinguishing markers.
+- [x] Non-ASCII and short IDs are unchanged by semantic compression.
 
-## Partial delivery — Timing presentation
+## Completion delivery
+
+All requested scopes now work and persist in schema-6 preferences, with migration
+from schemas 1–5. Precedence is tile runtime → configured tile → workspace runtime
+→ global project/client default → built-in on. Scoped reset affects compression
+only. Global/workspace controls explain the focused tile's effective source.
+
+The shared identifier helper preserves short/non-ASCII IDs and human/provider labels.
+Collision resolution extends first-four/last-four tokens deterministically across
+the loaded population; narrow lists reserve explicit `#n` markers rather than
+clipping away distinguishing characters. Tokens are stable while scrolling the same
+population; a different history page can change expansion or ordinal assignment.
+Extremely narrow viewports remain a physical visibility limit, not a change to raw IDs.
+
+Testing detail and attempt lists, Session/Runs, relevant catalog/log metadata and
+Waveforms identity displays now use the effective policy and shared helpers. Full
+mode exposes exact IDs; RPC identities, raw source bytes and selection remain exact.
+
+Verification passed: 27 scope combinations in fresh processes; identity guards and
+reset/migration tests; collision/Unicode/width-fitted renderer tests; native HTTP/PTY
+Testing and Waveforms controls/restart/export checks; independent Timing-preload
+regression; full Workbench build/lint/runtest at `-j 1`; changed-file formatting.
+Receipts: `/tmp/opencode/identifier-compression-n537648w/` and
+`/tmp/opencode/wb073-timing-preload/`.
+
+[Controls, scope and verification limits](../../identifier_compression.md).
+Status is **delivered**, awaiting owner acceptance; not closed.
+
+## Original partial delivery — Timing presentation (superseded)
 
 - Focused-tile commands: **Strings: Compress identifiers and source paths**,
   **Strings: Show full identifiers and source paths**, and reset-to-inherit.
@@ -65,15 +94,14 @@ Human/provider labels (never compressed), and copy-to-clipboard.
   sparse preference migration and fresh-process persistence. Actual a023 screenshots
   show `a023…4e4a` in Session and Runs.
 
-**Remaining:** global and workspace-level runtime controls/precedence, original
-simulation-detail attempt/job/discovery coverage and helper consolidation, and
-visible-list collision expansion. The new helper safely compresses long Unicode
-identifiers; the original criterion requiring all non-ASCII IDs unchanged has not
-been claimed satisfied and needs reconciliation before closure. First-four/last-four
-display is not a uniqueness guarantee; full exact IDs remain the selectors.
+**Gaps at that earlier checkpoint, now addressed above:** global/workspace controls,
+simulation-detail coverage, helper consolidation and collision expansion. The early
+helper compressed long Unicode IDs; the completed shared formatter now preserves
+them unchanged. Plain first-four/last-four display alone was not a uniqueness
+guarantee; the completed list resolver expands collisions while retaining exact selectors.
 
-See [controls and acceptance](../../timing_workspace_usability.md). The whole ticket
-is partial, not delivered/closed.
+See the [earlier Timing controls and acceptance](../../timing_workspace_usability.md).
+That increment alone was partial; the completion delivery above supersedes it.
 
 ## Dependencies
 None required. Reuses WB-048's persistence and inheritance rules.
@@ -84,9 +112,12 @@ persistence carry most of the work.
 
 ## Assumptions and decisions needed
 - Default on is implemented for the delivered Timing/Session per-tile trait.
-- Should the collision rule apply per tile or per workspace?
+- Collision resolution applies per tile's loaded identifier population, before
+  viewport slicing where practical; it is not a workspace-wide ID registry.
 
 ## References
+- [Completed compression controls and acceptance](../../identifier_compression.md)
+- [Completion agent plan](../../timing_triage_identifier_completion_plan.md)
 - [Timing compression, precision and preference controls](../../timing_workspace_usability.md)
 - [Shared display helpers](../../../terminal/presentation.ml)
 - [short_id](../../../terminal/overview_tiles.ml)

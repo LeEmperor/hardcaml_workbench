@@ -28,25 +28,64 @@ let decimal ~places value =
     else text)
 ;;
 
-let identifier ~compress value =
-  if not compress
+let compressible value =
+  String.length value > 12 && String.for_all value ~f:(fun c -> Char.to_int c < 128)
+;;
+
+let identifier_edges ~edges value =
+  if (2 * edges) + 1 >= String.length value
   then value
-  else (
-    let rec scalars offset acc =
-      if offset >= String.length value
-      then List.rev acc
-      else (
-        let decoded = Stdlib.String.get_utf_8_uchar value offset in
-        let length = Stdlib.Uchar.utf_decode_length decoded in
-        scalars (offset + length) (String.sub value ~pos:offset ~len:length :: acc))
+  else String.prefix value edges ^ "…" ^ String.suffix value edges
+;;
+
+let identifier ~compress value =
+  if compress && compressible value then identifier_edges ~edges:4 value else value
+;;
+
+(** Build once from the entire displayed population, before viewport slicing. Compare
+    complete labels, including unchanged Unicode tokens that contain an ellipsis. Equal
+    raw identities deliberately share a token. This API is display-only. *)
+let identifiers ?width ~compress population =
+  let ids = List.dedup_and_sort population ~compare:String.compare in
+  let rec resolve edges =
+    let labels =
+      Map.mapi edges ~f:(fun ~key:id ~data:edge ->
+        if compress && compressible id then identifier_edges ~edges:edge id else id)
     in
-    let parts = scalars 0 [] in
-    if List.length parts > 12
-    then
-      String.concat (List.take parts 4)
-      ^ "…"
-      ^ String.concat (List.drop parts (List.length parts - 4))
-    else value)
+    let counts = String.Table.create () in
+    Map.iter labels ~f:(fun label -> Hashtbl.incr counts label);
+    let changed = ref false in
+    let edges =
+      Map.mapi edges ~f:(fun ~key:id ~data:edge ->
+        if Hashtbl.find_exn counts (Map.find_exn labels id) > 1
+           && not (String.equal id (Map.find_exn labels id))
+        then (
+          changed := true;
+          edge + 1)
+        else edge)
+    in
+    if !changed then resolve edges else labels
+  in
+  let labels = resolve (String.Map.of_alist_exn (List.map ids ~f:(fun id -> id, 4))) in
+  let label_set = String.Set.of_list (Map.data labels) in
+  let rec marker_prefix prefix =
+    if List.exists
+         (List.mapi ids ~f:(fun i _ -> prefix ^ Int.to_string (i + 1)))
+         ~f:(Set.mem label_set)
+    then marker_prefix ("#" ^ prefix)
+    else prefix
+  in
+  let marker_prefix = marker_prefix "#" in
+  fun id ->
+    let label = Option.value (Map.find labels id) ~default:(identifier ~compress id) in
+    match width with
+    | Some width when Bonsai_term.View.width (Bonsai_term.View.text label) > width ->
+      (* A list-local ordinal is explicit and stable across viewport changes. Reserve it
+         instead of clipping away the characters that resolved a collision. *)
+      let rank = List.findi ids ~f:(fun _ raw -> String.equal raw id) in
+      Option.value_map rank ~default:label ~f:(fun (i, _) ->
+        marker_prefix ^ Int.to_string (i + 1))
+    | _ -> label
 ;;
 
 let source_path ~compress value =
@@ -63,6 +102,25 @@ let source_path ~compress value =
     ^ "/"
     ^ Filename.basename value)
   else value
+;;
+
+let%test_unit "collision resolution includes unchanged tokens and is order independent" =
+  let a = "abcd000000000000wxyz" in
+  let b = "abcd111111111111wxyz" in
+  let unchanged = "abcd…wxyz" in
+  let population = [ a; b; a; unchanged; "試験-long-identity"; "short" ] in
+  let show = identifiers ~compress:true population in
+  let reverse = identifiers ~compress:true (List.rev population) in
+  List.iter population ~f:(fun id -> assert (String.equal (show id) (reverse id)));
+  assert (not (String.equal (show a) (show b)));
+  assert (not (String.equal (show a) unchanged));
+  assert (String.equal (show unchanged) unchanged);
+  assert (String.equal (show "試験-long-identity") "試験-long-identity");
+  assert (String.equal (show "short") "short");
+  List.iter population ~f:(fun id ->
+    assert (String.equal (identifiers ~compress:false population id) id));
+  let narrow = identifiers ~width:4 ~compress:true population in
+  assert (not (String.equal (narrow a) (narrow b)))
 ;;
 
 let source_metadata ~compress value =
@@ -106,13 +164,8 @@ let identity_metadata_line ~compress line =
     let value = String.strip value in
     let shown =
       match label with
-      | "Run"
-      | "Context"
-      | "Workspace"
-      | "Source digest"
-      | "Execution SHA256"
-      | "Analysis digest"
-      | "Attempt" -> identifier ~compress value
+      | "Run" | "Source digest" | "Execution SHA256" | "Analysis digest" | "Attempt" ->
+        identifier ~compress value
       | "Execution" | "Execution file" | "Source" -> source_metadata ~compress value
       | _ -> value
     in
@@ -142,7 +195,7 @@ let%test_unit "compact identity and structured sources are reversible display ch
   [%test_result: string] (identifier ~compress:false id) ~expect:id;
   [%test_result: string]
     (identifier ~compress:true "界界界界abcdefgh界界界界")
-    ~expect:"界界界界…界界界界";
+    ~expect:"界界界界abcdefgh界界界界";
   let path =
     "/retained/timing-817177-2eeaceb51e3413c008ecd50516122412/reports/sta/max.rpt"
   in

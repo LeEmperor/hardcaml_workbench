@@ -12,6 +12,9 @@ let choose host id =
   in
   match command.action with
   | Set_presentation (tile, overrides) -> Host.set_presentation host tile overrides
+  | Set_global_compression value -> Host.set_global_compression host value, true
+  | Set_workspace_compression (workspace, value) ->
+    Host.set_workspace_compression host workspace value, true
   | _ -> failwith "Expected catalog presentation action"
 ;;
 
@@ -66,6 +69,69 @@ let () =
     Host.set_local host tile.id { local with filter = "not-persistent"; scroll = 23 }
   in
   match mode with
+  | "matrix-write" | "matrix-read" ->
+    let combo = argv.(3) in
+    let choice i =
+      match combo.[i] with
+      | 'i' -> None
+      | 't' -> Some true
+      | 'f' -> Some false
+      | _ -> assert false
+    in
+    let expected =
+      Host.set_global_compression host (choice 0)
+      |> fun host -> Host.set_workspace_compression host tile.workspace (choice 1)
+    in
+    let expected, _ =
+      Host.set_presentation expected tile.id
+        { T.inherit_ with string_compression = choice 2; decimal_places = Some 7 }
+    in
+    if String.equal mode "matrix-write"
+    then P.save ~state_directory (P.capture ~project_key expected)
+    else (
+      let saved = Option.value_exn (P.load ~state_directory ~project_key) in
+      let restored, pending = P.receive (Some saved) (P.apply saved Host.empty) registry in
+      assert (Option.is_none pending);
+      List.iter registry.tiles ~f:(fun tile ->
+        assert (T.equal (Host.policy restored tile) (Host.policy expected tile)));
+      assert ((Host.policy restored tile).decimal_places = 7))
+  | "scopes-write" ->
+    let host, _ = choose expected "global.strings.full" in
+    let host, _ = choose host "workspace.strings.compact" in
+    P.save ~state_directory (P.capture ~project_key { host with timing_preload = false })
+  | "scopes-read" ->
+    let preferences = Option.value_exn (P.load ~state_directory ~project_key) in
+    let restored, pending =
+      P.receive (Some preferences) (P.apply preferences Host.empty) registry
+    in
+    assert (Option.is_none pending);
+    assert (not restored.timing_preload);
+    assert (not (Host.policy restored tile).string_compression);
+    let reset, _ = choose restored "tile.presentation.strings.reset" in
+    assert (Host.policy reset tile).string_compression;
+    assert ((Host.policy reset tile).decimal_places = 9);
+    let reset, _ = choose reset "workspace.strings.reset" in
+    assert (not (Host.policy reset tile).string_compression);
+    let reset, _ = choose reset "global.strings.reset" in
+    assert (Host.policy reset tile).string_compression;
+    let replaced =
+      P.apply
+        preferences
+        (Host.receive
+           Host.empty
+           { registry with session_id = W.Session_id.of_string "replacement" })
+    in
+    assert (List.is_empty replaced.workspace_presentation);
+    assert (not (Host.policy replaced tile).string_compression);
+    P.save ~state_directory (P.capture ~project_key reset)
+  | "scopes-read-reset" ->
+    let preferences = Option.value_exn (P.load ~state_directory ~project_key) in
+    assert (Option.is_none preferences.global_compression);
+    assert (Option.is_none preferences.workspace_compression);
+    let restored = P.apply preferences host in
+    assert (Host.policy restored tile).string_compression;
+    assert ((Host.policy restored tile).decimal_places = 9);
+    assert (not restored.timing_preload)
   | "write" -> P.save ~state_directory (P.capture ~project_key expected)
   | "read" ->
     let preferences = Option.value_exn (P.load ~state_directory ~project_key) in

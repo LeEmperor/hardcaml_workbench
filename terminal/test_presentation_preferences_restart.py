@@ -4,6 +4,7 @@ _build/default/terminal/presentation_preferences_probe.exe
 Also wired into the terminal runtest alias. Each probe invocation is a fresh process.
 """
 
+import itertools
 import pathlib
 import re
 import subprocess
@@ -44,12 +45,12 @@ def main():
             run("hints-read", state, combo)
         # Schema 2 (before WB-048 tile appearance) and schema 1 (before WB-019
         # hints) files stay readable; missing fields inherit.
-        assert b"(schema_version 5)" in original and b"tile_appearance" in original
+        assert b"(schema_version 6)" in original and b"tile_appearance" in original
         run("headers-write")
         current = files[0].read_bytes()
         assert b"(tile_appearance ())" in current
         legacy_v2 = re.sub(rb"\s*\(tile_appearance \(\)\)", b"", current).replace(
-            b"(schema_version 5)", b"(schema_version 2)"
+            b"(schema_version 6)", b"(schema_version 2)"
         )
         assert b"tile_appearance" not in legacy_v2 and b"(schema_version 2)" in legacy_v2
         files[0].write_bytes(legacy_v2)
@@ -63,7 +64,22 @@ def main():
         run("write")
         run("read")
 
-        unknown_version = original.replace(b"(schema_version 5)", b"(schema_version 99)")
+        run("scopes-write")
+        run("scopes-read")
+        run("scopes-read-reset")
+        # Schema 5 already recorded preload; migration keeps its explicit false.
+        scopes_reset = files[0].read_bytes()
+        assert b"(timing_preload false)" in scopes_reset
+        files[0].write_bytes(
+            scopes_reset.replace(b"(schema_version 6)", b"(schema_version 5)")
+        )
+        run("scopes-read-reset")
+        for choices in itertools.product("itf", repeat=3):
+            combo = "".join(choices)
+            run("matrix-write", state, combo)
+            run("matrix-read", state, combo)
+
+        unknown_version = original.replace(b"(schema_version 6)", b"(schema_version 99)")
         # A schema 3 file missing its required appearance structure is rejected.
         cut = original.index(b"(tile_appearance")
         missing_appearance = original[:cut].rstrip() + b")\n"

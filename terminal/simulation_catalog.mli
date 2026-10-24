@@ -34,4 +34,4 @@ val disabled_reason : t -> string option
 (** Captures exact suite, subset, declared defaults and digest for Form.create. *)
 val launch : t -> (Simulation.Suite.t * Simulation.Selection.t * string) Or_error.t
 
-val rows : t -> Simulation_view.row list
+val rows : ?string_compression:bool -> t -> Simulation_view.row list

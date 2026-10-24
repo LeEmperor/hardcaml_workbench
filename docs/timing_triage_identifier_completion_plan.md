@@ -1,5 +1,9 @@
 # WB-009 triage completion and WB-073 identifier compression
 
+**Complete:** WB-069 and WB-009 are explicitly owner-verified/closed; WB-073 is
+implemented, automatically verified and deployed, awaiting owner acceptance.
+[Compression controls and acceptance](identifier_compression.md).
+
 ## Authorization and boundaries
 
 The owner explicitly closed/verified WB-069 and authorized work on the remaining
@@ -81,39 +85,39 @@ precedence, zero provider reads, restart and moved/removed/replaced identities.
 
 ### Agent A — WB-009 retained-evidence investigation
 
-- [ ] Trace original report and candidate executions using read-only source/evidence.
-- [ ] Reproduce available exact cases and identify any remaining fixable defect.
-- [ ] Implement a demonstrated backend/provider fix if needed, or return a precise
+- [x] Trace original report and candidate executions using read-only source/evidence.
+- [x] Reproduce available exact cases and identify any remaining fixable defect.
+- [x] Assess a demonstrated backend/provider fix if needed, or return a precise
   missing-evidence boundary for parent/user clarification. Do not edit parent docs.
-- [ ] Return receipts, exact IDs, query results and recommended ticket disposition.
+- [x] Return receipts, exact IDs, query results and recommended ticket disposition.
 
 ### Agent B — compression scopes and persistence
 
-- [ ] Add global/workspace compression choices and effective precedence to Host policy.
-- [ ] Add scoped palette actions/resets without changing unrelated settings.
-- [ ] Extend sparse preference schema, guards and migration from prior versions.
-- [ ] Test precedence, restart, resets, identity replacement and no provider effects.
-- [ ] Hand effective-policy API and commands to Agent C.
+- [x] Add global/workspace compression choices and effective precedence to Host policy.
+- [x] Add scoped palette actions/resets without changing unrelated settings.
+- [x] Extend sparse preference schema, guards and migration from prior versions.
+- [x] Test precedence, restart, resets, identity replacement and no provider effects.
+- [x] Hand effective-policy API and commands to Agent C.
 
 ### Agent C — shared collision-safe rendering and coverage
 
 Starts after B to avoid overlapping host/rendering/preferences edits.
 
-- [ ] Implement shared identifier formatting/collision resolver with short/Unicode
+- [x] Implement shared identifier formatting/collision resolver with short/Unicode
   preservation and stable deterministic output.
-- [ ] Apply it across required Testing/Session/run/Waveform identity surfaces,
+- [x] Apply it across required Testing/Session/run/Waveform identity surfaces,
   including simulation-detail attempt/job/discovery fields; consolidate old helpers.
-- [ ] Verify compress/full scope behavior in native terminal fixtures, including
+- [x] Verify compress/full scope behavior in native terminal fixtures, including
   deliberate collisions, long labels, mixed Unicode, pins and exact source identity.
-- [ ] Run targeted regressions and record final API/receipt handoff.
+- [x] Run targeted regressions and record final API/receipt handoff.
 
 ### Parent — closure, integration and deployment
 
 - [x] Record owner's WB-069 closure and this plan before implementation.
-- [ ] Resolve WB-009's disposition from actual evidence or ask for missing identity.
-- [ ] Run serial integrated build/lint/tests and review scope-complete acceptance.
-- [ ] Update ticket statuses honestly and publish controls/evidence documentation.
-- [ ] Refresh retained binaries if needed without stopping live user processes.
+- [x] Resolve WB-009's disposition from actual evidence or ask for missing identity.
+- [x] Run serial integrated build/lint/tests and review scope-complete acceptance.
+- [x] Update ticket statuses honestly and publish controls/evidence documentation.
+- [x] Refresh retained binaries if needed without stopping live user processes.
 
 ## Verification gates
 
@@ -128,4 +132,30 @@ preloading/navigation and Testing/Waveforms remain functional.
 
 ## Execution record
 
-Pending investigation/implementation.
+WB-009 trace is complete: 36 executions/16 registered IDs, two request-linked failed
+Signoff candidates with unpublished STA, successful historical comparison queries,
+and unchanged a023 evidence. Fifteen read-only calls and 6,024-file before/after
+inventory established no new provider/backend defect and no source mutations.
+The owner answered “Resolved by recent fixes”; WB-009 is now closed/verified without
+asserting which candidate was the original. Evidence: `/tmp/opencode/wb009-readonly-trace/`.
+
+Agent B completed schema-6 global/workspace/tile compression preferences and controls,
+documented precedence, sparse resets and identity guards. All 27 true/false/inherit
+scope combinations pass fresh-process verification. Terminal/protocol tests, build,
+lint and changed-file formatting passed at one job.
+
+Agent C completed shared collision-safe formatting and Testing/Session/Runs/Waveforms
+coverage. Short/non-ASCII IDs and human labels are preserved; list tokens extend on
+collision and narrow selectors reserve distinguishing ordinal markers. Full raw IDs
+remain selectors and exported source bytes remain exact. The native acceptance at
+`/tmp/opencode/identifier-compression-n537648w/` covers scopes, persistence, collisions,
+Unicode labels, waveform views and zero allocated domain jobs. Separate default-on
+Timing preload regression passed at `/tmp/opencode/wb073-timing-preload/`.
+
+Parent full Workbench build/lint/runtest passed serially at `-j 1`, and all changed
+OCaml files passed the configured formatter. Retained demo binaries were refreshed
+without stopping live processes; receipt
+`refresh-binaries-cd087c850b0240f7b4e72d1dcf3767fa` is under the real-demo receipts
+directory. No EDA or repository Git mutations occurred. Remaining physical viewport
+limits and non-repeated standalone legacy acceptance suites are documented in
+[the delivery guide](identifier_compression.md).

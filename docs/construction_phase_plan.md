@@ -8,9 +8,16 @@ triage and identifier-compression work. The
 boundaries, three-scope compression, collision handling and agent assignments.
 
 - [x] WB-069 explicitly closed/verified by owner.
-- [ ] Resolve original WB-009 report from retained evidence or identify missing input.
-- [ ] Complete WB-073 scope/persistence and collision-safe Testing/identity rendering.
-- [ ] Serial one-job integration checks, deployment and status/evidence reconciliation.
+- [x] Resolve original WB-009 report from retained evidence or identify missing input.
+- [x] Complete WB-073 scope/persistence and collision-safe Testing/identity rendering.
+- [x] Serial one-job integration checks, deployment and status/evidence reconciliation.
+
+WB-009 was traced read-only and the owner confirmed **Resolved by recent fixes**;
+it is now closed/verified. Original exact run identity remains unasserted. WB-073
+is now delivered awaiting owner acceptance: three scopes, schema-6 persistence,
+collision-safe Testing/Session/Runs/Waveforms identities and native verification.
+Full build/lint/tests passed at one job; retained binaries are refreshed.
+See [compression controls and evidence](identifier_compression.md).
 
 ## Active Timing usability and preloading — 2026-10-23
 

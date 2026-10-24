@@ -293,6 +293,7 @@ let fit_label ~width text =
 
 let run_selector_row
   ?(string_compression = true)
+  ?(population = [])
   ~width
   ~status_width
   ~cursor
@@ -303,15 +304,20 @@ let run_selector_row
   let marker = (if cursor then ">" else " ") ^ if active then "*" else " " in
   let status = E.text (E.clip ~width:status_width (E.plain status)) in
   let label_width = Int.max 0 (width - 3 - status_width - 1) in
-  let identity =
-    Backend_id.to_string run.Run_ref.backend
-    ^ "/"
-    ^ Presentation.identifier ~compress:string_compression run.id
+  let token =
+    Presentation.identifiers
+      ~width:label_width
+      ~compress:string_compression
+      (run.Run_ref.id :: population)
+      run.id
   in
+  let identity = Backend_id.to_string run.Run_ref.backend ^ "/" ^ token in
+  let identity = if cell_width identity > label_width then token else identity in
   let identity =
     match run.label with
     | Some label when (not (String.equal label run.id)) && not (String.is_empty label) ->
-      label ^ " · " ^ identity
+      let room = label_width - cell_width identity - 3 in
+      if room > 0 then fit_label ~width:room label ^ " · " ^ identity else identity
     | _ -> identity
   in
   let label = fit_label ~width:label_width identity in
@@ -417,6 +423,7 @@ let observation_qualifier = "Observation stopped; stage state unconfirmed"
 
 let run_selector_view
   ?(string_compression = true)
+  ?(population = [])
   ?indicator_frames
   ?time
   ?time_width
@@ -443,6 +450,7 @@ let run_selector_view
   let row =
     run_selector_row
       ~string_compression
+      ~population
       ~width:text_width
       ~status_width
       ~cursor
@@ -473,6 +481,46 @@ let run_selector_view
     ; View.text ~attrs:(attrs Muted) time
     ]
   |> box ~width ~height:1
+;;
+
+let%test_unit "single-line selectors reserve distinct tokens after final width fitting" =
+  let plain_text view =
+    let buffer = Buffer.create 100 in
+    Notty.Render.to_buffer
+      buffer
+      Notty.Cap.dumb
+      (0, 0)
+      (View.width view, View.height view)
+      (View.Private.notty_image view);
+    Buffer.contents buffer
+  in
+  let ids =
+    [ "same0000000000000000tail"; "same0000000000000001tail"; "same…tail"; "#1" ]
+  in
+  List.iter [ true; false ] ~f:(fun string_compression ->
+    List.iter [ 16; 24; 40; 100 ] ~f:(fun width ->
+      let rendered =
+        List.map ids ~f:(fun id ->
+          let run =
+            { Fs0_fixture.run_a with
+              id
+            ; label =
+                Some "A human provider label whose shared prefix must not hide identity"
+            }
+          in
+          run_selector_view
+            ~string_compression
+            ~population:ids
+            Appearance.default
+            ~width
+            ~status_width:6
+            ~cursor:false
+            ~active:false
+            run
+            "failed"
+          |> plain_text)
+      in
+      assert (not (List.contains_dup rendered ~compare:String.compare))))
 ;;
 
 let request_scope (execution : Asic.Run.t) =
@@ -1277,7 +1325,7 @@ let indicator_role : Indicator.t -> Role.t = function
   | Not_requested | Unknown | Pin | Artifact | Log | Seed | Report | Trace | Info -> Muted
 ;;
 
-let simulation_annotations ?(now = Time_ns.now ()) host data tile =
+let simulation_annotations ?(now = Time_ns.now ()) ?identifier_width host data tile =
   match Testing_workspace.pane tile.W.Tile.kind with
   | Some pane ->
     (match pane with
@@ -1293,12 +1341,15 @@ let simulation_annotations ?(now = Time_ns.now ()) host data tile =
      | _ -> [])
     @ Testing_workspace.rows
         ~now
+        ~string_compression:(H.policy host tile).string_compression
+        ?identifier_width
         (H.testing_state host tile.id)
         pane
         ~log_lines:data.log_lines
   | None ->
     Simulation_view.annotated_rows
       ~now
+      ~string_compression:(H.policy host tile).string_compression
       (H.simulation host tile.id)
       ~log_lines:data.log_lines
 ;;
@@ -1369,7 +1420,7 @@ let annotated_view_rows ?indicator_frames host ~width annotations =
 ;;
 
 let simulation_view_rows_with_selection ?indicator_frames ?now host data tile ~width =
-  simulation_annotations ?now host data tile
+  simulation_annotations ?now ~identifier_width:(Int.max 1 (width - 8)) host data tile
   |> List.filter ~f:(fun row ->
     (not row.Simulation_view.hint) || (H.policy host tile).hints)
   |> annotated_view_rows ?indicator_frames host ~width
@@ -1386,6 +1437,11 @@ let execution_annotations host data (tile : W.Tile.t) =
   in
   let selected job =
     Option.equal String.equal local.cursor (Some (Job_id.to_string job.Job.id))
+  in
+  let identity =
+    Presentation.identifiers
+      ~compress:(H.policy host tile).string_compression
+      (List.map jobs ~f:(fun job -> Job_id.to_string job.Job.id))
   in
   (if H.compact_summary host tile
    then [ row "Process results only" ]
@@ -1407,9 +1463,7 @@ let execution_annotations host data (tile : W.Tile.t) =
     else [])
   @ List.map jobs ~f:(fun job ->
     let prefix =
-      (if selected job then ">" else " ")
-      ^ Overview_tiles.short_id (Job_id.to_string job.id)
-      ^ "  "
+      (if selected job then ">" else " ") ^ identity (Job_id.to_string job.id) ^ "  "
     in
     let status = Job.State.to_string job.state in
     let tone : Simulation_view.tone =
@@ -1515,6 +1569,7 @@ let rows host data tile ~width ~height =
     |> List.map ~f:(fun (run, label) ->
       run_selector_row
         ~string_compression:(H.policy host tile).string_compression
+        ~population:(List.map data.runs ~f:(fun (r, _) -> r.id))
         ~width
         ~status_width
         ~cursor:(Option.equal String.equal selected (Some (run_label run)))
@@ -2129,6 +2184,7 @@ let tile_view
             |> List.map ~f:(fun (run, status) ->
               run_selector_view
                 ~string_compression:policy.string_compression
+                ~population:(List.map data.runs ~f:(fun (r, _) -> r.id))
                 ~time:(time run)
                 ~time_width
                 ?indicator_frames:
@@ -3278,6 +3334,59 @@ let refinement_fixture (definition : P.Definition.t) =
     List.find_exn (H.tiles host) ~f:(fun tile -> String.equal tile.W.Tile.kind kind)
   in
   host, data, find
+;;
+
+let%test_unit "Session and Runs render effective global workspace and tile compression" =
+  let host, data, find = refinement_fixture P.Overview.definition in
+  let session = find "live-status" in
+  let selector = find "run-selector" in
+  let run = { Fs0_fixture.run_a with id = "opaque00000000000000tail" } in
+  let registry = Option.value_exn host.registry in
+  let workspace =
+    List.find_exn registry.workspaces ~f:(fun w ->
+      W.Workspace_id.equal w.id session.workspace)
+  in
+  let context =
+    List.find_exn registry.contexts ~f:(fun c -> W.Context_id.equal c.id workspace.context)
+  in
+  let registry =
+    W.apply
+      registry
+      (Mutate
+         { expected_revision = registry.revision
+         ; mutation =
+             Select_run
+               { workspace = workspace.id
+               ; context = workspace.context
+               ; expected_selection_revision = context.selection_revision
+               ; run = Some run
+               }
+         })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let host = H.receive host registry in
+  let data = { data with runs = [ run, "completed" ] } in
+  let check host tile compact =
+    let text = tile_view host data tile ~width:160 ~height:30 |> plain_text in
+    let token = Presentation.identifier ~compress:compact run.id in
+    assert (String.is_substring text ~substring:token);
+    if compact then assert (not (String.is_substring text ~substring:run.id))
+  in
+  let full = H.set_global_compression host (Some false) in
+  List.iter [ session; selector ] ~f:(fun tile -> check full tile false);
+  let compact = H.set_workspace_compression full session.workspace (Some true) in
+  List.iter [ session; selector ] ~f:(fun tile -> check compact tile true);
+  let overridden, _ =
+    H.set_presentation
+      compact
+      session.id
+      { T.inherit_ with string_compression = Some false }
+  in
+  check overridden session false;
+  check overridden selector true;
+  let inherited, _ = H.set_presentation overridden session.id T.inherit_ in
+  check inherited session true
 ;;
 
 let%test_unit "hierarchy unavailable presentation is nonempty and clips small panes" =
@@ -4645,8 +4754,8 @@ let%test_unit "execution images paint typed states and condense only display ide
             in
             let prefix = ">" ^ Overview_tiles.short_id id ^ "  " in
             let identity =
-              View.crop ~l:(x - String.length prefix) ~t:y image
-              |> box ~width:(String.length prefix) ~height:1
+              View.crop ~l:(x - cell_width prefix) ~t:y image
+              |> box ~width:(cell_width prefix) ~height:1
             in
             let neutral =
               View.text ~attrs:(Role.attrs host.appearance Foreground) prefix
@@ -5494,7 +5603,7 @@ let%test_unit "selector width budget preserves useful IDs and aligns compact sta
   in
   assert (cell_width narrow = 36);
   assert (String.is_suffix narrow ~suffix:" completed");
-  assert (String.is_substring narrow ~substring:"~");
+  assert (String.is_substring narrow ~substring:"#1");
   List.iter [ 0; 1; 2; 3; 5; 10; 20 ] ~f:(fun width ->
     let label = fit_label ~width "界é selected run identity 界é" in
     assert (cell_width label <= width))

@@ -249,5 +249,7 @@ coherent slices to discuss together.
 | FS4 extensions | [WB-011](features/integrations/WB-011-vivado.md) Vivado; [WB-018](features/integrations/WB-018-ches-tiles.md) Ches; [WB-029](features/integrations/WB-029-version-control.md) VCS; [WB-017](features/project/WB-017-project-files.md) files; [WB-025](features/verification/WB-025-formal-verification.md), [WB-031](features/exploration/WB-031-design-space-sweeper.md), [WB-033](features/exploration/WB-033-quick-harn-playground.md) proof/design exploration. Each needs its own bounded activation. |
 | FS5 presentation | [Presentation category](features/README.md#presentation-and-interaction): small alignment/wording/control work through tabs, peeks, floats and a richer gallery. Native spinners, existing schemes and persisted global appearance are already delivered. |
 
-The newer WB-009 report requires exact-run triage; earlier adopted-evidence FS1
-acceptance remains recorded and must not be used to dismiss or pre-diagnose it.
+WB-009 is now owner-verified/closed following the a023 wrong-stage fix, additional
+read-only historical triage and confirmation that recent fixes resolve the older
+report. Original exact-run identity remains unasserted; earlier FS1 acceptance was
+not used to pre-diagnose it.

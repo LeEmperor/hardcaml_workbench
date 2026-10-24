@@ -387,12 +387,7 @@ let checklist_row ?now ~run ~selected = function
 
 (** Only shorten ASCII opaque identifiers. Human/provider labels remain intact and are
     clipped by display cells during rendering, never by UTF-8 byte offsets. *)
-let short_id text =
-  if String.for_all text ~f:(fun char -> Char.to_int char < 128)
-     && String.length text > 15
-  then String.prefix text 6 ^ "..." ^ String.suffix text 6
-  else text
-;;
+let short_id text = Presentation.identifier ~compress:true text
 
 let run_label (run : Run_ref.t) =
   Option.filter run.label ~f:(fun label -> not (String.is_empty (String.strip label)))
@@ -1344,7 +1339,7 @@ let%test_unit "aggregate colors require field-specific explicit facts" =
   check Verdict "unknown" Muted;
   check Verdict "future-provider-verdict" Muted;
   check Verdict "" Muted;
-  [%test_result: string] (short_id "0123456789abcdefghijkl") ~expect:"012345...ghijkl"
+  [%test_result: string] (short_id "0123456789abcdefghijkl") ~expect:"0123…ijkl"
 ;;
 
 let%test_unit "cached summary facts retain freshness and do not acquire stage statuses" =

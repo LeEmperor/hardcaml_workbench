@@ -31,6 +31,12 @@ type tile_appearance =
   }
 [@@deriving sexp]
 
+type workspace_compression =
+  { workspace : W.Workspace_id.t
+  ; string_compression : bool
+  }
+[@@deriving sexp]
+
 type t =
   { schema_version : int
   ; project_key : string
@@ -40,6 +46,8 @@ type t =
   ; main_hints : bool option [@sexp.option]
   ; palette_hints : bool option [@sexp.option]
   ; timing_preload : bool option [@sexp.option]
+  ; global_compression : bool option [@sexp.option]
+  ; workspace_compression : workspace_compression list option [@sexp.option]
   ; session : W.Session_id.t option
   ; tile_headers : tile_headers list
   ; tile_appearance : tile_appearance list option [@sexp.option]
@@ -59,7 +67,8 @@ let path ~state_directory ~project_key =
    choices and inherit compact strings and three decimals for these absent fields. *)
 (* Schema 5 adds the optional project Timing index preload policy. Schemas 1–4 inherit
    background-index; newly captured preferences always record the choice. *)
-let schema_version = 5
+(* Schema 6 adds sparse project/global and session/workspace compression choices. *)
+let schema_version = 6
 
 let appearance_of_overrides (o : T.overrides) ~tile ~workspace ~kind =
   match T.persisted { o with header = None } with
@@ -89,6 +98,20 @@ let capture ~project_key (host : Host.t) =
   ; main_hints = Some host.main_hints
   ; palette_hints = Some host.palette_hints
   ; timing_preload = Some host.timing_preload
+  ; global_compression = host.presentation.string_compression
+  ; workspace_compression =
+      (let entries =
+         Option.value_map host.registry ~default:[] ~f:(fun registry ->
+           List.filter_map registry.workspaces ~f:(fun workspace ->
+             List.Assoc.find
+               host.workspace_presentation
+               (W.Workspace_id.to_string workspace.id)
+               ~equal:String.equal
+             |> Option.bind ~f:(fun o -> o.string_compression)
+             |> Option.map ~f:(fun string_compression ->
+               { workspace = workspace.id; string_compression })))
+       in
+       if List.is_empty entries then None else Some entries)
   ; session = Option.map host.registry ~f:(fun registry -> registry.session_id)
   ; tile_headers =
       Option.value_map host.registry ~default:[] ~f:(fun registry ->
@@ -113,18 +136,31 @@ let decode ~project_key content =
   then failwith "Terminal presentation preference size limit exceeded";
   let stored = t_of_sexp (Sexp.of_string content) in
   (match stored.schema_version, stored.main_hints, stored.palette_hints with
-   | 1, None, None | (2 | 3 | 4 | 5), Some _, Some _ -> ()
-   | (1 | 2 | 3 | 4 | 5), _, _ ->
+   | 1, None, None | (2 | 3 | 4 | 5 | 6), Some _, Some _ -> ()
+   | (1 | 2 | 3 | 4 | 5 | 6), _, _ ->
      failwith "Terminal presentation hint fields do not match schema"
    | _ -> failwith "Unsupported terminal presentation preference schema");
   (match stored.schema_version, stored.tile_appearance with
-   | (1 | 2), None | (3 | 4 | 5), Some _ -> ()
+   | (1 | 2), None | (3 | 4 | 5 | 6), Some _ -> ()
    | _ -> failwith "Terminal tile appearance fields do not match schema");
   let appearance = Option.value stored.tile_appearance ~default:[] in
+  let workspaces = Option.value stored.workspace_compression ~default:[] in
+  if stored.schema_version < 6
+     && (Option.is_some stored.global_compression
+         || Option.is_some stored.workspace_compression)
+  then failwith "Compression scopes require schema 6";
+  if List.length workspaces > 128
+  then failwith "Too many workspace compression preferences";
+  if List.contains_dup workspaces ~compare:(fun a b ->
+       W.Workspace_id.compare a.workspace b.workspace)
+  then failwith "Duplicate workspace compression preference";
   if not (String.equal stored.project_key project_key)
   then failwith "Terminal presentation preference project/environment mismatch";
   if Option.is_none stored.session
-     && not (List.is_empty stored.tile_headers && List.is_empty appearance)
+     && not
+          (List.is_empty stored.tile_headers
+           && List.is_empty appearance
+           && List.is_empty workspaces)
   then failwith "Tile header preferences require a workspace session";
   let ids = List.map stored.tile_headers ~f:(fun tile -> W.Tile_id.to_string tile.tile) in
   if List.contains_dup ids ~compare:String.compare
@@ -166,6 +202,18 @@ let apply_tiles t (host : Host.t) =
   | Some registry ->
     let same_session =
       Option.equal W.Session_id.equal t.session (Some registry.session_id)
+    in
+    let host =
+      List.fold registry.workspaces ~init:host ~f:(fun host workspace ->
+        let value =
+          if same_session
+          then
+            List.find (Option.value t.workspace_compression ~default:[]) ~f:(fun pref ->
+              W.Workspace_id.equal pref.workspace workspace.id)
+            |> Option.map ~f:(fun pref -> pref.string_compression)
+          else None
+        in
+        Host.set_workspace_compression host workspace.id value)
     in
     List.fold registry.tiles ~init:host ~f:(fun host (tile : W.Tile.t) ->
       let matches pref_tile pref_workspace pref_kind =
@@ -215,7 +263,16 @@ let apply t (host : Host.t) =
     ; main_hints = Option.value t.main_hints ~default:true
     ; palette_hints = Option.value t.palette_hints ~default:true
     ; timing_preload = Option.value t.timing_preload ~default:true
+    ; presentation = { host.presentation with string_compression = t.global_compression }
     }
+;;
+
+(** Restoration is a one-shot handoff, not a policy replayed on every poll. Consume even a
+    mismatching/empty registry: removed identities must not regain old preferences if
+    their IDs are subsequently reused. *)
+let receive pending host snapshot =
+  let host = Host.receive host snapshot in
+  Option.value_map pending ~default:host ~f:(fun saved -> apply_tiles saved host), None
 ;;
 
 let%test_unit "preload schema migration and durable explicit policy" =
@@ -237,12 +294,129 @@ let%test_unit "preload schema migration and durable explicit policy" =
   assert (restore { stored with timing_preload = Some true }).timing_preload
 ;;
 
-(** Restoration is a one-shot handoff, not a policy replayed on every poll. Consume even a
-    mismatching/empty registry: removed identities must not regain old preferences if
-    their IDs are subsequently reused. *)
-let receive pending host snapshot =
-  let host = Host.receive host snapshot in
-  Option.value_map pending ~default:host ~f:(fun saved -> apply_tiles saved host), None
+let%test_unit "compression scope round trips, guards, sparse resets and schema 5 preload" =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "compression-scopes") in
+  let tile = List.hd_exn registry.tiles in
+  let base = Host.receive Host.empty registry in
+  let round_trip host snapshot =
+    let saved =
+      decode ~project_key:"scopes" (encode (capture ~project_key:"scopes" host))
+    in
+    saved, apply saved (Host.receive Host.empty snapshot)
+  in
+  let choices = [ None; Some true; Some false ] in
+  List.iter choices ~f:(fun global ->
+    List.iter choices ~f:(fun workspace ->
+      List.iter choices ~f:(fun tile_choice ->
+        let host = Host.set_global_compression base global in
+        let host = Host.set_workspace_compression host tile.workspace workspace in
+        let overrides =
+          { T.inherit_ with
+            string_compression = tile_choice
+          ; decimal_places = Some 8
+          ; hints = Some false
+          ; frame = Some false
+          }
+        in
+        let host, _ = Host.set_presentation host tile.id overrides in
+        let expected =
+          Option.first_some tile_choice (Option.first_some workspace global)
+          |> Option.value ~default:true
+        in
+        let saved, restored = round_trip host registry in
+        assert (Bool.equal (Host.policy restored tile).string_compression expected);
+        assert ((Host.policy restored tile).decimal_places = 8);
+        assert (Option.equal Bool.equal restored.presentation.string_compression global);
+        let command =
+          Host.catalog restored ~project:None ~jobs:[]
+          |> List.find_exn ~f:(fun c ->
+            String.equal c.id "tile.presentation.strings.reset")
+        in
+        let reset =
+          match command.action with
+          | Set_presentation (id, o) -> fst (Host.set_presentation restored id o)
+          | _ -> assert false
+        in
+        assert (
+          T.equal_overrides
+            (Host.local reset tile.id).presentation
+            { overrides with string_compression = None });
+        let reset =
+          Host.set_workspace_compression reset tile.workspace None
+          |> fun h -> Host.set_global_compression h None
+        in
+        let sparse, reset = round_trip reset registry in
+        assert (Option.is_none sparse.global_compression);
+        assert (Option.is_none sparse.workspace_compression);
+        assert (Host.policy reset tile).string_compression;
+        assert ((Host.policy reset tile).decimal_places = 8);
+        assert (Option.equal W.Snapshot.equal host.registry base.registry);
+        assert (Option.equal W.Tile_id.equal host.focus base.focus);
+        assert (phys_equal host.planned_run base.planned_run);
+        let renamed =
+          { registry with
+            workspaces =
+              List.map registry.workspaces ~f:(fun w -> { w with name = "Renamed" })
+          }
+        in
+        assert (
+          Bool.equal
+            (Host.policy (apply saved (Host.receive Host.empty renamed)) tile)
+              .string_compression
+            expected);
+        let replaced =
+          Host.receive
+            restored
+            { registry with session_id = W.Session_id.of_string "replacement" }
+        in
+        assert (List.is_empty replaced.workspace_presentation);
+        assert (
+          Option.is_none (Host.local replaced tile.id).presentation.string_compression);
+        assert (
+          Bool.equal
+            (Host.policy replaced tile).string_compression
+            (Option.value global ~default:true));
+        let removed =
+          Host.receive restored { registry with workspaces = []; tiles = [] }
+        in
+        let readded =
+          Host.receive removed { registry with revision = registry.revision + 1 }
+        in
+        assert (List.is_empty readded.workspace_presentation);
+        assert (
+          Option.is_none (Host.local readded tile.id).presentation.string_compression);
+        let absent, pending =
+          receive
+            (Some saved)
+            (apply saved Host.empty)
+            { registry with workspaces = []; tiles = [] }
+        in
+        let readded, _ = receive pending absent registry in
+        assert (List.is_empty readded.workspace_presentation))));
+  let saved = capture ~project_key:"scopes" { base with timing_preload = false } in
+  let legacy = { saved with schema_version = 5 } in
+  let migrated = decode ~project_key:"scopes" (encode legacy) in
+  let restored = apply migrated base in
+  assert (not restored.timing_preload);
+  assert ((capture ~project_key:"scopes" restored).schema_version = 6);
+  let pref = { workspace = tile.workspace; string_compression = false } in
+  let rejects saved =
+    assert (
+      Result.is_error
+        (Or_error.try_with (fun () -> decode ~project_key:"scopes" (encode saved))))
+  in
+  rejects { saved with workspace_compression = Some [ pref; pref ] };
+  rejects { saved with session = None; workspace_compression = Some [ pref ] };
+  rejects { saved with workspace_compression = Some (List.init 129 ~f:(fun _ -> pref)) };
+  rejects { legacy with global_compression = Some false };
+  List.iter [ -1; 10 ] ~f:(fun decimal_places ->
+    let host, _ =
+      Host.set_presentation
+        base
+        tile.id
+        { T.inherit_ with decimal_places = Some decimal_places }
+    in
+    rejects (capture ~project_key:"scopes" host))
 ;;
 
 (* Reads and writes run on the caller's I/O worker. Rename is in the same directory:
@@ -363,7 +537,7 @@ let%test_unit "strict schema validation and isolated identities" =
       Result.is_error (Or_error.try_with (fun () -> decode ~project_key:"root/env" value)))
   in
   rejects "(";
-  rejects (encode { stored with schema_version = 6 });
+  rejects (encode { stored with schema_version = 7 });
   rejects (encode { stored with schema_version = 99 });
   rejects (encode { stored with main_hints = None });
   (* Schema 3 requires the appearance list; earlier schemas predate it. *)
