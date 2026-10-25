@@ -359,6 +359,46 @@ let indicator_view ?indicator_frames appearance role kind =
     |> View.with_colors' ~fg:(Role.foreground appearance role)
 ;;
 
+let indicator_label icons kind label =
+  let glyph = Indicator.text icons kind in
+  (if String.is_empty glyph then "" else glyph ^ " ") ^ label
+;;
+
+let freshness_indicator : Asic.Summary.Freshness.t -> Indicator.t = function
+  | Validated -> Completed
+  | Cached_unverified -> Cached
+  | Missing_source -> Unavailable
+  | Refresh_failed _ -> Stale
+;;
+
+(* Only a typed, active evidence read for this exact scope is activity. A cache lookup,
+   retained error, or execution lifecycle must never start an evidence spinner. *)
+let evidence_reading data ~views ~runs =
+  match Evidence_activity.summarize ~views ~runs data.asic with
+  | Reading _ -> true
+  | Idle | Cache_lookup _ | Not_updated _ -> false
+;;
+
+let freshness_row ?(reading = false) icons freshness row =
+  let glyph =
+    Indicator.text icons (if reading then Running else freshness_indicator freshness)
+  in
+  if String.is_empty glyph
+  then row
+  else { E.text = glyph ^ " "; role = E.freshness_role freshness } :: row
+;;
+
+let inspection_indicator ~reading (view : Inspection_view.t) : Indicator.t =
+  if reading
+  then Running
+  else if Option.is_some (Option.first_some view.error view.pending_error)
+  then Stale
+  else (
+    match view.index with
+    | None -> Unavailable
+    | Some index -> if index.cached_unverified then Cached else Completed)
+;;
+
 let run_has_producer data run =
   Option.exists data.asic ~f:(fun snapshot ->
     List.exists snapshot.Asic.Snapshot.runs ~f:(fun execution ->
@@ -1044,6 +1084,20 @@ let terminal_content host data tile ~run =
         && (policy.freshness || i <> 1)
         && (policy.hints || not (Option.equal Int.equal (Some i) hint_index)))
   in
+  let content =
+    if exact_terminal && policy.freshness
+    then
+      List.mapi content ~f:(fun i row ->
+        if i = 0
+        then
+          freshness_row
+            ~reading:(evidence_reading data ~views:[] ~runs:[ run ])
+            host.H.appearance.icons
+            (Option.value_exn summary).freshness
+            row
+        else row)
+    else content
+  in
   (if String.equal tile.kind "finalization"
    then List.map (data.run_lines run "finalization-status") ~f:E.plain
    else [])
@@ -1073,7 +1127,16 @@ let synthesis_metrics_content host data tile ~run =
     then None
     else if i = 0 && not policy.hints
     then Some (E.plain "Synthesis metrics")
-    else Some row)
+    else
+      Some
+        (if Option.equal Int.equal (Some i) freshness_index
+         then
+           freshness_row
+             ~reading:(evidence_reading data ~views:[] ~runs:[ run ])
+             host.H.appearance.icons
+             (Option.value_exn summary).freshness
+             row
+         else row))
 ;;
 
 let metrics_scope data run =
@@ -1178,6 +1241,20 @@ let semantic_rows host data tile ~width ~height =
                         && ((Synthesis_view.Mode.equal mode Summary && source_height >= 8)
                             || (Synthesis_view.Mode.equal mode Cells && source_height >= 5)
                            ))))
+            |> List.mapi ~f:(fun i row ->
+              if policy.freshness && Synthesis_view.Mode.equal mode Summary && i = 1
+              then
+                Option.value_map
+                  (data.summary run)
+                  ~default:row
+                  ~f:(fun s ->
+                    freshness_row
+                      ~reading:(evidence_reading data ~views:[] ~runs:[ run ])
+                      host.H.appearance.icons
+                      s.freshness
+                      row)
+                |> E.clip ~width
+              else row)
             |> Fn.flip List.take height
           | Details | Evidence ->
             Synthesis_view.semantic_rows
@@ -1295,7 +1372,8 @@ let producer_indicator : Planned_run.launch_status -> Indicator.t = function
   | Completed -> Completed
   | Launch_failed -> Failed
   | Cancelled -> Cancelled
-  | Detached | Unavailable -> Unknown
+  | Detached -> Unknown
+  | Unavailable -> Unavailable
 ;;
 
 let planned_role : Planned_run.role -> Role.t = function
@@ -1359,7 +1437,8 @@ let indicator_role : Indicator.t -> Role.t = function
   | Completed -> Success
   | Failed -> Failure
   | Pending | Cancelled | Skipped | Stale -> Warning
-  | Ready -> Success
+  | Ready | Linked -> Success
+  | Cached | Independent | Expanded | Collapsed | Leaf | Top | Unavailable
   | Not_requested | Unknown | Pin | Artifact | Log | Seed | Report | Trace | Info -> Muted
 ;;
 
@@ -1628,14 +1707,25 @@ let rows host data tile ~width ~height =
   in
   let rows =
     match inspection_explorer host tile, artifact_inspector host tile with
-    | Some view, _ -> Inspection_view.rows view ~width ~height
+    | Some view, _ ->
+      Inspection_view.rows view ~width ~height
+      |> List.mapi ~f:(fun i row ->
+        if i = 0
+        then
+          indicator_label
+            host.appearance.icons
+            (inspection_indicator
+               ~reading:(evidence_reading data ~views:[ view ] ~runs:[])
+               view)
+            row
+        else row)
     | None, Some view -> Artifact_view.rows view ~width ~height
     | None, None ->
       (match tile.kind with
        | "hierarchy" ->
          [ local.hierarchy_status; "Tested top / DUT: unknown" ]
          @ Option.value_map local.hierarchy ~default:[] ~f:(fun view ->
-           Hierarchy_view.rows view ~height)
+           Hierarchy_view.rows ~icons:host.appearance.icons view ~height)
        | "planned-run" ->
          planned_rows host tile ~width |> List.map ~f:(fun row -> row.Planned_run.text)
        | "run-selector" -> run_rows ()
@@ -1804,6 +1894,8 @@ let timing_semantic_prefix ?(presentation = T.defaults) ~pane ~width view =
    retains C's four-row viewport budget; tiny panes give selection priority. *)
 let timing_body
   ?(presentation = T.defaults)
+  ?indicator_frames
+  ?(reading = false)
   appearance
   ~pane
   ~scroll
@@ -1865,7 +1957,15 @@ let timing_body
                   (all view.corner)
                   (all view.group)
                   (all view.producer)))
-      ; View.hcat [ text Metric (count ^ " · "); text observation_role observation ]
+      ; View.hcat
+          [ text Metric (count ^ " · ")
+          ; indicator_view
+              ?indicator_frames
+              appearance
+              observation_role
+              (inspection_indicator ~reading view)
+          ; text observation_role observation
+          ]
       ; text Muted "Path / endpoint                         Value · reported status"
       ]
     in
@@ -2513,6 +2613,8 @@ let tile_view
       | Some pane, Some view ->
         timing_body
           ~presentation:policy
+          ?indicator_frames
+          ~reading:(evidence_reading data ~views:[ view ] ~runs:[])
           appearance
           ~pane
           ~scroll:local.scroll
@@ -2996,8 +3098,8 @@ let render_workspace
                  w.name
                  (Option.value_map c.selected_run ~default:"none" ~f:display_run)
                  (if W.Context_id.equal c.id s.main_context
-                  then "Linked"
-                  else "Independent")
+                  then indicator_label appearance.icons Linked "Linked"
+                  else indicator_label appearance.icons Independent "Independent")
                  c.name
                  (Option.value_map data.project ~default:"Workbench" ~f:(fun p -> p.name))
                  data.status
@@ -3016,7 +3118,7 @@ let render_workspace
         ~width
         ~height:available
         [ "No visible tiles in this workspace."
-        ; "Space c c: Apply default layout to recover"
+        ; "Space c c: Add a tile, or Apply default layout"
         ]
     else
       List.map layout ~f:(fun (tile, (g : W.Geometry.t)) ->
@@ -3283,12 +3385,25 @@ let render ?(now = Time_ns.now ()) ?indicator_frames ?render_pane host data dime
     match Option.bind inspection_tile ~f:(inspection_explorer host) with
     | Some view ->
       let width, height = inspection_viewport dimensions in
-      lines
-        ~appearance:host.appearance
-        ~role:Surface
-        ~width
-        ~height
-        (Inspection_view.rows view ~width ~height |> inspector_breadcrumb host ~width)
+      let kind =
+        inspection_indicator
+          ~reading:(evidence_reading data ~views:[ view ] ~runs:[])
+          view
+      in
+      let icon =
+        indicator_view ?indicator_frames host.appearance (indicator_role kind) kind
+      in
+      let rows =
+        Inspection_view.rows view ~width ~height
+        |> inspector_breadcrumb host ~width:(Int.max 0 (width - View.width icon))
+      in
+      let rows =
+        List.mapi rows ~f:(fun i row ->
+          let text = View.text ~attrs:(Role.attrs host.appearance Surface) row in
+          (if i = 0 then View.hcat [ icon; text ] else text)
+          |> box ~width ~height:1)
+      in
+      View.vcat rows
       |> colored host.appearance Surface
       |> box ~width ~height
     | None -> render_workspace ~now ?indicator_frames ?render_pane host data dimensions
@@ -3374,6 +3489,91 @@ let refinement_fixture (definition : P.Definition.t) =
     List.find_exn (H.tiles host) ~f:(fun tile -> String.equal tile.W.Tile.kind kind)
   in
   host, data, find
+;;
+
+let%test_unit "WB002 stock Overview stage cards render typed freshness markers" =
+  let host, data, find = refinement_fixture P.Overview.definition in
+  let analysis : Asic.Timing_analysis.t =
+    { target =
+        { attempt_id = "attempt"
+        ; occurrence_id = "signoff"
+        ; analysis_id = "sta"
+        ; source_digest = "digest"
+        ; execution_sha256 = "sha"
+        ; stage = "signoff"
+        ; execution_file = None
+        }
+    ; status = Completed
+    ; reason = None
+    ; duration = None
+    ; enclosing_status = "completed"
+    ; producer = None
+    ; corners = []
+    ; metrics = []
+    ; timing_goal = Pass
+    ; evidence = "retained"
+    }
+  in
+  List.iter
+    [ Asic.Summary.Freshness.Cached_unverified, Indicator.Cached, "cached/unverified"
+    ; Validated, Completed, "validated"
+    ; Missing_source, Unavailable, "source unavailable"
+    ; Refresh_failed "offline", Stale, "refresh failed"
+    ]
+    ~f:(fun (freshness, indicator, label) ->
+      List.iter [ None; Some analysis ] ~f:(fun timing_analysis ->
+        let data =
+          { data with
+            summary =
+              (fun run ->
+                Option.map (data.summary run) ~f:(fun s ->
+                  { s with freshness; timing_analysis }))
+          }
+        in
+        List.iter Appearance.Icons.all ~f:(fun icons ->
+          let host = { host with appearance = { host.appearance with icons } } in
+          List.iter
+            [ "synthesis"; "placement"; "routing"; "checks"; "finalization"; "timing" ]
+            ~f:(fun kind ->
+              let tile = find kind in
+              assert (compact_summary_enabled host tile);
+              let render ?indicator_frames width height =
+                tile_view ?indicator_frames host data tile ~width ~height
+              in
+              let text = render 120 20 |> plain_text in
+              let glyph = Indicator.text icons indicator in
+              let expected =
+                if String.equal kind "timing" && Option.is_some timing_analysis
+                then
+                  (if String.is_empty glyph then "" else glyph ^ " ")
+                  ^ "Goal: pass · signoff / post-PNR STA"
+                  ^ if Asic.Summary.Freshness.equal freshness Validated
+                    then ""
+                    else " [" ^ label ^ "]"
+                else
+                  (if String.is_empty glyph then "" else glyph ^ " ")
+                  ^ "Evidence: " ^ label
+              in
+              (* Validated compact Timing has no freshness qualifier. *)
+              if not
+                   (String.equal kind "timing"
+                    && Asic.Summary.Freshness.equal freshness Validated)
+              then assert (String.is_substring text ~substring:expected);
+              if String.equal kind "synthesis"
+              then (
+                assert (String.is_substring text ~substring:"Reported cells (agg.): 50");
+                assert (String.is_substring text ~substring:"synthesis: completed");
+                assert (String.is_substring text ~substring:"Time: unknown"));
+              let frames glyph : Indicator.frames =
+                { dot = View.text glyph; line = View.text glyph }
+              in
+              assert (
+                String.equal
+                  (render ~indicator_frames:(frames "A") 120 20 |> plain_text)
+                  (render ~indicator_frames:(frames "B") 120 20 |> plain_text));
+              List.iter [ 1, 1; 24, 4; 80, 8 ] ~f:(fun (width, height) ->
+                let view = render width height in
+                assert (View.width view = width && View.height view = height))))))
 ;;
 
 let%test_unit "Session and Runs render effective global workspace and tile compression" =
@@ -3754,6 +3954,195 @@ let%test_unit "Waveforms banner and hints stay scoped with explicit local hint o
       ~substring:"j/k browse")
 ;;
 
+let%test_unit "WB-002 host context labels respect icon policy without duplicating pin badges" =
+  let host, data, find = refinement_fixture P.Overview.definition in
+  let registry = Option.value_exn host.registry in
+  let workspace = Option.value_exn (H.active host) in
+  let context = W.context registry workspace.context in
+  let independent =
+    { context with id = W.Context_id.of_string "wb002-independent"; name = "Detached" }
+  in
+  let detached =
+    H.receive host
+      { registry with
+        contexts = independent :: registry.contexts
+      ; workspaces =
+          List.map registry.workspaces ~f:(fun w ->
+            if W.Workspace_id.equal w.id workspace.id
+            then { w with context = independent.id }
+            else w)
+      }
+  in
+  List.iter Appearance.Icons.all ~f:(fun icons ->
+    List.iter [ host, Indicator.Linked, "Linked"; detached, Independent, "Independent" ]
+      ~f:(fun (host, kind, label) ->
+        let host = { host with appearance = { host.appearance with icons } } in
+        let registry = Option.value_exn host.registry in
+        let host =
+          H.receive host
+            { registry with
+              tiles =
+                List.filter registry.tiles ~f:(fun tile ->
+                  not (String.equal tile.kind "live-status"))
+            }
+        in
+        let screen =
+          render_workspace host data { Dimensions.width = 200; height = 40 } |> plain_text
+        in
+        assert (
+          String.is_substring screen
+            ~substring:(indicator_label icons kind label ^ ": ")));
+    let tile = { (find "synthesis") with binding = Pin_run Fs0_fixture.run_a } in
+    let host = { host with appearance = { host.appearance with icons } } in
+    let screen = tile_view host data tile ~width:100 ~height:16 |> plain_text in
+    let label = indicator_label icons Pin ("PIN " ^ run_label Fs0_fixture.run_a) in
+    assert (String.is_substring screen ~substring:label);
+    assert (List.length (String.substr_index_all screen ~pattern:label ~may_overlap:false) = 1))
+;;
+
+let%test_unit "WB-002 host freshness uses typed state and preserves fallback payloads" =
+  let host, data, find = refinement_fixture P.Overview.definition in
+  let tile = find "timing" in
+  let run = Fs0_fixture.run_a in
+  let fallback = [ "Freshness: running"; "Linked: pass"; "CACHED UNVERIFIED" ] in
+  let terminal : Asic.Terminal_result.t =
+    { attempt = "attempt"
+    ; results_file = "results"
+    ; results_digest = "digest"
+    ; operation_status = "completed"
+    ; physical_completion = "partial"
+    ; acceptance = "unknown"
+    ; timing_goal = "unknown"
+    ; metrics = []
+    ; checks = []
+    ; evidence = "Freshness: running"
+    ; execution_timing = None
+    }
+  in
+  List.iter Appearance.Icons.all ~f:(fun icons ->
+    let host = { host with appearance = { host.appearance with icons } } in
+    let fallback_data =
+      { data with summary = (fun _ -> None); run_lines = (fun _ _ -> fallback) }
+    in
+    assert (
+      List.equal String.equal fallback
+        (terminal_content host fallback_data tile ~run |> List.map ~f:E.text));
+    let mismatched =
+      { fallback_data with summary = (fun _ -> data.summary Fs0_fixture.run_b) }
+    in
+    assert (
+      List.equal String.equal fallback
+        (terminal_content host mismatched tile ~run |> List.map ~f:E.text));
+    List.iter
+      [ Asic.Summary.Freshness.Validated, Indicator.Completed
+      ; Cached_unverified, Cached
+      ; Missing_source, Unavailable
+      ; Refresh_failed "running in an error is not activity", Stale
+      ]
+      ~f:(fun (freshness, kind) ->
+        let summary =
+          { (Option.value_exn (data.summary run)) with freshness; terminal = Some terminal }
+        in
+        let data = { data with summary = (fun _ -> Some summary) } in
+        let row = terminal_content host data tile ~run |> List.hd_exn |> E.text in
+        let label =
+          "Freshness: " ^ Sexp.to_string_hum (Asic.Summary.Freshness.sexp_of_t freshness)
+        in
+        assert (String.equal row (indicator_label icons kind label));
+        let original = E.freshness freshness in
+        let decorated = freshness_row icons freshness original in
+        if Appearance.Icons.equal icons None_ then assert (E.equal_row original decorated)));
+  let operation : Asic.Pending.t =
+    { key = "refresh:host"
+    ; kind = "refresh"
+    ; state = "executing"
+    ; run = Some run
+    ; error = None
+    ; activity = Evidence_read
+    }
+  in
+  let snapshot = Option.value_exn data.asic in
+  List.iter
+    [ operation, true
+    ; { operation with activity = Evidence_cache_lookup }, false
+    ; { operation with activity = Unreported }, false
+    ; { operation with state = "completed" }, false
+    ; { operation with state = "failed"; error = Some "running" }, false
+    ; { operation with state = "cancelled" }, false
+    ; { operation with run = Some Fs0_fixture.run_b }, false
+    ]
+    ~f:(fun (operation, expected) ->
+      let data = { data with asic = Some { snapshot with operations = [ operation ] } } in
+      assert (Bool.equal (evidence_reading data ~views:[] ~runs:[ run ]) expected);
+      let summary =
+        { (Option.value_exn (data.summary run)) with terminal = Some terminal }
+      in
+      let data = { data with summary = (fun _ -> Some summary) } in
+      let row = terminal_content host data tile ~run |> List.hd_exn |> E.text in
+      let kind = if expected then Indicator.Running else freshness_indicator summary.freshness in
+      assert (
+        String.is_prefix row
+          ~prefix:(indicator_label host.appearance.icons kind "Freshness: ")))
+;;
+
+let%test_unit "WB-002 inspector frames stop for terminal, cache-only and unavailable states" =
+  let host, data, find = refinement_fixture P.Overview.definition in
+  let tile = find "timing" in
+  let run = Fs0_fixture.run_a in
+  let view = Inspection_view.create ~scope:run ~run ~domain:"timing" ~stage:"signoff" () in
+  let operation : Asic.Pending.t =
+    { key = Inspection_view.index_key view
+    ; kind = "inspection"
+    ; state = "executing"
+    ; run = Some run
+    ; error = None
+    ; activity = Evidence_read
+    }
+  in
+  let host =
+    { (H.set_local host tile.id { H.default_local with inspection = Some view }) with
+      focus = Some tile.id
+    }
+  in
+  let frames glyph : Indicator.frames = { dot = View.text glyph; line = View.text glyph } in
+  List.iter Appearance.Icons.all ~f:(fun icons ->
+    let host = { host with appearance = { host.appearance with icons } } in
+    List.iter
+      [ operation, true
+      ; { operation with state = "completed" }, false
+      ; { operation with state = "failed"; error = Some "running" }, false
+      ; { operation with state = "cancelled" }, false
+      ; { operation with state = "detached" }, false
+      ; { operation with activity = Evidence_cache_lookup }, false
+      ; { operation with activity = Unreported }, false
+      ; { operation with key = "obsolete-request" }, false
+      ]
+      ~f:(fun (operation, active) ->
+        let snapshot = Option.value_exn data.asic in
+        let data = { data with asic = Some { snapshot with operations = [ operation ] } } in
+        let screen glyph width height =
+          render ~indicator_frames:(frames glyph) host data { Dimensions.width; height }
+        in
+        let a = screen "A" 120 24 |> plain_text
+        and b = screen "B" 120 24 |> plain_text in
+        assert (
+          Bool.equal (not (String.equal a b))
+            (active && not (Appearance.Icons.equal icons None_)));
+        assert (String.is_substring a ~substring:"INSPECT timing");
+        List.iter [ 1, 1; 7, 3; 32, 8; 120, 24 ] ~f:(fun (width, height) ->
+          let image = screen "A" width height in
+          assert (View.width image = width && View.height image = height))));
+  assert (
+    String.equal
+      (Indicator.text Ascii (inspection_indicator ~reading:false view))
+      (Indicator.text Ascii Unavailable));
+  assert (
+    String.equal
+      (Indicator.text Ascii
+         (inspection_indicator ~reading:false { view with pending_error = Some "running" }))
+      (Indicator.text Ascii Stale))
+;;
+
 let%test_unit "lifecycle icons do not turn readiness, ownership or completion into case \
                pass"
   =
@@ -3767,7 +4156,7 @@ let%test_unit "lifecycle icons do not turn readiness, ownership or completion in
     ; Launch_failed, Failed
     ; Cancelled, Cancelled
     ; Detached, Unknown
-    ; Unavailable, Unknown
+    ; Unavailable, Unavailable
     ]
     ~f:(fun (state, expected) -> check (producer_indicator state) expected);
   List.iter
@@ -7540,7 +7929,7 @@ let%test_unit "warm synthesis run switch renders 73 while pinned reference retai
      tables remain an explicit Cells mode instead of consuming summary rows. *)
   let before = frame host 32 10 in
   assert (has before "Reported cells (agg.): 50");
-  assert (has before "Evidence: cached/unverified");
+  assert (has before "Evidence: cached/unver");
   assert (has before "Cell breakdown: 2 reported");
   assert (not (has before "/explicit/synthetic"));
   let host = select host Fs0_fixture.run_b in
@@ -7552,7 +7941,7 @@ let%test_unit "warm synthesis run switch renders 73 while pinned reference retai
     assert (has both "run asic/fixture-B" && has both "PIN asic/fixture-A");
     let small = frame host 32 10 in
     assert (has small "Reported cells (agg.): 73");
-    assert (has small "Evidence: cached/unverified");
+    assert (has small "Evidence: cached/unver");
     assert (has small "Cell breakdown: 2 reported");
     assert (not (has small "/explicit/synthetic"));
     let pinned_frame = frame { host with focus = Some pinned } 32 8 in

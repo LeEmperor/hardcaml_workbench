@@ -25,6 +25,14 @@ the detail pane.
 
 ## Evidence and selection
 
+The real `controlled_fifo_specimen` example currently supplies ASIC and simulation
+providers, but no generic Workbench hardware driver or structured elaboration
+hierarchy. ASIC runs and their retained RTL/netlists alone do not populate this
+tile. Its hardware driver integration must be added before the Generate RTL/load
+workflow above is available. Missing-hierarchy guidance now distinguishes absent
+or unusable drivers and missing target/configuration discovery from an actual
+generation that has not been run.
+
 The compact view shows the elaborated top, current/historical status, generating
 target/configuration and shortened job/artifact identifiers. Detail exposes exact
 artifact, job, project, target/configuration, provenance, RTL artifact references,

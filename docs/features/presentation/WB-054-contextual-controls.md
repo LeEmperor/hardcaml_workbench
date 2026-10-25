@@ -3,7 +3,7 @@ id: WB-054
 title: Contextual actions, breadcrumbs and help
 category: presentation
 feature_sets: [FS5, FS1, FS2]
-status: delivered
+status: closed
 kind: enhancement
 priority: P2
 severity: n/a
@@ -59,6 +59,14 @@ integration, excluding separately scoped tab or workspace redesign work.
 ## Assumptions and decisions needed
 Choose representative actions and a compact breadcrumb vocabulary with owner review.
 Dense packing remains the baseline; always-visible extra chrome is not assumed.
+
+## Owner closure — 2026-10-25
+
+**Closed/accepted by owner.** The owner confirmed the timing evidence behaviour is
+satisfactory, which lifts the 2026-10-21 hold on clock/timing detail-view review. With
+Testing and hints already accepted, the ticket is closed. This records closure
+authorization, not a new interactive review run; existing automated evidence stands.
+The dedicated Clocks workspace remains separate future work.
 
 ## Follow-up resolution — 2026-10-20
 

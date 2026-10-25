@@ -40,8 +40,8 @@ let legacy_rows
         ; "Results file: " ^ t.results_file
         ]))
   in
-  let plain ?(role = O.Role.Muted) ?(extra = []) label value =
-    O.row ~role ~details:(details @ extra) label value
+  let plain ?(role = O.Role.Muted) ?indicator ?(extra = []) label value =
+    O.row ~role ?indicator ~details:(details @ extra) label value
   in
   let stage =
     match
@@ -83,11 +83,12 @@ let legacy_rows
   let time = plain ~extra:[ "Execution time scope: " ^ scope ] "Time" time_value in
   let freshness =
     match summary with
-    | None -> plain "Evidence" "not loaded for this run"
+    | None -> plain ~indicator:Unavailable "Evidence" "not loaded for this run"
     | Some s ->
       let value, role = O.freshness_label s.freshness in
       plain
         ~role
+        ~indicator:(O.freshness_indicator s.freshness)
         ~extra:
           (match s.freshness with
            | Refresh_failed reason -> [ "Refresh error: " ^ reason ]
@@ -255,7 +256,9 @@ let rows
     in
     let analysis = Option.bind summary ~f:(fun s -> s.Asic.Summary.timing_analysis) in
     let details = O.analysis_details ~decimal_places ~run summary in
-    let fact ?(role = O.Role.Muted) label value = O.row ~role ~details label value in
+    let fact ?(role = O.Role.Muted) ?indicator label value =
+      O.row ~role ?indicator ~details label value
+    in
     let physical = List.find stages ~f:(fun s -> String.equal s.Asic.Stage.id "timing") in
     let stage =
       Option.value_map
@@ -308,6 +311,11 @@ let rows
       Option.value_map summary ~default:"not loaded" ~f:(fun s ->
         fst (O.freshness_label s.freshness))
     in
+    let freshness_indicator =
+      Option.value_map summary ~default:Indicator.Unavailable ~f:(fun s ->
+        O.freshness_indicator s.freshness)
+    in
+    let freshness_row = fact ~indicator:freshness_indicator "Evidence" freshness in
     if compact
     then (
       (* At the stock five-cell height there are only three body rows. Keep status AND
@@ -319,11 +327,12 @@ let rows
       in
       let compact_evidence =
         match analysis with
-        | None -> (if stale then [ fact "Evidence" freshness ] else []) @ evidence
+        | None -> (if stale then [ freshness_row ] else []) @ evidence
         | Some a ->
           let goal = List.hd_exn evidence in
-          ({ goal with
-             value = (goal.value ^ if stale then " [" ^ freshness ^ "]" else "")
+           ({ goal with
+              value = (goal.value ^ if stale then " [" ^ freshness ^ "]" else "")
+            ; indicator = (if stale then Some freshness_indicator else goal.indicator)
            }
            :: List.map a.corners ~f:(fun c ->
              let metrics =
@@ -380,7 +389,7 @@ let rows
        }
        :: sta_runtime)
       @ compact_evidence)
-    else (stage :: time :: sta_runtime) @ (fact "Evidence" freshness :: evidence))
+    else (stage :: time :: sta_runtime) @ (freshness_row :: evidence))
 ;;
 
 let%test_unit "typed metrics preserve zero, units, missing and nonfinite without a \

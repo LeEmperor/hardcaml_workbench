@@ -456,9 +456,76 @@ let composition_persistence () =
         "Failed additive apply published composition")
 ;;
 
+let blank_workspace_persistence () =
+  let state_dir = Filename_unix.temp_dir "blank-workspace-" "" in
+  Monitor.protect
+    ~finally:(fun () -> In_thread.run (fun () -> remove_tree state_dir))
+    (fun () ->
+      let project_key = "/blank|environment" in
+      let handle service operation = Service.handle service ~project_key operation in
+      let service = Service.create ~state_dir in
+      let%bind before = handle service Get >>| ok in
+      let window = (List.hd_exn before.workspaces).window in
+      let operation : W.Operation.t =
+        Mutate
+          { expected_revision = before.revision
+          ; mutation =
+              Create_workspace
+                { window; name = "Workspace 1"; context = before.main_context }
+          }
+      in
+      let%bind created = handle service operation >>| ok in
+      let blank = List.last_exn created.workspaces in
+      require (List.equal W.Tile.equal before.tiles created.tiles) "Creation added tiles";
+      require (W.Context_id.equal blank.context created.main_context) "Not Main-linked";
+      let%bind rejected = handle service operation in
+      expect_error Conflict rejected;
+      let service = Service.create ~state_dir in
+      let%bind restored = handle service Get >>| ok in
+      require (W.Snapshot.equal created restored) "Restart lost blank workspace";
+      let%bind populated =
+        handle
+          service
+          (Mutate
+             { expected_revision = restored.revision
+             ; mutation =
+                 Create_tile
+                   { workspace = blank.id
+                   ; kind = "logs"
+                   ; geometry = { x = 0; y = 0; width = 40; height = 10 }
+                   }
+             })
+        >>| ok
+      in
+      let%bind with_selection =
+        handle
+          service
+          (Mutate
+             { expected_revision = populated.revision
+             ; mutation =
+                 Select_run
+                   { workspace = blank.id
+                   ; context = restored.main_context
+                   ; expected_selection_revision = 0
+                   ; run = Some (run "shared")
+                   }
+             })
+        >>| ok
+      in
+      let%map restored = handle (Service.create ~state_dir) Get >>| ok in
+      require (W.Snapshot.equal with_selection restored) "Restart lost populated workspace";
+      require
+        (Option.equal
+           Run_ref.equal
+           (selected restored (List.last_exn restored.tiles).id)
+           (Some (run "shared")))
+        "Added tile does not follow shared selection")
+;;
+
 let run_tests () =
   pure_transitions ();
   let%bind () = persistence () in
+  let%bind () = blank_workspace_persistence () in
   composition_persistence ()
 ;;
 

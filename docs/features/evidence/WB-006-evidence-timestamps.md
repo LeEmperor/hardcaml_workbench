@@ -3,7 +3,7 @@ id: WB-006
 title: Stage/report timestamps and age
 category: evidence
 feature_sets: [FS1]
-status: delivered
+status: closed
 kind: enhancement
 priority: P2
 severity: n/a
@@ -65,6 +65,14 @@ as a clearly labeled observation; it must never masquerade as production evidenc
 - [Inspection index](../../../protocol/asic_inspection.ml)
 - [Existing evidence service](../../../backend/asic_inspection.ml)
 - [Attribution/freshness contract](../../fs1_investigation.md)
+
+## Owner closure — 2026-10-25
+
+**Closed/accepted by owner.** The owner confirmed the timing evidence behaviour is
+satisfactory, which lifts the 2026-10-21 hold on clock/timing timestamp review. This
+records closure authorization; no new interactive report-view run was performed.
+Existing automated evidence stands. Actual production times still depend on the
+provider supplying `production_times`; until then, unknown is the correct display.
 
 ## Follow-up resolution — 2026-10-20
 

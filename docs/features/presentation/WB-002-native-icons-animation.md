@@ -3,7 +3,7 @@ id: WB-002
 title: Further native icons and animation
 category: presentation
 feature_sets: [FS5]
-status: partial
+status: delivered
 kind: enhancement
 priority: P3
 severity: n/a
@@ -25,7 +25,7 @@ Add **more** useful icons and animation using native Bonsai Term capabilities.
 Requested size: **Ticket**; this is incremental expansion of delivered indicators.
 
 ## Current baseline
-The uncommitted working tree already delivers native Dot/Line spinners and semantic
+The existing implementation delivers native Dot/Line spinners and semantic
 icons for lifecycle, readiness, pins, artifacts, logs and simulation context.
 Unicode/ASCII/Off controls, persistence and deterministic capture fallbacks exist.
 The installed spinner API is known; a broad imported icon catalog is not assumed.
@@ -40,11 +40,56 @@ Rebuilding native animation, introducing decorative title dots, or importing an
 unverified general icon API. Nerd Font support is a separate optional feature.
 
 ## Acceptance criteria
-- [ ] Agree and document the additional locations and intended semantic value.
-- [ ] Existing and new indicators distinguish activity, completion and verdicts.
-- [ ] Animation follows real typed activity and stops for terminal states.
-- [ ] Unicode/ASCII/Off preserve labels, layout and keyboard actions.
-- [ ] Presentation changes and animation cause no provider execution or extra polling.
+- [x] Agree and document the additional locations and intended semantic value.
+- [x] Existing and new indicators distinguish activity, completion and verdicts.
+- [x] Animation follows real typed activity and stops for terminal states.
+- [x] Unicode/ASCII/Off preserve labels, layout and keyboard actions.
+- [x] Presentation changes and animation cause no provider execution or extra polling.
+
+## Delivery — 2026-10-25
+
+The owner approved a bounded expansion across evidence freshness, context
+relationships and hierarchy navigation. Implemented and automatically verified;
+owner visual acceptance remains pending.
+
+- **Evidence:** typed freshness markers distinguish validated, cached/unverified,
+  source-unavailable and refresh-failed summaries in Session and host evidence
+  displays. Inspector and Timing observation markers animate only for a scoped,
+  active typed evidence read. Validation is evidence freshness, not run acceptance;
+  existing labels and verdicts remain authoritative.
+- **Contexts:** Session and the global context header distinguish linked and
+  independent contexts; existing pin badges are reused without duplication.
+  Missing Session context has an explicit unavailable marker.
+- **Hierarchy:** expanded/collapsed branches and leaves use shared markers. A
+  childless root has a top marker; expandable roots retain their expansion marker
+  and root label. Off leaves a blank marker column so selection and indentation
+  stay in place. Navigation and source evidence are unchanged.
+- **Policy:** all additions follow Appearance Icons Unicode / ASCII / Off. Static
+  semantic markers do not animate. Rendering changes add no provider requests,
+  polling or execution paths; native animation reuses existing shared frames.
+
+Verification:
+
+- `scripts/with-switch.sh dune build -j8 @all @runtest` passed on the combined tree.
+- `scripts/with-switch.sh ocamlformat --check terminal/indicator.ml terminal/indicator.mli terminal/hierarchy_view.ml terminal/hierarchy_view.mli terminal/host_view.ml terminal/overview_tiles.ml terminal/evidence_session_test.ml` passed.
+- Focused tests cover one-cell glyphs, all icon modes, narrow rendering, context
+  labels, pin duplication, hierarchy navigation and typed activity fencing for
+  terminal/cache-only/unreported/obsolete requests.
+- No new live terminal/font matrix acceptance is claimed by these automated checks.
+
+### Owner review and follow-up — 2026-10-25
+
+The owner confirmed the context marker and observed refresh animation and cached
+evidence markers in Timing inspection. Their Overview screenshot exposed a missed
+rendering path: stock stage cards are rendered by `overview_summary.ml`. That path
+now decorates Evidence rows for synthesis, placement, routing, checks and finalization,
+and the Timing Evidence/compact Goal freshness display. Regression tests render the
+actual stock cards in all icon modes and freshness states rather than only helpers.
+
+Hierarchy visual acceptance is blocked for the real FIFO example by its absent
+generic hardware-driver integration, not missing icon rendering. The unavailable
+guidance now explains this prerequisite. Owner acceptance of the Overview correction
+and hierarchy markers remains pending.
 
 ## Dependencies
 Required: none; native integration and shared semantic indicators are delivered.

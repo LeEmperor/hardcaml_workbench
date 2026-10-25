@@ -3,7 +3,7 @@ id: WB-003
 title: Evidence refresh activity and current-operation status
 category: evidence
 feature_sets: [FS1, FS5]
-status: delivered
+status: closed
 kind: enhancement
 priority: P1
 severity: n/a
@@ -65,6 +65,14 @@ The indicator must distinguish evidence reading from actual producer execution.
 - [Utility projections](../../../terminal/overview_tiles.ml)
 - [Indicator primitives](../../../terminal/indicator.ml)
 - [Inspection cache behavior](../../fs1_investigation.md)
+
+## Owner closure — 2026-10-25
+
+**Closed/accepted by owner.** The owner confirmed the timing evidence behaviour is
+satisfactory, which lifts the 2026-10-21 hold on human review. The Session-row surface and
+its wording are accepted as delivered. This records closure authorization; no new
+delayed-provider PTY run or actual HTTP failure injection was performed. Existing
+automated evidence stands.
 
 ## Follow-up resolution — 2026-10-20
 

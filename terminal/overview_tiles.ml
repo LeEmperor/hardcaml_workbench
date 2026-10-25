@@ -51,6 +51,9 @@ type row =
   ; value : string
   ; role : Role.t
   ; status : Status.t option
+  ; indicator : Indicator.t option
+  (** Static semantic marker, separate from stage status and its running animation.
+      A status takes precedence so a row never acquires two indicators. *)
   ; active : bool
   ; workspace : Workspace.Workspace_id.t option
   ; details : string list
@@ -64,6 +67,7 @@ type row =
 let row
   ?(role = Role.Foreground)
   ?status
+  ?indicator
   ?(active = false)
   ?workspace
   ?(details = [])
@@ -73,7 +77,18 @@ let row
   label
   value
   =
-  { label; value; role; status; active; workspace; details; display_run; emphasis; time }
+  { label
+  ; value
+  ; role
+  ; status
+  ; indicator
+  ; active
+  ; workspace
+  ; details
+  ; display_run
+  ; emphasis
+  ; time
+  }
 ;;
 
 let status_role : Status.t -> Role.t = function
@@ -495,6 +510,13 @@ let freshness_label : Asic.Summary.Freshness.t -> string * Role.t = function
   | Refresh_failed _ -> "refresh failed", Warning
 ;;
 
+let freshness_indicator : Asic.Summary.Freshness.t -> Indicator.t = function
+  | Validated -> Completed
+  | Cached_unverified -> Cached
+  | Missing_source -> Unavailable
+  | Refresh_failed _ -> Stale
+;;
+
 (** Compose only with a summary whose [run] matches the selected run; the caller already
     has that identity when loading host data. Cached facts retain their reported verdict,
     with freshness visible on every row and in inspection. No metrics, check counts, or
@@ -525,7 +547,14 @@ let summary_rows ?(freshness = true) (summary : Asic.Summary.t) =
     row ~role:(Fact.role field value) ~details:(details @ extra) label visible
   in
   (if show_freshness || not (Asic.Summary.Freshness.equal summary.freshness Validated)
-   then [ row ~role:freshness_role ~details "Freshness" freshness ]
+   then
+     [ row
+         ~indicator:(freshness_indicator summary.freshness)
+         ~role:freshness_role
+         ~details
+         "Freshness"
+         freshness
+     ]
    else [])
   @
   match summary.terminal with
@@ -679,13 +708,13 @@ let status_rows
   in
   let linkage =
     match arrangement with
-    | None -> row ~role:Muted "Context" "workspace unavailable"
+    | None -> row ~indicator:Unavailable ~role:Muted "Context" "workspace unavailable"
     | Some w ->
       (match
          List.find snapshot.contexts ~f:(fun c ->
            Workspace.Context_id.equal c.id w.context)
        with
-       | None -> row ~role:Warning "Context" "unavailable"
+       | None -> row ~indicator:Unavailable ~role:Warning "Context" "unavailable"
        | Some context ->
          let shared =
            Workspace.Context_id.equal context.id snapshot.main_context
@@ -697,6 +726,7 @@ let status_rows
             value, so it survives right-clipping before the context name does. *)
          let keyword = if shared then "linked" else "own" in
          row
+           ~indicator:(if shared then Linked else Independent)
            ~emphasis:(if shared then String.length keyword else 0)
            ~details:
              [ "Context: " ^ Workspace.Context_id.to_string context.id
@@ -744,9 +774,9 @@ let status_indicator : Status.t -> Indicator.t = function
 ;;
 
 let marker (appearance : Appearance.t) (row : row) =
-  match row.status with
-  | Some status ->
-    let glyph = Indicator.text appearance.icons (status_indicator status) in
+  match Option.first_some (Option.map row.status ~f:status_indicator) row.indicator with
+  | Some kind ->
+    let glyph = Indicator.text appearance.icons kind in
     if String.is_empty glyph then "" else glyph ^ " "
   | None ->
     if row.active && not (Appearance.Icons.equal appearance.icons None_) then "> " else ""
@@ -754,7 +784,9 @@ let marker (appearance : Appearance.t) (row : row) =
 
 let row_prefix ~appearance ~indent row =
   indent
-  ^ (if row.active && Option.is_some row.status then "> " else "")
+  ^ (if row.active && (Option.is_some row.status || Option.is_some row.indicator)
+     then "> "
+     else "")
   ^ marker appearance row
 ;;
 
@@ -1551,6 +1583,85 @@ let plain_lines view =
   |> List.map ~f:(fun line -> String.rstrip line)
 ;;
 
+let%test_unit "summary freshness markers are typed, static and never stage verdicts" =
+  let summary = List.hd_exn Fs0_fixture.snapshot.summaries in
+  List.iter
+    [ Asic.Summary.Freshness.Validated, Indicator.Completed, "validated"
+    ; Cached_unverified, Cached, "cached/unverified"
+    ; Missing_source, Unavailable, "source unavailable"
+    ; Refresh_failed "offline", Stale, "refresh failed"
+    ]
+    ~f:(fun (freshness, kind, label) ->
+      let rows = summary_rows { summary with freshness } in
+      let freshness_row = List.hd_exn rows in
+      let facts = List.tl_exn rows in
+      assert (List.for_all rows ~f:(fun r -> Option.is_none r.status));
+      assert (List.for_all facts ~f:(fun r -> Option.is_none r.indicator));
+      let inspection = inspection_lines rows in
+      [%test_result: string] (List.hd_exn inspection) ~expect:("Freshness: " ^ label);
+      (match freshness with
+       | Refresh_failed reason ->
+         assert (List.mem inspection ("Refresh error: " ^ reason) ~equal:String.equal)
+       | Validated | Cached_unverified | Missing_source -> ());
+      List.iter Appearance.Icons.all ~f:(fun icons ->
+        let appearance = { Appearance.default with icons; density = Compact } in
+        let glyph = Indicator.text icons kind in
+        let prefix = if String.is_empty glyph then "" else glyph ^ " " in
+        let text =
+          row_spans ~appearance ~width:80 ~indent:"" freshness_row
+          |> List.map ~f:snd
+          |> String.concat
+        in
+        [%test_result: string] text ~expect:(prefix ^ "Freshness: " ^ label);
+        let render_frame frame width height =
+          let indicator_frames : Indicator.frames =
+            { dot = View.text frame; line = View.text frame }
+          in
+          render ~indicator_frames ~appearance ~attrs:(fun _ -> []) ~width ~height rows
+        in
+        List.iter [ 0, 0; 1, 1; 24, 3; 80, 8 ] ~f:(fun (width, height) ->
+          let a = render_frame "A" width height in
+          let b = render_frame "B" width height in
+          assert (View.width a = width && View.height a = height);
+          assert (List.equal String.equal (plain_lines a) (plain_lines b)))));
+  (* A lifecycle status owns the single marker even if semantic metadata is present. *)
+  let both = row ~status:Running ~indicator:Cached "Updating" "" in
+  List.iter Appearance.Icons.all ~f:(fun icons ->
+    let appearance = { Appearance.default with icons } in
+    let glyph = Indicator.text icons Running in
+    [%test_result: string]
+      (marker appearance both)
+      ~expect:(if String.is_empty glyph then "" else glyph ^ " "))
+;;
+
+let%test_unit "missing session contexts use unavailable without inventing linkage" =
+  let snapshot = Workspace.initial ~session_id:(Workspace.Session_id.of_string "s") in
+  let active = (List.hd_exn snapshot.workspaces).id in
+  List.iter
+    [ snapshot, None, "workspace unavailable"
+    ; { snapshot with contexts = [] }, Some active, "unavailable"
+    ]
+    ~f:(fun (snapshot, active_workspace, value) ->
+      let rows =
+        status_rows
+          ~string_compression:true
+          ~snapshot
+          ~active_workspace
+          ~project:None
+          ~selected_run:None
+          ~connection:"local"
+      in
+      let context = List.nth_exn rows 2 in
+      [%test_result: string] context.value ~expect:value;
+      assert (Option.is_none context.status);
+      assert (context.emphasis = 0);
+      List.iter Appearance.Icons.all ~f:(fun icons ->
+        let glyph = Indicator.text icons Unavailable in
+        [%test_result: string]
+          (marker { Appearance.default with icons } context)
+          ~expect:(if String.is_empty glyph then "" else glyph ^ " ")))
+;;
+
 let%test_unit "duration is additional to aligned checklist status and clips within \
                narrow cells"
   =
@@ -1749,15 +1860,15 @@ let%expect_test "context linkage avoids nested colons and keeps names visible" =
     {|
     Context: linked to Main
     Context: linked to Main
-    Context: linked to Main
-    Context: linked to Main
-    Context: linked to Main
-    Context: linked to Main
+    = Context: linked to Main
+    = Context: linked to Mai
+    ↔ Context: linked to Main
+    ↔ Context: linked to Mai
     Context: own Overview independent
     Context: own Overview in
-    Context: own Overview independent
-    Context: own Overview in
-    Context: own Overview independent
-    Context: own Overview in
+    o Context: own Overview independent
+    o Context: own Overview
+    ○ Context: own Overview independent
+    ○ Context: own Overview
     |}]
 ;;

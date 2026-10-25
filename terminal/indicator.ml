@@ -19,6 +19,14 @@ type t =
   | Report
   | Trace
   | Info
+  | Cached
+  | Linked
+  | Independent
+  | Expanded
+  | Collapsed
+  | Leaf
+  | Top
+  | Unavailable
 [@@deriving enumerate]
 
 type frames =
@@ -47,7 +55,15 @@ let text icons kind =
      | Seed -> "*"
      | Report -> "%"
      | Trace -> "/"
-     | Info -> "i")
+      | Info -> "i"
+      | Cached -> "c"
+      | Linked -> "="
+      | Independent -> "o"
+      | Expanded -> "-"
+      | Collapsed -> "+"
+      | Leaf -> "."
+      | Top -> "^"
+      | Unavailable -> "?")
   | Unicode ->
     (match kind with
      | Running -> "⣷"
@@ -66,7 +82,15 @@ let text icons kind =
      | Seed -> "*"
      | Report -> "▤"
      | Trace -> "↝"
-     | Info -> "i")
+      | Info -> "i"
+      | Cached -> "◈"
+      | Linked -> "↔"
+      | Independent -> "○"
+      | Expanded -> "▾"
+      | Collapsed -> "▸"
+      | Leaf -> "·"
+      | Top -> "⌂"
+      | Unavailable -> "∅")
 ;;
 
 let view ?frames icons kind =
@@ -105,4 +129,19 @@ let%test_unit "native frames are used only for running and respect icon mode" =
       | _ ->
         assert (not (phys_equal (view ~frames icons kind) frames.dot));
         assert (not (phys_equal (view ~frames icons kind) frames.line))))
+;;
+
+let%test_unit "navigation and context kinds preserve their semantic distinctions" =
+  List.iter [ Appearance.Icons.Unicode; Ascii ] ~f:(fun icons ->
+    List.iter
+      [ [ Cached; Running; Completed; Stale ]
+      ; [ Linked; Independent ]
+      ; [ Expanded; Collapsed; Leaf; Top ]
+      ; [ Unavailable; Failed; Completed ]
+      ]
+      ~f:(fun kinds ->
+        let glyphs = List.map kinds ~f:(text icons) in
+        [%test_eq: int]
+          (Set.length (String.Set.of_list glyphs))
+          (List.length kinds)))
 ;;

@@ -79,6 +79,7 @@ type action =
   | Restore_default_layout of W.Workspace_id.t * P.Definition.t
   | Restore_default_layout_unavailable
   | Create_testing_workspace
+  | Create_blank_workspace
   | Local_headers
   | Set_presentation of W.Tile_id.t * T.overrides
   | Set_global_compression of bool option
@@ -275,6 +276,90 @@ let set_local t id value =
 let hierarchy_request_current t id ~identity ~request =
   let l = local t id in
   phys_equal l.identity identity && phys_equal l.hierarchy_request request
+;;
+
+let missing_hierarchy_guidance ~(project : Project.t option) ~target ~configuration =
+  match project with
+  | None -> "open a project with hardware driver integration"
+  | Some project ->
+    (match project.integration.driver with
+     | Absent ->
+       "no hardware driver integration; configure a project-side hardware driver, then \
+        refresh hardware integration"
+     | Unusable { reason } ->
+       "hardware driver unavailable: " ^ reason ^ "; fix it, then refresh hardware integration"
+     | Available _ ->
+       (match Option.bind target ~f:(Project.target project) with
+        | None ->
+          if List.is_empty project.targets
+          then "no hardware targets discovered; refresh hardware integration"
+          else "select a discovered hardware target and configuration"
+        | Some target ->
+          let configurations = Project.configurations_for_target project target.id in
+          if Option.exists configuration ~f:(fun id ->
+               List.exists configurations ~f:(fun config -> Configuration_id.equal id config.id))
+          then "generate RTL for selected target/configuration, then r"
+          else if List.is_empty configurations
+          then "no hardware configurations discovered for selected target; refresh hardware integration"
+          else "select a discovered configuration for the selected hardware target"))
+;;
+
+let%test_unit "missing hierarchy guidance requires a usable driver and matching discovered \
+               target/configuration"
+  =
+  let project = Baseline_fixture.project in
+  let target = List.hd_exn project.targets in
+  let configuration = List.hd_exn (Project.configurations_for_target project target.id) in
+  let guidance ?(target = Some target.id) ?(configuration = Some configuration.id) project =
+    missing_hierarchy_guidance ~project ~target ~configuration
+  in
+  assert (
+    String.equal
+      (guidance (Some project))
+      "generate RTL for selected target/configuration, then r");
+  let unavailable project =
+    let message = guidance project in
+    assert (not (String.is_substring message ~substring:"generate RTL"));
+    message
+  in
+  ignore (unavailable None : string);
+  let absent =
+    { project with integration = { project.integration with driver = Absent } }
+  in
+  assert (String.is_substring (unavailable (Some absent)) ~substring:"no hardware driver");
+  let unusable =
+    { project with
+      integration =
+        { project.integration with driver = Unusable { reason = "typed discovery failure" } }
+    }
+  in
+  assert (
+    String.is_substring (unavailable (Some unusable)) ~substring:"typed discovery failure");
+  assert (
+    String.is_substring
+      (unavailable (Some { project with targets = []; configurations = [] }))
+      ~substring:"no hardware targets discovered");
+  assert (
+    String.is_substring
+      (unavailable (Some { project with configurations = [] }))
+      ~substring:"no hardware configurations discovered");
+  List.iter
+    [ guidance ~target:None (Some project)
+    ; guidance ~target:(Some (Target_id.of_string "removed-target")) (Some project)
+    ; guidance ~configuration:None (Some project)
+    ; guidance
+        ~configuration:(Some (Configuration_id.of_string "removed-configuration"))
+        (Some project)
+    ]
+    ~f:(fun message -> assert (not (String.is_substring message ~substring:"generate RTL")));
+  let other =
+    List.find_exn project.configurations ~f:(fun config ->
+      not (Target_id.equal config.target target.id))
+  in
+  assert (
+    String.equal
+      (guidance ~configuration:(Some other.id) (Some project))
+      "select a discovered configuration for the selected hardware target")
 ;;
 
 let waveform_pin t workspace =
@@ -1428,6 +1513,34 @@ let switch t id =
       }
     in
     Option.value_map t.registry ~default:t ~f:(receive t))
+;;
+
+let blank_workspace_mutation (registry : W.Snapshot.t) ~window =
+  let rec available n =
+    let name = "Workspace " ^ Int.to_string n in
+    if List.exists registry.workspaces ~f:(fun w -> String.equal w.name name)
+    then available (n + 1)
+    else name
+  in
+  W.Mutation.Create_workspace
+    { window; name = available 1; context = registry.main_context }
+;;
+
+(** Only an acknowledged single mutation may drive creation navigation. A refresh after
+    a conflict is not a creation receipt, even if another client added a workspace. *)
+let created_workspace ~(before : W.Snapshot.t) ~(after : W.Snapshot.t) =
+  if not (W.Session_id.equal before.session_id after.session_id)
+     || after.revision <> before.revision + 1
+  then None
+  else (
+    match
+      List.filter after.workspaces ~f:(fun w ->
+        not
+          (List.exists before.workspaces ~f:(fun old ->
+             W.Workspace_id.equal old.id w.id)))
+    with
+    | [ workspace ] -> Some workspace.id
+    | _ -> None)
 ;;
 
 (** Registry membership, not labels or preset names, fences local navigation. *)
@@ -3226,6 +3339,12 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
     in
     let geometry : W.Geometry.t = { x = 0; y = 0; width = 40; height = 10 } in
     base
+    @ [ command
+          "workspace.create-blank"
+          "Create blank workspace"
+          "new empty workspace window tmux"
+          Create_blank_workspace
+      ]
     @ restore_commands w
     @ (if String.is_prefix w.name ~prefix:"Timing · captured "
        then
@@ -5891,6 +6010,101 @@ let%test_unit "selectors and project-scoped tiles do not acquire ASIC evidence i
   assert (List.equal Run_ref.equal (evidence_runs (receive empty s)) [ run ]);
   let s = apply s (Set_tile_hidden { tile = timing.id; hidden = true }) in
   assert (List.is_empty (evidence_runs (receive empty s)))
+;;
+
+let%test_unit "blank workspaces have unique names and IDs, share Main, and accept tiles \
+               through the palette without a focused tile"
+  =
+  let apply s mutation =
+    W.apply s (Mutate { expected_revision = s.W.Snapshot.revision; mutation })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let invoke host query =
+    let commands = catalog host ~project:None ~jobs:[] in
+    let press host event = input host event ~commands in
+    let host =
+      List.fold [ ' '; 'c'; 'c' ] ~init:host ~f:(fun host ch ->
+        fst (press host (Character ch)))
+    in
+    assert (Option.is_some host.palette);
+    let host, _ = press host (Text query) in
+    let palette = Option.value_exn host.palette in
+    let index, _ =
+      List.findi_exn (matches palette) ~f:(fun _ command -> String.equal command.title query)
+    in
+    let host = { host with palette = Some { palette with index } } in
+    press host Enter
+  in
+  let initial = W.initial ~session_id:(W.Session_id.of_string "blank-workspaces") in
+  let original = List.hd_exn initial.workspaces in
+  let registry = apply initial (Make_independent original.id) in
+  let host = receive empty registry in
+  let host, effect = invoke host "Create blank workspace" in
+  (match effect with
+   | Execute (_, Create_blank_workspace) -> ()
+   | _ -> assert false);
+  assert (W.Snapshot.equal (Option.value_exn host.registry) registry);
+  let first =
+    apply registry (blank_workspace_mutation registry ~window:original.window)
+  in
+  let id = Option.value_exn (created_workspace ~before:registry ~after:first) in
+  let workspace = W.workspace first id in
+  assert (String.equal workspace.name "Workspace 1");
+  assert (W.Window_id.equal workspace.window original.window);
+  assert (W.Context_id.equal workspace.context first.main_context);
+  assert (Option.is_none workspace.preset && Option.is_none workspace.zoomed_tile);
+  assert (List.equal W.Tile.equal registry.tiles first.tiles);
+  let host = switch (receive host first) id in
+  assert (Option.equal W.Workspace_id.equal host.active (Some id));
+  assert (Option.is_none host.focus && List.is_empty (tiles host));
+  let host, effect = invoke host "Add logs tile" in
+  let populated =
+    match effect with
+    | Execute (capture, Registry (Create_tile args as mutation)) ->
+      assert (W.Workspace_id.equal capture.workspace id);
+      assert (W.Workspace_id.equal args.workspace id);
+      apply first mutation
+    | _ -> assert false
+  in
+  let host = receive host populated in
+  let tile = Option.value_exn (focused host) in
+  assert (String.equal tile.kind "logs" && W.Binding.equal tile.binding Follow);
+  let second =
+    apply populated (blank_workspace_mutation populated ~window:original.window)
+  in
+  let second_id =
+    Option.value_exn (created_workspace ~before:populated ~after:second)
+  in
+  assert (not (W.Workspace_id.equal id second_id));
+  assert (String.equal (W.workspace second second_id).name "Workspace 2");
+  let host = switch (switch (receive host second) second_id) id in
+  assert (Option.equal W.Tile_id.equal host.focus (Some tile.id));
+  let renamed =
+    apply second (Rename_workspace { workspace = id; name = "Workspace 3" })
+  in
+  let third =
+    apply renamed (blank_workspace_mutation renamed ~window:original.window)
+  in
+  let third_id = Option.value_exn (created_workspace ~before:renamed ~after:third) in
+  assert (String.equal (W.workspace third third_id).name "Workspace 1");
+  assert (not (W.Workspace_id.equal id third_id));
+  assert (Option.is_none (created_workspace ~before:third ~after:third));
+  assert (
+    Option.is_none
+      (created_workspace
+         ~before:renamed
+         ~after:{ third with session_id = W.Session_id.of_string "replacement" }));
+  let saved = navigation_preferences ~project_key:"blank" (switch host second_id) in
+  let restored =
+    restore_navigation_focus
+      (Option.value_exn saved)
+      (receive empty second)
+      ~restore_active:true
+      ~preserve_focus:[]
+  in
+  assert (Option.equal W.Workspace_id.equal restored.active (Some second_id));
+  assert (Option.is_none restored.focus)
 ;;
 
 let%test_unit "palette captures text and revalidates registry target" =

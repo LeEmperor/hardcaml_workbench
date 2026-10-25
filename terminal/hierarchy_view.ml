@@ -178,7 +178,7 @@ let display_label text =
   Buffer.contents buffer
 ;;
 
-let rows t ~height =
+let rows ?(icons = Appearance.Icons.Ascii) t ~height =
   if height <= 0
   then []
   else (
@@ -194,12 +194,16 @@ let rows t ~height =
     |> Fn.flip List.drop start
     |> Fn.flip List.take height
     |> List.map ~f:(fun (depth, node) ->
-      let marker =
+      let kind =
         if not (Set.mem t.evidence.branches node.key)
-        then " "
+        then if String.equal node.key t.evidence.hierarchy.root then Indicator.Top else Leaf
         else if Set.mem t.expanded node.key
-        then "-"
-        else "+"
+        then Expanded
+        else Collapsed
+      in
+      let marker =
+        (* Keep the marker column even with icons Off; labels and selection stay put. *)
+        if Appearance.Icons.equal icons None_ then " " else Indicator.text icons kind
       in
       sprintf
         "%s%s%s %s : %s"
@@ -235,6 +239,46 @@ module%test Tests = struct
   ;;
 
   let keys t = List.map (visible t) ~f:(fun (_, node) -> node.key)
+
+  let%test_unit "branch, leaf and top markers preserve labels and cell positions" =
+    let initial = create (evidence tree) in
+    [%test_eq: string list]
+      (rows initial ~height:4)
+      [ ">- <root> : circuit_/"; "   + a : circuit_/a"; "   . z : circuit_/z" ];
+    let expanded = move initial 1 |> toggle in
+    [%test_eq: string list]
+      (rows ~icons:Ascii expanded ~height:4)
+      [ " - <root> : circuit_/"
+      ; ">  - a : circuit_/a"
+      ; "     . leaf : circuit_/a/leaf"
+      ; "   . z : circuit_/z"
+      ];
+    let width row = Notty.I.width (Notty.I.string Notty.A.empty row) in
+    List.iter [ initial; expanded; toggle initial ] ~f:(fun view ->
+      let ascii = rows ~icons:Ascii view ~height:4 in
+      List.iter Appearance.Icons.all ~f:(fun icons ->
+        let rendered = rows ~icons view ~height:4 in
+        [%test_eq: int list] (List.map rendered ~f:width) (List.map ascii ~f:width);
+        List.iter2_exn rendered ascii ~f:(fun row reference ->
+          [%test_eq: string]
+            (snd (String.lsplit2_exn row ~on:':'))
+            (snd (String.lsplit2_exn reference ~on:':'));
+          [%test_eq: char] row.[0] reference.[0])));
+    [%test_eq: string list]
+      (rows ~icons:None_ initial ~height:4)
+      [ ">  <root> : circuit_/"; "     a : circuit_/a"; "     z : circuit_/z" ];
+    [%test_eq: string list]
+      (rows ~icons:Unicode initial ~height:4)
+      [ ">▾ <root> : circuit_/"; "   ▸ a : circuit_/a"; "   · z : circuit_/z" ];
+    let top = create (evidence { tree with nodes = [ node "/" ] }) in
+    List.iter Appearance.Icons.all ~f:(fun icons ->
+      let marker = if Appearance.Icons.equal icons None_ then " " else Indicator.text icons Top in
+      [%test_eq: string list]
+        (rows ~icons top ~height:1)
+        [ ">" ^ marker ^ " <root> : circuit_/" ];
+      [%test_eq: string list] (rows ~icons (toggle top) ~height:1) (rows ~icons top ~height:1));
+    [%test_eq: string] (selected_key initial) "/"
+  ;;
 
   let%test_unit "shared evidence and immutable independent navigation" =
     let shared = evidence tree in
@@ -340,7 +384,7 @@ module%test Tests = struct
     let unsafe = "hello\n\t\027[31m\127\194\128\226\128\174\255世界" in
     let tree = { tree with nodes = [ { (node "/") with circuit_name = unsafe } ] } in
     let view = create (evidence tree) in
-    [%test_eq: string list] (rows view ~height:1) [ ">  <root> : hello   [31m   ?世界" ];
+    [%test_eq: string list] (rows view ~height:1) [ ">^ <root> : hello   [31m   ?世界" ];
     [%test_eq: string] (Option.value_exn (selected_node view)).circuit_name unsafe
   ;;
 end

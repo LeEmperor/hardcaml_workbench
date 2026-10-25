@@ -15,6 +15,18 @@ The [post-merge audit](workspace_post_merge_audit.md) verifies merged hierarchy,
 Testing/Timing/Overview and reconnect features against this structure, including
 custom mixed workspaces and preservation of authored layouts during investigation.
 
+## Create a blank workspace from the palette
+
+Open **Space c c**, choose **Create blank workspace**, and press Enter. Workbench
+creates and switches to an empty `Workspace N` using the next available name.
+It belongs to the current window, follows Main context, and persists in the daemon
+registry. Switching occurs only after successful creation.
+
+The palette works even before any tile exists. Open **Space c c** again and choose
+an **Add … tile** command, such as **Add run-selector tile**, **Add live-status
+tile**, **Add synthesis tile**, or **Add logs tile**. Tile contents depend on the
+project's available evidence. Names are automatic; this command has no naming prompt.
+
 ## Keyboard navigation and layout modes
 
 In **Fit** mode, the layout tree also defines Tab order: stacks top-to-bottom,

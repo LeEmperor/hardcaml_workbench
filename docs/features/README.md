@@ -83,6 +83,19 @@ not claimed. WB-048 remains delivered.
 
 ## How this directory works
 
+**2026-10-25:** WB-002's owner-selected evidence freshness, context relationship
+and hierarchy navigation indicators are **delivered**, awaiting owner visual
+acceptance. Unicode/ASCII/Off, typed refresh animation fencing and compact tree
+markers pass combined build/tests and formatting checks. See the
+[ticket delivery notes](presentation/WB-002-native-icons-animation.md#delivery--2026-10-25).
+
+**2026-10-25 owner closure:** [WB-003](evidence/WB-003-evidence-refresh-activity.md),
+[WB-006](evidence/WB-006-evidence-timestamps.md) and
+[WB-054](presentation/WB-054-contextual-controls.md) are now **closed/accepted**. The
+owner confirmed the timing evidence behaviour, lifting the 2026-10-21 signoff-evidence
+hold on their clock/timing inspection review. This is closure authorization; no new
+delayed-provider, report-view or HTTP failure-injection run is claimed.
+
 **2026-10-21 status vocabulary:** owner-accepted tickets now carry `status: closed`
 rather than `delivered` plus acceptance prose: WB-001, WB-019, WB-024, WB-039,
 WB-048, WB-050, WB-063 and WB-066. `delivered` now means implemented and awaiting

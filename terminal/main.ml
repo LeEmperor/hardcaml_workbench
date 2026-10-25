@@ -1242,7 +1242,7 @@ let change_synthesis session f =
       session.host <- Host.set_local session.host tile.id next))
 ;;
 
-let workspace_request session operation =
+let workspace_request ?(on_snapshot = fun _ -> ()) session operation =
   match current_project session with
   | None -> return ()
   | Some project ->
@@ -1285,10 +1285,11 @@ let workspace_request session operation =
         session.host <- host;
         session.presentation_preferences <- pending;
         apply_waveform_preferences session;
-        reconcile_synthesis session)
+        reconcile_synthesis session;
+        on_snapshot snapshot)
 ;;
 
-let mutate_workspace session mutation =
+let mutate_workspace ?on_snapshot session mutation =
   match session.host.registry with
   | None -> return ()
   | Some snapshot ->
@@ -1306,6 +1307,7 @@ let mutate_workspace session mutation =
         (fun () ->
           let%bind () =
             workspace_request
+              ?on_snapshot
               session
               (Mutate { expected_revision = snapshot.revision; mutation })
           in
@@ -3029,6 +3031,13 @@ let read_hierarchy_shared session (job : Job.t) (artifact : Artifact.t) =
     response
 ;;
 
+let missing_hierarchy_guidance session =
+  Host.missing_hierarchy_guidance
+    ~project:(current_project session)
+    ~target:session.selected_target
+    ~configuration:session.selected_configuration
+;;
+
 let load_tile_hierarchy session id =
   let local = Host.local session.host id in
   let ticket = ref () in
@@ -3070,7 +3079,7 @@ let load_tile_hierarchy session id =
   | None ->
     finish
       None
-      "Missing hierarchy: generate RTL for selected target/configuration, then r";
+      ("Missing hierarchy: " ^ missing_hierarchy_guidance session);
     return ()
   | Some job when not (Job.State.equal job.state Complete) ->
     finish
@@ -3079,7 +3088,10 @@ let load_tile_hierarchy session id =
        ^ Job.State.to_string job.state
        ^ " in "
        ^ Job_id.to_string job.id
-       ^ "; wait or generate RTL, then r");
+        ^ "; "
+        ^ (if Job.is_terminal job
+           then missing_hierarchy_guidance session
+           else "wait for generation to finish, then r"));
     return ()
   | Some job ->
     (match hierarchy_artifact_for_job session job with
@@ -3411,7 +3423,7 @@ let integration_lines session =
 
 let hierarchy_status_lines session =
   match current_generation session with
-  | None -> [ "Hardware hierarchy: unavailable; generate RTL for this selection" ]
+  | None -> [ "Hardware hierarchy: unavailable; " ^ missing_hierarchy_guidance session ]
   | Some job ->
     (match job.state with
      | Queued | Starting | Running ->
@@ -5360,6 +5372,18 @@ let execute_host session captured action ~exit =
     | Switch id ->
       activate_workspace session id;
       Effect.Ignore
+    | Create_blank_workspace ->
+      async (fun () ->
+        match session.host.registry, Host.active session.host with
+        | Some registry, Some active when Host.current session.host captured ->
+          mutate_workspace
+            session
+            (Host.blank_workspace_mutation registry ~window:active.window)
+            ~on_snapshot:(fun snapshot ->
+              Option.iter
+                (Host.created_workspace ~before:registry ~after:snapshot)
+                ~f:(activate_workspace session))
+        | _ -> return ())
     | Create_testing_workspace ->
       async (fun () ->
         match session.host.registry, Host.active session.host with

@@ -60,6 +60,73 @@ let%test_unit "Session line projects scoped evidence reads through the real rend
   assert (has (session_text (with_operations [ other ])) "Evidence: idle")
 ;;
 
+let%test_unit "Session context markers preserve labels and typed refresh owns one animation" =
+  let host, data, find = Host_view.refinement_fixture P.Timing.definition in
+  let paths = find "timing-paths"
+  and session = find "live-status" in
+  let host =
+    H.set_timing host paths
+      (Timing_workspace.create ~generation:1 ~run:Fs0_fixture.run_a ~stage:"signoff")
+  in
+  let registry = Option.value_exn host.registry in
+  let active = Option.value_exn host.active in
+  let independent =
+    H.receive host (Workspace.apply_mutation registry (Make_independent active))
+  in
+  let independent =
+    H.set_timing independent paths
+      (Timing_workspace.create ~generation:2 ~run:Fs0_fixture.run_a ~stage:"signoff")
+  in
+  let operation activity : Asic.Pending.t =
+    { key =
+        Asic_inspection.index_key ~run:Fs0_fixture.run_a ~domain:"timing" ~stage:"signoff"
+    ; kind = "inspection"
+    ; state = "executing"
+    ; run = Some Fs0_fixture.run_a
+    ; error = None
+    ; activity
+    }
+  in
+  List.iter Appearance.Icons.all ~f:(fun icons ->
+    List.iter
+      [ host, Indicator.Linked, "linked to Main"; independent, Independent, "own " ]
+      ~f:(fun (host, kind, label) ->
+        let host = { host with appearance = { host.appearance with icons } } in
+        let glyph = Indicator.text icons kind in
+        let prefix = if String.is_empty glyph then "" else glyph ^ " " in
+        let render activity frame width height =
+          let data =
+            { data with
+              Host_view.asic =
+                Option.map data.asic ~f:(fun snapshot ->
+                  { snapshot with operations = [ operation activity ] })
+            }
+          in
+          let indicator_frames : Indicator.frames =
+            { dot = Bonsai_term.View.text frame; line = Bonsai_term.View.text frame }
+          in
+          Host_view.tile_view ~indicator_frames host data session ~width ~height
+        in
+        let text activity frame = render activity frame 80 7 |> Host_view.plain_text in
+        let reading = text Evidence_read "A" in
+        assert (String.is_substring reading ~substring:(prefix ^ "Context: " ^ label));
+        let animation = if Appearance.Icons.equal icons None_ then "" else "A " in
+        assert (
+          String.is_substring reading
+            ~substring:(animation ^ "updating evidence · timing/signoff"));
+        assert (not (String.is_substring reading ~substring:"A A "));
+        assert (
+          Bool.equal
+            (not (String.equal reading (text Evidence_read "B")))
+            (not (Appearance.Icons.equal icons None_)));
+        assert (
+          String.equal (text Evidence_cache_lookup "A") (text Evidence_cache_lookup "B"));
+        List.iter [ 0, 0; 1, 1; 24, 7; 80, 7 ] ~f:(fun (width, height) ->
+          let view = render Evidence_read "A" width height in
+          assert (Bonsai_term.View.width view = width);
+          assert (Bonsai_term.View.height view = height))))
+;;
+
 let%expect_test "Session line wording at the preset Session width" =
   let host, data, find = Host_view.refinement_fixture P.Timing.definition in
   let paths = find "timing-paths"
@@ -115,28 +182,28 @@ let%expect_test "Session line wording at the preset Session width" =
     ╭ session ───────────────────╮
     │ Connection: connected      │
     │ Project: none open         │
-    │ Context: linked to Main    │
+    │ ↔ Context: linked to Main  │
     │ Run: fixture-A             │
     │ ⣷ updating evidence · timi │
     ╰────────────────────────────╯
     ╭ session ───────────────────╮
     │ Connection: connected      │
     │ Project: none open         │
-    │ Context: linked to Main    │
+    │ ↔ Context: linked to Main  │
     │ Run: fixture-A             │
     │ Evidence: not updated: pro │
     ╰────────────────────────────╯
     ╭ session ───────────────────╮
     │ Connection: connected      │
     │ Project: none open         │
-    │ Context: linked to Main    │
+    │ ↔ Context: linked to Main  │
     │ Run: fixture-A             │
     │ ⣷ updating evidence (2)    │
     ╰────────────────────────────╯
     ╭ session ───────────────────╮
     │ Connection: connected      │
     │ Project: none open         │
-    │ Context: linked to Main    │
+    │ ↔ Context: linked to Main  │
     │ Run: fixture-A             │
     │ Evidence: idle             │
     ╰────────────────────────────╯
