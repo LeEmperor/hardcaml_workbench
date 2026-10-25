@@ -84,6 +84,31 @@ Its optional `gutter` defaults to zero (adjacent, disjoint frame rectangles); us
 one for a blank cell between tiles. Insufficient dimensions use the existing grid
 or focused-tile fallback without changing saved geometry or membership.
 
+### Layout order and keyboard focus
+
+In **Fit**, Tab follows the declared layout tree: `Stack` children top-to-bottom,
+`Columns` and `Weighted_columns` children left-to-right, completing each child's
+subtree before moving to the next. Column weights affect size, not traversal;
+`Narrow` preserves its child's order. Shift-Tab follows the exact reverse, and both
+directions wrap. Workspace tabs retain their normal focus stop. In Overview this
+means workspace tabs, then Session → Runs → Stage checklist → Planned run, then
+the right-hand stage tiles.
+
+Configured leaves address authoring keys, so two tiles of the same kind can have
+independent positions and focus stops. For example, `custom.sexp` visits `choose`
+→ `right` → `left`, despite membership listing `left` before `right`. Missing or
+hidden leaves are skipped, each eligible tile is visited once, and unmatched extras
+follow the declared tiles in registry order. Zoom restricts navigation to the
+zoomed tile. Without a usable definition, navigation retains registry order.
+
+Fit keeps this semantic tree order across responsive resizes, including when the
+viewport forces a registry-ordered grid or **Compact** focused-tile-only rendering.
+The grid's visual row order can therefore differ from Tab order; Compact still
+allows every eligible tile to be reached. **Preferred** instead follows registry
+order, matching requested-size shelf packing, including when insufficient space
+shows only the focused tile. Navigation does not rewrite saved tile order or
+requested geometry; applying a definition to an older session needs no migration.
+
 FS3 portable templates carry the stable preset ID alongside exact membership and
 requested geometry. `Definition.template` supplies the same definitions to CLI
 `starter overview|timing|testing`; imports do not fill/reset sparse arrangements.

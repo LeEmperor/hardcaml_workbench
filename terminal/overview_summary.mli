@@ -10,12 +10,15 @@ val supports : string -> bool
     full run/digest/producer/source provenance in [details] for inspection. [compact]
     defaults to false; true prioritizes facts/failures before redundant chrome.
     [freshness] defaults to true; false hides validated-only chrome, never stale or
-    unavailable warnings. *)
+    unavailable warnings. [decimal_places] defaults to 3 (bounded to 0..9) and truncates
+    displayed Timing measurements towards zero; counts retain integer-style display.
+    Numeric evidence and technical source text are unchanged. *)
 val rows
   :  ?now:Time_ns.t
   -> ?finalizations:Asic.Finalization.t list
   -> ?compact:bool
   -> ?freshness:bool
+  -> ?decimal_places:int
   -> ?stage_id:string
   -> kind:string
   -> run:Run_ref.t

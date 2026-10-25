@@ -171,6 +171,20 @@ let resolve ?(min_height_for_index = fun _ -> None) tree kinds =
   | Some tree, extras -> Some (Stack [ tree; Stack extras ])
 ;;
 
+(** Input indices in depth-first layout order, independent of available geometry. [kinds]
+    contains authoring keys for configured layouts, as in [compute]. Missing leaves are
+    skipped; unmatched inputs follow the tree in their original order. *)
+let navigation_order (definition : Definition.t) ~kinds =
+  let rec leaves = function
+    | Cell (i, _, _, _) -> [ i ]
+    | Stack children | Columns children -> List.concat_map children ~f:leaves
+    | Weighted_columns children ->
+      List.concat_map children ~f:(fun (_, child) -> leaves child)
+    | Narrow tree -> leaves tree
+  in
+  Option.value_map (resolve definition.layout kinds) ~default:[] ~f:leaves
+;;
+
 let grid ?(gutter = 0) ?(min_height_for_index = fun _ -> None) ~width ~height count =
   List.range 1 (Int.min count 4 + 1)
   |> List.find_map ~f:(fun columns ->

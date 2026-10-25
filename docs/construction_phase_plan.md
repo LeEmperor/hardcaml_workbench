@@ -1,5 +1,23 @@
 # Hardcaml Workbench — Demo construction plan
 
+## Active Overview compression/title regression
+
+Owner supplied live Overview state where Placement/Routing lose titles and show
+generic finalization text after compression toggling. The
+[regression plan](overview_compression_regression_plan.md) owns private reproduction,
+render/policy correction and targeted state recovery. Preserve the user's layout
+and all unrelated presentation choices; serialize verification at one job.
+
+- [x] Diagnose and fix Placement/Routing title/body behavior.
+- [x] Verify compression/persistence isolation and refresh retained client.
+
+Saved header-off settings explain the absent titles; reproduction did not show
+compression changing them. Enter/detail mode exposed a separate fallback bug that
+discarded stage observations without finalization. Typed domain detail is restored,
+Overview Timing now honors decimal precision, and boundary-safe decimal truncation
+is regression-tested. Actual-state native replay and full single-job build/lint/tests
+passed. See the plan for two targeted header toggles and client-only restart.
+
 ## Active WB-009 / WB-073 completion
 
 Owner verified and closed **WB-069**, then authorized the remaining timing-report

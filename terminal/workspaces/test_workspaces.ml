@@ -151,6 +151,167 @@ let%test_unit "merged stock content and presentation survive the schema projecti
     assert (not (List.mem (kinds d) "hierarchy" ~equal:String.equal)))
 ;;
 
+let%test_unit "stock navigation follows layout subtrees even with shuffled Runs last" =
+  let cases =
+    [ ( Overview.definition
+      , [ "workspace-tabs"
+        ; "live-status"
+        ; "run-selector"
+        ; "stage-checklist"
+        ; "planned-run"
+        ; "synthesis"
+        ; "timing"
+        ; "placement"
+        ; "routing"
+        ; "checks"
+        ; "finalization"
+        ] )
+    ; ( Testing.definition
+      , [ "workspace-tabs"
+        ; "live-status"
+        ; "project-tests"
+        ; "execution"
+        ; "simulation-catalog"
+        ; "simulation-attempts"
+        ; "simulation-cases"
+        ; "simulation-detail"
+        ; "simulation-artifacts"
+        ; "simulation-logs"
+        ] )
+    ; ( Waveforms.definition
+      , [ "workspace-tabs"
+        ; "waveform-session"
+        ; "waveform-signals"
+        ; "waveform-waves"
+        ; "waveform-picker"
+        ; "waveform-logs"
+        ] )
+    ; ( Timing.definition
+      , [ "workspace-tabs"
+        ; "live-status"
+        ; "run-selector"
+        ; "timing-paths"
+        ; "timing-detail"
+        ; "timing-context"
+        ] )
+    ]
+  in
+  List.iter cases ~f:(fun (definition, expected) ->
+    let shuffled =
+      List.rev (kinds definition)
+      |> List.partition_tf ~f:(fun kind -> not (String.equal kind "run-selector"))
+      |> fun (others, runs) -> others @ runs
+    in
+    List.iter
+      [ kinds definition; shuffled ]
+      ~f:(fun input ->
+        let order = Layout.navigation_order definition ~kinds:input in
+        assert (List.equal String.equal (List.map order ~f:(List.nth_exn input)) expected);
+        assert (
+          List.equal
+            Int.equal
+            (List.sort order ~compare:Int.compare)
+            (List.range 0 (List.length input)))))
+;;
+
+let%test_unit "navigation skips missing leaves and appends duplicate and custom extras" =
+  let input =
+    [ "custom-first"
+    ; "timing"
+    ; "run-selector"
+    ; "custom-last"
+    ; "live-status"
+    ; "run-selector"
+    ; "planned-run"
+    ]
+  in
+  assert (
+    List.equal
+      Int.equal
+      (Layout.navigation_order Overview.definition ~kinds:input)
+      [ 4; 2; 6; 1; 0; 3; 5 ]);
+  assert (
+    List.equal
+      Int.equal
+      (Layout.navigation_order Overview.definition ~kinds:[ "unknown"; "unknown" ])
+      [ 0; 1 ])
+;;
+
+let%test_unit "nested navigation completes columns and treats Narrow as transparent" =
+  let leaf kind : Common.tree =
+    Leaf { kind; min_width = 24; min_height = 6; weight = 1 }
+  in
+  let definition =
+    { Overview.definition with
+      layout =
+        Stack
+          [ Columns
+              [ Narrow (Stack [ leaf "b"; leaf "a" ])
+              ; Weighted_columns
+                  [ 3, leaf "missing"; 1, leaf "c"; 9, Stack [ leaf "a"; leaf "d" ] ]
+              ]
+          ; leaf "b"
+          ; leaf "b"
+          ]
+    }
+  in
+  (* Repeated references consume distinct matching inputs, then disappear when exhausted.
+     Column weights do not change traversal order. *)
+  assert (
+    List.equal
+      Int.equal
+      (Layout.navigation_order
+         definition
+         ~kinds:[ "extra"; "a"; "d"; "b"; "c"; "a"; "b"; "tail" ])
+      [ 3; 1; 4; 5; 2; 6; 0; 7 ])
+;;
+
+let%test_unit "empty navigation trees retain every input as a stable extra" =
+  List.iter
+    [ Common.Stack []; Columns []; Weighted_columns []; Narrow (Stack []) ]
+    ~f:(fun layout ->
+      let definition = { Overview.definition with layout } in
+      assert (List.is_empty (Layout.navigation_order definition ~kinds:[]));
+      assert (
+        List.equal
+          Int.equal
+          (Layout.navigation_order definition ~kinds:[ "b"; "a"; "b" ])
+          [ 0; 1; 2 ]));
+  List.iter Presets.all ~f:(fun definition ->
+    assert (List.is_empty (Layout.navigation_order definition ~kinds:[])))
+;;
+
+let%test_unit "navigation leaves computed geometry associated with original input indices"
+  =
+  let definition = Overview.definition in
+  let original = kinds definition in
+  let shuffled =
+    List.rev
+      (List.filter original ~f:(fun kind -> not (String.equal kind "run-selector")))
+    @ [ "run-selector" ]
+  in
+  let compute kinds =
+    match Layout.compute definition ~width:180 ~height:80 ~kinds with
+    | Compact -> assert false
+    | Grid cells -> cells
+  in
+  let baseline = List.zip_exn original (compute original) in
+  let before = compute shuffled in
+  assert (
+    not
+      (List.equal
+         Int.equal
+         (Layout.navigation_order definition ~kinds:shuffled)
+         (List.range 0 (List.length shuffled))));
+  let after = compute shuffled in
+  assert (List.equal Workspace.Geometry.equal before after);
+  List.iter2_exn shuffled after ~f:(fun kind cell ->
+    assert (
+      Workspace.Geometry.equal
+        cell
+        (List.Assoc.find_exn baseline kind ~equal:String.equal)))
+;;
+
 let%test_unit "custom spec addresses duplicate kinds by keys and uses bounded fallback" =
   let config =
     Presets.custom_example () |> Or_error.ok_exn |> Presets.resolve |> Or_error.ok_exn
@@ -159,6 +320,17 @@ let%test_unit "custom spec addresses duplicate kinds by keys and uses bounded fa
   let d = Definition.of_spec spec in
   let keys = List.map spec.tiles ~f:(fun t -> t.Workspace_config.Tile.key) in
   assert (List.equal String.equal (kinds d) [ "run-selector"; "synthesis"; "synthesis" ]);
+  assert (List.equal Int.equal (Layout.navigation_order d ~kinds:keys) [ 0; 2; 1 ]);
+  assert (
+    List.equal
+      Int.equal
+      (Layout.navigation_order d ~kinds:[ "left"; "extra"; "right"; "choose" ])
+      [ 3; 2; 0; 1 ]);
+  assert (
+    List.equal
+      Int.equal
+      (Layout.navigation_order d ~kinds:[ "left"; "extra"; "choose"; "left" ])
+      [ 2; 0; 1; 3 ]);
   (match Layout.compute d ~width:100 ~height:30 ~kinds:keys with
    | Compact -> assert false
    | Grid cells ->

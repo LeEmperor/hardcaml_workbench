@@ -16,16 +16,39 @@ let decimal ~places value =
   if not (Float.is_finite value)
   then Float.to_string value
   else (
-    let scale = Float.(10. ** of_int places) in
-    let scaled = value *. scale in
-    let truncated =
-      if Float.is_finite scaled then Float.round_towards_zero scaled /. scale else value
+    (* Find a shortest significant-digit decimal that round-trips to this float. Scaling
+       the binary float first can lose a decimal unit (1.001 * 1000 is
+       1000.9999999999999). No epsilon: an adjacent float below the boundary must keep its
+       distinct decimal representation and still truncate downwards. IEEE doubles need at
+       most 17 significant digits. *)
+    let rec shortest precision =
+      let text = sprintf "%.*g" precision value in
+      if precision = 17 || Float.equal (Float.of_string text) value
+      then text
+      else shortest (precision + 1)
     in
-    (* Explicit sign preserves tiny negative violations, including at precision zero. *)
-    let text = sprintf "%.*f" places truncated in
-    if Float.(value < 0.) && not (String.is_prefix text ~prefix:"-")
-    then "-" ^ text
-    else text)
+    let text = shortest 1 in
+    let negative = String.is_prefix text ~prefix:"-" in
+    let magnitude = if negative then String.drop_prefix text 1 else text in
+    let mantissa, exponent =
+      match String.lsplit2 (String.lowercase magnitude) ~on:'e' with
+      | None -> magnitude, 0
+      | Some (mantissa, exponent) -> mantissa, Int.of_string exponent
+    in
+    let point =
+      Option.value (String.index mantissa '.') ~default:(String.length mantissa)
+      + exponent
+    in
+    let digits = String.filter mantissa ~f:(fun c -> not (Char.equal c '.')) in
+    let digit index =
+      if index < 0 || index >= String.length digits then '0' else digits.[index]
+    in
+    (* Exponent expansion is bounded by double's range: <=309 integer digits, <=9
+       fractional digits, plus sign and point. Tiny exponents allocate no intervening
+       zero-filled buffer. Keep the sign even for negative zero. *)
+    (if negative then "-" else "")
+    ^ (if point <= 0 then "0" else String.init point ~f:digit)
+    ^ if places = 0 then "" else "." ^ String.init places ~f:(fun i -> digit (point + i)))
 ;;
 
 let compressible value =
@@ -181,6 +204,42 @@ let%test_unit "display precision truncates toward zero, preserving violations an
   [%test_result: string] (decimal ~places:0 (-0.125029)) ~expect:"-0";
   [%test_result: string] (decimal ~places:3 0.) ~expect:"0.000";
   [%test_result: string] (decimal ~places:9 0.1250299879) ~expect:"0.125029987";
+  List.iter
+    [ 0.125029, 6, "0.125029"; 1.001, 3, "1.001"; 0.29, 2, "0.29" ]
+    ~f:(fun (value, places, expected) ->
+      [%test_result: string] (decimal ~places value) ~expect:expected;
+      [%test_result: string] (decimal ~places (-.value)) ~expect:("-" ^ expected);
+      let below = Stdlib.Float.next_after value Float.neg_infinity in
+      assert (Float.(below < value));
+      assert (not (String.equal (Float.to_string below) (Float.to_string value)));
+      [%test_result: string]
+        (decimal ~places below)
+        ~expect:
+          (match places with
+           | 6 -> "0.125028"
+           | 3 -> "1.000"
+           | _ -> "0.28");
+      [%test_result: string]
+        (decimal ~places (-.below))
+        ~expect:
+          (match places with
+           | 6 -> "-0.125028"
+           | 3 -> "-1.000"
+           | _ -> "-0.28"));
+  (* Actual retained provider metric, not the rounded report's 0.125029. *)
+  [%test_result: string] (decimal ~places:6 0.12502899069955042) ~expect:"0.125028";
+  [%test_result: string] (decimal ~places:3 1e20) ~expect:"100000000000000000000.000";
+  [%test_result: string] (decimal ~places:3 (-1e20)) ~expect:"-100000000000000000000.000";
+  [%test_result: string] (decimal ~places:9 1.23456789e-7) ~expect:"0.000000123";
+  [%test_result: string] (decimal ~places:9 (-1.23456789e-7)) ~expect:"-0.000000123";
+  [%test_result: string] (decimal ~places:9 5e-324) ~expect:"0.000000000";
+  [%test_result: string] (decimal ~places:9 (-5e-324)) ~expect:"-0.000000000";
+  [%test_result: string] (decimal ~places:3 (-0.)) ~expect:"-0.000";
+  [%test_result: string] (decimal ~places:(-1) 1.001) ~expect:"1";
+  let largest = Float.of_string "1.7976931348623157e308" in
+  let expanded = decimal ~places:99 largest in
+  assert (String.length expanded = 319);
+  assert (Float.equal (Float.of_string expanded) largest);
   assert (
     String.is_substring (String.lowercase (decimal ~places:3 Float.nan)) ~substring:"nan");
   assert (

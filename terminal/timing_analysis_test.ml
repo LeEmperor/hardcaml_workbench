@@ -136,6 +136,100 @@ let fixture () =
   host, data, find, summary
 ;;
 
+let%test_unit "Overview Timing precision is display-only in compact and expanded views" =
+  let host, data, find, summary = fixture () in
+  let base = List.hd_exn analysis.metrics in
+  let analysis =
+    { analysis with
+      metrics =
+        [ { base with value = Some 16.23669876 }
+        ; { base with key = "hold_slack"; value = Some (-0.0009876549) }
+        ; { base with key = "setup_violations"; value = Some 2.; unit_ = Some "count" }
+        ; { base with key = "hold_violations"; value = Some 0.; unit_ = Some "count" }
+        ]
+    ; evidence = "technical report: 16.23669876 / -0.0009876549"
+    }
+  in
+  let summary = { summary with timing_analysis = Some analysis } in
+  let raw = Asic.Summary.sexp_of_t summary in
+  let render ?decimal_places compact =
+    Overview_summary.rows
+      ?decimal_places
+      ~compact
+      ~kind:"timing"
+      ~run:summary.run
+      ~summary:(Some summary)
+      ~stages:[]
+      ()
+    |> List.map ~f:(fun row -> row.O.label ^ ": " ^ row.value)
+    |> String.concat ~sep:"\n"
+  in
+  List.iter [ false; true ] ~f:(fun compact ->
+    let three = render compact
+    and six = render ~decimal_places:6 compact in
+    List.iter [ "16.236 ns"; "-0.000 ns"; "2 count"; "0 count" ] ~f:(fun substring ->
+      assert (String.is_substring three ~substring));
+    List.iter
+      [ "16.236698 ns"; "-0.000987 ns"; "2 count"; "0 count" ]
+      ~f:(fun substring -> assert (String.is_substring six ~substring));
+    assert (not (String.is_substring three ~substring:"2.000"));
+    assert (not (String.is_substring six ~substring:"2.000000")));
+  let data =
+    { data with
+      summary = (fun _ -> Some summary)
+    ; asic =
+        Option.map data.asic ~f:(fun snapshot ->
+          { snapshot with
+            runs =
+              List.map snapshot.runs ~f:(fun run ->
+                { run with
+                  stages =
+                    [ { (List.hd_exn run.stages) with id = "timing"; name = "Timing" } ]
+                })
+          })
+    }
+  in
+  let tile = find "timing" in
+  List.iter [ false; true ] ~f:(fun detail ->
+    List.iter
+      [ 0, "16 ns", "-0 ns"
+      ; 3, "16.236 ns", "-0.000 ns"
+      ; 6, "16.236698 ns", "-0.000987 ns"
+      ; 9, "16.236698760 ns", "-0.000987654 ns"
+      ]
+      ~f:(fun (decimal_places, positive, negative) ->
+        let local = H.local host tile.id in
+        let host =
+          H.set_local
+            host
+            tile.id
+            { local with
+              utility_detail = detail
+            ; presentation =
+                { local.presentation with decimal_places = Some decimal_places }
+            }
+        in
+        let text =
+          Host_view.tile_view host data tile ~width:160 ~height:40 |> Host_view.plain_text
+        in
+        assert (String.is_substring text ~substring:positive);
+        if not (String.is_substring text ~substring:negative)
+        then
+          failwithf
+            "Missing %s at precision %d detail=%b:\n%s"
+            negative
+            decimal_places
+            detail
+            text
+            ();
+        if detail
+        then (
+          assert (String.is_substring text ~substring:"2 count");
+          assert (String.is_substring text ~substring:analysis.evidence))));
+  assert (Sexp.equal raw (Asic.Summary.sexp_of_t summary));
+  assert (Asic.Timing_analysis.Goal.equal analysis.timing_goal Fail)
+;;
+
 let%test_unit "hidden builtin follows exact resolved analysis without navigation or pin \
                edits"
   =

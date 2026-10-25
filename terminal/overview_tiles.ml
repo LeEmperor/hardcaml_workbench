@@ -274,7 +274,14 @@ let analysis_duration (a : Asic.Timing_analysis.t) =
       ~f:(fun seconds -> sprintf "%gs" seconds))
 ;;
 
-let analysis_details ~run (summary : Asic.Summary.t option) =
+let timing_metric_value ~decimal_places ~key ~unit_ value =
+  if Option.equal String.equal unit_ (Some "count")
+     || List.mem [ "setup_violations"; "hold_violations" ] key ~equal:String.equal
+  then sprintf "%g" value
+  else Presentation.decimal ~places:decimal_places value
+;;
+
+let analysis_details ?(decimal_places = 3) ~run (summary : Asic.Summary.t option) =
   [ "Run: " ^ run_identity run
   ; "Analysis: post-PNR STA (independent of physical stage completion)"
   ]
@@ -340,7 +347,10 @@ let analysis_details ~run (summary : Asic.Summary.t option) =
                   "Metric %s / %s: %s %s; raw key: %s; source: %s%s"
                   m.key
                   m.corner
-                  (Option.value_map m.value ~default:"unavailable" ~f:(sprintf "%g"))
+                  (Option.value_map
+                     m.value
+                     ~default:"unavailable"
+                     ~f:(timing_metric_value ~decimal_places ~key:m.key ~unit_:m.unit_))
                   (Option.value m.unit_ ~default:"unit unknown")
                   m.raw_key
                   m.provenance
@@ -354,7 +364,7 @@ let analysis_details ~run (summary : Asic.Summary.t option) =
               | _ -> []))
 ;;
 
-let analysis_row ~run ~selected summary =
+let analysis_row ?(decimal_places = 3) ~run ~selected summary =
   let analysis = Option.bind summary ~f:(fun s -> s.Asic.Summary.timing_analysis) in
   let status =
     match analysis with
@@ -366,7 +376,7 @@ let analysis_row ~run ~selected summary =
     ~active:selected
     ~role:(status_role status)
     ~time:(Option.value_map analysis ~default:"unknown" ~f:analysis_duration)
-    ~details:(analysis_details ~run summary)
+    ~details:(analysis_details ~decimal_places ~run summary)
     "Timing"
     (match analysis with
      | Some { status = Unavailable; _ } -> "unavailable"

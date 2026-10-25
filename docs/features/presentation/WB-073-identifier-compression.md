@@ -81,6 +81,17 @@ Receipts: `/tmp/opencode/identifier-compression-n537648w/` and
 [Controls, scope and verification limits](../../identifier_compression.md).
 Status is **delivered**, awaiting owner acceptance; not closed.
 
+### Overview regression follow-up
+
+The owner's subsequent blank Placement/Routing report was reproduced against the
+supplied state. Saved header-off preferences explained missing titles; compression
+actions preserved them. An independent terminal-result detail fallback discarded
+available stage evidence without finalization. That reader is fixed and actual-state
+native tests verify global/workspace/tile compression isolation, restart and missing
+states. [Diagnosis, recovery controls and evidence](../../overview_compression_regression_plan.md).
+This does not assert when the original header overrides were created or imply owner
+acceptance of WB-073.
+
 ## Original partial delivery — Timing presentation (superseded)
 
 - Focused-tile commands: **Strings: Compress identifiers and source paths**,

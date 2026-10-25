@@ -562,13 +562,18 @@ let set_presentation t id (presentation : T.overrides) =
     let previous = local t id in
     let compression_only =
       T.equal_overrides
-        { previous.presentation with string_compression = presentation.string_compression }
+        { previous.presentation with
+          string_compression = presentation.string_compression
+        }
         presentation
     in
     ( set_local
         t
         id
-        { previous with presentation; scroll = (if compression_only then previous.scroll else 0) }
+        { previous with
+          presentation
+        ; scroll = (if compression_only then previous.scroll else 0)
+        }
     , not
         (T.equal_overrides (T.persisted previous.presentation) (T.persisted presentation))
     ))
@@ -2248,6 +2253,22 @@ let layout_keys t (tiles : W.Tile.t list) =
     Option.value key ~default:("extra:" ^ W.Tile_id.to_string tile.id))
 ;;
 
+(** Fit follows semantic tree order even when placement falls back to a grid or Compact.
+    Preferred packs in registry order. Keep [tiles] unchanged for callers that associate
+    its indices with rendered geometry. *)
+let navigation_tiles t =
+  let eligible = tiles t in
+  match t.layout_mode, active t with
+  | Fit, Some workspace ->
+    (match render_definition t workspace with
+     | None -> eligible
+     | Some definition ->
+       let indexed = Array.of_list eligible in
+       P.Layout.navigation_order definition ~kinds:(layout_keys t eligible)
+       |> List.map ~f:(fun index -> indexed.(index)))
+  | _ -> eligible
+;;
+
 let restore_commands (workspace : W.Arrangement.t) =
   let make ?unavailable id title action =
     command ?unavailable id title "restore default preset layout hide extras fit" action
@@ -2919,7 +2940,9 @@ let compression_commands t =
 ;;
 
 let%test_unit "scoped compression actions preserve loaded data and navigation" =
-  let registry = W.initial ~session_id:(W.Session_id.of_string "compression-local-only") in
+  let registry =
+    W.initial ~session_id:(W.Session_id.of_string "compression-local-only")
+  in
   let tile = List.hd_exn registry.tiles in
   let host = receive empty registry in
   let original =
@@ -4482,7 +4505,7 @@ let input t event ~commands : t * effect =
             }
           , No_effect )
         | (Focus | Focus_previous), _ ->
-          let visible = tiles t in
+          let visible = navigation_tiles t in
           let index =
             List.findi visible ~f:(fun _ tile ->
               Option.value_map t.focus ~default:false ~f:(W.Tile_id.equal tile.id))
@@ -4992,6 +5015,146 @@ let select_run t run =
   | _ -> None
 ;;
 
+let%test_unit "persisted Runs-last Overview traverses the complete tree and wraps both \
+               ways"
+  =
+  let registry = W.initial ~session_id:(W.Session_id.of_string "layout-focus-order") in
+  let workspace = List.hd_exn registry.workspaces in
+  let registry =
+    W.apply
+      registry
+      (Mutate
+         { expected_revision = registry.revision
+         ; mutation = P.Definition.apply P.Overview.definition ~workspace:workspace.id
+         })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let runs, others =
+    List.partition_tf registry.tiles ~f:(fun tile ->
+      W.Workspace_id.equal tile.workspace workspace.id
+      && String.equal tile.kind "run-selector")
+  in
+  let registry = { registry with tiles = others @ runs } in
+  let registry = W.Snapshot.t_of_sexp (W.Snapshot.sexp_of_t registry) in
+  let host = receive empty registry in
+  let expected =
+    [ "workspace-tabs"
+    ; "live-status"
+    ; "run-selector"
+    ; "stage-checklist"
+    ; "planned-run"
+    ; "synthesis"
+    ; "timing"
+    ; "placement"
+    ; "routing"
+    ; "checks"
+    ; "finalization"
+    ]
+  in
+  assert (String.equal (List.last_exn (tiles host)).kind "run-selector");
+  assert (
+    List.equal
+      String.equal
+      (List.map (navigation_tiles host) ~f:(fun tile -> tile.kind))
+      expected);
+  let step host event expected =
+    let next, effect = input { host with prefix = 2 } event ~commands:[] in
+    (match effect with
+     | No_effect -> ()
+     | _ -> assert false);
+    assert (next.prefix = 0);
+    assert (String.equal (Option.value_exn (focused next)).kind expected);
+    assert (phys_equal next.registry host.registry);
+    next
+  in
+  let host = { host with focus = None } in
+  let forward = List.fold expected ~init:host ~f:(fun h kind -> step h Focus kind) in
+  let wrapped = step forward Focus "workspace-tabs" in
+  let backward =
+    List.fold (List.rev expected) ~init:wrapped ~f:(fun h kind ->
+      step h Focus_previous kind)
+  in
+  ignore (step backward Focus_previous "finalization" : t);
+  List.iter
+    [ None; Some (W.Tile_id.of_string "missing-focus") ]
+    ~f:(fun focus ->
+      ignore (step { host with focus } Focus "workspace-tabs" : t);
+      ignore (step { host with focus } Focus_previous "finalization" : t));
+  let preferred = { host with layout_mode = Preferred } in
+  assert (List.equal W.Tile.equal (navigation_tiles preferred) (tiles preferred));
+  ignore (step preferred Focus_previous "run-selector" : t);
+  let unconfigured =
+    { registry with
+      workspaces = List.map registry.workspaces ~f:(fun w -> { w with preset = None })
+    ; config_workspaces = []
+    }
+  in
+  let host = receive empty unconfigured in
+  assert (List.equal W.Tile.equal (navigation_tiles host) (tiles host))
+;;
+
+let%test_unit "keyed focus order distinguishes duplicate kinds and appends stable extras" =
+  let config =
+    P.Presets.custom_example () |> Or_error.ok_exn |> P.Presets.resolve |> Or_error.ok_exn
+  in
+  let registry = W.initial ~session_id:(W.Session_id.of_string "custom-focus-order") in
+  let registry =
+    W.apply registry (Initialize_config config) |> Result.ok |> Option.value_exn
+  in
+  let origin = List.hd_exn registry.config_workspaces in
+  let tile key =
+    W.tile registry (List.Assoc.find_exn origin.tiles key ~equal:String.equal)
+  in
+  let choose = tile "choose"
+  and left = tile "left"
+  and right = tile "right" in
+  let extra_a = { left with id = W.Tile_id.of_string "extra-a" } in
+  let extra_b = { right with id = W.Tile_id.of_string "extra-b" } in
+  let registry =
+    { registry with tiles = [ extra_b; left; choose; extra_a; right ] }
+    |> W.Snapshot.sexp_of_t
+    |> W.Snapshot.t_of_sexp
+  in
+  let host = receive empty registry in
+  let ids tiles = List.map tiles ~f:(fun (tile : W.Tile.t) -> tile.id) in
+  let expected = [ choose; right; left; extra_b; extra_a ] in
+  assert (List.equal W.Tile_id.equal (ids (navigation_tiles host)) (ids expected));
+  let step host event (tile : W.Tile.t) =
+    let next, effect = input host event ~commands:[] in
+    (match effect with
+     | No_effect -> ()
+     | _ -> assert false);
+    assert (Option.equal W.Tile_id.equal next.focus (Some tile.id));
+    next
+  in
+  let forward =
+    List.fold expected ~init:{ host with focus = None } ~f:(fun h tile ->
+      step h Focus tile)
+  in
+  let wrapped = step forward Focus choose in
+  let backward =
+    List.fold (List.rev expected) ~init:wrapped ~f:(fun h tile ->
+      step h Focus_previous tile)
+  in
+  ignore (step backward Focus_previous extra_a : t);
+  let hidden =
+    { registry with
+      tiles =
+        List.map registry.tiles ~f:(fun tile ->
+          if W.Tile_id.equal tile.id right.id then { tile with hidden = true } else tile)
+    }
+  in
+  let host = receive empty hidden in
+  assert (
+    List.equal
+      W.Tile_id.equal
+      (ids (navigation_tiles host))
+      (ids [ choose; left; extra_b; extra_a ]));
+  ignore (step { host with focus = Some right.id } Focus choose : t);
+  ignore (step { host with focus = Some right.id } Focus_previous extra_a : t)
+;;
+
 let%test_unit "Tab and Shift-Tab wrap only visible tiles and honor zoom and modals" =
   let s = W.initial ~session_id:(W.Session_id.of_string "reverse-focus") in
   let first = List.hd_exn s.tiles in
@@ -5002,7 +5165,13 @@ let%test_unit "Tab and Shift-Tab wrap only visible tiles and honor zoom and moda
   let reverse =
     decode_event (Key_press { key = Tab; mods = [ Shift ] }) |> Option.value_exn
   in
-  let step t event = fst (input t event ~commands:[]) in
+  let step t event =
+    let next, effect = input t event ~commands:[] in
+    (match effect with
+     | No_effect -> ()
+     | _ -> assert false);
+    next
+  in
   let previous = step host reverse in
   assert (Option.equal W.Tile_id.equal previous.focus (Some extra.id));
   assert (Option.equal W.Tile_id.equal (step previous Focus).focus host.focus);
@@ -5022,8 +5191,10 @@ let%test_unit "Tab and Shift-Tab wrap only visible tiles and honor zoom and moda
   in
   let zoomed = step (receive host zoomed) reverse in
   assert (Option.equal W.Tile_id.equal zoomed.focus (Some first.id));
-  let no_tiles = step (receive host { s with tiles = [] }) reverse in
-  assert (Option.is_none no_tiles.focus)
+  assert (Option.equal W.Tile_id.equal (step zoomed Focus).focus (Some first.id));
+  List.iter [ Focus; Focus_previous ] ~f:(fun event ->
+    let no_tiles = step { (receive host { s with tiles = [] }) with prefix = 2 } event in
+    assert (Option.is_none no_tiles.focus && no_tiles.prefix = 0))
 ;;
 
 let%test_unit "palette similar commands capture Tab arrows aliases stable identity and \

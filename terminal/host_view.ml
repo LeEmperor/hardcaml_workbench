@@ -779,7 +779,12 @@ let utility_rows ?(now = Time_ns.now ()) host data tile =
              |> Option.map ~f:(Overview_tiles.asic_stage_row ~now ~run ~selected:false)
            in
            Option.to_list stage
-           @ [ Overview_tiles.analysis_row ~run ~selected:false (data.summary run) ]))
+           @ [ Overview_tiles.analysis_row
+                 ~decimal_places:policy.decimal_places
+                 ~run
+                 ~selected:false
+                 (data.summary run)
+             ]))
     | "live-status" when H.compact_summary host tile ->
       Some
         [ Overview_tiles.row
@@ -979,15 +984,47 @@ let terminal_content host data tile ~run =
       Run_ref.equal s.Asic.Summary.run run && Option.is_some s.terminal)
   in
   let content =
-    Terminal_result_view.semantic_rows
-      ~fallback:(data.run_lines run tile.kind)
-      ~request_context:(data.run_context run)
-      { local.terminal_result with offset = 0 }
-      ~run
-      ~summary
-      ~kind:tile.kind
-      ~width:Int.max_value
-      ~height:Int.max_value
+    if (not exact_terminal)
+       && List.mem [ "placement"; "routing" ] tile.kind ~equal:String.equal
+    then
+      (* Physical stage observations do not require a finalization result. Enter leaves
+         the compact view, but must not replace those facts with the terminal-result
+         reader's unrelated finalization placeholder. Keep the exact stage/run/source
+         details available in this expanded view too. *)
+      Overview_summary.rows
+        ~decimal_places:policy.decimal_places
+        ~kind:tile.kind
+        ~run
+        ~summary
+        ~stages:(Overview_tiles.observed_stages ~asic:data.asic ~run)
+        ()
+      |> fun rows ->
+      let facts =
+        List.filter_map rows ~f:(fun row ->
+          (* The non-detail host adds its own stage Time row. *)
+          if (not local.terminal_result.detail)
+             && String.equal row.Overview_tiles.label "Time"
+          then None
+          else Some (row.label ^ ": " ^ row.value))
+      in
+      let details =
+        if local.terminal_result.detail
+        then
+          List.concat_map rows ~f:(fun row -> row.Overview_tiles.details)
+          |> List.stable_dedup ~compare:String.compare
+        else []
+      in
+      List.map (facts @ data.run_context run @ details) ~f:E.plain
+    else
+      Terminal_result_view.semantic_rows
+        ~fallback:(data.run_lines run tile.kind)
+        ~request_context:(data.run_context run)
+        { local.terminal_result with offset = 0 }
+        ~run
+        ~summary
+        ~kind:tile.kind
+        ~width:Int.max_value
+        ~height:Int.max_value
   in
   let hint_index =
     Option.bind summary ~f:(fun s ->
@@ -1071,6 +1108,7 @@ let compact_rows ?(now = Time_ns.now ()) host data tile =
     Option.map (tile_run host tile) ~f:(fun run ->
       Overview_summary.rows
         ~now
+        ~decimal_places:(H.policy host tile).decimal_places
         ~finalizations:
           (Option.value_map data.asic ~default:[] ~f:(fun s ->
              s.Asic.Snapshot.finalizations))
@@ -1965,6 +2003,7 @@ let tile_view
   let semantic =
     if Option.is_none compact
        && Overview_summary.supports tile.kind
+       && (not local.utility_detail)
        && Option.is_none local.inspection
        && Option.is_none local.artifacts
        && (not local.terminal_result.detail)
@@ -1977,6 +2016,7 @@ let tile_view
         let time =
           Overview_summary.rows
             ~now
+            ~decimal_places:policy.decimal_places
             ~kind:tile.kind
             ~run
             ~summary:(data.summary run)
@@ -3347,7 +3387,8 @@ let%test_unit "Session and Runs render effective global workspace and tile compr
       W.Workspace_id.equal w.id session.workspace)
   in
   let context =
-    List.find_exn registry.contexts ~f:(fun c -> W.Context_id.equal c.id workspace.context)
+    List.find_exn registry.contexts ~f:(fun c ->
+      W.Context_id.equal c.id workspace.context)
   in
   let registry =
     W.apply
@@ -4848,6 +4889,101 @@ let%test_unit "Overview renders four primary domains with shallow frames and bou
   in
   assert (Option.is_none (compact_rows explicit data synthesis));
   assert (Option.is_some (semantic_rows explicit data synthesis ~width:60 ~height:12))
+;;
+
+let%test_unit "physical detail without finalization retains stages independently of \
+               headers and compression"
+  =
+  let host, data, find = refinement_fixture P.Overview.definition in
+  let snapshot = Option.value_exn data.asic in
+  let summary run =
+    Option.map (data.summary run) ~f:(fun s -> { s with terminal = None })
+  in
+  let data =
+    { data with
+      summary
+    ; run_context = (fun _ -> [ "Request endpoint: timing" ])
+    ; run_lines = (fun _ _ -> failwith "physical detail must use typed stage evidence")
+    }
+  in
+  List.iter [ "placement"; "routing" ] ~f:(fun kind ->
+    let tile = find kind in
+    List.iter [ false; true ] ~f:(fun header ->
+      List.iter [ false; true ] ~f:(fun detail ->
+        let local = H.local host tile.id in
+        let host =
+          H.set_local
+            host
+            tile.id
+            { local with
+              presentation = { T.inherit_ with header = Some header }
+            ; terminal_result = { local.terminal_result with detail }
+            }
+        in
+        let render host data = tile_view host data tile ~width:100 ~height:32 in
+        let image = render host data in
+        let text = plain_text image in
+        assert (String.is_substring text ~substring:(kind ^ ": completed"));
+        assert (not (String.is_substring text ~substring:"No terminal result imported"));
+        let heading = View.crop ~b:31 image |> plain_text |> String.lowercase in
+        assert (Bool.equal header (String.is_substring heading ~substring:kind));
+        if detail
+        then (
+          assert (String.is_substring text ~substring:("Stage ID: " ^ kind));
+          assert (String.is_substring text ~substring:"Request endpoint: timing"));
+        List.iter [ None; Some false; Some true ] ~f:(fun choice ->
+          let global = H.set_global_compression host choice in
+          let workspace = H.set_workspace_compression global tile.workspace choice in
+          let local = H.local workspace tile.id in
+          let tile_host, _ =
+            H.set_presentation
+              workspace
+              tile.id
+              { local.presentation with string_compression = choice }
+          in
+          List.iter [ global; workspace; tile_host ] ~f:(fun changed ->
+            assert (String.equal text (render changed data |> plain_text))));
+        (* A Timing-only observation does not imply physical completion, nor invent a
+           terminal result or borrow cached synthesis measurements. *)
+        let missing =
+          { data with
+            asic =
+              Some
+                { snapshot with
+                  runs =
+                    List.map snapshot.runs ~f:(fun r ->
+                      { r with
+                        stages =
+                          [ { Asic.Stage.id = "timing"
+                            ; name = "Timing"
+                            ; status = Completed
+                            ; requested = true
+                            ; reason = None
+                            ; action = None
+                            ; execution_timing = None
+                            }
+                          ]
+                      })
+                }
+          ; summary = (fun _ -> None)
+          }
+        in
+        let text = render host missing |> plain_text in
+        assert (String.is_substring text ~substring:"Stage: not reported");
+        List.iter
+          [ "completed"; "Cell count:"; "No terminal result imported" ]
+          ~f:(fun substring -> assert (not (String.is_substring text ~substring)));
+        let mismatched =
+          { missing with
+            summary =
+              (fun _ ->
+                Option.map (summary Fs0_fixture.run_a) ~f:(fun s ->
+                  { s with run = Fs0_fixture.run_b; source_digest = "wrong-run-source" }))
+          }
+        in
+        let text = render host mismatched |> plain_text in
+        assert (String.is_substring text ~substring:"Stage: not reported");
+        assert (not (String.is_substring text ~substring:"wrong-run-source")))))
 ;;
 
 let%test_unit "two-row compact facts retain stages and stale warnings with freshness off" =
@@ -7473,6 +7609,204 @@ let%test_unit "warm synthesis run switch renders 73 while pinned reference retai
         Summary));
   let host = select host Fs0_fixture.run_a in
   assert (has (frame host 32 8) "Reported cells (agg.): 50")
+;;
+
+let%test_unit "stock Fit navigation completes rendered subtrees without reassigning cells"
+  =
+  List.iter P.Presets.all ~f:(fun definition ->
+    let host, data, _ = refinement_fixture definition in
+    let registry = Option.value_exn host.registry in
+    (* Model a saved session whose tile order no longer matches the declaration. *)
+    let registry = { registry with tiles = List.rev registry.tiles } in
+    let host = { (H.receive host registry) with layout_mode = H.Fit; chrome = false } in
+    let tiles = H.tiles host in
+    let _, compact, cells = tile_layout host { width = 240; height = 100 } in
+    assert (not compact);
+    assert (
+      List.equal
+        W.Tile_id.equal
+        (List.map tiles ~f:(fun tile -> tile.W.Tile.id))
+        (List.map cells ~f:(fun (tile, _) -> tile.W.Tile.id)));
+    let painted = ref [] in
+    let render_pane (tile : W.Tile.t) ~width:_ ~height:_ =
+      painted := tile.id :: !painted;
+      None
+    in
+    let image = render ~render_pane host data { width = 240; height = 100 } in
+    assert (View.width image = 240 && View.height image = 100);
+    assert (
+      List.equal
+        W.Tile_id.equal
+        (List.rev !painted)
+        (List.map cells ~f:(fun (tile, _) -> tile.W.Tile.id)));
+    let tree = P.Layout.resolve definition.layout (H.layout_keys host tiles) in
+    let rec check = function
+      | P.Layout.Cell (index, _, _, _) ->
+        let tile = List.nth_exn tiles index in
+        let rendered, geometry = List.nth_exn cells index in
+        assert (W.Tile_id.equal tile.id rendered.id);
+        [ tile ], geometry
+      | Narrow child -> check child
+      | Stack children -> check_children ~vertical:true children
+      | Columns children -> check_children ~vertical:false children
+      | Weighted_columns children ->
+        check_children ~vertical:false (List.map children ~f:snd)
+    and check_children ~vertical children =
+      let groups = List.map children ~f:check in
+      List.iteri groups ~f:(fun i (_, (a : W.Geometry.t)) ->
+        List.iter
+          (List.drop groups (i + 1))
+          ~f:(fun (_, (b : W.Geometry.t)) ->
+            assert (if vertical then a.y + a.height <= b.y else a.x + a.width <= b.x)));
+      let bounds =
+        List.map groups ~f:snd
+        |> List.reduce_exn ~f:(fun (a : W.Geometry.t) (b : W.Geometry.t) ->
+          let x = Int.min a.x b.x
+          and y = Int.min a.y b.y in
+          { W.Geometry.x
+          ; y
+          ; width = Int.max (a.x + a.width) (b.x + b.width) - x
+          ; height = Int.max (a.y + a.height) (b.y + b.height) - y
+          })
+      in
+      List.concat_map groups ~f:fst, bounds
+    in
+    let declared, _ = check (Option.value_exn tree) in
+    let navigation = H.navigation_tiles host in
+    assert (
+      List.equal
+        W.Tile_id.equal
+        (List.map declared ~f:(fun tile -> tile.W.Tile.id))
+        (List.map navigation ~f:(fun tile -> tile.W.Tile.id)));
+    if String.equal definition.id "overview"
+    then
+      assert (
+        List.equal
+          String.equal
+          (List.map navigation ~f:(fun tile -> tile.W.Tile.kind))
+          [ "workspace-tabs"
+          ; "live-status"
+          ; "run-selector"
+          ; "stage-checklist"
+          ; "planned-run"
+          ; "synthesis"
+          ; "timing"
+          ; "placement"
+          ; "routing"
+          ; "checks"
+          ; "finalization"
+          ]);
+    assert (W.Snapshot.equal registry (Option.value_exn host.registry)))
+;;
+
+let%test_unit "keyed Fit navigation follows duplicate-kind placement while Preferred \
+               packs registry order"
+  =
+  let config =
+    P.Presets.custom_example () |> Or_error.ok_exn |> P.Presets.resolve |> Or_error.ok_exn
+  in
+  let initial = W.initial ~session_id:(W.Session_id.of_string "navigation-render") in
+  let registry =
+    W.apply initial (Initialize_config config)
+    |> Result.ok
+    |> Option.value_exn
+    |> fun registry -> W.Snapshot.t_of_sexp (W.Snapshot.sexp_of_t registry)
+  in
+  let host = { (H.receive H.empty registry) with layout_mode = H.Fit; chrome = false } in
+  let _, data, _ = refinement_fixture P.Overview.definition in
+  let tiles = H.tiles host in
+  assert (List.equal String.equal (H.layout_keys host tiles) [ "choose"; "left"; "right" ]);
+  let choose = List.nth_exn tiles 0
+  and left = List.nth_exn tiles 1
+  and right = List.nth_exn tiles 2 in
+  assert (String.equal left.kind right.kind);
+  let ids tiles = List.map tiles ~f:(fun tile -> tile.W.Tile.id) in
+  let fit_order = [ choose; right; left ] in
+  assert (List.equal W.Tile_id.equal (ids (H.navigation_tiles host)) (ids fit_order));
+  let _, compact, cells = tile_layout host { width = 120; height = 40 } in
+  assert (not compact);
+  assert (
+    List.equal W.Tile_id.equal (List.map cells ~f:(fun (t, _) -> t.W.Tile.id)) (ids tiles));
+  let geometry tile =
+    List.find_exn cells ~f:(fun (t, _) -> W.Tile_id.equal t.id tile.W.Tile.id) |> snd
+  in
+  let c = geometry choose
+  and l = geometry left
+  and r = geometry right in
+  assert (c.y + c.height <= l.y && c.y + c.height <= r.y);
+  assert (r.x + r.width <= l.x && r.y = l.y);
+  let preferred = { host with layout_mode = H.Preferred } in
+  assert (List.equal W.Tile_id.equal (ids (H.navigation_tiles preferred)) (ids tiles));
+  let _, compact, packed = tile_layout preferred { width = 200; height = 40 } in
+  assert (not compact);
+  assert (
+    List.equal
+      W.Tile_id.equal
+      (List.map packed ~f:(fun (t, _) -> t.W.Tile.id))
+      (ids tiles));
+  List.iteri packed ~f:(fun i (_, (a : W.Geometry.t)) ->
+    List.iter
+      (List.drop packed (i + 1))
+      ~f:(fun (_, (b : W.Geometry.t)) -> assert (a.y = b.y && a.x + a.width <= b.x)));
+  (* The narrow viewport cannot fit the declared columns, but can fit a grid. Geometry
+     stays registry-associated while semantic focus order survives resize. *)
+  let _, compact, grid = tile_layout host { width = 25; height = 25 } in
+  assert (not compact);
+  assert (
+    List.equal W.Tile_id.equal (List.map grid ~f:(fun (t, _) -> t.W.Tile.id)) (ids tiles));
+  List.iteri grid ~f:(fun i (_, (a : W.Geometry.t)) ->
+    List.iter
+      (List.drop grid (i + 1))
+      ~f:(fun (_, (b : W.Geometry.t)) -> assert (a.x = b.x && a.y + a.height <= b.y)));
+  let step host event =
+    let host, effect = H.input host event ~commands:[] in
+    (match effect with
+     | No_effect -> ()
+     | _ -> assert false);
+    host
+  in
+  List.iter
+    [ host, fit_order, { Dimensions.width = 25; height = 25 }, false
+    ; host, fit_order, { Dimensions.width = 1; height = 1 }, true
+    ; preferred, tiles, { Dimensions.width = 25; height = 8 }, false
+    ]
+    ~f:(fun (host, order, dimensions, expect_compact) ->
+      let check host tile =
+        assert (Option.equal W.Tile_id.equal host.H.focus (Some tile.W.Tile.id));
+        let _, compact, visible = tile_layout host dimensions in
+        assert (Bool.equal compact expect_compact);
+        assert (List.exists visible ~f:(fun (t, _) -> W.Tile_id.equal t.id tile.id));
+        if expect_compact
+           ||
+           match host.H.layout_mode with
+           | Preferred -> true
+           | Fit -> false
+        then assert (List.length visible = 1);
+        let image = render host data dimensions in
+        assert (
+          View.width image = dimensions.width && View.height image = dimensions.height);
+        assert (W.Snapshot.equal registry (Option.value_exn host.registry))
+      in
+      let first = List.hd_exn order in
+      let start = { host with focus = Some first.id } in
+      let last =
+        List.fold
+          (List.tl_exn order @ [ first ])
+          ~init:start
+          ~f:(fun host tile ->
+            let host = step host H.Focus in
+            check host tile;
+            host)
+      in
+      ignore
+        (List.fold
+           (List.rev (List.tl_exn order) @ [ first ])
+           ~init:last
+           ~f:(fun host tile ->
+             let host = step host H.Focus_previous in
+             check host tile;
+             host)
+         : H.t))
 ;;
 
 let%test_unit "custom and unknown presets honor generic Fit without rewriting geometry" =

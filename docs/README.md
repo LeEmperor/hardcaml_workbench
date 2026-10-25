@@ -21,6 +21,7 @@ Project/provider commands remain useful without the application.
 | [Compose windows and workspaces](workspace_configuration.md) | Export stock examples, author keyed tile layouts, initialize/apply configuration and recover built-ins |
 | [Post-merge composition audit](workspace_post_merge_audit.md) | Reconciliation of hierarchy, Testing/Timing/Overview and reconnect features with the shared specification |
 | [Restore default layout](default_layout_restore.md) |One-step recovery: show defaults, hide extras, restore sizes, clear zoom and select Fit while preserving evidence/pins |
+| [Layout focus-order plan](layout_focus_order_plan.md) | Implemented layout-defined Tab/Shift-Tab traversal, agent work packages and validation results |
 | [Provider integration](fs0_provider_integration.md) | Implemented public API, configuration, cache and supervision limits |
 | [Terminal host](fs0_terminal.md) / [Execution module](fs0_execution_module.md) | Current UI controls and daemon-routed generic execution boundary |
 | [Architecture](hardcaml_workbench_architecture.md) | Runtime, ownership, data and integration boundaries |
@@ -42,6 +43,7 @@ Project/provider commands remain useful without the application.
 | [Timing workspace diagnosis and loading](timing_workspace_loading.md) | Real a023 empty-path fix, saved catalog removal, cache investigation and background warm-up rationale |
 | [Timing usability and preloading](timing_workspace_usability.md) / [plan](timing_usability_preload_plan.md) | Three-decimal/compact presentation, built-in navigation, reordered tabs and default background index loading with explicit-only mode |
 | [Identifier compression](identifier_compression.md) / [completion plan](timing_triage_identifier_completion_plan.md) | WB-073 global/workspace/tile controls, collision-safe identities, persistence and WB-009/WB-069 owner closure |
+| [Overview title/detail regression](overview_compression_regression_plan.md) | Saved header recovery, stage-aware Placement/Routing detail, Overview Timing precision and actual-state verification |
 | [FS1 acceptance](fs1_acceptance.md) | Aggregate timing/resources/checks, declared-clock context, finalization import, real physical/acceptance/cancellation evidence and remaining scope |
 | [Finalization and artifacts](fs1_lifecycle_and_artifacts.md) | Workbench-owned collect/accept, live phases, cancel/reconnect, bounded report paging and explicit external text export |
 | [FS1 investigation](fs1_investigation.md) | Completed adopted-evidence scope: paths, measured clocks, physical/routing tables, binary handoff, verified provider generation and activation |

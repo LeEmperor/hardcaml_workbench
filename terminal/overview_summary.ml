@@ -13,6 +13,7 @@ let legacy_rows
   ?(finalizations = [])
   ?(compact = false)
   ?(freshness = true)
+  ?(decimal_places = 3)
   ?stage_id
   ~kind
   ~run
@@ -104,11 +105,11 @@ let legacy_rows
          match m.value with
          | Some value when not (Float.is_finite value) -> "invalid (non-finite)"
          | Some value when String.equal m.availability "available" ->
-           sprintf
-             "%g%s"
-             value
-             (Option.value_map m.unit_ ~default:" (unit not reported)" ~f:(fun u ->
-                " " ^ u))
+           (if String.equal kind "timing"
+            then O.timing_metric_value ~decimal_places ~key:m.key ~unit_:m.unit_ value
+            else sprintf "%g" value)
+           ^ Option.value_map m.unit_ ~default:" (unit not reported)" ~f:(fun u ->
+             " " ^ u)
          | _ -> "unavailable"
        in
        value
@@ -226,6 +227,7 @@ let rows
   ?finalizations
   ?(compact = false)
   ?freshness
+  ?(decimal_places = 3)
   ?stage_id
   ~kind
   ~run
@@ -240,6 +242,7 @@ let rows
       ?finalizations
       ~compact
       ?freshness
+      ~decimal_places
       ?stage_id
       ~kind
       ~run
@@ -251,13 +254,13 @@ let rows
       Option.filter summary ~f:(fun (s : Asic.Summary.t) -> Run_ref.equal s.run run)
     in
     let analysis = Option.bind summary ~f:(fun s -> s.Asic.Summary.timing_analysis) in
-    let details = O.analysis_details ~run summary in
+    let details = O.analysis_details ~decimal_places ~run summary in
     let fact ?(role = O.Role.Muted) label value = O.row ~role ~details label value in
     let physical = List.find stages ~f:(fun s -> String.equal s.Asic.Stage.id "timing") in
     let stage =
       Option.value_map
         physical
-        ~default:(O.analysis_row ~run ~selected:false summary)
+        ~default:(O.analysis_row ~decimal_places ~run ~selected:false summary)
         ~f:(O.asic_stage_row ?now ~run ~selected:false)
     in
     let time =
@@ -291,7 +294,9 @@ let rows
           fact
             (m.key ^ " / " ^ m.corner)
             (Option.value_map m.value ~default:"unavailable" ~f:(fun v ->
-               if Float.is_finite v then sprintf "%g" v else "unavailable")
+               if Float.is_finite v
+               then O.timing_metric_value ~decimal_places ~key:m.key ~unit_:m.unit_ v
+               else "unavailable")
              ^ " "
              ^ Option.value m.unit_ ~default:"unit unknown"))
         @ [ fact "Source" (a.target.stage ^ " / post-PNR STA")
@@ -338,7 +343,14 @@ let rows
                      (label
                       ^ " "
                       ^ Option.value_map m.value ~default:"unavailable" ~f:(fun v ->
-                        if Float.is_finite v then sprintf "%g" v else "unavailable")
+                        if Float.is_finite v
+                        then
+                          O.timing_metric_value
+                            ~decimal_places
+                            ~key:m.key
+                            ~unit_:m.unit_
+                            v
+                        else "unavailable")
                       ^ Option.value_map
                           m.unit_
                           ~default:" (unit unknown)"
@@ -417,7 +429,7 @@ let%test_unit "typed metrics preserve zero, units, missing and nonfinite without
     }
   in
   List.iter
-    [ Some 0., "available", "0 ns [available]"
+    [ Some 0., "available", "0.000 ns [available]"
     ; None, "available", "unavailable [available]"
     ; Some 12., "not_requested", "unavailable [not_requested]"
     ; Some Float.nan, "available", "invalid (non-finite) [available]"
@@ -444,6 +456,17 @@ let%test_unit "typed metrics preserve zero, units, missing and nonfinite without
         ]
         ~f:(fun text -> assert (List.mem r.details text ~equal:String.equal)));
   let rs = rows ~kind:"finalization" ~run ~summary:(Some (summary [])) ~stages:[] () in
+  let precise =
+    legacy_rows
+      ~decimal_places:6
+      ~kind:"timing"
+      ~run
+      ~summary:(Some (summary [ metric (Some (-0.000987654)) "available" ]))
+      ~stages:[]
+      ()
+    |> List.find_exn ~f:(fun row -> String.is_prefix row.label ~prefix:"Aggregate ")
+  in
+  [%test_result: string] precise.value ~expect:"-0.000987 ns [available]";
   let acceptance =
     List.find_exn rs ~f:(fun r -> String.equal r.label "Acceptance (agg.)")
   in
