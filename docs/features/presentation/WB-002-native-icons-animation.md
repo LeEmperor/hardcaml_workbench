@@ -3,7 +3,7 @@ id: WB-002
 title: Further native icons and animation
 category: presentation
 feature_sets: [FS5]
-status: delivered
+status: closed
 kind: enhancement
 priority: P3
 severity: n/a
@@ -15,7 +15,7 @@ estimate_scope: incremental
 origin: owner-intake
 tags: [native, indicators, animation]
 depends_on: []
-related: [WB-001, WB-058, WB-059]
+related: [WB-001, WB-007, WB-058, WB-059]
 ---
 
 # WB-002 — Further native icons and animation
@@ -50,7 +50,7 @@ unverified general icon API. Nerd Font support is a separate optional feature.
 
 The owner approved a bounded expansion across evidence freshness, context
 relationships and hierarchy navigation. Implemented and automatically verified;
-owner visual acceptance remains pending.
+owner acceptance and the deferred hierarchy review are recorded below.
 
 - **Evidence:** typed freshness markers distinguish validated, cached/unverified,
   source-unavailable and refresh-failed summaries in Session and host evidence
@@ -89,7 +89,17 @@ actual stock cards in all icon modes and freshness states rather than only helpe
 Hierarchy visual acceptance is blocked for the real FIFO example by its absent
 generic hardware-driver integration, not missing icon rendering. The unavailable
 guidance now explains this prerequisite. Owner acceptance of the Overview correction
-and hierarchy markers remains pending.
+and hierarchy markers was pending at that review.
+
+### Owner acceptance and closure — 2026-10-25
+
+The owner confirmed the Overview correction and context indicators work, and
+authorized independent closure of the icon ticket with remaining hierarchy-specific
+review deferred to [WB-007](../project/WB-007-hierarchy-tile.md). WB-002 is closed.
+Timing's cached/unverified text describes retained evidence freshness and is not an
+outstanding icon defect. Hierarchy markers are implemented and automatically tested;
+real-example integration and their owner visual review remain tracked under WB-007
+and do not block this closure. WB-001 checklist alignment was already closed.
 
 ## Dependencies
 Required: none; native integration and shared semantic indicators are delivered.

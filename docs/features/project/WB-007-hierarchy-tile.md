@@ -15,7 +15,7 @@ estimate_scope: incremental
 origin: owner-intake
 tags: [hierarchy, top, tiles]
 depends_on: []
-related: []
+related: [WB-002]
 ---
 
 # WB-007 — Visible hierarchy and top
@@ -53,7 +53,9 @@ Do not turn a hierarchy-node selection into a new build or simulation request.
 
 ## Dependencies
 Required: delivered hierarchy reader and tile host; no additional ticket prerequisite.
-Related: none; alternate-top execution can consume this view independently later.
+Related: [WB-002](../presentation/WB-002-native-icons-animation.md) delivered the
+shared hierarchy markers; its remaining hierarchy-specific visual review is tracked
+here. Alternate-top execution can consume this view independently later.
 
 ## Estimate rationale
 13 points cover mounting the existing data as a tile, provenance labels and state handling.
@@ -73,6 +75,22 @@ Current provider contracts supply no tested-DUT association, so it is unknown.
   acceptance passed at `/tmp/opencode/hierarchy-tile-w1de3jp1/`.
 - The [acceptance record](../../hierarchy_tile.md#verification-limits) records
   pre-existing global format failures and native lifecycle/real-provider coverage limits.
+
+## Deferred real-example acceptance — 2026-10-25
+
+The owner authorized closing WB-002 independently and tracking remaining hierarchy
+icon acceptance here. Expanded/collapsed, leaf and childless-root markers are already
+implemented with Unicode/ASCII/Off support and automated coverage.
+
+- [ ] Supply or arrange the real FIFO example's generic Workbench hardware-driver
+  integration and structured hierarchy evidence so the tile can be exercised there.
+  Its current ASIC and simulation providers alone do not publish this evidence.
+- [ ] Owner-review hierarchy markers, expansion/selection and top visibility with
+  that evidence in Unicode, ASCII and Off modes.
+
+The missing-driver guidance is now explicit. These follow-ups do not reopen WB-002
+or the already closed WB-001. WB-007 remains delivered pending owner acceptance;
+the example integration gap is not a claim that the tested tile renderer is absent.
 
 ## References
 - [Implementation plan and agent work packages](../../hierarchy_tile_plan.md)

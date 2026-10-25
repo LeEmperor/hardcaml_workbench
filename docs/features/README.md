@@ -83,9 +83,11 @@ not claimed. WB-048 remains delivered.
 
 ## How this directory works
 
-**2026-10-25:** WB-002's owner-selected evidence freshness, context relationship
-and hierarchy navigation indicators are **delivered**, awaiting owner visual
-acceptance. Unicode/ASCII/Off, typed refresh animation fencing and compact tree
+**2026-10-25:** WB-002's owner-selected evidence freshness and context relationship
+indicators are **closed, owner-accepted**, including the Overview rendering correction.
+Implemented hierarchy navigation markers' remaining real-example integration and
+visual review are deferred to WB-007 and do not block WB-002. Unicode/ASCII/Off,
+typed refresh animation fencing and compact tree
 markers pass combined build/tests and formatting checks. See the
 [ticket delivery notes](presentation/WB-002-native-icons-animation.md#delivery--2026-10-25).
 
