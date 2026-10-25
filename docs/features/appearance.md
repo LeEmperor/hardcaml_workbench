@@ -24,6 +24,12 @@ Sources: [newer gallery](../design/tui_candidate_gallery_handoff.md) supersedes 
 [older handoff](../design/tui_design_system_handoff.md). See the
 [interpretation notes](../design/README.md) for implementation corrections.
 
+Follow-up accepted 2026-10-25: workspace tile Tab/Shift-Tab navigation in Fit now
+follows declarative layout-tree order, including existing sessions with Runs last
+in registry order. Preferred retains registry-order packing/navigation. See
+[layout modes and controls](../workspace_configuration.md#keyboard-navigation-and-layout-modes)
+and the [implementation/owner acceptance record](../layout_focus_order_plan.md).
+
 ## User outcome
 
 Experiment with btop-like instruments, Lazygit-like framed investigation, gh-dash

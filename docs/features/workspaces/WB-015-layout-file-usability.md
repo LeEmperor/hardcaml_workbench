@@ -37,6 +37,20 @@ One-step [built-in default restoration](../../default_layout_restore.md) is also
 delivered. The editable-file workflow is now delivered separately from that recovery
 command; automatic reload and reset-to-config remain follow-ons.
 
+### Layout-defined focus follow-up — accepted 2026-10-25
+
+Fit-mode Tab/Shift-Tab traversal now derives from the same declarative layout tree
+as placement, rather than persisted tile registration order. This fixes existing
+Overview sessions where Runs was visually second but visited last. Custom keyed
+layouts, hidden tiles, zoom and responsive fallbacks are covered by regression
+tests. Preferred retains registry-order traversal.
+
+The owner confirmed the corrected order after relaunching the rebuilt client;
+the initial retry had used an older demo binary. No dedicated focus-order ticket
+was found; this related follow-up is recorded here without changing this ticket's
+delivered status. See [behavior and controls](../../workspace_configuration.md#keyboard-navigation-and-layout-modes)
+and [implementation/validation](../../layout_focus_order_plan.md).
+
 ## Scope
 - Improve readable layout examples, validation diagnostics and edit/apply workflow.
 - State how editable files, registered presets and live saved layouts relate.

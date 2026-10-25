@@ -1,6 +1,6 @@
 # Layout-defined tile focus order
 
-Status: implemented and validated, 2026-10-25. The user authorized execution after
+Status: implemented, validated and owner-accepted, 2026-10-25. The user authorized execution after
 reviewing the plan. Three general agents completed the work packages below.
 
 ## Goal
@@ -156,3 +156,19 @@ inspection of the user's running session. Headless input/render tests verify the
 interaction; no interactive terminal session was driven. Existing unrelated local
 changes were preserved. No mutative Git operations or external repository changes
 were made.
+
+## Owner acceptance and ticket reconciliation
+
+The owner tested the updated client and confirmed: “yep works fine now”, followed
+by “all good”. The first live retry still used
+`hardcaml_asic_example/.dev/workbench-real-demo/bin/client`, an older binary whose
+hash differed from the rebuilt `terminal/main.exe`. Relaunching the rebuilt client
+with the existing endpoint, project root and `--environment opam:5.2.0+ox` resolved
+the discrepancy. No daemon restart was needed.
+
+Reviewed the local feature catalog for a dedicated tile focus-order ticket; none
+was found. Recorded this accepted follow-up under related
+[WB-015 layout-file usability](features/workspaces/WB-015-layout-file-usability.md),
+and updated the workspace authoring guide and F12 appearance feature summary.
+WB-053 concerns tabs inside a tile, and WB-071 concerns workspace ordering; neither
+is the tile-to-tile focus bug fixed here.

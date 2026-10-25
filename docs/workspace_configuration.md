@@ -15,6 +15,31 @@ The [post-merge audit](workspace_post_merge_audit.md) verifies merged hierarchy,
 Testing/Timing/Overview and reconnect features against this structure, including
 custom mixed workspaces and preservation of authored layouts during investigation.
 
+## Keyboard navigation and layout modes
+
+In **Fit** mode, the layout tree also defines Tab order: stacks top-to-bottom,
+columns left-to-right, completing each subtree before moving to the next.
+Shift-Tab reverses that sequence; both directions wrap. For stock Overview, after
+the workspace-tabs stop, this is **Session → Runs → Stage checklist → Planned run
+→ stage tiles**. Configured leaf keys distinguish tiles even when they share a kind.
+
+Hidden tiles are skipped, zoom restricts focus to the zoomed tile, and unmatched
+extra tiles follow the declared tiles in saved registry order. Existing sessions
+benefit without resetting their arrangement or migrating saved tile order.
+
+Fit adjusts tile sizes to the terminal. If space forces a simpler grid or a
+focused-tile-only Compact view, Tab retains the semantic tree order and can still
+reach every eligible tile; fallback grid rows may differ from navigation order.
+**Preferred** uses saved/requested sizes and registry-order packing, with Tab
+following that registry order. Without a usable definition, registry order is the
+navigation fallback.
+
+To select Fit, open the palette with **Space → c → c** and choose **Layout: Fit
+tiles to window**. This navigation fix requires restarting only the terminal
+client with the updated binary; the daemon can keep running. Launching an older
+installed/demo copy will retain the old behavior even after rebuilding the source
+checkout. See the [implementation and acceptance record](layout_focus_order_plan.md).
+
 ## Export, edit and validate
 
 With the native commands installed:
