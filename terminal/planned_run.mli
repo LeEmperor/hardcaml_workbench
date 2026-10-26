@@ -60,6 +60,7 @@ val empty : t
 val reset : t -> scope:string -> t
 val begin_plan : t -> Asic.Selection.t -> t * ticket
 val current_ticket : t -> ticket -> bool
+val same_generation : t -> ticket -> bool
 
 (** Receipt failures remain explicit, even when a newer poll won snapshot ordering.
     [floor] is the first snapshot request revision allowed to acknowledge this intent. Use

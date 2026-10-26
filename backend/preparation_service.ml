@@ -12,9 +12,16 @@ type attempt =
   ; config : Config.t
   }
 
+type staged =
+  { receipt : Staged.t
+  ; config : Config.t
+  ; mutable launch_key : string option
+  }
+
 type project =
   { mutable attempts : attempt list
   ; submissions : (string, string * attempt) Hashtbl.t
+  ; mutable staged : staged option
   }
 
 type t =
@@ -89,7 +96,7 @@ let handle
   =
   let project =
     Hashtbl.find_or_add t.projects project_key ~default:(fun () ->
-      { attempts = []; submissions = Hashtbl.create (module String) })
+      { attempts = []; submissions = Hashtbl.create (module String); staged = None })
   in
   let snapshot ?requested_attempt availability =
     let history =
@@ -105,13 +112,101 @@ let handle
     ; requested_attempt
     ; latest = List.hd history
     ; history
+    ; staged = Option.map project.staged ~f:(fun s -> s.receipt)
     }
   in
   let%map handled =
     Monitor.try_with (fun () ->
       let%bind availability, config = load_config root in
+      let validate selection expected_plan_identity =
+        match
+          Or_error.try_with (fun () ->
+            Preparation_receipt.validate_selection selection expected_plan_identity)
+        with
+        | Error error -> rpc_error Invalid_request (Error.to_string_hum error)
+        | Ok () -> ()
+      in
+      let require_config () =
+        match config with
+        | Some config -> config
+        | None ->
+          rpc_error Unsupported_operation "Source bundle preparation is not configured"
+      in
+      (* Normalize an explicit launch only after checking its captured scope. A successful
+         submission replay is allowed even after supersession/drift: it observes the
+         original attempt and never launches more work. *)
+      let operation, launching =
+        match operation with
+        | Operation.Launch_staged { stage_id; submission_key } ->
+          if String.is_empty submission_key
+          then rpc_error Invalid_request "Empty submission key";
+          let payload = "stage:" ^ stage_id in
+          (match Hashtbl.find project.submissions submission_key with
+           | Some (previous, _) when not (String.equal previous payload) ->
+             rpc_error Conflict "Submission key already used for different inputs"
+           | Some (_, a) ->
+             ( Operation.Prepare
+                 { submission_key
+                 ; selection = a.value.selection
+                 ; expected_plan_identity = a.value.expected_plan_identity
+                 }
+             , Some (payload, None) )
+           | None ->
+             let s =
+               match project.staged with
+               | Some s when String.equal s.receipt.id stage_id -> s
+               | _ -> rpc_error Conflict "Unknown or superseded preparation stage"
+             in
+             if not
+                  (String.equal s.receipt.source_root root
+                   && V1.Environment_selection.equal s.receipt.environment environment
+                   && Option.equal Config.equal config (Some s.config))
+             then
+               rpc_error
+                 Conflict
+                 "Preparation stage scope/configuration changed; stage again";
+             if Option.is_some s.launch_key
+             then
+               rpc_error
+                 Conflict
+                 "Preparation stage already launched with another submission key";
+             ( Operation.Prepare
+                 { submission_key
+                 ; selection = s.receipt.selection
+                 ; expected_plan_identity = s.receipt.expected_plan_identity
+                 }
+             , Some (payload, Some s) ))
+        | operation -> operation, None
+      in
       match operation with
       | Operation.Get -> return (snapshot availability)
+      | Stage { selection; expected_plan_identity } ->
+        validate selection expected_plan_identity;
+        let config = require_config () in
+        t.next_id <- t.next_id + 1;
+        let receipt : Staged.t =
+          { id =
+              "stage-"
+              ^ Preparation_receipt.sha256
+                  (sprintf
+                     "%s:%d:%s"
+                     project_key
+                     t.next_id
+                     (Time_ns.to_string (Time_ns.now ())))
+          ; selection
+          ; expected_plan_identity
+          ; source_root = root
+          ; build_target = config.build_target
+          ; source_executable = Config.source_executable config ~root
+          ; results_root = config.results_root
+          ; timeout_seconds = config.timeout_seconds
+          ; environment
+          ; created_at = Timestamp.of_time_ns (Time_ns.now ())
+          }
+        in
+        project.staged <- Some { receipt; config; launch_key = None };
+        return (snapshot availability)
+      | Launch_staged _ -> assert false
       | Cancel id ->
         let a =
           match List.find project.attempts ~f:(fun a -> String.equal a.value.id id) with
@@ -134,15 +229,15 @@ let handle
       | Prepare { submission_key; selection; expected_plan_identity } ->
         if String.is_empty submission_key
         then rpc_error Invalid_request "Empty submission key";
-        (match
-           Or_error.try_with (fun () ->
-             Preparation_receipt.validate_selection selection expected_plan_identity)
-         with
-         | Error error -> rpc_error Invalid_request (Error.to_string_hum error)
-         | Ok () -> ());
-        let payload =
+        validate selection expected_plan_identity;
+        let selection_payload =
           Sexp.to_string_mach
             ([%sexp_of: Selection.t * string option] (selection, expected_plan_identity))
+        in
+        let payload =
+          match launching with
+          | Some (payload, _) -> payload
+          | None -> selection_payload
         in
         (match Hashtbl.find project.submissions submission_key with
          | Some (previous, a) ->
@@ -153,7 +248,8 @@ let handle
          | None ->
            (match
               List.find project.attempts ~f:(fun a ->
-                active a
+                Option.is_none launching
+                && active a
                 && (not a.cancelled)
                 && Selection.equal a.value.selection selection
                 && Option.value_map config ~default:false ~f:(Config.equal a.config)
@@ -168,20 +264,20 @@ let handle
               snapshot ~requested_attempt:a.value.id availability
             | None ->
               let config =
-                match config with
-                | Some c -> c
-                | None ->
-                  rpc_error
-                    Unsupported_operation
-                    "Source bundle preparation is not configured"
+                match launching with
+                | Some (_, Some s) -> s.config
+                | _ -> require_config ()
               in
+              Option.iter launching ~f:(fun (_, stage) ->
+                Option.iter stage ~f:(fun s -> s.launch_key <- Some submission_key));
               t.next_id <- t.next_id + 1;
               let a =
                 { value =
                     { Attempt.id = sprintf "preparation-%d" t.next_id
                     ; selection
                     ; selection_identity =
-                        Preparation_receipt.sha256 (project_key ^ "\000" ^ payload)
+                        Preparation_receipt.sha256
+                          (project_key ^ "\000" ^ selection_payload)
                     ; expected_plan_identity
                     ; source_root = root
                     ; build_target = config.build_target

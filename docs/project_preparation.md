@@ -13,16 +13,18 @@ Open the palette with **Space c c**.
 2. Choose **Preparation inputs: FLOW / PROFILE** and enter the endpoint and optional
    parameter overrides using the existing selection form. This selects inputs only.
    Existing remembered Plan inputs can also supply the selection.
-3. Choose **Prepare elaboration bundle (EDA-less)**, or focus the preparation tile
-   and press **r**. The checklist's **Elaboration** preparation row, before Synthesis,
-   has the same EDA-less action.
+3. Press **r** on the preparation tile or the checklist's **Elaboration** row to
+   stage an input plan for manual launch. This performs no build or emission.
+   Review it in Planned run, then choose **Launch planned PREPARATION** from the
+   palette. Alternatively, **R** stages and launches immediately.
 
 The endpoint is part of the bundle's selected methodology; selecting `synthesis`
 as the endpoint does **not** execute synthesis during preparation.
 
 | Control on preparation tile | Action |
 | --- | --- |
-| `r` | Build current source executable, then emit selected bundle |
+| `r` | Stage preparation inputs for review/manual launch; no processes |
+| `R` | Stage, then immediately build current source and emit selected bundle |
 | Enter | Inspect scope, outcomes and existing job logs |
 | `j` / `k` | Browse retained session attempts |
 | `[` / `]` | Scroll inspection details/logs |
@@ -33,6 +35,58 @@ as the endpoint does **not** execute synthesis during preparation.
 Palette artifact entries expose individual imported files. **Build project** and
 **Run project tests** remain separate commands. Merely viewing a row, log or artifact
 does not submit work.
+
+### Uniform checklist launch controls
+
+For physical stages, **r** retains the existing plan-for-manual-launch behavior.
+**R** obtains the exact selected stage's plan, waits for that plan to be ready, and
+launches it once. Failed planning or changed captured context/selection prevents
+automatic launch; an unrelated retained preview is never substituted.
+
+Palette options persist per project:
+
+- **Quick-launch behavior: view launched run** (default).
+- **Quick-launch behavior: keep current context**.
+
+### Palette launch queries
+
+The palette prioritizes action names over behavior settings:
+
+| Query prefix | Default action |
+| --- | --- |
+| `launch and vi` | Launch and view the already planned run (or staged preparation) |
+| `quick lau` | Quick launch selected stage |
+| `launch syn` | Launch synthesis and view |
+| `launch elab` | Launch elaboration bundle (build and emit; context retained) |
+
+**Quick launch selected stage** uses the focused checklist, or the active workspace's
+unambiguous checklist selection from another tile. It uses the saved quick-launch
+view preference. Explicit named physical actions always request viewing the newly
+allocated run without changing that preference. Named stage commands still require
+declared capability; unsupported actions explain why they are unavailable.
+
+Editing the search query selects the new highest-ranked match. Explicit arrow/Tab
+navigation is retained until the query changes again. Prefix matching and aliases
+remain compatible with fuzzy search and Unicode highlighting.
+
+Selected-stage actions capture the stage/run and revalidate selection, inputs and
+capability throughout asynchronous planning. Changing the checklist cursor or
+withdrawing the selected stage's capability before launch prevents execution.
+
+Elaboration follows the same r/R split, through typed backend `Stage` and
+`Launch_staged` operations. Its staged receipt captures selection/build/configuration,
+not a generated provider plan or frozen source bytes. Superseded receipts and changed
+configuration are rejected at launch. Preparation does not allocate an ASIC run,
+so either view option leaves the ASIC context unchanged for this operation.
+
+The Elaboration checklist duration uses the same aligned time column as physical
+stages. It measures total preparation including build and emission, advances while
+active, and freezes when terminal timestamps are available; otherwise it is unknown.
+
+Preparation is already part of stock Overview, above Synthesis. For older saved
+geometry, use **Restore default layout: Overview (hide extras)**. Restore preserves
+tile IDs, pins and contexts while restoring default visibility/geometry; extra tiles
+are hidden rather than deleted.
 
 ## What the statuses mean
 
@@ -107,7 +161,7 @@ python3 -B scripts/real-asic-example-demo.py client
 
 No reseeding is needed. Demo daemon/client/exporter copies were refreshed after
 verification; live processes were not restarted. Refresh receipt:
-`hardcaml_asic_example/.dev/workbench-real-demo/receipts/refresh-binaries-b67182ad169a4862acf679ee4ac77c67/`.
+`hardcaml_asic_example/.dev/workbench-real-demo/receipts/refresh-binaries-68176cc5afe44718a14eac30416af3c0/`.
 The SDK environment was also checked with the demo's `opam:5.2.0+ox` build path.
 
 ## Verification and limits
@@ -117,9 +171,15 @@ The SDK environment was also checked with the demo's `opam:5.2.0+ox` build path.
   drift in unrelated hierarchy/indicator/hydration/waveform/workspace files; only
   WB-004 changes were formatted.
 - Native HTTP/PTY regression passed against normal rebuilt binaries:
-  `/tmp/opencode/wb004-final-native/result.json`. Covers scoped generic RTL,
-  preparation inputs, unavailable state, logs/artifacts, failure history, reconnect,
-  cancellation and separation from physical launch.
+  `/tmp/opencode/wb004-palette-final-preparation/result.json`. Covers scoped generic RTL,
+  zero-work staging, manual launch, quick launch, unavailable state, logs/artifacts,
+  failure history, reconnect, cancellation and live/frozen duration rendering.
+- Full checklist HTTP/PTY workflow passed at
+  `/tmp/opencode/wb004-palette-final-checklist/`, including physical R once-only
+  launch, context-follow on/off and preference restart, planning failure and
+  changed-selection fences. Includes incremental palette queries, named launch-and-view
+  despite keep-context preference, and pending-plan cursor/action/capability withdrawal.
+  Physical execution in these checks is synthetic.
 - Real FIFO HTTP acceptance passed:
   `/tmp/opencode/wb004-real-example-acceptance-review/report.json`.
   Selected `standard / synth_delay / synthesis`, with

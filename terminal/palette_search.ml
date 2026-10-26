@@ -110,6 +110,39 @@ let align token text =
         (score, trace (m - 1) j [])))
 ;;
 
+(* Prefer action-first phrases and consecutive word prefixes over incidental token matches
+   deep in metadata. Fuzzy matching and its byte-offset highlights remain available
+   whenever a phrase does not match. This is independent of command IDs. *)
+let prefix_bonus tokens text =
+  let scalars = Array.map (decode text) ~f:(fun (c, _) -> fold c) in
+  let words =
+    Array.to_list scalars
+    |> List.group ~break:(fun a b -> Bool.(separator a <> separator b))
+    |> List.filter ~f:(fun word -> not (separator (List.hd_exn word)))
+    |> List.map ~f:Array.of_list
+  in
+  let prefix token word =
+    Array.length token <= Array.length word
+    && Array.for_alli token ~f:(fun i c -> c = word.(i))
+  in
+  let rec leading tokens words =
+    match tokens, words with
+    | [], _ -> true
+    | token :: tokens, word :: words when prefix token word -> leading tokens words
+    | _ -> false
+  in
+  if List.is_empty tokens || not (leading tokens words)
+  then 0
+  else (
+    let phrase =
+      List.map tokens ~f:Array.to_list
+      |> List.intersperse ~sep:[ Char.to_int ' ' ]
+      |> List.concat
+      |> Array.of_list
+    in
+    200 + if prefix phrase scalars then 600 else 0)
+;;
+
 let rank ~query candidates =
   let tokens =
     String.split_on_chars query ~on:[ ' '; '\t'; '\r'; '\n'; '\011'; '\012' ]
@@ -120,14 +153,24 @@ let rank ~query candidates =
     List.fold_until
       tokens
       ~init:(0, [])
-      ~finish:(fun (score, positions) -> Some { item; score; positions })
+      ~finish:(fun (score, positions) ->
+        let bonus =
+          List.fold fields ~init:0 ~f:(fun best field ->
+            Int.max best (prefix_bonus tokens field.text * field.weight / 100))
+        in
+        Some { item; score = score + bonus; positions })
       ~f:(fun (total, positions) token ->
         let best =
           List.fold fields ~init:None ~f:(fun best field ->
             match align token field.text with
             | None -> best
             | Some (raw, offsets) ->
-              let score = raw * field.weight / 100 in
+              (* Small, capped specificity cost breaks otherwise equal phrase matches in
+                 favor of concise actions, without suppressing fuzzy/alias matches. *)
+              let score =
+                (raw * field.weight / 100)
+                - Int.min 12 (Array.length (decode field.text) / 16)
+              in
               (match best with
                | Some (s, _, _) when s >= score -> best
                | _ -> Some (score, field.text, offsets)))

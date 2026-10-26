@@ -113,6 +113,36 @@ Implemented, awaiting owner acceptance. See [controls, configuration and evidenc
   preparation/publication through the new CLI. Existing resource-preparation edits
   were preserved.
 
+## Owner workflow follow-up — 2026-10-26
+
+The owner confirmed initial functionality and requested consistent staging and
+timing. Implemented and automatically verified:
+
+- `r` stages Elaboration inputs without processes, then manual launch uses the exact
+  backend receipt. `R` stages and launches immediately, for preparation and physical
+  checklist stages. Physical quick launch waits for its exact captured preview.
+- Persistent quick-launch preference defaults to launch-and-view; launch without
+  switching context is selectable. Preparation creates no ASIC run and retains context.
+- Elaboration has an aligned total-preparation duration (build plus emission), live
+  while active and frozen at terminal finish when known.
+- Stock Overview includes preparation above Synthesis. Explicit default restoration
+  from legacy/config-backed layouts is tested at 120x40 and 180x55, retaining IDs,
+  pins and contexts; saved layouts are not silently rewritten on reconnect.
+- Full combined build/tests/lint and preparation/checklist native HTTP/PTY checks
+  pass. Backend tests cover zero-work staging, stale/config-changed tokens and
+  duplicate launch receipts. Owner acceptance of these refinements is pending.
+
+### Palette refinement — 2026-10-26
+
+Implemented action-first names and ranked prefix queries for staged launch-and-view,
+selected-stage quick launch, and named synthesis/elaboration quick launch. Preference
+titles describe behavior without keybinding names. Named physical launches always
+request context viewing while preserving the saved generic quick-launch setting;
+elaboration retains context because it allocates no ASIC run. Actual incremental
+typing/Enter behavior, preference retention and pending-plan selection/capability
+withdrawal pass native HTTP/PTY regression. See the updated
+[palette controls](../../project_preparation.md#palette-launch-queries).
+
 ## References
 - [Driver operations](../../../project_integration/driver_protocol.ml)
 - [Existing checklist projection](../../../terminal/overview_tiles.ml)

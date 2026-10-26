@@ -125,7 +125,7 @@ def real_case(args, manifest, reference, presets, mode, check):
         save(base / 'cold-snapshot.json', cold)
         terminal = c.Terminal(base, args, daemon.url, 180, 55)
         terminal.capture('cold-overview', ['stage checklist', 'Synthesis:', 'completed'])
-        terminal.open_palette('Launch')
+        terminal.open_palette('Launch planned run without view')
         terminal.capture('launch-visible-before-plan', ['Launch', 'No preview:', 'stage r'])
         terminal.key(b'\x1b')
         check(not any(x['argv'][:2] in (['flow', 'list'], ['flow', 'describe'], ['flow', 'plan']) for x in calls(base)), mode + ': passive rendering/palette does not discover or plan')
@@ -147,7 +147,7 @@ def real_case(args, manifest, reference, presets, mode, check):
             (base / 'discovery-gate.release').write_text('release')
             wait(lambda: field(http.rpc(wait=False), 'flows'), 'late discovery response completed')
             terminal.drain(1)
-            terminal.open_palette('Launch')
+            terminal.open_palette('Launch planned run without view')
             terminal.capture('late-reply-launch-disabled', ['Launch', 'context changed'])
             terminal.key(b'\r'); terminal.key(b'\x1b')
             final = http.rpc(wait=False)
@@ -159,7 +159,7 @@ def real_case(args, manifest, reference, presets, mode, check):
             reason = 'Selected profile unavailable' if mode == 'stale-profile' else 'Unsupported fresh endpoint'
             wait(lambda: field(http.rpc(wait=False), 'flows'), 'negative discovery completed')
             terminal.drain(1)
-            terminal.open_palette('Launch')
+            terminal.open_palette('Launch planned run without view')
             terminal.capture('negative-visible-disabled-launch', ['Launch', reason])
             terminal.key(b'\r'); terminal.key(b'\x1b')
             final = http.rpc(wait=False)
@@ -174,8 +174,8 @@ def real_case(args, manifest, reference, presets, mode, check):
         check(plan_json['contract'] == 'hardcaml-asic.methodology-plan' and plan_json['methodology']['snapshot']['selected'] == dict(flow='standard', profile=profile), mode + ': real public plan metadata confirms exact flow/profile')
         terminal.command('Unzoom workspace')
         terminal.capture('real-ready-plan', ['ready:', 'flow: standard / profile: ' + profile, 'endpoint: routing'])
-        terminal.open_palette('Launch standard / ' + profile + ' → routing')
-        terminal.capture('real-launch-enabled-never-pressed', ['Launch standard / ' + profile + ' → routing'], ['No preview:', 'pending, failed', 'No matching commands'])
+        terminal.open_palette('Launch planned run without view standard / ' + profile + ' → routing')
+        terminal.capture('real-launch-enabled-never-pressed', ['Launch planned run without view standard / ' + profile + ' → routing'], ['No preview:', 'pending, failed', 'No matching commands'])
         terminal.key(b'\x1b')
         final = http.rpc(wait=False)
         check(not field(final, 'launches') and len(field(final, 'runs')) == 1, mode + ': planning never launches/allocates a real producer')
@@ -215,7 +215,7 @@ def synthetic_case(args, check):
                     if json.loads(line)['argv'][:2] == ['flow', 'run'] or json.loads(line)['argv'][:1] == ['finalize']]
         terminal = c.Terminal(base, args, daemon.url, 180, 55)
         terminal.capture('synthetic-initial', ['stage checklist'])
-        terminal.open_palette('Launch')
+        terminal.open_palette('Launch planned run without view')
         terminal.capture('synthetic-launch-visible-unprepared', ['Launch', 'No preview:', 'stage r'])
         terminal.key(b'\r')
         check(not field(snapshot(), 'launches') and not producers(), 'Synthetic disabled Launch Enter starts no producer')
@@ -230,14 +230,14 @@ def synthetic_case(args, check):
         wait(lambda: control.with_suffix('.entered').exists(), 'gated synthetic plan pending')
         terminal.command('Unzoom workspace')
         terminal.capture('synthetic-new-plan-pending', ['pending:', 'endpoint: cts'])
-        terminal.open_palette('Launch')
-        terminal.capture('synthetic-launch-pending-disabled', ['Launch', 'No preview: Requested plan pending; previous preview is not ready'], ['Launch synthetic / success → placement ['])
+        terminal.open_palette('Launch planned run without view')
+        terminal.capture('synthetic-launch-pending-disabled', ['Launch', 'No preview: Requested plan pending;'], ['Launch planned run without view synthetic / success → placement ['])
         terminal.key(b'\r'); terminal.key(b'\x1b')
         check(not producers() and not field(snapshot(), 'launches'), 'Pending replacement cannot launch old ready preview')
         control.with_suffix('.release').write_text('release')
         terminal.capture('synthetic-plan-failed', ['failed:'])
-        terminal.open_palette('Launch')
-        terminal.capture('synthetic-launch-failed-visible', ['Launch', 'No preview:', 'ASIC command failed'])
+        terminal.open_palette('Launch planned run without view')
+        terminal.capture('synthetic-launch-failed-visible', ['Launch', 'No preview:'])
         terminal.key(b'\r'); terminal.key(b'\x1b')
         check(not producers() and not field(snapshot(), 'launches'), 'Failed replacement cannot launch old ready preview')
         control.unlink()
@@ -247,7 +247,7 @@ def synthetic_case(args, check):
         preview = wait(lambda: next((p for p in field(snapshot(), 'preview') if field(field(p, 'selection'), 'endpoint') == 'cts'), None), 'synthetic retry ready')
         terminal.command('Unzoom workspace')
         terminal.capture('synthetic-retry-ready', ['ready:', 'endpoint: cts'])
-        terminal.command('Launch synthetic / success → cts')
+        terminal.type_action('launch and vi', 'Launch and view planned run', 'synthetic-manual-selected-action')
         launch = wait(lambda: next((l for l in field(snapshot(), 'launches') if field(l, 'run_id')), None), 'exact one synthetic allocation')
         check(field(launch, 'preview') == preview and len(field(snapshot(), 'launches')) == 1, 'Synthetic exact submitted preview and one durable launch reservation')
         run = next(r for r in field(snapshot(), 'runs') if field(field(r, 'run'), 'id') in field(launch, 'run_id'))
@@ -263,13 +263,214 @@ def synthetic_case(args, check):
         daemon.stop()
 
 
+def quick_case(args, check, view=True, failure=False, changed=False, named=False):
+    label = 'named-view' if named else 'quick-' + ('changed' if changed else 'failure' if failure else 'view' if view else 'no-view')
+    base = c.demo.prepare(args.evidence / label, manual=True, delay=.05)
+    for name in ('home', 'config', 'client-state'): (base / name).mkdir()
+    gate = base / 'plan-gate'
+    wrapper = base / 'project/synthetic-flow'
+    original = wrapper.read_text()
+    wrapper.write_text('#!' + sys.executable + '\nimport sys,time\nfrom pathlib import Path\n' +
+        'g=Path(' + repr(str(gate)) + ')\n' +
+        'if sys.argv[1:3]==["flow","plan"] and "placement" in sys.argv:\n' +
+        ' g.with_suffix(".entered").write_text("entered")\n' +
+        (' while not g.exists(): time.sleep(.05)\n' if changed else '') +
+        (' raise SystemExit("INJECTED quick plan failure")\n' if failure else '') +
+        original.split('\n', 1)[1])
+    daemon, terminal = consistency.PrivateDaemon(args, base), None
+    try:
+        daemon.start()
+        http, _ = c.demo.seed(base, daemon.url, args.preset_export)
+        daemon.histories.append(http.history)
+        def snapshot(): return http.rpc(wait=False)
+        def context_run():
+            ws = http.rpc(domain='workspace')
+            overview = next(w for w in field(ws, 'workspaces') if field(w, 'preset') == ['overview'])
+            return field(next(x for x in field(ws, 'contexts') if field(x, 'id') == field(overview, 'context')), 'selected_run')
+        before = context_run()
+        if failure or changed:
+            http.rpc('(Plan ((flow synthetic) (profile success) (endpoint synthesis) (assignments ())))', wait=False)
+            wait(lambda: field(snapshot(), 'preview'), 'unrelated retained synthesis preview')
+        terminal = c.Terminal(base, args, daemon.url, 180, 55)
+        terminal.capture(label + '-initial', ['stage checklist'])
+        if not view:
+            terminal.command('Quick-launch behavior: keep current context')
+            terminal.drain(.5)
+            terminal.close()
+            terminal = c.Terminal(base, args, daemon.url, 180, 55)
+            terminal.capture(label + '-restarted', ['stage checklist'])
+            terminal.open_palette('Quick-launch behavior: keep current context')
+            terminal.capture(label + '-restart-preference', ['keep current context (selected)'])
+            terminal.key(b'\x1b')
+            check(True, 'No-view R preference survives a fresh client process')
+        zoom(http, 'stage-checklist')
+        terminal.capture(label + '-focused', ['stage checklist'])
+        terminal.key(b'k' * 12); terminal.key(b'j' * 3)
+        if named:
+            # Keep the actual palette action captured while an ordinary Observe
+            # replaces the advertised action. Enter must reject the stale closure.
+            ref_run = next(r for r in field(snapshot(), 'runs') if [field(r, 'run')] == before)
+            reference = field(ref_run, 'reference')
+            observation = Path(field(reference, 'attempt')) / 'observation.json'
+            original_observation = observation.read_text()
+            stale = json.loads(original_observation)
+            stage = next(s for s in stale['stage_plan']['stages'] if s['id'] == 'synthesis')
+            stage.pop('action', None)
+            terminal.open_palette('launch syn')
+            terminal.capture(label + '-captured-before-drift', ['> Launch synthesis and view'])
+            observation.write_text(json.dumps(stale))
+            http.rpc('(Observe %s)' % sexp(field(ref_run, 'run')), wait=False)
+            wait(lambda: not field(next(s for r in field(snapshot(), 'runs') if field(r, 'run') == field(ref_run, 'run')
+                                        for s in field(r, 'stages') if field(s, 'id') == 'synthesis'), 'action'),
+                 'advertised synthesis action withdrawn')
+            terminal.drain(1)
+            terminal.key(b'\r'); terminal.key(b'\x1b')
+            terminal.drain(1)
+            check(not field(snapshot(), 'launches'), 'Stale captured named action cannot launch after capability withdrawal')
+            check(not any(json.loads(line)['argv'][:2] == ['flow', 'plan']
+                          for line in (base / 'project/provider-calls.jsonl').read_text().splitlines()),
+                  'Stale named action is rejected before planning')
+            observation.write_text(original_observation)
+            http.rpc('(Observe %s)' % sexp(field(ref_run, 'run')), wait=False)
+            wait(lambda: field(next(s for r in field(snapshot(), 'runs') if field(r, 'run') == field(ref_run, 'run')
+                                    for s in field(r, 'stages') if field(s, 'id') == 'synthesis'), 'action'),
+                 'advertised synthesis action restored')
+            terminal.drain(1)
+            terminal.type_action('launch syn', 'Launch synthesis and view', label + '-selected-action')
+        elif failure or changed:
+            terminal.key(b'R')
+        else:
+            terminal.type_action('quick lau', 'Quick launch selected stage', label + '-selected-action')
+        if not named:
+            wait(lambda: gate.with_suffix('.entered').exists(), 'quick plan dispatched')
+        if changed:
+            ws = http.rpc(domain='workspace')
+            overview = next(w for w in field(ws, 'workspaces') if field(w, 'preset') == ['overview'])
+            context = next(x for x in field(ws, 'contexts') if field(x, 'id') == field(overview, 'context'))
+            http.mutate(ws, '(Select_run (workspace %s) (context %s) (expected_selection_revision %s) (run ()))' %
+                        (sexp(field(overview, 'id')), sexp(field(context, 'id')), field(context, 'selection_revision')))
+            terminal.capture(label + '-changed', ['Run: none selected'])
+            gate.write_text('release')
+        if failure or changed:
+            terminal.drain(2)
+            check(not field(snapshot(), 'launches'), label + ': async plan never launches stale unrelated preview after failure/selection change')
+            return
+        launch = wait(lambda: next((l for l in field(snapshot(), 'launches') if field(l, 'run_id')), None), label + ' exact allocation')
+        endpoint = 'synthesis' if named else 'placement'
+        check(field(field(launch, 'preview'), 'selection') == [['flow', 'synthetic'], ['profile', 'success'], ['endpoint', endpoint], ['assignments', []]], label + ': launches exact selected plan')
+        wait(lambda: context_run() == [field(next(r for r in field(snapshot(), 'runs') if field(field(r, 'run'), 'id') in field(launch, 'run_id')), 'run')] if view or named else context_run() == before, label + ' context policy')
+        terminal.drain(1)
+        provider_calls = [json.loads(line)['argv'] for line in (base / 'project/provider-calls.jsonl').read_text().splitlines()]
+        producer_calls = [a for a in provider_calls if a[:2] == ['flow', 'run']]
+        check(sum(a[:2] == ['flow', 'plan'] for a in provider_calls) == 1,
+              label + ': action plans exactly once')
+        check(len(field(snapshot(), 'launches')) == 1 and len(producer_calls) == 1, label + ': action stages then launches exactly once')
+        check(context_run() != before if view or named else context_run() == before, label + ': selected linked context follow=' + str(view or named))
+        expected_pref = 'view launched run' if view else 'keep current context'
+        terminal.open_palette('Quick-launch behavior: ' + expected_pref)
+        terminal.capture(label + '-preference-unchanged', [expected_pref + ' (selected)'])
+        terminal.key(b'\x1b')
+        check(True, label + ': action does not mutate quick-launch preference')
+        save(base / 'exact-launch.json', launch)
+    finally:
+        if terminal is not None: terminal.close()
+        daemon.stop()
+
+
+def selected_async_case(args, check, change):
+    """Hold a real Plan after palette acceptance, then invalidate only client-local
+    selection or current capability evidence. Neither mutation changes the context."""
+    label = 'selected-async-' + change
+    base = c.demo.prepare(args.evidence / label, manual=True, delay=.05)
+    for name in ('home', 'config', 'client-state'): (base / name).mkdir()
+    gate, withdraw = base / 'plan-gate', base / 'withdraw-capability'
+    wrapper = base / 'project/synthetic-flow'
+    original = wrapper.read_text()
+    wrapper.write_text('#!' + sys.executable + '\nimport sys,time\nfrom pathlib import Path\n' +
+        'g=Path(' + repr(str(gate)) + ')\n' +
+        'if sys.argv[1:3]==["flow","plan"] and "placement" in sys.argv:\n' +
+        ' g.with_suffix(".entered").write_text("entered")\n' +
+        ' deadline=time.monotonic()+30\n' +
+        ' while not g.exists():\n' +
+        '  if time.monotonic()>deadline: raise SystemExit("selected Plan gate timeout")\n' +
+        '  time.sleep(.05)\n' + original.split('\n', 1)[1])
+    if change == 'capability':
+        settings = base / 'project/synthetic-settings.json'
+        settings.write_text(json.dumps(dict(json.loads(settings.read_text()), executable_timing=True)))
+        provider = base / 'project/synthetic-provider/provider.py'
+        provider.write_text(provider.read_text().replace("STAGES = SCENARIOS['stages']",
+            "STAGES = SCENARIOS['stages']\n" +
+            'if sys.argv[1:3] in (["flow","list"],["flow","describe"]) and Path(' + repr(str(withdraw)) + ').exists():\n' +
+            '    STAGES = [s for s in STAGES if s != "placement"]'))
+    daemon, terminal = consistency.PrivateDaemon(args, base), None
+    try:
+        daemon.start()
+        http, _ = c.demo.seed(base, daemon.url, args.preset_export)
+        daemon.histories.append(http.history)
+        def snapshot(): return http.rpc(wait=False)
+        registry = http.rpc(domain='workspace')
+        overview = next(w for w in field(registry, 'workspaces') if field(w, 'preset') == ['overview'])
+        context = next(x for x in field(registry, 'contexts') if field(x, 'id') == field(overview, 'context'))
+        run = field(context, 'selected_run')[0]
+        execution = next(r for r in field(snapshot(), 'runs') if field(r, 'run') == run)
+        observation = Path(field(field(execution, 'reference'), 'attempt')) / 'observation.json'
+        def withdraw_action():
+            payload = json.loads(observation.read_text())
+            next(s for s in payload['stage_plan']['stages'] if s['id'] == 'placement').pop('action', None)
+            observation.write_text(json.dumps(payload))
+            http.rpc('(Observe %s)' % sexp(run), wait=False)
+            wait(lambda: not field(next(s for r in field(snapshot(), 'runs') if field(r, 'run') == run
+                                       for s in field(r, 'stages') if field(s, 'id') == 'placement'), 'action'),
+                 label + ' action withdrawn')
+        if change == 'capability':
+            withdraw_action()
+            check('placement' in field(next(f for f in field(snapshot(), 'flows') if field(f, 'id') == 'synthetic'), 'fresh_stage_endpoints'),
+                  label + ': initial selected row is authorized by fresh capability, not an action')
+        terminal = c.Terminal(base, args, daemon.url, 180, 55)
+        terminal.capture(label + '-initial', ['stage checklist'])
+        zoom(http, 'stage-checklist')
+        terminal.capture(label + '-focused', ['stage checklist'])
+        terminal.key(b'k' * 12); terminal.key(b'j' * 3)
+        terminal.type_action('quick lau', 'Quick launch selected stage', label + '-captured-action')
+        wait(lambda: gate.with_suffix('.entered').exists(), label + ' Plan held')
+        before = http.rpc(domain='workspace')
+        if change == 'cursor':
+            terminal.key(b'j')
+            terminal.capture(label + '-changed-local-cursor', ['> ✓ CTS:'])
+        elif change == 'action':
+            withdraw_action()
+        else:
+            withdraw.write_text('withdraw')
+            http.rpc('Discover', wait=False)
+            wait(lambda: (flow := next((f for f in field(snapshot(), 'flows') if field(f, 'id') == 'synthetic'), None)) is not None
+                         and 'placement' not in field(flow, 'fresh_stage_endpoints'),
+                 label + ' fresh capability withdrawn')
+        terminal.drain(1)
+        after = http.rpc(domain='workspace')
+        check(before == after, label + ': invalidation does not change registry/context capture')
+        gate.write_text('release')
+        wait(lambda: any(field(field(p, 'selection'), 'endpoint') == 'placement' for p in field(snapshot(), 'preview')),
+             label + ' exact old-row Plan completed')
+        terminal.drain(1.5)
+        calls = [json.loads(line)['argv'] for line in (base / 'project/provider-calls.jsonl').read_text().splitlines()]
+        check(sum(a[:2] == ['flow', 'plan'] for a in calls) == 1, label + ': captured old selection planned exactly once')
+        check(not field(snapshot(), 'launches') and not any(a[:2] == ['flow', 'run'] for a in calls),
+              label + ': invalidated selected shortcut allocates no run and starts no producer')
+        save(base / 'final-snapshot.json', snapshot())
+        terminal.capture(label + '-stopped')
+    finally:
+        gate.write_text('release')
+        if terminal is not None: terminal.close()
+        daemon.stop()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('daemon', 'client', 'preset-export'): parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--real-demo', type=Path, default=real.EXAMPLE / '.dev/workbench-real-demo')
     parser.add_argument('--evidence', type=Path)
     parser.add_argument('--timeout', type=int, default=600)
-    parser.add_argument('--case', action='append', choices=('historical-default', 'remembered', 'default-not-first', 'stale-profile', 'nonfresh', 'unsupported-endpoint', 'changed-context', 'synthetic'), help='diagnostic subset; omit for complete acceptance')
+    parser.add_argument('--case', action='append', choices=('historical-default', 'remembered', 'default-not-first', 'stale-profile', 'nonfresh', 'unsupported-endpoint', 'changed-context', 'synthetic', 'selected-async'), help='diagnostic subset; omit for complete acceptance')
     args = parser.parse_args()
     args.evidence = (args.evidence or Path('/tmp/opencode') / ('checklist-workflow-' + secrets.token_hex(6))).resolve()
     require(args.evidence.is_relative_to('/tmp/opencode'), 'Private evidence required')
@@ -289,7 +490,16 @@ def main():
         for mode in ('historical-default', 'remembered', 'default-not-first', 'stale-profile', 'nonfresh', 'unsupported-endpoint', 'changed-context'):
             if args.case and mode not in args.case: continue
             real_case(args, manifest, references[1], presets, mode, check)
-        if not args.case or 'synthetic' in args.case: synthetic_case(args, check)
+        if not args.case or 'synthetic' in args.case:
+            synthetic_case(args, check)
+            quick_case(args, check)
+            quick_case(args, check, view=False)
+            quick_case(args, check, view=False, named=True)
+            quick_case(args, check, failure=True)
+            quick_case(args, check, changed=True)
+        if not args.case or 'selected-async' in args.case:
+            for change in ('cursor', 'action', 'capability'):
+                selected_async_case(args, check, change)
         result['status'] = 'passed'
     except BaseException:
         result['error'] = traceback.format_exc()

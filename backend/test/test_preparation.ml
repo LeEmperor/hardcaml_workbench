@@ -788,6 +788,151 @@ let run_fixture () =
        return ())
 ;;
 
+let run_staging_fixture () =
+  with_service
+    (fun
+        ~service
+        ~project
+        ~root
+        ~config
+        ~write_config
+        ~plan_identity
+        ~receipt:_
+        ~output_dir:_
+        ~build_script:_
+        ~emit_script:_
+        ~builds
+        ~emissions
+      ->
+       let stage ?(selected = selection) () =
+         call
+           service
+           project
+           (Stage { selection = selected; expected_plan_identity = Some plan_identity })
+       in
+       let launch stage_id submission_key =
+         call service project (Launch_staged { stage_id; submission_key })
+       in
+       let conflict result message =
+         require
+           (match result with
+            | Error (error : V1.Error.t) -> V1.Error.Kind.equal error.kind Conflict
+            | Ok _ -> false)
+           message
+       in
+       let%bind absent = stage () in
+       require (Result.is_error absent) "Unconfigured staging accepted";
+       write_config ();
+       let%bind invalid = stage ~selected:{ selection with flow = "" } () in
+       require (Result.is_error invalid) "Invalid staged selection accepted";
+       let%bind first = stage () >>| ok in
+       let first_stage = Option.value_exn first.staged in
+       require
+         (Preparation.Selection.equal first_stage.selection selection
+          && Option.equal
+               String.equal
+               first_stage.expected_plan_identity
+               (Some plan_identity)
+          && String.equal first_stage.source_root root
+          && String.equal first_stage.build_target config.build_target
+          && String.equal
+               first_stage.source_executable
+               (Config.source_executable config ~root)
+          && String.equal first_stage.results_root config.results_root
+          && first_stage.timeout_seconds = config.timeout_seconds
+          && V1.Environment_selection.equal first_stage.environment Inherit_daemon
+          && Option.is_none first.latest
+          && List.is_empty first.history)
+         "Stage did not capture input scope independently of attempts";
+       (* Older sexp snapshots omit the additive field. *)
+       let legacy =
+         match Preparation.Snapshot.sexp_of_t first with
+         | Sexp.List fields ->
+           Sexp.List
+             (List.filter fields ~f:(function
+               | Sexp.List (Sexp.Atom "staged" :: _) -> false
+               | _ -> true))
+         | _ -> assert false
+       in
+       require
+         (Option.is_none (Preparation.Snapshot.t_of_sexp legacy).staged)
+         "Legacy snapshot sexp requires staged field";
+       let%bind cancelled = call service project (Cancel first_stage.id) in
+       require (Result.is_error cancelled) "Cancel treated staged input as an attempt";
+       let%bind after_cancel = get service project in
+       require
+         (Option.equal Preparation.Staged.equal after_cancel.staged first.staged)
+         "Cancel consumed staged input";
+       let%bind second = stage ~selected:{ selection with profile = "other" } () >>| ok in
+       let second_stage = Option.value_exn second.staged in
+       let%bind stale = launch first_stage.id "old-token" in
+       conflict stale "Superseded selection token launched";
+       let changed = { config with timeout_seconds = config.timeout_seconds + 1 } in
+       Out_channel.write_all
+         (Filename.concat root Config.filename)
+         ~data:(Sexp.to_string_hum (Config.sexp_of_t changed));
+       let%bind drift = launch second_stage.id "drift-token" in
+       conflict drift "Configuration drift silently launched";
+       Out_channel.write_all (Filename.concat root Config.filename) ~data:"broken";
+       let%bind invalid_config = launch second_stage.id "invalid-config" in
+       conflict invalid_config "Invalid current configuration silently launched";
+       write_config ();
+       let%bind staged = stage () >>| ok in
+       let staged = Option.value_exn staged.staged in
+       let jobs = (ok (Service.snapshot service { instance_id })).jobs in
+       require
+         (!builds = 0
+          && !emissions = 0
+          && List.is_empty jobs
+          && Hashtbl.is_empty service.jobs
+          && Hashtbl.is_empty service.artifacts
+          && List.is_empty (Sys_unix.ls_dir service.log_dir))
+         "Stage/cancel/rejected launches created jobs, tools or logs";
+       let%bind accepted, duplicate =
+         Deferred.both (launch staged.id "launch") (launch staged.id "launch")
+       in
+       let accepted = ok accepted
+       and duplicate = ok duplicate in
+       require
+         (Option.equal
+            String.equal
+            accepted.requested_attempt
+            duplicate.requested_attempt)
+         "Concurrent staged submission duplicated attempt";
+       let%bind other_key = launch staged.id "another-launch" in
+       conflict other_key "Same stage launched again under a new key";
+       let%bind completed = wait_for service project (fun s -> terminal (latest s)) in
+       require
+         (Preparation.Outcome.equal (latest completed).outcome Completed
+          && !builds = 1
+          && !emissions = 1
+          && Preparation.Selection.equal (latest completed).selection staged.selection
+          && List.length completed.history = 1)
+         "Staged launch did not run exact captured preparation once";
+       let%bind _ = stage () >>| ok in
+       let%bind stale = launch staged.id "after-supersession" in
+       conflict stale "Launched superseded stage with new key";
+       Out_channel.write_all (Filename.concat root Config.filename) ~data:"broken";
+       let%bind replay = launch staged.id "launch" >>| ok in
+       require
+         (Option.equal String.equal replay.requested_attempt accepted.requested_attempt
+          && !builds = 1
+          && !emissions = 1)
+         "Accepted staged replay after supersession/config drift launched again";
+       let%bind crossed =
+         call
+           service
+           project
+           (Prepare
+              { submission_key = "launch"
+              ; selection
+              ; expected_plan_identity = Some plan_identity
+              })
+       in
+       conflict crossed "Immediate API reused staged submission key";
+       return ())
+;;
+
 (* Optional read-only acceptance check against a provider's real receipt and publication.
    Selection and store location are taken from that supplied receipt. *)
 let validate_receipt_file path =
@@ -848,6 +993,7 @@ let () =
             ~doc:"PATH also validate an existing real provider receipt read-only"
         in
         fun () ->
+          let%bind () = run_staging_fixture () in
           let%map () = run_fixture () in
           Option.iter receipt ~f:validate_receipt_file))
 ;;

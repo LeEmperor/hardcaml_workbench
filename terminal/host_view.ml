@@ -949,13 +949,19 @@ let utility_rows ?(now = Time_ns.now ()) host data tile =
               in
               { row with
                 status = Some status
+              ; time = Some (Preparation_view.total_time ~now host.preparation)
               ; role = Overview_tiles.status_role status
               ; value =
                   (if Overview_tiles.Status.equal status Unsupported
                    then "unavailable"
                    else Overview_tiles.Status.label status)
               ; details =
-                  row.details @ [ relation ] @ Overview_tiles.inspection_lines prep
+                  row.details
+                  @ [ relation
+                    ; "Time: total preparation inclusive of build and emission; unknown \
+                       if finish unavailable"
+                    ]
+                  @ Overview_tiles.inspection_lines prep
               }
             | Physical_stage s when String.equal s.id "timing" ->
               { row with
@@ -967,6 +973,7 @@ let utility_rows ?(now = Time_ns.now ()) host data tile =
           let status = Preparation_view.checklist_status host.preparation in
           Overview_tiles.row
             ~status
+            ~time:(Preparation_view.total_time ~now host.preparation)
             ~role:(Overview_tiles.status_role status)
             "Elaboration"
             (Preparation_view.status_label status)
@@ -1355,7 +1362,7 @@ let semantic_rows host data tile ~width ~height =
 (* A shallow plan panel must show state and endpoint before verbose explanatory metadata.
    Summary facts each occupy one display-cell-clipped line; Enter retains the complete
    wrapped typed model, including exact identity and JSON. *)
-let planned_source_rows host tile =
+let planned_asic_source_rows host tile =
   let detail = (H.local host tile.W.Tile.id).utility_detail in
   let model = Planned_run.model host.H.planned_run in
   let rows = Planned_run.rows model ~detail in
@@ -1398,7 +1405,7 @@ let planned_source_rows host tile =
           { row with
             Planned_run.text =
               state
-              ^ ": plan / "
+              ^ ": provider preview / "
               ^ (if Option.is_none model.preview
                  then "separate launch: "
                  else if Planned_run.equal_status model.status Ready
@@ -1418,6 +1425,30 @@ let planned_source_rows host tile =
       @ Option.value_map model.launch.key ~default:[] ~f:(fun key ->
         [ { Planned_run.role = Fact; text = "submission key: " ^ key } ])
       @ List.drop selection 1)
+;;
+
+let planned_source_rows host tile =
+  match
+    Option.bind host.H.preparation ~f:(fun s ->
+      if host.planned_preparation then Preparation_view.staged_available s else None)
+  with
+  | Some staged ->
+    (match host.stage_preparation with
+     | None -> Preparation_view.staged_lines staged
+     | Some reason ->
+       ("PREPARATION input plan stale/unconfirmed: " ^ reason)
+       :: List.drop (Preparation_view.staged_lines staged) 1)
+    |> List.map ~f:(fun text -> { Planned_run.role = Fact; text })
+  | None
+    when host.planned_preparation
+         && Option.exists host.preparation ~f:(fun s -> Option.is_some s.staged) ->
+    [ { Planned_run.role = Muted
+      ; text =
+          "PREPARATION input plan consumed/stale; r stages again. Generated provider \
+           preview belongs to attempt evidence."
+      }
+    ]
+  | None -> planned_asic_source_rows host tile
 ;;
 
 let planned_rows host tile ~width =
@@ -1460,7 +1491,19 @@ let planned_view_rows ?indicator_frames host tile ~width =
   planned_source_rows host tile
   |> List.concat_mapi ~f:(fun i row ->
     let kind =
-      if Option.is_some host.stage_preparation
+      if host.planned_preparation
+         && Option.exists host.preparation ~f:(fun s -> Option.is_some s.staged)
+      then
+        if i = 0
+        then
+          Some
+            (if Option.is_none host.stage_preparation
+                && Option.is_some
+                     (Option.bind host.preparation ~f:Preparation_view.staged_available)
+             then Indicator.Ready
+             else Stale)
+        else None
+      else if Option.is_some host.stage_preparation
       then None
       else if i = 0
       then Some (plan_indicator model.status)

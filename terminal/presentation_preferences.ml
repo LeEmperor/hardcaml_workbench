@@ -46,6 +46,7 @@ type t =
   ; main_hints : bool option [@sexp.option]
   ; palette_hints : bool option [@sexp.option]
   ; timing_preload : bool option [@sexp.option]
+  ; quick_launch_view : bool option [@sexp.option]
   ; global_compression : bool option [@sexp.option]
   ; workspace_compression : workspace_compression list option [@sexp.option]
   ; session : W.Session_id.t option
@@ -68,6 +69,8 @@ let path ~state_directory ~project_key =
 (* Schema 5 adds the optional project Timing index preload policy. Schemas 1–4 inherit
    background-index; newly captured preferences always record the choice. *)
 (* Schema 6 adds sparse project/global and session/workspace compression choices. *)
+(* WB004 adds an optional quick-launch context-follow choice. Existing files inherit
+   [true]; their stock layout/default migration is independent of this preference. *)
 let schema_version = 6
 
 let appearance_of_overrides (o : T.overrides) ~tile ~workspace ~kind =
@@ -98,6 +101,7 @@ let capture ~project_key (host : Host.t) =
   ; main_hints = Some host.main_hints
   ; palette_hints = Some host.palette_hints
   ; timing_preload = Some host.timing_preload
+  ; quick_launch_view = Some host.quick_launch_view
   ; global_compression = host.presentation.string_compression
   ; workspace_compression =
       (let entries =
@@ -263,6 +267,7 @@ let apply t (host : Host.t) =
     ; main_hints = Option.value t.main_hints ~default:true
     ; palette_hints = Option.value t.palette_hints ~default:true
     ; timing_preload = Option.value t.timing_preload ~default:true
+    ; quick_launch_view = Option.value t.quick_launch_view ~default:true
     ; presentation = { host.presentation with string_compression = t.global_compression }
     }
 ;;
@@ -292,6 +297,17 @@ let%test_unit "preload schema migration and durable explicit policy" =
     in
     assert (restore legacy).timing_preload);
   assert (restore { stored with timing_preload = Some true }).timing_preload
+;;
+
+let%test_unit "quick launch legacy preferences default to view and explicit no-view \
+               round trips"
+  =
+  let project_key = "quick-launch/project" in
+  let stored = capture ~project_key { Host.empty with quick_launch_view = false } in
+  let restore stored = apply (decode ~project_key (encode stored)) Host.empty in
+  assert (not (restore stored).quick_launch_view);
+  assert (restore { stored with quick_launch_view = None }).quick_launch_view;
+  assert (restore { stored with quick_launch_view = Some true }).quick_launch_view
 ;;
 
 let%test_unit "compression scope round trips, guards, sparse resets and schema 5 preload" =

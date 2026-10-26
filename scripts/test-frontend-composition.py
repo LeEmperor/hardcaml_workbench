@@ -234,10 +234,19 @@ class Terminal:
     def command(self, title):
         self.open_palette(title)
         self.capture('command-' + str(len(self.keys)), [title], ['No matching commands'])
-        # Query edits preserve selected command identity. Explicitly choose the
-        # highest-ranked title match instead of accidentally executing a previously
-        # selected fuzzy alias (especially runs sharing "reference" in long IDs).
+        # Exact-title convenience; incremental palette regressions use type_action
+        # below so no navigation can conceal a query-selection regression.
         self.key(b'\x1b[A' * 100)
+        self.key(b'\r')
+
+    def type_action(self, query, selected_title, label):
+        """Real per-character PTY input, including a displaced selection before an edit."""
+        self.open_palette()
+        for char in query[:-1]:
+            self.key(char.encode())
+        self.key(b'\x1b[B')
+        self.key(query[-1].encode())
+        self.capture(label, ['> ' + selected_title], ['No matching commands'])
         self.key(b'\r')
 
     def focus_view(self, view, limit=32):
@@ -319,20 +328,18 @@ def palette_acceptance(t, check, http):
         rows = [line for line in screen.lines()[title_y + 2:] if re.search(r'>\s+Appearance:', line)]
         require(len(rows) == 1, 'Exactly one selected palette command: ' + screen.text())
         return rows[0]
-    # Query edits intentionally preserve command identity. Explicitly navigate
-    # to the first ranked result before testing the similar-color sequence.
-    overlay = t.key(b'\x1b[A' * 30)
+    # Query edits select the top-ranked match, including incremental edits.
     first = selected(overlay)
-    check('Color Vivid' in first, 'Arrow navigation reaches first ranked fuzzy Color result')
+    check('Color Selective' in first, 'Query selects first ranked fuzzy Color result')
     second = selected(t.key(b'\t'))
     t.save('palette-tab', t.drain())
-    check(second != first and 'Selective' in second, 'Tab selects similar Color Selective command')
+    check(second != first and 'Restrained' in second, 'Tab selects similar Color Restrained command')
     check(selected(t.key(b'\x1b[Z')) == first, 'Shift-Tab restores first similar command')
     t.key(b'\t'); t.key(b'\r')
     t.capture('palette-executed', absent=['COMMAND PALETTE'])
-    t.open_palette('Appearance: Color Selective')
-    active = t.capture('palette-executed-active', ['Color Selective [active]'])
-    check('[active]' in selected(active), 'Enter executed selected Color Selective')
+    t.open_palette('Appearance: Color Restrained')
+    active = t.capture('palette-executed-active', ['Color Restrained [active]'])
+    check('[active]' in selected(active), 'Enter executed selected Color Restrained')
     t.key(b'\x1b')
     stable = t.capture('before-escape')
     t.open_palette('ap col')
@@ -551,7 +558,8 @@ def run(args, acceptance=full_acceptance, extra_runs=(3, 4, 5, 6), startup_check
                 left = lines[top].rfind('╭', 0, title_x)
                 right = lines[top].index('╮', title_x)
                 bottom = next(y for y in range(top + 1, len(lines)) if lines[y][left:left + 1] == '╰')
-                return sum('asic/' in line[left + 1:right] for line in lines[top + 1:bottom])
+                # Compressed run labels need not retain the asic/ prefix.
+                return sum(bool(line[left + 1:right].strip()) for line in lines[top + 1:bottom])
             check(selector_count(startup) == 4, 'Overview sidebar run selector shows exactly four of six registered runs by default')
             check('WORKSPACES' not in startup.text() and '[PROJECT' not in startup.text(), 'Default navigation has quiet title/project chrome')
             registry = http.rpc(domain='workspace')

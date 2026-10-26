@@ -137,6 +137,100 @@ let prepare ~snapshot ~selection ~submission_key ~expected_plan_identity =
   | _ -> Error "Preparation already active"
 ;;
 
+let stage ~snapshot ~selection ~expected_plan_identity =
+  match snapshot, selection with
+  | Some { Preparation.Snapshot.availability = Available; _ }, Ok selection ->
+    Ok (Preparation.Operation.Stage { selection; expected_plan_identity })
+  | Some { availability = Unavailable _; _ }, _ ->
+    Error "Preparation unavailable (configuration)"
+  | None, _ -> Error "Preparation capability unavailable or not loaded"
+  | _, Error reason -> Error reason
+;;
+
+let staged_available (s : Preparation.Snapshot.t) =
+  match s.availability with
+  | Unavailable _ -> None
+  | Available ->
+    Option.filter s.staged ~f:(fun staged ->
+      not
+        (Option.exists s.latest ~f:(fun a ->
+           Timestamp.compare a.created_at staged.created_at >= 0)))
+;;
+
+(* Inclusive preparation time: starts at attempt acceptance, ends at the last supervised
+   build/emission finish. Retained live samples never run backwards. *)
+let elapsed_samples = String.Table.create ()
+
+let monotonic_now () =
+  Result.ok Core_unix.Clock.gettime
+  |> Option.map ~f:(fun gettime -> Int63.to_float (gettime Monotonic) /. 1e9)
+;;
+
+let total_time ?(monotonic = monotonic_now ()) ~now snapshot =
+  match Option.bind snapshot ~f:(fun s -> s.Preparation.Snapshot.latest) with
+  | None -> "unknown"
+  | Some a ->
+    let finish =
+      if active a
+      then Some now
+      else (
+        let final_job =
+          match a.outcome with
+          | Build_failed -> a.build_job
+          | Cancelled -> Option.first_some a.emission_job a.build_job
+          | Completed | Emission_failed -> a.emission_job
+          | Building | Emitting -> None
+        in
+        Option.bind final_job ~f:(fun j ->
+          Option.map j.Job.finished_at ~f:Timestamp.to_time_ns))
+    in
+    Option.value_map finish ~default:"unknown" ~f:(fun finish ->
+      let seconds =
+        Float.max
+          0.
+          (Time_ns.Span.to_sec (Time_ns.diff finish (Timestamp.to_time_ns a.created_at)))
+      in
+      let key = a.id ^ Sexp.to_string_mach (Timestamp.sexp_of_t a.created_at) in
+      let seconds =
+        if active a
+        then (
+          match monotonic with
+          | None -> seconds
+          | Some tick ->
+            let initial, started =
+              match Hashtbl.find elapsed_samples key with
+              | Some sample -> sample
+              | None ->
+                if Hashtbl.length elapsed_samples >= 256
+                then Hashtbl.clear elapsed_samples;
+                Hashtbl.set elapsed_samples ~key ~data:(seconds, tick);
+                seconds, tick
+            in
+            initial +. Float.max 0. (tick -. started))
+        else seconds
+      in
+      Execution_time_view.duration seconds)
+;;
+
+let staged_lines (s : Preparation.Staged.t) =
+  [ "PREPARATION input-plan ready: " ^ s.id
+  ; "Not a generated provider preview; no processes started; source bytes are not frozen"
+  ; "Scope: " ^ s.source_root
+  ; "Build: " ^ s.build_target ^ " / executable: " ^ s.source_executable
+  ; "Results: " ^ s.results_root
+  ; "Environment: " ^ Sexp.to_string (V1.Environment_selection.sexp_of_t s.environment)
+  ; "Flow: "
+    ^ s.selection.flow
+    ^ " / profile: "
+    ^ s.selection.profile
+    ^ " / endpoint: "
+    ^ s.selection.endpoint
+  ; "Overrides: " ^ String.concat ~sep:"; " s.selection.assignments
+  ; "Stage availability: staged, unconsumed (superseded/consumed receipts cannot launch)"
+  ; "Launch planned run: builds and emits; no ASIC allocation or context switch"
+  ]
+;;
+
 let attempt_details (a : Preparation.Attempt.t) =
   [ "Selection: "
     ^ a.selection.flow
@@ -304,6 +398,27 @@ let rows ~snapshot ~jobs ~project ~rtl_scope ~cursor ~detail ~log_lines =
       :: result
     | _ -> result
   in
+  let result =
+    Option.value_map
+      (Option.bind snapshot ~f:staged_available)
+      ~default:[]
+      ~f:(fun staged ->
+        [ O.row
+            ~role:Success
+            ~details:(staged_lines staged)
+            "PREPARATION input plan"
+            ("ready: " ^ staged.id)
+        ])
+    @ (match snapshot with
+       | Some s when Option.is_some s.staged && Option.is_none (staged_available s) ->
+         [ O.row
+             ~role:Muted
+             "PREPARATION input plan"
+             "consumed/stale; r stages new inputs"
+         ]
+       | _ -> [])
+    @ result
+  in
   if not detail
   then result
   else
@@ -311,7 +426,8 @@ let rows ~snapshot ~jobs ~project ~rtl_scope ~cursor ~detail ~log_lines =
     @ [ O.row
           ~role:Muted
           "Controls"
-          "j/k attempts; Enter inspect; r prepare; x cancel; a artifact"
+          "j/k attempts; Enter inspect; r stage input plan; R stage+launch; x cancel; a \
+           artifact"
       ]
     @ List.map all ~f:(fun a ->
       row (outcome a.outcome) "History" a.id (attempt_details a))
@@ -380,12 +496,52 @@ let fixture_snapshot () : Preparation.Snapshot.t =
   { availability = Available
   ; session_only = true
   ; requested_attempt = None
+  ; staged = None
   ; latest = Some (fixture_attempt "new-failure" Emission_failed)
   ; history =
       [ fixture_attempt "new-failure" Emission_failed
       ; fixture_attempt "old-success" Completed
       ]
   }
+;;
+
+let%test_unit "inclusive preparation clock advances across build/emission, ignores wall \
+               rollback and freezes terminal"
+  =
+  let start = Time_ns.epoch in
+  let at seconds = Time_ns.add start (Time_ns.Span.of_sec seconds) in
+  let attempt =
+    { (fixture_attempt "clock-test" Building) with
+      created_at = Timestamp.of_time_ns start
+    }
+  in
+  let snapshot attempt = Some { (fixture_snapshot ()) with latest = Some attempt } in
+  assert (
+    String.equal (total_time ~monotonic:(Some 100.) ~now:(at 5.) (snapshot attempt)) "5s");
+  let emitting = { attempt with outcome = Emitting } in
+  assert (
+    String.equal
+      (total_time ~monotonic:(Some 107.) ~now:(at (-20.)) (snapshot emitting))
+      "12s");
+  let finished_job =
+    Option.map (fixture_attempt "finished-clock" Completed).emission_job ~f:(fun j ->
+      { j with finished_at = Some (Timestamp.of_time_ns (at 15.)) })
+  in
+  let finished =
+    { emitting with outcome = Completed; emission_job = finished_job; build_job = None }
+  in
+  assert (String.equal (total_time ~now:(at 100.) (snapshot finished)) "15s");
+  assert (String.equal (total_time ~now:(at 200.) (snapshot finished)) "15s");
+  assert (String.equal (total_time ~now:start None) "unknown");
+  let unknown = { finished with emission_job = None } in
+  assert (String.equal (total_time ~now:start (snapshot unknown)) "unknown");
+  let missing_finish =
+    { finished with
+      build_job = finished_job
+    ; emission_job = Option.map finished_job ~f:(fun j -> { j with finished_at = None })
+    }
+  in
+  assert (String.equal (total_time ~now:start (snapshot missing_finish)) "unknown")
 ;;
 
 let%test_unit "preparation preserves failed headline, completed build, exact logs and \

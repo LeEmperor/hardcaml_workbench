@@ -7,6 +7,8 @@
   indicator
   planned_run
   stage_action
+  stage_launch_commands
+  stage_launch_commands_test
   tile_presentation
   panel
   evidence_style

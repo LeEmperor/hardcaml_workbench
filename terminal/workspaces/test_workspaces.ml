@@ -4,6 +4,53 @@ open Hardcaml_workbench_workspaces
 
 let kinds d = List.map d.Definition.tiles ~f:(fun t -> t.Common.kind)
 
+let%test_unit "authored and exported stock Overview include visible Preparation defaults" =
+  let exported =
+    Presets.export_config ()
+    |> Or_error.ok_exn
+    |> Presets.decode
+    |> Or_error.ok_exn
+    |> Presets.resolve
+    |> Or_error.ok_exn
+  in
+  List.iter [ Presets.stock_config; exported ] ~f:(fun (config : Workspace_config.t) ->
+    let spec =
+      List.find_exn config.definitions ~f:(fun d -> String.equal d.key "overview")
+    in
+    let view, tile =
+      List.zip_exn spec.template.views spec.tiles
+      |> List.find_exn ~f:(fun (view, _) -> String.equal view.kind "preparation")
+    in
+    assert (not view.hidden);
+    assert (String.equal tile.key "preparation");
+    assert (view.geometry.height = 7);
+    let presentation = Option.value_exn tile.presentation in
+    assert (Option.equal Bool.equal presentation.run_reference (Some false));
+    assert (Option.equal Bool.equal presentation.hints (Some false));
+    let definition = Definition.of_spec spec in
+    assert (
+      Option.equal
+        Int.equal
+        (Definition.leaf_min_height definition.layout ~key:tile.key)
+        (Some 7));
+    let initial =
+      Workspace.initial ~session_id:(Workspace.Session_id.of_string "preparation-default")
+    in
+    let initialized =
+      Workspace.apply
+        initial
+        (Presets.startup_operation ~selected:config initial |> Option.value_exn)
+      |> Result.ok
+      |> Option.value_exn
+    in
+    let overview = List.hd_exn initialized.workspaces in
+    assert (
+      List.exists initialized.tiles ~f:(fun t ->
+        Workspace.Workspace_id.equal t.workspace overview.id
+        && String.equal t.kind "preparation"
+        && not t.hidden)))
+;;
+
 let%test_unit "fresh startup initializes the stock window spec before legacy bootstrap" =
   let module W = Workspace in
   let initial = W.initial ~session_id:(W.Session_id.of_string "stock-startup") in
@@ -1087,6 +1134,165 @@ let%test_unit "shared restore API repairs every preset in the captured renamed w
     assert (List.length visible = List.length d.tiles);
     let repeated = mutate next mutation in
     assert (Workspace.Snapshot.equal { next with revision = repeated.revision } repeated))
+;;
+
+let%test_unit "explicit Overview restore adopts Preparation in saved legacy and config \
+               layouts"
+  =
+  let module W = Workspace in
+  let ok = function
+    | Ok value -> value
+    | Error error -> raise_s [%sexp (error : V1.Error.t)]
+  in
+  let mutate (s : W.Snapshot.t) mutation =
+    W.apply s (Mutate { expected_revision = s.revision; mutation }) |> ok
+  in
+  (* Model a previously shipped stock catalog, with no Preparation membership. Its
+     persisted definition must not shadow the current explicit Restore definition. *)
+  let old_config =
+    { Presets.stock_config with
+      definitions =
+        List.map Presets.stock_config.definitions ~f:(fun d ->
+          if not (String.equal d.key "overview")
+          then d
+          else (
+            let views, tiles =
+              List.zip_exn d.template.views d.tiles
+              |> List.filter ~f:(fun (view, _) ->
+                not (String.equal view.kind "preparation"))
+              |> List.unzip
+            in
+            { d with template = { d.template with views }; tiles; layout = None }))
+    }
+  in
+  List.iter [ false; true ] ~f:(fun configured ->
+    let initial = W.initial ~session_id:(W.Session_id.of_string "old-overview") in
+    let saved = W.apply initial (Initialize_config old_config) |> ok in
+    let saved =
+      if configured
+      then saved
+      else { saved with config_windows = []; config_workspaces = [] }
+    in
+    let workspace = List.hd_exn saved.workspaces in
+    let synthesis =
+      List.find_exn saved.tiles ~f:(fun t ->
+        W.Workspace_id.equal t.workspace workspace.id && String.equal t.kind "synthesis")
+    in
+    let run : Run_ref.t =
+      { backend = Backend_id.of_string "saved-provider"
+      ; id = "pinned-run"
+      ; build = None
+      ; label = Some "Keep this pin"
+      }
+    in
+    let saved =
+      mutate saved (Set_tile_binding { tile = synthesis.id; binding = Pin_run run })
+    in
+    let saved = mutate saved (Set_tile_hidden { tile = synthesis.id; hidden = true }) in
+    let saved =
+      mutate saved (Rename_workspace { workspace = workspace.id; name = "My Overview" })
+    in
+    let saved =
+      mutate
+        saved
+        (Create_tile
+           { workspace = workspace.id
+           ; kind = "custom-extra"
+           ; geometry = synthesis.requested_geometry
+           })
+    in
+    let extra = List.last_exn saved.tiles in
+    let saved =
+      mutate saved (Set_tile_binding { tile = extra.id; binding = Pin_run run })
+    in
+    let saved =
+      mutate saved (Set_zoom { workspace = workspace.id; tile = Some extra.id })
+    in
+    (* Rehydration/reconnect preserves user intent; adoption is an explicit command. *)
+    let saved = W.Snapshot.t_of_sexp (W.Snapshot.sexp_of_t saved) in
+    W.validate saved |> ok;
+    assert (Option.is_none (Presets.startup_operation saved));
+    assert (not (List.exists saved.tiles ~f:(fun t -> String.equal t.kind "preparation")));
+    let restored =
+      mutate saved (Definition.restore Overview.definition ~workspace:workspace.id)
+    in
+    assert (List.length restored.tiles = List.length saved.tiles + 1);
+    assert (List.equal W.Context.equal saved.contexts restored.contexts);
+    assert (String.equal (W.workspace restored workspace.id).name "My Overview");
+    assert (Option.is_none (W.workspace restored workspace.id).zoomed_tile);
+    List.iter saved.tiles ~f:(fun tile ->
+      let actual = W.tile restored tile.id in
+      assert (W.Binding.equal tile.binding actual.binding);
+      assert (String.equal tile.kind actual.kind);
+      assert (W.Workspace_id.equal tile.workspace actual.workspace);
+      if not (W.Workspace_id.equal tile.workspace workspace.id)
+      then assert (W.Tile.equal tile actual));
+    assert (not (W.tile restored synthesis.id).hidden);
+    assert (
+      W.Tile.equal
+        (W.tile restored extra.id)
+        { (W.tile saved extra.id) with hidden = true });
+    List.iter restored.config_workspaces ~f:(fun origin ->
+      if W.Workspace_id.equal origin.workspace workspace.id
+      then assert origin.policy_detached);
+    let hydrated = W.Snapshot.t_of_sexp (W.Snapshot.sexp_of_t restored) in
+    W.validate hydrated |> ok;
+    assert (W.Snapshot.equal hydrated restored);
+    let template = W.export_template hydrated workspace.id |> ok in
+    let template =
+      Workspace_template.encode template
+      |> Or_error.ok_exn
+      |> Workspace_template.decode
+      |> Or_error.ok_exn
+    in
+    let preparation =
+      List.find_exn template.views ~f:(fun v -> String.equal v.kind "preparation")
+    in
+    assert (not preparation.hidden);
+    assert (preparation.geometry.height = 7);
+    let visible =
+      List.filter hydrated.tiles ~f:(fun t ->
+        W.Workspace_id.equal t.workspace workspace.id && not t.hidden)
+    in
+    (* Restore appends the new tile, rather than changing IDs/order to match the authoring
+       list. Fit must still put Preparation above Synthesis. *)
+    List.iter
+      [ 120, 40; 180, 55 ]
+      ~f:(fun (width, terminal_height) ->
+        let height = terminal_height - 2 in
+        match
+          Layout.compute
+            Overview.definition
+            ~width
+            ~height
+            ~kinds:(List.map visible ~f:(fun t -> t.kind))
+        with
+        | Compact -> assert false
+        | Grid cells ->
+          let cell kind =
+            List.zip_exn visible cells
+            |> List.find_exn ~f:(fun (tile, _) -> String.equal tile.kind kind)
+            |> snd
+          in
+          let prep = cell "preparation" in
+          assert (prep.x = width / 3 && prep.y = 1);
+          assert (prep.width = width - (width / 3) && prep.height = 7);
+          assert ((cell "synthesis").y = prep.y + prep.height);
+          List.iteri cells ~f:(fun i (a : W.Geometry.t) ->
+            assert (a.x >= 0 && a.y >= 0 && a.width > 0 && a.height > 0);
+            assert (a.x + a.width <= width && a.y + a.height <= height);
+            List.iter
+              (List.drop cells (i + 1))
+              ~f:(fun b ->
+                assert (
+                  a.x + a.width <= b.x
+                  || b.x + b.width <= a.x
+                  || a.y + a.height <= b.y
+                  || b.y + b.height <= a.y))));
+    let repeated =
+      mutate hydrated (Definition.restore Overview.definition ~workspace:workspace.id)
+    in
+    assert (W.Snapshot.equal { hydrated with revision = repeated.revision } repeated))
 ;;
 
 let%test_unit "sparse membership and resize thresholds never overflow or overlap" =

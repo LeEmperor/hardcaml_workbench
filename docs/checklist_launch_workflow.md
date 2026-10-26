@@ -1,4 +1,24 @@
-# Checklist r: prepare a new run, then launch explicitly
+# Checklist r/R: stage for review or stage and launch
+
+**2026-10-26:** lowercase **r** retains the manual workflow below; uppercase **R**
+stages the selected operation and automatically launches its exact ready plan.
+Quick launch defaults to viewing the new run in the captured linked context. The
+palette's **Quick-launch behavior: keep current context** option persists across
+client restarts; **Quick-launch behavior: view launched run** restores
+the default. Failed planning or changed captured context/selection prevents launch.
+
+The **Elaboration** preparation row follows the same r/R split. Its input plan is
+staged on the backend without building or emitting; launch then builds current
+source and emits the selected bundle without EDA. Preparation does not allocate an
+ASIC run, so it retains the context under either viewing preference. Its aligned
+time column includes build and emission. See [project preparation](project_preparation.md).
+
+Palette shortcuts now use action-first names: **Quick launch selected stage**, **Launch
+synthesis and view**, and **Launch elaboration bundle**. The query prefixes `quick lau`,
+`launch syn`, `launch elab` and `launch and vi` select their corresponding actions.
+Named physical shortcuts always launch-and-view without changing the saved generic
+quick-launch preference. Search edits select the best-ranked match; captured actions
+remain subject to selection/capability/context revalidation.
 
 Restored and verified 2026-10-17 for the actual ASIC example as well as synthetic
 stage actions. This supersedes the earlier limitation that real normalized stage
@@ -11,7 +31,7 @@ rows could only report status. [Implementation plan](checklist_launch_workflow_p
    current capabilities, resolves the captured stage and prepares a normal plan.
 3. Wait for **ready** in planned-run. Check the resolved flow/profile/endpoint.
 4. Open/reopen **Space c c** and choose **Launch** or **Launch and view in captured
-   context**. Only this step starts execution.
+   context**. In the lowercase-r workflow, only this step starts execution.
 
 For `standard / balanced`, choosing Routing requests a **new fresh prefix through
 routing**, not restart/resume of the selected historical execution. A stage marked

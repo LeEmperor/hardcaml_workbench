@@ -62,6 +62,26 @@ module Attempt = struct
   [@@deriving bin_io, compare, equal, sexp]
 end
 
+module Staged = struct
+  (** Input plan only: staging does not generate a provider plan or bundle, nor freeze
+      source file contents. The opaque id captures this selection and
+      source/build/configuration scope for this daemon session. A new Stage supersedes the
+      previous receipt. *)
+  type t =
+    { id : string
+    ; selection : Selection.t
+    ; expected_plan_identity : string option
+    ; source_root : string
+    ; build_target : string
+    ; source_executable : string
+    ; results_root : string
+    ; timeout_seconds : int
+    ; environment : V1.Environment_selection.t
+    ; created_at : Timestamp.t
+    }
+  [@@deriving bin_io, compare, equal, sexp]
+end
+
 module Operation = struct
   type t =
     | Get
@@ -71,6 +91,18 @@ module Operation = struct
         ; expected_plan_identity : string option
         }
     | Cancel of string
+    | Stage of
+        { selection : Selection.t
+        ; expected_plan_identity : string option
+        }
+    | Launch_staged of
+        (* Launches only the current stage, once. Reuse the same submission key to observe
+           that attempt, including after supersession or config drift. A different key
+           cannot launch an already accepted stage again. Cancel addresses attempts only
+           and never launches or consumes a stage. *)
+        { stage_id : string
+        ; submission_key : string
+        }
   [@@deriving bin_io, compare, equal, sexp]
 end
 
@@ -84,6 +116,7 @@ module Snapshot = struct
     ; requested_attempt : string option
     ; latest : Attempt.t option
     ; history : Attempt.t list
+    ; staged : Staged.t option [@sexp.option]
     }
   [@@deriving bin_io, compare, equal, sexp]
 end

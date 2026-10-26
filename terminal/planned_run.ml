@@ -149,10 +149,12 @@ let begin_plan t selection =
   , { scope = t.scope; generation } )
 ;;
 
-let current_ticket t (ticket : ticket) =
+let same_generation t (ticket : ticket) =
   String.equal t.scope ticket.scope
   && t.generation = ticket.generation
-  && Option.is_some t.intent
+;;
+
+let current_ticket t ticket = same_generation t ticket && Option.is_some t.intent
 ;;
 
 let receipt t ticket ~floor result =
@@ -500,7 +502,8 @@ let rows m ~detail =
                "Retained/unconfirmed shared preview below; not ready for current intent."
            }
          ])
-      @ [ { role = Fact; text = "exact plan identity: " ^ p.plan_identity }
+       @ [ { role = Muted; text = "Generated provider plan preview (separate from PREPARATION input plan):" }
+         ; { role = Fact; text = "exact plan identity: " ^ p.plan_identity }
         ; { role = Muted; text = "shared preview selection:" }
         ]
       @ facts p.selection

@@ -317,6 +317,8 @@ def pty_check(base, client_path, http):
         # Only after the physical demo proof, zoom the actual checklist for the
         # existing deterministic interaction/launch scenario.
         ws = http.mutate(http.rpc(domain='workspace'), '(Set_zoom (workspace %s) (tile (%s)))' % (workspace, field(checklist, 'id')))
+        screen('elaboration-first', ['Stage checklist', '> ? Elaboration: unavailable'])
+        keys(b'j')
         screen('initial', ['Stage checklist', '> ✓ Synthesis: completed'],
                ['Session', 'Reported cells (agg.)'])
         # Compact preset hides hints by default. Explicitly enable them for the
@@ -343,7 +345,7 @@ def pty_check(base, client_path, http):
             keys(b'\x1b')
             screen('appearance-' + appearance[0], ['Stage checklist', '> ✓ Synthesis: completed'])
         no_launch('Enter/Esc, j/k browsing and restyling')
-        # The actual requested stage is the third row, selected with jj.
+        # Placement follows synthesis and floorplan, below the preparation row.
         keys(b'j')
         keys(b'j')
         keys(b'\r')
@@ -364,7 +366,7 @@ def pty_check(base, client_path, http):
         # including every earlier HTTP/seeded/cancelled run, not an allowlist.
         require({field(field(r, 'run'), 'id') for r in field(http.rpc(), 'runs')} == before_ids,
                 'Run identities changed before launch')
-        palette('Launch and view in captured context')
+        palette('Launch and view planned run in captured context')
         def new_allocation():
             runs = field(http.rpc(wait=False), 'runs')
             new = [r for r in runs if field(field(r, 'run'), 'id') not in before_ids]

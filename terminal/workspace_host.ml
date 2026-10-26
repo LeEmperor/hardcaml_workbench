@@ -61,6 +61,14 @@ type action =
   | Hierarchy_detail of W.Tile_id.t
   | Discover_asic
   | Prepare_project
+  | Quick_prepare_project
+  | Launch_preparation of string
+  | Quick_prepare_stage of Asic.Stage.t * Run_ref.t
+  | Quick_prepare_endpoint of string * Run_ref.t
+  | Launch_stage_and_view of Stage_action.intent * Run_ref.t option * Asic.Selection.t
+  | Quick_launch_selected of Overview_tiles.checklist_item * Run_ref.t
+  | Launch_elaboration_bundle of Preparation.Selection.t
+  | Set_quick_launch_view of bool
   | Edit_preparation of string * string
   | Select_preparation of Asic.Selection.t
   | Cancel_preparation
@@ -167,6 +175,8 @@ type t =
   ; main_hints : bool
   ; palette_hints : bool
   ; timing_preload : bool
+  ; quick_launch_view : bool
+  ; planned_preparation : bool
   ; notice : string
   ; editing_filter : bool
   ; workspace_focus : (string * W.Tile_id.t option) list
@@ -202,6 +212,8 @@ let empty =
   ; main_hints = true
   ; palette_hints = true
   ; timing_preload = true
+  ; quick_launch_view = true
+  ; planned_preparation = true
   ; notice = "Loading workspace registry"
   ; editing_filter = false
   ; workspace_focus = []
@@ -2040,7 +2052,7 @@ let simulation_log_commands (tile : W.Tile.t) =
     ]
 ;;
 
-let launch_commands t ~preview ~view_pending =
+let asic_launch_commands t ~preview ~view_pending =
   let model = Planned_run.model t.planned_run in
   let unavailable =
     Option.first_some
@@ -2060,8 +2072,8 @@ let launch_commands t ~preview ~view_pending =
             ^ "; prepare again if failed/stale; reopen palette when ready"))
   in
   List.map
-    [ "asic.launch", "Launch", false
-    ; "asic.launch-view", "Launch and view in captured context", true
+    [ "asic.launch", "Launch planned run without view", false
+    ; "asic.launch-view", "Launch and view planned run in captured context", true
     ]
     ~f:(fun (id, title, view) ->
       let title, action =
@@ -2087,6 +2099,49 @@ let launch_commands t ~preview ~view_pending =
         title
         "run synth launch"
         action)
+;;
+
+let launch_commands t ~preview ~view_pending =
+  match
+    Option.bind t.preparation ~f:(fun s ->
+      if t.planned_preparation then Preparation_view.staged_available s else None)
+  with
+  | Some staged ->
+    let unavailable =
+      Option.first_some
+        t.stage_preparation
+        (if Option.exists t.preparation ~f:(fun s ->
+              Option.exists s.latest ~f:Preparation_view.active)
+         then Some "Preparation already active; staging does not submit another producer"
+         else None)
+    in
+    List.map
+      [ "asic.launch", "Launch planned PREPARATION without view"
+      ; ( "asic.launch-view"
+        , "Launch and view planned PREPARATION (context retained; no ASIC allocation)" )
+      ]
+      ~f:(fun (id, title) ->
+        command
+          ?unavailable
+          id
+          (title ^ " [" ^ staged.id ^ "]")
+          "launch staged preparation input plan"
+          (Launch_preparation staged.id))
+  | None
+    when t.planned_preparation
+         && Option.exists t.preparation ~f:(fun s -> Option.is_some s.staged) ->
+    List.map
+      [ "asic.launch", "Launch planned PREPARATION without view"
+      ; "asic.launch-view", "Launch and view planned PREPARATION"
+      ]
+      ~f:(fun (id, title) ->
+        command
+          ~unavailable:"PREPARATION input plan consumed/stale; stage again with r"
+          id
+          (title ^ " (consumed/stale)")
+          "launch"
+          Unavailable_launch)
+  | None -> asic_launch_commands t ~preview ~view_pending
 ;;
 
 let%test_unit "Launch remains searchable without preview and preserves captured disabled \
@@ -3263,9 +3318,21 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
     [ command
         ?unavailable:needs_project
         "preparation.prepare"
-        "Prepare elaboration bundle (EDA-less)"
+        "Plan PREPARATION inputs for manual launch (r; no processes)"
         "build flow emit"
         Prepare_project
+    ; command
+        "launch.quick.view"
+        ("Quick-launch behavior: view launched run"
+         ^ if t.quick_launch_view then " (selected)" else "")
+        "preference setting default follow context"
+        (Set_quick_launch_view true)
+    ; command
+        "launch.quick.no-view"
+        ("Quick-launch behavior: keep current context"
+         ^ if t.quick_launch_view then "" else " (selected)")
+        "preference setting stay context"
+        (Set_quick_launch_view false)
     ; command
         ?unavailable:needs_project
         "preparation.cancel"
@@ -4035,16 +4102,10 @@ let ranked_matches p =
 
 let matches p = List.map (ranked_matches p) ~f:(fun result -> result.Palette_search.item)
 
-(* Query edits retain command identity even when its ranked index changes. *)
+(* Edits start a new search and follow its best result. Arrow/Tab choices remain selected
+   until the next edit; an unchanged query does not undo navigation. *)
 let palette_query p query =
-  let selected = List.nth (matches p) p.index in
-  let next = { p with query; index = 0 } in
-  let index =
-    Option.bind selected ~f:(fun selected ->
-      List.findi (matches next) ~f:(fun _ c -> String.equal selected.id c.id))
-    |> Option.value_map ~default:0 ~f:fst
-  in
-  { next with index }
+  if String.equal p.query query then p else { p with query; index = 0 }
 ;;
 
 type input =
@@ -5449,9 +5510,8 @@ let%test_unit "palette similar commands capture Tab arrows aliases stable identi
   (match effect with
    | No_effect -> ()
    | _ -> assert false);
-  let selected_id = selected next in
   let edited = query next "final" in
-  assert (String.equal (selected edited) selected_id);
+  assert ((Option.value_exn edited.palette).index = 0);
   let unicode = step (query opened "界é") Backspace in
   assert (String.equal (Option.value_exn unicode.palette).query "界");
   assert (Option.is_none (step opened Escape).palette)
