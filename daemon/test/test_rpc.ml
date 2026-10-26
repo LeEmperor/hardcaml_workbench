@@ -292,6 +292,7 @@ let run () =
            ; "workspace"
            ; "asic"
            ; "simulation"
+           ; Preparation.capability
            ])
         "hello did not advertise the complete V1 capability set";
       let snapshot = Rpc.snapshot rpc { instance_id } in
@@ -584,6 +585,49 @@ let run () =
              })
       in
       let opened = decode_exn V1.Open_project.Response.t_of_sexp opened_body |> ok in
+      let preparation_request : Preparation.Request.t =
+        { instance_id; project = opened.project.id; operation = Get }
+      in
+      let%bind preparation_body =
+        post rpc Preparation.rpc_path (Preparation.Request.sexp_of_t preparation_request)
+      in
+      let preparation =
+        decode_exn Preparation.Response.t_of_sexp preparation_body |> ok
+      in
+      require
+        (Preparation.Availability.equal
+           preparation.availability
+           (Unavailable Not_configured)
+         && preparation.session_only
+         && List.is_empty preparation.history)
+        "Preparation availability/history did not round-trip";
+      let%bind wrong_preparation =
+        post
+          rpc
+          Preparation.rpc_path
+          (Preparation.Request.sexp_of_t
+             { preparation_request with instance_id = "other" })
+      in
+      require_instance_changed
+        (decode_exn Preparation.Response.t_of_sexp wrong_preparation)
+        "Preparation accepted a stale daemon instance";
+      let%bind server = Rpc.start rpc ~port:0 in
+      let%bind () =
+        Monitor.protect
+          ~finally:(fun () -> Cohttp_async.Server.close server)
+          (fun () ->
+            let client =
+              Hardcaml_workbench_native_http.Client.create
+                (sprintf "http://127.0.0.1:%d" (Cohttp_async.Server.listening_on server))
+            in
+            let%map result =
+              Hardcaml_workbench_native_http.Client.preparation client preparation_request
+            in
+            let received = Or_error.ok_exn result |> ok in
+            require
+              (Preparation.Snapshot.equal received preparation)
+              "Native preparation client used the wrong contract")
+      in
       let asic_request : Asic.Request.t =
         { instance_id; project = opened.project.id; operation = Get }
       in

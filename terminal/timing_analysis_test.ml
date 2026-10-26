@@ -416,7 +416,7 @@ let%test_unit "executable Timing merges physical row, seven-stage cursor and ind
   List.iter [ Asic.Stage.Status.Pending; Running; Completed; Failed ] ~f:(fun status ->
     let host, data, find, summary = executable_fixture status in
     let items = O.checklist_items ~asic:data.asic ~run:summary.run in
-    assert (List.length items = 7);
+    assert (List.length items = 8);
     assert (List.count items ~f:(fun i -> String.equal (O.checklist_id i) "timing") = 1);
     assert (
       not
@@ -424,7 +424,7 @@ let%test_unit "executable Timing merges physical row, seven-stage cursor and ind
           | O.Timing_analysis _ -> true
           | _ -> false)));
     let tile = find "stage-checklist" in
-    let host = H.browse_checklist host tile.id ~run:summary.run ~items ~delta:5 in
+    let host = H.browse_checklist host tile.id ~run:summary.run ~items ~delta:6 in
     (match H.checklist_cursor (H.local host tile.id) ~run:summary.run ~items with
      | Some (Physical_stage s) ->
        assert (String.equal s.id "timing");
@@ -439,9 +439,9 @@ let%test_unit "executable Timing merges physical row, seven-stage cursor and ind
     assert (String.is_substring details ~substring:"Captured source status: running");
     List.iter [ 24; 40; 80 ] ~f:(fun width ->
       let rendered =
-        O.render ~appearance:host.appearance ~attrs:(fun _ -> []) ~width ~height:7 rows
+        O.render ~appearance:host.appearance ~attrs:(fun _ -> []) ~width ~height:8 rows
       in
-      assert (View.width rendered = width && View.height rendered = 7);
+      assert (View.width rendered = width && View.height rendered = 8);
       let lines = Host_view.plain_text rendered |> String.split_lines in
       let columns =
         List.map2_exn rows lines ~f:(fun row line ->
@@ -563,7 +563,15 @@ let%test_unit "WB069 both Overview surfaces share completion/duration and indepe
     List.equal
       String.equal
       names
-      [ "synthesis"; "floorplan"; "placement"; "cts"; "routing"; "Timing"; "signoff" ]);
+      [ "Elaboration"
+      ; "synthesis"
+      ; "floorplan"
+      ; "placement"
+      ; "cts"
+      ; "routing"
+      ; "Timing"
+      ; "signoff"
+      ]);
   let timing = List.find_exn rows ~f:(fun r -> String.equal r.label "Timing") in
   assert (String.equal timing.value "completed");
   assert (Option.equal String.equal timing.time (Some "1.575s"));
@@ -627,7 +635,7 @@ let%test_unit "WB069 projected cursor reaches Timing without physical action inf
   let host, data, find, summary = fixture () in
   let tile = find "stage-checklist" in
   let items = O.checklist_items ~asic:data.asic ~run:summary.run in
-  let host = H.browse_checklist host tile.id ~run:summary.run ~items ~delta:5 in
+  let host = H.browse_checklist host tile.id ~run:summary.run ~items ~delta:6 in
   (match H.checklist_cursor (H.local host tile.id) ~run:summary.run ~items with
    | Some (Timing_analysis _) -> ()
    | _ -> assert false);
@@ -637,7 +645,7 @@ let%test_unit "WB069 projected cursor reaches Timing without physical action inf
     let host = { host with appearance } in
     let rows = Host_view.utility_rows host data tile |> Option.value_exn in
     List.iter [ 24; 30; 40; 60 ] ~f:(fun width ->
-      let view = O.render ~appearance ~attrs:(fun _ -> []) ~width ~height:7 rows in
+      let view = O.render ~appearance ~attrs:(fun _ -> []) ~width ~height:8 rows in
       assert (View.width view <= width);
       let text = Host_view.plain_text view in
       assert (String.is_substring text ~substring:"completed");
@@ -716,7 +724,7 @@ let%test_unit "historical Timing remains supplementary while upgraded catalog pe
    | Some (Timing_analysis _) -> ()
    | _ -> assert false);
   let tile = find "stage-checklist" in
-  let host = H.browse_checklist host tile.id ~run:summary.run ~items ~delta:5 in
+  let host = H.browse_checklist host tile.id ~run:summary.run ~items ~delta:6 in
   assert (
     Option.equal String.equal (H.local host tile.id).cursor (Some "analysis:post-pnr-sta"));
   assert (Asic.Summary.equal (Option.value_exn (data.summary summary.run)) summary)

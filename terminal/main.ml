@@ -133,6 +133,7 @@ type session =
   ; mutable registry_busy : bool
   ; mutable asic : Asic.Snapshot.t option
   ; mutable asic_request_id : int
+  ; mutable preparation_request_id : int
   ; mutable asic_applied_id : int
   ; mutable timing_demand :
       (Workspace.Tile.t * Http.Client.t * Terminal_presentation.Timing_demand.t ref)
@@ -335,6 +336,7 @@ let create_session
       ; registry_busy = false
       ; asic = None
       ; asic_request_id = 0
+      ; preparation_request_id = 0
       ; asic_applied_id = 0
       ; timing_demand = None
       ; timing_preload = Terminal_presentation.Timing_preload.empty
@@ -409,6 +411,7 @@ let reconcile_selection session =
     session.host
     <- { session.host with
          planned_run = Planned_run.reset session.host.planned_run ~scope:""
+       ; preparation_rtl_scope = None
        };
     session.asic <- None;
     session.selected_target <- None;
@@ -430,6 +433,14 @@ let reconcile_selection session =
     in
     session.selected_target <- target;
     session.selected_configuration <- configuration;
+    session.host
+    <- { session.host with
+         preparation_rtl_scope =
+           Terminal_presentation.Preparation_view.Rtl_scope.create
+             ~project:(Some project)
+             ~target
+             ~configuration
+       };
     let artifacts = project_artifacts session in
     let selected_artifact =
       Option.first_some
@@ -2202,6 +2213,52 @@ let refresh_simulation session =
 ;;
 
 (** This retained-state lane never waits on Updates, waveform or log I/O. *)
+let preparation_request session operation =
+  if not (List.mem session.hello.capabilities Preparation.capability ~equal:String.equal)
+  then return ()
+  else (
+    match current_project session with
+    | None -> return ()
+    | Some project ->
+      let client = session.client in
+      session.preparation_request_id <- session.preparation_request_id + 1;
+      let request_id = session.preparation_request_id in
+      let instance_id = session.hello.instance_id in
+      let%bind result =
+        request session.diagnostics_file (fun () ->
+          Http.Client.preparation
+            client
+            { Preparation.Request.instance_id; project = project.id; operation })
+      in
+      if request_id <> session.preparation_request_id
+         || (not (phys_equal client session.client))
+         || (not (V1.Daemon_instance_id.equal instance_id session.hello.instance_id))
+         || not
+              (Option.exists (current_project session) ~f:(fun p ->
+                 Project_id.equal p.id project.id))
+      then return ()
+      else (
+        match result with
+        | Error message ->
+          session.host <- { session.host with notice = message };
+          return ()
+        | Ok snapshot ->
+          session.host <- { session.host with preparation = Some snapshot };
+          let jobs =
+            Terminal_presentation.Preparation_view.attempts (Some snapshot)
+            |> List.concat_map ~f:(fun a ->
+              Option.to_list a.build_job @ Option.to_list a.emission_job)
+          in
+          let jobs =
+            jobs
+            @ List.filter (project_jobs session) ~f:(fun j ->
+              String.equal j.kind.namespace "dune"
+              && List.mem [ "test"; "build" ] j.kind.name ~equal:String.equal)
+          in
+          Deferred.List.iter jobs ~how:`Sequential ~f:(fun j ->
+            read_job_log_id session (Some j.id))))
+;;
+
 let hydrate_retained ?(reschedule = false) session =
   let client = session.client in
   Terminal_presentation.Retained_hydration.Coordinator.request
@@ -2217,6 +2274,10 @@ let hydrate_retained ?(reschedule = false) session =
       else
         Deferred.all_unit
           [ Terminal_presentation.Retained_hydration.run
+              session.retained_reads
+              ~key:"preparation"
+              (fun () -> preparation_request session Get)
+          ; Terminal_presentation.Retained_hydration.run
               session.retained_reads
               ~key:"asic"
               (fun () -> asic_request session Get)
@@ -2629,6 +2690,7 @@ let rec refresh session =
         return ())
       (fun () ->
         don't_wait_for (hydrate_retained session);
+        let sequence_before = session.snapshot.cursor.sequence in
         let%bind updates = poll_updates session ~timeout_ms:200 in
         match updates with
         | Error message ->
@@ -2639,12 +2701,21 @@ let rec refresh session =
           in
           reconnect session
         | Ok update ->
+          let%bind () =
+            if Option.is_none session.host.preparation
+               || session.snapshot.cursor.sequence <> sequence_before
+               || Option.exists session.host.preparation ~f:(fun s ->
+                 Option.exists s.latest ~f:Terminal_presentation.Preparation_view.active)
+            then preparation_request session Get
+            else return ()
+          in
           session.status
           <- (match update with
               | `Resynced -> "connected; update cursor recovered from snapshot"
               | `Applied | `Stale -> "connected");
           let%bind () = refresh_host session in
           let%bind () = read_selected_log session in
+          let%bind () = read_job_log session (current_generation session) in
           Host.tiles session.host
           |> List.filter ~f:(fun tile ->
             String.equal tile.kind "logs" || String.equal tile.kind "project-tests")
@@ -2698,7 +2769,10 @@ and reconnect session =
     session.retained_reads <- Terminal_presentation.Retained_hydration.create ();
     (* The same project's authoritative evidence remains valid while the first new
        transport poll is pending; dropping it would reset stage/result browsing. *)
-    if instance_changed || project_changed then session.asic <- None;
+    if instance_changed || project_changed
+    then (
+      session.asic <- None;
+      session.host <- { session.host with preparation = None });
     if instance_changed || project_changed
     then (
       session.navigation_restore_revision <- session.navigation_revision;
@@ -2900,13 +2974,13 @@ let generate_rtl session =
 ;;
 
 let inspect_artifact session =
-  match selected_artifact session with
+  match session.selected_artifact with
   | None ->
     session.status <- "no artifact is selected";
     return ()
-  | Some artifact ->
+  | Some artifact_id ->
     (match session.artifact_view with
-     | Some view when Artifact_id.equal view.artifact artifact.id ->
+     | Some view when Artifact_id.equal view.artifact artifact_id ->
        session.artifact_view <- None;
        session.status <- "closed artifact view";
        return ()
@@ -2924,7 +2998,7 @@ let inspect_artifact session =
                Http.Client.read_artifact
                  requested_client
                  { instance_id = requested_instance
-                 ; artifact = artifact.id
+                 ; artifact = artifact_id
                  ; offset
                  ; max_bytes
                  })
@@ -2936,16 +3010,16 @@ let inspect_artifact session =
            | Ok page ->
              read page.next_offset (page.data :: parts) (bytes + String.length page.data))
        in
-       session.status <- "fetching artifact " ^ artifact.metadata.display_name ^ "...";
+       session.status <- "fetching artifact " ^ Artifact_id.to_string artifact_id ^ "...";
        let%map result = read 0 [] 0 in
        if V1.Daemon_instance_id.equal requested_instance session.hello.instance_id
           && Option.value_map session.selected_artifact ~default:false ~f:(fun id ->
-            Artifact_id.equal id artifact.id)
+            Artifact_id.equal id artifact_id)
        then (
          match result with
          | Error message -> session.status <- "artifact retrieval failed: " ^ message
          | Ok (content, truncated) ->
-           session.artifact_view <- Some { artifact = artifact.id; content; truncated };
+           session.artifact_view <- Some { artifact = artifact_id; content; truncated };
            session.status
            <- (if truncated then "artifact view truncated at 1 MiB" else "artifact loaded")))
 ;;
@@ -3077,9 +3151,7 @@ let load_tile_hierarchy session id =
        };
   match current_generation session with
   | None ->
-    finish
-      None
-      ("Missing hierarchy: " ^ missing_hierarchy_guidance session);
+    finish None ("Missing hierarchy: " ^ missing_hierarchy_guidance session);
     return ()
   | Some job when not (Job.State.equal job.state Complete) ->
     finish
@@ -3088,10 +3160,11 @@ let load_tile_hierarchy session id =
        ^ Job.State.to_string job.state
        ^ " in "
        ^ Job_id.to_string job.id
-        ^ "; "
-        ^ (if Job.is_terminal job
-           then missing_hierarchy_guidance session
-           else "wait for generation to finish, then r"));
+       ^ "; "
+       ^
+       if Job.is_terminal job
+       then missing_hierarchy_guidance session
+       else "wait for generation to finish, then r");
     return ()
   | Some job ->
     (match hierarchy_artifact_for_job session job with
@@ -3784,7 +3857,16 @@ let render_legacy session ({ Bonsai_term.Dimensions.width; height } as dimension
                  ~default:(Artifact_id.to_string view.artifact)
                  ~f:(fun artifact -> artifact.metadata.display_name)
           in
-          ( "RTL ARTIFACT: " ^ label
+          let preparation_artifact =
+            Terminal_presentation.Preparation_view.attempts session.host.preparation
+            |> List.exists ~f:(fun a ->
+              Option.exists a.bundle ~f:(fun b ->
+                List.mem b.artifacts view.artifact ~equal:Artifact_id.equal))
+          in
+          ( (if preparation_artifact
+             then "PREPARATION BUNDLE ARTIFACT (Esc returns): "
+             else "RTL ARTIFACT: ")
+            ^ label
           , (String.split_lines view.content
              @ if view.truncated then [ "[artifact view truncated at 1 MiB]" ] else [])
             |> Fn.flip List.take console_height )
@@ -4213,6 +4295,7 @@ let session_of_baseline_fixture (fixture : Baseline_fixture.t) =
     ; registry_busy = false
     ; asic = None
     ; asic_request_id = 0
+    ; preparation_request_id = 0
     ; asic_applied_id = 0
     ; timing_demand = None
     ; timing_preload = Terminal_presentation.Timing_preload.empty
@@ -4438,6 +4521,25 @@ let host_catalog_base session =
              (Simulation_case (tile.id, c.case_id)))
          @ Host.simulation_selection_commands session.host tile ~submission_key)
      | _ -> [])
+  @ Option.value_map (current_generation session) ~default:[] ~f:(fun job ->
+    List.map job.artifacts ~f:(fun id ->
+      Host.command
+        ("preparation.generic-rtl-artifact." ^ Artifact_id.to_string id)
+        ("Generic RTL "
+         ^ Job_id.to_string job.id
+         ^ ": artifact "
+         ^ Artifact_id.to_string id)
+        "generate-rtl current target configuration read-only output"
+        (Preparation_open_artifact id)))
+  @ (Terminal_presentation.Preparation_view.attempts session.host.preparation
+     |> List.concat_map ~f:(fun a ->
+       Option.value_map a.bundle ~default:[] ~f:(fun b ->
+         List.map b.artifacts ~f:(fun id ->
+           Host.command
+             ("preparation.artifact." ^ Artifact_id.to_string id)
+             ("Preparation " ^ a.id ^ ": artifact " ^ Artifact_id.to_string id)
+             "bundle published inspect read-only"
+             (Preparation_open_artifact id)))))
   @ Option.value_map session.remembered_selection ~default:[] ~f:(fun selection ->
     let available =
       Option.value_map session.asic ~default:false ~f:(fun asic ->
@@ -4466,17 +4568,23 @@ let host_catalog_base session =
       ~view_pending:(Option.is_some session.view_on_allocation)
   @ Option.value_map session.asic ~default:[] ~f:(fun asic ->
     List.concat_map asic.flows ~f:(fun flow ->
-      Host.command
-        ("asic.describe." ^ flow.id)
-        ("Describe ASIC flow " ^ flow.id)
-        "endpoints parameters"
-        (Asic (Describe flow.id))
-      :: List.map flow.profiles ~f:(fun profile ->
+      (Host.command
+         ("asic.describe." ^ flow.id)
+         ("Describe ASIC flow " ^ flow.id)
+         "endpoints parameters"
+         (Asic (Describe flow.id))
+       :: List.map flow.profiles ~f:(fun profile ->
+         Host.command
+           ("asic.plan." ^ flow.id ^ "." ^ profile)
+           ("Plan ASIC " ^ flow.id ^ " / " ^ profile ^ " (enter endpoint)")
+           "run synth preview"
+           (Edit_plan (flow.id, profile))))
+      @ List.map flow.profiles ~f:(fun profile ->
         Host.command
-          ("asic.plan." ^ flow.id ^ "." ^ profile)
-          ("Plan ASIC " ^ flow.id ^ " / " ^ profile ^ " (enter endpoint)")
-          "run synth preview"
-          (Edit_plan (flow.id, profile))))
+          ("preparation.inputs." ^ flow.id ^ "." ^ profile)
+          ("Preparation inputs: " ^ flow.id ^ " / " ^ profile)
+          "selected flow endpoint overrides EDA-less no launch"
+          (Edit_preparation (flow.id, profile))))
     @ Host.asic_cancel_commands asic
     @ List.map asic.finalizations ~f:(fun finalization ->
       Host.command
@@ -5495,6 +5603,101 @@ let execute_host session captured action ~exit =
     | Load_hierarchy id -> async (fun () -> load_tile_hierarchy session id)
     | Hierarchy_detail id -> async (fun () -> detail_tile_hierarchy session id)
     | Discover_asic -> async (fun () -> asic_request session Discover)
+    | Prepare_project ->
+      let captured_selection = session.remembered_selection in
+      let selection =
+        Terminal_presentation.Preparation_view.selection
+          ~remembered:session.remembered_selection
+          ~asic:session.asic
+      in
+      let expected_plan_identity =
+        Option.bind session.asic ~f:(fun s -> s.preview)
+        |> Option.bind ~f:(fun p ->
+          match selection with
+          | Ok s when Asic.Selection.equal s p.selection -> Some p.plan_identity
+          | _ -> None)
+      in
+      (match
+         Terminal_presentation.Preparation_view.prepare
+           ~snapshot:session.host.preparation
+           ~selection
+           ~submission_key:(submission_key "preparation")
+           ~expected_plan_identity
+       with
+       | Error notice ->
+         session.host <- { session.host with notice };
+         Effect.Ignore
+       | Ok operation ->
+         async (fun () ->
+           if Option.equal
+                Asic.Selection.equal
+                captured_selection
+                session.remembered_selection
+           then preparation_request session operation
+           else (
+             session.host
+             <- { session.host with
+                  notice = "Preparation inputs changed before dispatch; prepare again"
+                };
+             return ())))
+    | Select_preparation selection ->
+      async (fun () ->
+        let%map () = save_preferences session selection in
+        session.host
+        <- { session.host with
+             notice =
+               "Preparation inputs selected; r on preparation builds and emits (EDA-less)"
+           })
+    | Edit_preparation (flow, profile) ->
+      let query =
+        Option.value_map session.remembered_selection ~default:"" ~f:(fun s ->
+          if String.equal flow s.flow && String.equal profile s.profile
+          then String.concat ~sep:" " (s.endpoint :: s.assignments)
+          else "")
+      in
+      session.host
+      <- { session.host with
+           palette =
+             Some
+               { capture = captured
+               ; commands = []
+               ; query
+               ; index = 0
+               ; argument = Some (Host.Preparation_inputs (flow, profile))
+               }
+         ; notice = "Enter ENDPOINT [name=value ...]; captures preparation inputs only"
+         };
+      Effect.Ignore
+    | Cancel_preparation ->
+      (match Option.bind session.host.preparation ~f:(fun s -> s.latest) with
+       | Some a when Terminal_presentation.Preparation_view.active a ->
+         async (fun () -> preparation_request session (Cancel a.id))
+       | _ ->
+         session.host <- { session.host with notice = "No active preparation" };
+         Effect.Ignore)
+    | Preparation_artifact ->
+      let cursor =
+        Option.bind (Host.focused session.host) ~f:(fun tile ->
+          (Host.local session.host tile.id).cursor)
+      in
+      (match
+         Terminal_presentation.Preparation_view.selected session.host.preparation cursor
+         |> function
+         | Some a ->
+           Option.bind a.Preparation.Attempt.bundle ~f:(fun b -> List.hd b.artifacts)
+         | None ->
+           Option.bind (current_generation session) ~f:(fun j -> List.hd j.artifacts)
+       with
+       | None ->
+         session.host
+         <- { session.host with notice = "No published bundle artifact for this attempt" };
+         Effect.Ignore
+       | Some id ->
+         session.selected_artifact <- Some id;
+         async (fun () -> inspect_artifact session))
+    | Preparation_open_artifact id ->
+      session.selected_artifact <- Some id;
+      async (fun () -> inspect_artifact session)
     | (Prepare_stage _ | Prepare_endpoint _) as preparation ->
       let intent, run =
         match preparation with
@@ -6157,6 +6360,7 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
                         ~run)
                  |> Option.exists ~f:(function
                    | Timing_analysis _ -> true
+                   | Elaboration_preparation -> false
                    | Physical_stage stage -> String.equal stage.id "timing")))) ->
     (match Host.focused host, captured with
      | Some tile, Some capture ->
@@ -6165,7 +6369,7 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
   | Host.Activate ->
     Option.iter (Host.focused host) ~f:(fun tile ->
       if List.mem
-           [ "stage-checklist"; "live-status"; "planned-run" ]
+           [ "preparation"; "stage-checklist"; "live-status"; "planned-run" ]
            tile.kind
            ~equal:String.equal
       then
@@ -6205,6 +6409,12 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
          || host.editing_filter
          || host.prefix > 0 -> Some Effect.Ignore
   | Host.No_effect when workspace_navigation -> Some Effect.Ignore
+  | Host.No_effect
+    when Option.exists (Host.focused session.host) ~f:(fun tile ->
+           String.equal tile.kind "preparation")
+         && Option.exists input ~f:(function
+           | Character ('j' | 'k') | Next | Previous | Enter -> true
+           | _ -> false) -> Some Effect.Ignore
   | Host.No_effect
     when Option.exists (Host.focused session.host) ~f:(fun tile ->
            Testing_workspace.is_pane tile.kind)
@@ -6316,6 +6526,15 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
      | Some (Character 'h')
        when Option.exists (Host.focused session.host) ~f:(fun tile ->
               Host.simulation_kind tile.kind) -> dispatch "simulation.history"
+     | Some (Character 'r')
+       when Option.exists (Host.focused session.host) ~f:(fun t ->
+              String.equal t.kind "preparation") -> dispatch "preparation.prepare"
+     | Some (Character 'x')
+       when Option.exists (Host.focused session.host) ~f:(fun t ->
+              String.equal t.kind "preparation") -> dispatch "preparation.cancel"
+     | Some (Character 'a')
+       when Option.exists (Host.focused session.host) ~f:(fun t ->
+              String.equal t.kind "preparation") -> dispatch "preparation.artifact"
      | Some (Character 't') -> dispatch "project.test"
      | Some (Character 'i') -> dispatch "project.discover"
      | Some (Character 's') -> dispatch "synthesis.cycle-sort"
@@ -6345,6 +6564,8 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
                |> Option.map ~f:(fun stage -> stage, run))))
        in
        (match selected, captured with
+        | Some (Elaboration_preparation, _), Some capture ->
+          Some (execute_host session capture Prepare_project ~exit)
         | Some (Physical_stage stage, run), Some capture ->
           session.host
           <- { session.host with
@@ -6419,6 +6640,7 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
                || Host.simulation_kind tile.kind
                || String.equal tile.kind "synthesis"
                || String.equal tile.kind "live-status"
+               || String.equal tile.kind "preparation"
                || String.equal tile.kind "planned-run"
                || String.equal tile.kind "stage-checklist" ->
           scroll_host session (if Char.equal ch '[' then -1 else 1)
@@ -7011,6 +7233,13 @@ let tui session ~exit ~dimensions graph =
   let handle (event : Event.t) =
     if Host.is_interrupt event
     then exit ()
+    else if Option.is_some session.artifact_view
+            && Option.exists (Host.decode_event event) ~f:(function
+              | Host.Escape -> true
+              | _ -> false)
+    then (
+      session.artifact_view <- None;
+      Effect.Ignore)
     else (
       let hosted =
         if session.waveform_visible

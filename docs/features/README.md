@@ -83,6 +83,12 @@ not claimed. WB-048 remains delivered.
 
 ## How this directory works
 
+**2026-10-25:** WB-004 is **delivered**, awaiting owner acceptance. EDA-less
+source build and selected-flow bundle emission have a preparation tile and an
+Elaboration checklist row before Synthesis. Real FIFO acceptance verified source
+build, publication/reuse and artifact reads without provider/EDA execution.
+[Controls, configuration and verification](../project_preparation.md).
+
 **2026-10-25:** WB-002's owner-selected evidence freshness and context relationship
 indicators are **closed, owner-accepted**, including the Overview rendering correction.
 Implemented hierarchy navigation markers' remaining real-example integration and

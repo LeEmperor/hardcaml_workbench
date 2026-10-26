@@ -31,3 +31,19 @@
  (deps fs2_provider.py)
  (action
   (run %{test} %{dep:fs2_provider.py})))
+
+(test
+ (name test_preparation)
+ (modules test_preparation)
+ (libraries
+  async
+  core
+  core_unix
+  core_unix.command_unix
+  yojson
+  hardcaml_workbench_backend
+  hardcaml_workbench_adapters
+  hardcaml_workbench_project_integration
+  hardcaml_workbench_protocol)
+ (preprocess
+  (pps ppx_jane)))

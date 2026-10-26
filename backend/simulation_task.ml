@@ -7,6 +7,8 @@ open Hardcaml_workbench_protocol
 type t =
   { invocation : Hardcaml_workbench_adapters.Dune_adapter.Invocation.t
   ; timeout_seconds : int
+  (** Runs when dequeued, before process creation; failure prevents launch. *)
+  ; preflight : unit -> unit Deferred.t
   ; start : unit -> unit
   ; stdout : string -> unit
   ; poll : unit -> bool
@@ -19,6 +21,7 @@ type t =
 let released : t =
   { invocation = { executable = ""; argv = []; cwd = "/"; environment = Inherit_daemon }
   ; timeout_seconds = 1
+  ; preflight = (fun () -> return ())
   ; start = (fun () -> ())
   ; stdout = (fun _ -> ())
   ; poll = (fun () -> true)

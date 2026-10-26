@@ -3,7 +3,7 @@ id: WB-004
 title: Core build, bundle emission and verification status
 category: project
 feature_sets: [FS0, FS1, FS2]
-status: partial
+status: delivered
 kind: enhancement
 priority: P2
 severity: n/a
@@ -25,8 +25,8 @@ Original size: **Ticket**. Show core build, bundle-emission and verification
 status in a useful tile, optionally with a stage-checklist-like presentation.
 
 **Owner addition, 2026-10-20:** bundle emission / OCaml elaboration should be its
-own stage. It is now a named checklist row ahead of `synthesis`, rather than only
-part of a separate preparation tile.
+own stage. The requested design includes a named checklist row ahead of `synthesis`,
+rather than only part of a separate preparation tile. Both are now implemented.
 
 ## Current baseline
 Generic build/test jobs and project-driver RTL generation already exist.
@@ -67,8 +67,51 @@ Exclude creation of bundle producers or additional simulation adapters.
 Default: one preparation tile with explicit capability gaps, plus the elaboration
 row on the checklist (2026-10-20). Agree that row's order with
 [WB-069](../evidence/WB-069-timing-checklist-stage.md)'s timing row.
-TBD: which existing project/provider operation authoritatively means “bundle emitted”;
-do not invent a universal bundle lifecycle before that contract is selected.
+Selected contract: explicitly configured source build followed by the project's
+versioned `flow emit` operation, validating the exact selected methodology and bundle.
+Generic RTL generation remains separately labelled evidence, not ASIC publication.
+
+## Scope clarification — 2026-10-25
+
+The owner intends an explicitly EDA-less preparation stage: build the OCaml/project
+executable with Dune as needed, then run elaboration and Verilog/bundle emission,
+without launching synthesis or subsequent physical implementation. Build and emission
+retain separate outcomes even when orchestrated as one user-facing stage; build
+success alone does not establish emitted output. Building a current executable must
+not silently invoke a stale pinned deployment instead.
+
+Existing `hardcaml_asic` emission APIs already support EDA-less emission. The example's
+standalone `project emit --json` uses its fixed project declaration; emitting the exact
+selected named flow/profile now uses the example's new emission-only `flow emit`
+path through existing methodology preparation/publication machinery. Future
+resource-mapping/preparation composition
+should retain distinct operation identities and outcomes.
+
+Durable preparation receipts/history across daemon restart and discovery/adoption of
+externally launched emission are explicitly deferred to the
+[preparation-history backlog](../../backlog/README.md#preparation-history-and-external-emission-adoption).
+They do not block WB-004's initial supervised operation and UI. Missing session
+history must not imply that an operation was never run.
+
+## Delivery and verification — 2026-10-25
+
+Implemented, awaiting owner acceptance. See [controls, configuration and evidence](../../project_preparation.md).
+
+- Source build and selected-flow emission are separate supervised jobs with exact
+  inputs, outcomes, logs and bundle artifacts; no stale pinned executable fallback.
+- Compact preparation tile and typed Elaboration checklist item precede physical
+  Synthesis. Unavailable, unrequested/session-unknown, active, failed, cancelled and
+  completed states remain distinct, with prior attempts inspectable.
+- Project test-command results are labelled as process outcomes. Generic RTL
+  observations retain target/configuration identity and never claim ASIC publication.
+- Snapshot/action fencing, config revalidation, submission deduplication, cancellation,
+  receipt/manifest/file validation and session-only history are covered by tests.
+- Full combined build/tests/lint and final native HTTP/PTY checks passed. Real FIFO
+  source build/emission, exact profile/overrides, 25 imported artifact reads, verified
+  reuse and mismatch rejection passed with zero traced provider/EDA executions.
+- No core `hardcaml_asic` change was needed; the example exposes existing methodology
+  preparation/publication through the new CLI. Existing resource-preparation edits
+  were preserved.
 
 ## References
 - [Driver operations](../../../project_integration/driver_protocol.ml)

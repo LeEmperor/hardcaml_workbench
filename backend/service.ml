@@ -106,6 +106,7 @@ type t =
   ; workspace_service : Workspace_service.t
   ; asic_service : Asic_service.t
   ; simulation_service : Simulation_service.t
+  ; preparation_service : Preparation_service.t
   ; projects_by_key : (string, project_session) Hashtbl.t
   ; projects : (Project_id.t, project_session) Hashtbl.t
   ; root_queues : (string, job_entry Queue.t) Hashtbl.t
@@ -158,6 +159,8 @@ let create
   ?action_invocation
   ?(driver_invocation = Driver_adapter.describe_invocation)
   ?(generate_rtl_invocation = Driver_adapter.generate_rtl_invocation)
+  ?preparation_build_invocation
+  ?preparation_emit_invocation
   ~instance_id
   ~log_dir
   ()
@@ -192,6 +195,11 @@ let create
           ~state_dir
           ()
     ; simulation_service = Simulation_service.create ~state_dir
+    ; preparation_service =
+        Preparation_service.create
+          ?build:preparation_build_invocation
+          ?emit:preparation_emit_invocation
+          ()
     ; projects_by_key = Hashtbl.create (module String)
     ; projects = Project_id.Table.create ()
     ; root_queues = Hashtbl.create (module String)
@@ -691,7 +699,8 @@ let finish_entry t (entry : job_entry) state status failure =
     };
   Ivar.fill_if_empty entry.finished ();
   match entry.operation with
-  | Simulation_task _ -> prune_simulation_jobs t entry.session.root
+  | Simulation_task _ when String.equal entry.job.kind.namespace "simulation" ->
+    prune_simulation_jobs t entry.session.root
   | _ -> ()
 ;;
 
@@ -1169,9 +1178,23 @@ let rec run_next t root =
             | Error (Generation_unsupported reason | Generation_invalid reason) ->
               Error reason)
        in
+       let%bind preflight =
+         match entry.operation with
+         | Simulation_task task ->
+           let%map result = Monitor.try_with_or_error task.preflight in
+           Result.map_error result ~f:Error.to_string_hum
+         | _ -> return preflight
+       in
+       let preflight =
+         if entry.cancel_requested || t.shutting_down
+         then Error "Job cancelled before launch"
+         else preflight
+       in
        match preflight with
        | Error reason ->
-         finish_entry t entry Failed None (Some reason);
+         if entry.cancel_requested || t.shutting_down
+         then finish_entry t entry Cancelled None None
+         else finish_entry t entry Failed None (Some reason);
          let%bind () = Writer.close entry.log_writer in
          let%bind () =
            match entry.operation with
@@ -1292,7 +1315,10 @@ let rec run_next t root =
                   in
                   if Poly.equal result `Timeout && not (Ivar.is_full entry.finished)
                   then (
-                    task.fail "Simulation provider timeout";
+                    task.fail
+                      (if String.equal entry.job.kind.namespace "preparation"
+                       then "Preparation process timeout"
+                       else "Simulation provider timeout");
                     begin_escalation t entry process))
              | _ -> ());
             if entry.cancel_requested || t.shutting_down
@@ -1301,6 +1327,12 @@ let rec run_next t root =
             let stderr = drain t entry Stderr (Process.stderr process) in
             let%bind status = Process.wait process in
             let%bind () = Deferred.all_unit [ stdout; stderr; entry.log_tail ] in
+            if String.equal entry.job.kind.namespace "preparation"
+            then
+              update_job
+                t
+                entry
+                { entry.job with exit_status = Some (exit_status status) };
             polling := false;
             let%bind () =
               match entry.operation with
@@ -2243,6 +2275,185 @@ let simulation t (request : Simulation.Request.t) =
          ~schedule
          ~cancel
          ~verify_asic
+         request.operation)
+;;
+
+let preparation t (request : Preparation.Request.t) =
+  match check_instance t request.instance_id with
+  | Error error -> return (Error error)
+  | Ok () when t.shutting_down -> return (error Conflict "Daemon is shutting down")
+  | Ok () ->
+    (match Hashtbl.find t.projects request.project with
+     | None -> return (error Not_found "Unknown project")
+     | Some session ->
+       let schedule ~name ~cancelled (task : Simulation_task.t) =
+         let id = mint_job_id t in
+         let job =
+           Job.create
+             ~id
+             ~kind:{ namespace = "preparation"; name }
+             ~project:request.project
+             ~created_at:(Timestamp.of_time_ns (Time_ns.now ()))
+         in
+         let log_path = Filename.concat t.log_dir (Job_id.to_string id ^ ".log") in
+         let%map log_writer = Writer.open_file ~append:true ~perm:0o600 log_path in
+         let task =
+           { task with
+             drain =
+               (fun () ->
+                 let entry = Hashtbl.find_exn t.jobs id in
+                 match entry.job.exit_status with
+                 | Some (Job.Exit_status.Exited 0)
+                   when (not entry.cancel_requested) && not t.shutting_down ->
+                   task.drain ()
+                 | _ -> return ())
+           }
+         in
+         let entry =
+           { operation = Simulation_task task
+           ; session
+           ; job
+           ; log_path
+           ; log_writer
+           ; log_records = Hashtbl.create (module Int)
+           ; log_position = 0
+           ; next_log_offset = 0
+           ; log_tail = return ()
+           ; stdout_parts = []
+           ; stdout_bytes = 0
+           ; stdout_overflow = false
+           ; process = None
+           ; cancel_requested = false
+           ; escalation_started = false
+           ; escalation_finished = Ivar.create ()
+           ; finished = Ivar.create ()
+           ; source_start = None
+           }
+         in
+         Hashtbl.set t.jobs ~key:id ~data:entry;
+         emit t (Job_upsert job);
+         if cancelled () || t.shutting_down
+         then (
+           finish_entry t entry Cancelled None None;
+           don't_wait_for (Writer.close log_writer))
+         else (
+           let queue =
+             Hashtbl.find_or_add t.root_queues session.root ~default:Queue.create
+           in
+           Queue.enqueue queue entry;
+           if not (Hash_set.mem t.running_roots session.root)
+           then (
+             Hash_set.add t.running_roots session.root;
+             run_next t session.root));
+         entry.job
+       in
+       let import ~job ~valid ~output_dir ~files =
+         let entry = Hashtbl.find_exn t.jobs job in
+         let copied = ref [] in
+         let%bind result =
+           Monitor.try_with_or_error (fun () ->
+             Deferred.List.map files ~how:`Sequential ~f:(fun (file, expected_hash) ->
+               let id = mint_artifact_id t in
+               let destination =
+                 Filename.concat t.artifact_dir (Artifact_id.to_string id ^ ".content")
+               in
+               let%bind copied_file =
+                 In_thread.run (fun () ->
+                   copy_output_file
+                     ~output_dir
+                     ~source:(Filename.concat output_dir file)
+                     ~destination
+                     ~max_bytes:(Some (16 * 1024 * 1024)))
+               in
+               let size = Or_error.ok_exn copied_file in
+               copied := destination :: !copied;
+               let%map () =
+                 In_thread.run (fun () ->
+                   if not
+                        (String.equal
+                           expected_hash
+                           (Preparation_receipt.sha256 (In_channel.read_all destination)))
+                   then failwith "Bundle bytes changed during artifact import")
+               in
+               let created_at = Timestamp.of_time_ns (Time_ns.now ()) in
+               let provenance : Provenance.t =
+                 { project_root = session.project.root
+                 ; target = None
+                 ; configuration = None
+                 ; build = None
+                 ; run = None
+                 ; generating_job = job
+                 ; requested_tools = []
+                 ; actual_tools =
+                     [ { tool = "dune"; version = Some session.summary.dune_version } ]
+                 ; environment =
+                     [ { component = "project-environment"
+                       ; identity = Some session.summary.provenance
+                       }
+                     ]
+                 ; source =
+                     Provenance.Source_identity.unknown
+                       ~reason:"Exact source evidence is in the bundle manifest"
+                 ; created_at
+                 }
+               in
+               let artifact : Artifact.t =
+                 { id
+                 ; kind =
+                     { namespace = "preparation"
+                     ; name = "bundle-file"
+                     ; role = Report
+                     ; media = None
+                     }
+                 ; project = request.project
+                 ; target = None
+                 ; configuration = None
+                 ; generating_job = job
+                 ; build = None
+                 ; run = None
+                 ; availability = Available
+                 ; metadata =
+                     { display_name = file
+                     ; description =
+                         Some "Emitted bundle input (not physical execution evidence)"
+                     ; size_in_bytes = Some size
+                     ; provenance
+                     }
+                 }
+               in
+               { artifact; path = destination }))
+         in
+         match result with
+         | Error error ->
+           let%map () = Deferred.List.iter !copied ~how:`Sequential ~f:cleanup_path in
+           Error error
+         | Ok _ when entry.cancel_requested || t.shutting_down || not (valid ()) ->
+           let%map () = Deferred.List.iter !copied ~how:`Sequential ~f:cleanup_path in
+           Or_error.error_string "Preparation cancelled or failed during import"
+         | Ok artifacts ->
+           List.iter artifacts ~f:(fun artifact ->
+             Hashtbl.set t.artifacts ~key:artifact.artifact.id ~data:artifact;
+             emit t (Artifact_upsert artifact.artifact));
+           let ids = List.map artifacts ~f:(fun a -> a.artifact.id) in
+           update_job t entry { entry.job with artifacts = ids };
+           return (Ok ids)
+       in
+       Preparation_service.handle
+         t.preparation_service
+         ~root:session.root
+         ~project_key:session.key
+         ~environment:session.environment
+         ~schedule
+         ~import
+         ~get_job:(fun id -> Option.map (Hashtbl.find t.jobs id) ~f:(fun e -> e.job))
+         ~wait:(fun id ->
+           let entry = Hashtbl.find_exn t.jobs id in
+           let%map () = Ivar.read entry.finished in
+           entry.job)
+         ~cancel:(fun id ->
+           match Hashtbl.find t.jobs id with
+           | None -> return ()
+           | Some e -> cancel_entry t e)
          request.operation)
 ;;
 

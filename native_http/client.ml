@@ -205,3 +205,12 @@ let simulation t request =
     ~response_of_sexp:Simulation.Response.t_of_sexp
     request
 ;;
+
+let preparation t request =
+  post
+    t
+    ~path:Preparation.rpc_path
+    ~sexp_of_request:Preparation.Request.sexp_of_t
+    ~response_of_sexp:Preparation.Response.t_of_sexp
+    request
+;;

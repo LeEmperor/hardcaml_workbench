@@ -51,7 +51,7 @@ def pane_rect(screen, title):
 
 def sidebar_geometry(screen, check):
     rects = {title: pane_rect(screen, title) for title in (
-        'session', 'runs', 'stage checklist', 'synthesis', 'timing',
+        'session', 'runs', 'stage checklist', 'preparation', 'synthesis', 'timing',
         'placement', 'routing', 'checks', 'finalization', 'planned-run')}
     session, runs, stages, plan = (rects[k] for k in ('session', 'runs', 'stage checklist', 'planned-run'))
     check(abs((session[2] - session[0]) - screen.width / 3) <= 1,
@@ -62,12 +62,12 @@ def sidebar_geometry(screen, check):
     check(abs((stages[3] - stages[1]) - (plan[3] - plan[1])) <= 1,
           'Checklist and planned run divide remaining sidebar approximately in half')
     previous = session[1]
-    for title in ('synthesis', 'timing', 'placement', 'routing', 'checks', 'finalization'):
+    for title in ('preparation', 'synthesis', 'timing', 'placement', 'routing', 'checks', 'finalization'):
         left, top, right, bottom = rects[title]
         check(left == session[2] and right == screen.width and top == previous,
               'Full-width right stack order and zero gutter: ' + title)
         previous = bottom
-    check(previous == plan[3], 'Six right domains and left sidebar finish at the same row')
+    check(previous == plan[3], 'Preparation, six right domains and left sidebar finish at the same row')
     values = list(rects.values())
     check(all(a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1]
               for i, a in enumerate(values) for b in values[i + 1:]),
@@ -115,7 +115,8 @@ def acceptance(t, check, http, runs, presets):
         check(label in full_runs.text(), 'Zoom preserves the complete distinguishable run label: ' + label)
     t.command('Unzoom workspace')
     stage_names = ['Synthesis', 'Floorplan', 'Placement', 'CTS', 'Routing', 'Signoff']
-    strip = [line for line in map(composition.status_text, pane_body(overview_screen, 'stage checklist'))
+    strip = [' '.join(line.split()) for line in map(composition.status_text, pane_body(overview_screen, 'stage checklist'))]
+    strip = [line for line in strip
              if ': completed' in line and any(name in line for name in stage_names)]
     check(all(any(name + ': completed' in line for line in strip) for name in stage_names), 'Vertical checklist exposes all six explicit stage outcomes')
     check(all(sum(name + ': completed' in line for name in stage_names) == 1 for line in strip), 'One explicit stage per checklist row')

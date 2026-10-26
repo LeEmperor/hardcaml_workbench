@@ -159,6 +159,7 @@ let%test_unit "stock navigation follows layout subtrees even with shuffled Runs 
         ; "run-selector"
         ; "stage-checklist"
         ; "planned-run"
+        ; "preparation"
         ; "synthesis"
         ; "timing"
         ; "placement"
@@ -805,7 +806,7 @@ let%test_unit "actual terminal content bounds at80x24,120x40,large" =
       match Layout.compute d ~width ~height ~kinds:(kinds d) with
       | Compact -> assert (width = 80)
       | Grid cells ->
-        assert (List.length cells = 11);
+        assert (List.length cells = 12);
         List.iteri cells ~f:(fun i (a : Workspace.Geometry.t) ->
           assert (a.x >= 0 && a.y >= 0 && a.width > 0 && a.height > 0);
           assert (a.x + a.width <= width && a.y + a.height <= height);
@@ -847,7 +848,14 @@ let%test_unit "one-third sidebar splits stages and plan above six full-width dom
     assert (Int.abs (stages.height - plan.height) <= 1);
     let bottom = ref session.y in
     List.iter
-      [ "synthesis"; "timing"; "placement"; "routing"; "checks"; "finalization" ]
+      [ "preparation"
+      ; "synthesis"
+      ; "timing"
+      ; "placement"
+      ; "routing"
+      ; "checks"
+      ; "finalization"
+      ]
       ~f:(fun kind ->
         let g = cell kind in
         assert (g.x = 40 && g.width = 80 && g.height >= 5 && g.y = !bottom);
@@ -871,7 +879,7 @@ let%test_unit "six-row selector preserves readable stages and balanced plan at12
     | Grid cells ->
       let selector = List.nth_exn cells 2
       and stages = List.nth_exn cells 3
-      and plan = List.nth_exn cells 10 in
+      and plan = List.nth_exn cells 11 in
       assert (selector.height = selector_height);
       assert (stages.height >= 10 && plan.height >= 10);
       assert (Int.abs (stages.height - plan.height) <= 1);

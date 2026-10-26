@@ -47,6 +47,7 @@ let create ~application_version ~instance_id ~service =
             ; "workspace"
             ; "asic"
             ; "simulation"
+            ; Preparation.capability
             ]
         }
     ; service
@@ -308,6 +309,14 @@ let handle_post t ~path ~headers ~body =
                 ~execution_timing_header_value:
                   (Cohttp.Header.get headers Execution_timing.header)
                 ~header_value:(Cohttp.Header.get headers Asic.Evidence_metadata.header)))
+      | Ok body when String.equal path Preparation.rpc_path ->
+        (match decode body Preparation.Request.t_of_sexp with
+         | Error error ->
+           boundary_error `Bad_request error.kind "malformed preparation request"
+         | Ok request ->
+           operation_response
+             (Service.preparation t.service request)
+             Preparation.Response.sexp_of_t)
       | Ok body when String.equal path Simulation.rpc_path ->
         (match decode body Simulation.Request.t_of_sexp with
          | Error error ->
@@ -353,7 +362,8 @@ let callback t ~body _peer request =
          | "/api/v1/read-hierarchy"
          | "/api/v1/workspace"
          | "/api/v1/asic"
-         | "/api/v1/simulation" ) ) -> handle_post t ~path ~headers ~body
+         | "/api/v1/simulation"
+         | "/api/v1/preparation" ) ) -> handle_post t ~path ~headers ~body
      | _ -> boundary_error `Not_found Not_found "unknown endpoint or protocol version")
 ;;
 

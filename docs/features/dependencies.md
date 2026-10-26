@@ -70,8 +70,10 @@ requires explicit estimate reconciliation, not addition of parent and child tota
 ## Decisions that deserve owner review first
 
 1. WB-009: exact run/stage/provider/filter state behind the reported empty Timing pane.
-2. WB-004/008: what “bundle emission,” “verification” and an OOC top mean in the
-   project's actual public commands and constraints.
+2. WB-004's initial meaning is now selected and implemented: source build plus
+   EDA-less selected-flow `flow emit`, with verification labelled as the project
+   test-command outcome. Exact-bundle verification/resource-preparation composition
+   remain later work; WB-008 still needs the project's OOC-top command semantics.
 3. WB-017: browsing files versus editing a project-owned membership list; which
    build systems actually require explicit membership?
 4. WB-020/028: first supported data format and native-terminal versus graphical surface.

@@ -60,6 +60,12 @@ type action =
   | Load_hierarchy of W.Tile_id.t
   | Hierarchy_detail of W.Tile_id.t
   | Discover_asic
+  | Prepare_project
+  | Edit_preparation of string * string
+  | Select_preparation of Asic.Selection.t
+  | Cancel_preparation
+  | Preparation_artifact
+  | Preparation_open_artifact of Artifact_id.t
   | Asic of Asic.Operation.t
   | Edit_plan of string * string
   | Edit_finalization of Run_ref.t
@@ -130,6 +136,7 @@ type capture =
 
 type argument =
   | Plan_endpoint of string * string
+  | Preparation_inputs of string * string
   | Finalization_attempt of Run_ref.t
   | Acceptance of Run_ref.t * string * string
   | Simulation_selection of W.Tile_id.t * string * string * Simulation_view.Form.t
@@ -178,6 +185,8 @@ type t =
   ; timing_navigation_notice : string option
   ; stage_generation : int
   ; remembered_selection : Asic.Selection.t option
+  ; preparation : Preparation.Snapshot.t option
+  ; preparation_rtl_scope : Preparation_view.Rtl_scope.t option
   }
 
 let empty =
@@ -211,6 +220,8 @@ let empty =
   ; timing_navigation_notice = None
   ; stage_generation = 0
   ; remembered_selection = None
+  ; preparation = None
+  ; preparation_rtl_scope = None
   }
 ;;
 
@@ -287,7 +298,9 @@ let missing_hierarchy_guidance ~(project : Project.t option) ~target ~configurat
        "no hardware driver integration; configure a project-side hardware driver, then \
         refresh hardware integration"
      | Unusable { reason } ->
-       "hardware driver unavailable: " ^ reason ^ "; fix it, then refresh hardware integration"
+       "hardware driver unavailable: "
+       ^ reason
+       ^ "; fix it, then refresh hardware integration"
      | Available _ ->
        (match Option.bind target ~f:(Project.target project) with
         | None ->
@@ -297,20 +310,24 @@ let missing_hierarchy_guidance ~(project : Project.t option) ~target ~configurat
         | Some target ->
           let configurations = Project.configurations_for_target project target.id in
           if Option.exists configuration ~f:(fun id ->
-               List.exists configurations ~f:(fun config -> Configuration_id.equal id config.id))
+               List.exists configurations ~f:(fun config ->
+                 Configuration_id.equal id config.id))
           then "generate RTL for selected target/configuration, then r"
           else if List.is_empty configurations
-          then "no hardware configurations discovered for selected target; refresh hardware integration"
+          then
+            "no hardware configurations discovered for selected target; refresh hardware \
+             integration"
           else "select a discovered configuration for the selected hardware target"))
 ;;
 
-let%test_unit "missing hierarchy guidance requires a usable driver and matching discovered \
-               target/configuration"
+let%test_unit "missing hierarchy guidance requires a usable driver and matching \
+               discovered target/configuration"
   =
   let project = Baseline_fixture.project in
   let target = List.hd_exn project.targets in
   let configuration = List.hd_exn (Project.configurations_for_target project target.id) in
-  let guidance ?(target = Some target.id) ?(configuration = Some configuration.id) project =
+  let guidance ?(target = Some target.id) ?(configuration = Some configuration.id) project
+    =
     missing_hierarchy_guidance ~project ~target ~configuration
   in
   assert (
@@ -330,7 +347,9 @@ let%test_unit "missing hierarchy guidance requires a usable driver and matching 
   let unusable =
     { project with
       integration =
-        { project.integration with driver = Unusable { reason = "typed discovery failure" } }
+        { project.integration with
+          driver = Unusable { reason = "typed discovery failure" }
+        }
     }
   in
   assert (
@@ -351,7 +370,8 @@ let%test_unit "missing hierarchy guidance requires a usable driver and matching 
         ~configuration:(Some (Configuration_id.of_string "removed-configuration"))
         (Some project)
     ]
-    ~f:(fun message -> assert (not (String.is_substring message ~substring:"generate RTL")));
+    ~f:(fun message ->
+      assert (not (String.is_substring message ~substring:"generate RTL")));
   let other =
     List.find_exn project.configurations ~f:(fun config ->
       not (Target_id.equal config.target target.id))
@@ -1526,18 +1546,17 @@ let blank_workspace_mutation (registry : W.Snapshot.t) ~window =
     { window; name = available 1; context = registry.main_context }
 ;;
 
-(** Only an acknowledged single mutation may drive creation navigation. A refresh after
-    a conflict is not a creation receipt, even if another client added a workspace. *)
+(** Only an acknowledged single mutation may drive creation navigation. A refresh after a
+    conflict is not a creation receipt, even if another client added a workspace. *)
 let created_workspace ~(before : W.Snapshot.t) ~(after : W.Snapshot.t) =
-  if not (W.Session_id.equal before.session_id after.session_id)
+  if (not (W.Session_id.equal before.session_id after.session_id))
      || after.revision <> before.revision + 1
   then None
   else (
     match
       List.filter after.workspaces ~f:(fun w ->
         not
-          (List.exists before.workspaces ~f:(fun old ->
-             W.Workspace_id.equal old.id w.id)))
+          (List.exists before.workspaces ~f:(fun old -> W.Workspace_id.equal old.id w.id)))
     with
     | [ workspace ] -> Some workspace.id
     | _ -> None)
@@ -3243,6 +3262,23 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
   let base =
     [ command
         ?unavailable:needs_project
+        "preparation.prepare"
+        "Prepare elaboration bundle (EDA-less)"
+        "build flow emit"
+        Prepare_project
+    ; command
+        ?unavailable:needs_project
+        "preparation.cancel"
+        "Cancel preparation"
+        "stop build emission"
+        Cancel_preparation
+    ; command
+        "preparation.artifact"
+        "Inspect preparation bundle artifact"
+        "publication output"
+        Preparation_artifact
+    ; command
+        ?unavailable:needs_project
         "project.build"
         "Build project"
         "dune build"
@@ -3422,6 +3458,7 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
         [ "live-status"
         ; "hierarchy"
         ; "workspace-tabs"
+        ; "preparation"
         ; "stage-checklist"
         ; "planned-run"
         ; "run-selector"
@@ -4466,7 +4503,7 @@ let input t event ~commands : t * effect =
           when match p.argument with
                | Some (Finalization_attempt _ | Acceptance _ | Simulation_selection _) ->
                  String.length p.query >= 4096
-               | None | Some (Plan_endpoint _) -> false ->
+               | None | Some (Plan_endpoint _ | Preparation_inputs _) -> false ->
           { t with notice = "Finalization reference is limited to 4096 bytes" }, No_effect
         | Character ch ->
           ( { t with palette = Some (palette_query p (p.query ^ String.of_char ch)) }
@@ -4509,7 +4546,7 @@ let input t event ~commands : t * effect =
           else if match p.argument with
                   | Some (Finalization_attempt _ | Acceptance _ | Simulation_selection _)
                     -> String.length p.query > reference_limit t
-                  | None | Some (Plan_endpoint _) -> false
+                  | None | Some (Plan_endpoint _ | Preparation_inputs _) -> false
           then
             ( { t with notice = "Finalization reference is limited to 4096 bytes" }
             , No_effect )
@@ -4531,14 +4568,20 @@ let input t event ~commands : t * effect =
                    | `Launch selection ->
                      Simulation
                        (tile, Launch { submission_key; discovery_digest; selection }))
-                | Plan_endpoint (flow, profile) ->
+                | (Plan_endpoint (flow, profile) | Preparation_inputs (flow, profile)) as
+                  argument ->
                   let args =
                     String.split (String.strip p.query) ~on:' '
                     |> List.filter ~f:(Fn.non String.is_empty)
                   in
                   let endpoint = List.hd_exn args
                   and assignments = List.tl_exn args in
-                  Asic (Asic.Operation.Plan { flow; profile; endpoint; assignments }))
+                  let selection =
+                    { Asic.Selection.flow; profile; endpoint; assignments }
+                  in
+                  (match argument with
+                   | Preparation_inputs _ -> Select_preparation selection
+                   | _ -> Asic (Asic.Operation.Plan selection)))
             in
             match operation with
             | Ok operation -> { t with palette = None }, Execute (p.capture, operation)
@@ -4662,6 +4705,46 @@ let input t event ~commands : t * effect =
             | _ -> 1
           in
           browse_workspaces { t with prefix = 0 } tile.id ~delta, No_effect
+        | (Character 'j' | Next | Character 'k' | Previous), _
+          when Option.exists (focused t) ~f:(fun tile ->
+                 String.equal tile.kind "preparation") ->
+          let tile = Option.value_exn (focused t) in
+          let l = local t tile.id in
+          let all = Preparation_view.attempts t.preparation in
+          let index =
+            Option.bind l.cursor ~f:(fun id ->
+              List.findi all ~f:(fun _ a -> String.equal a.id id))
+            |> Option.value_map ~default:0 ~f:fst
+          in
+          let delta =
+            match event with
+            | Character 'k' | Previous -> -1
+            | _ -> 1
+          in
+          let cursor =
+            List.nth all (Int.max 0 (Int.min (List.length all - 1) (index + delta)))
+            |> Option.map ~f:(fun a -> a.Preparation.Attempt.id)
+          in
+          ( set_local t tile.id { l with cursor; utility_detail = true; scroll = 0 }
+          , No_effect )
+        | Character (('r' | 'x' | 'a') as key), _
+          when Option.exists (focused t) ~f:(fun tile ->
+                 String.equal tile.kind "preparation") ->
+          let action =
+            match key with
+            | 'r' -> Prepare_project
+            | 'x' -> Cancel_preparation
+            | _ -> Preparation_artifact
+          in
+          (match capture t with
+           | Some captured -> t, Execute (captured, action)
+           | None -> t, No_effect)
+        | Enter, _
+          when Option.exists (focused t) ~f:(fun tile ->
+                 String.equal tile.kind "preparation") ->
+          let tile = Option.value_exn (focused t) in
+          let l = local t tile.id in
+          set_local t tile.id { l with utility_detail = true; scroll = 0 }, No_effect
         | Enter, _
           when Option.exists (focused t) ~f:(fun tile ->
                  String.equal tile.kind "workspace-tabs") ->
@@ -5163,6 +5246,7 @@ let%test_unit "persisted Runs-last Overview traverses the complete tree and wrap
     ; "run-selector"
     ; "stage-checklist"
     ; "planned-run"
+    ; "preparation"
     ; "synthesis"
     ; "timing"
     ; "placement"
@@ -6031,7 +6115,8 @@ let%test_unit "blank workspaces have unique names and IDs, share Main, and accep
     let host, _ = press host (Text query) in
     let palette = Option.value_exn host.palette in
     let index, _ =
-      List.findi_exn (matches palette) ~f:(fun _ command -> String.equal command.title query)
+      List.findi_exn (matches palette) ~f:(fun _ command ->
+        String.equal command.title query)
     in
     let host = { host with palette = Some { palette with index } } in
     press host Enter
@@ -6073,9 +6158,7 @@ let%test_unit "blank workspaces have unique names and IDs, share Main, and accep
   let second =
     apply populated (blank_workspace_mutation populated ~window:original.window)
   in
-  let second_id =
-    Option.value_exn (created_workspace ~before:populated ~after:second)
-  in
+  let second_id = Option.value_exn (created_workspace ~before:populated ~after:second) in
   assert (not (W.Workspace_id.equal id second_id));
   assert (String.equal (W.workspace second second_id).name "Workspace 2");
   let host = switch (switch (receive host second) second_id) id in
@@ -6083,9 +6166,7 @@ let%test_unit "blank workspaces have unique names and IDs, share Main, and accep
   let renamed =
     apply second (Rename_workspace { workspace = id; name = "Workspace 3" })
   in
-  let third =
-    apply renamed (blank_workspace_mutation renamed ~window:original.window)
-  in
+  let third = apply renamed (blank_workspace_mutation renamed ~window:original.window) in
   let third_id = Option.value_exn (created_workspace ~before:renamed ~after:third) in
   assert (String.equal (W.workspace third third_id).name "Workspace 1");
   assert (not (W.Workspace_id.equal id third_id));

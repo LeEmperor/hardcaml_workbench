@@ -52,8 +52,8 @@ type row =
   ; role : Role.t
   ; status : Status.t option
   ; indicator : Indicator.t option
-  (** Static semantic marker, separate from stage status and its running animation.
-      A status takes precedence so a row never acquires two indicators. *)
+  (** Static semantic marker, separate from stage status and its running animation. A
+      status takes precedence so a row never acquires two indicators. *)
   ; active : bool
   ; workspace : Workspace.Workspace_id.t option
   ; details : string list
@@ -219,8 +219,10 @@ let observed_stages ~asic ~run =
 type checklist_item =
   | Physical_stage of Asic.Stage.t
   | Timing_analysis of Asic.Summary.t option
+  | Elaboration_preparation
 
 let checklist_id = function
+  | Elaboration_preparation -> "preparation:elaboration"
   | Physical_stage s -> s.Asic.Stage.id
   | Timing_analysis _ -> "analysis:post-pnr-sta"
 ;;
@@ -257,22 +259,24 @@ let checklist_items ~asic ~run =
       timing :: List.map (s :: rest) ~f:(fun s -> Physical_stage s)
     | s :: rest -> Physical_stage s :: insert rest
   in
-  if List.exists stages ~f:(fun s -> String.equal s.Asic.Stage.id "timing")
-  then
-    List.map stages ~f:(fun s ->
-      let s =
-        if String.equal s.id "timing" && Option.is_none s.action
-        then (
-          let observed = Option.bind (execution ~asic ~run) ~f:(fun r -> r.selection) in
-          match
-            Stage_action.resolve ~stage:s ~remembered:None ~observed ~snapshot:asic
-          with
-          | Ok selection -> { s with action = Some selection }
-          | Error _ -> s)
-        else s
-      in
-      Physical_stage s)
-  else insert stages
+  Elaboration_preparation
+  ::
+  (if List.exists stages ~f:(fun s -> String.equal s.Asic.Stage.id "timing")
+   then
+     List.map stages ~f:(fun s ->
+       let s =
+         if String.equal s.id "timing" && Option.is_none s.action
+         then (
+           let observed = Option.bind (execution ~asic ~run) ~f:(fun r -> r.selection) in
+           match
+             Stage_action.resolve ~stage:s ~remembered:None ~observed ~snapshot:asic
+           with
+           | Ok selection -> { s with action = Some selection }
+           | Error _ -> s)
+         else s
+       in
+       Physical_stage s)
+   else insert stages)
 ;;
 
 let goal_label : Asic.Timing_analysis.Goal.t -> string = function
@@ -399,6 +403,17 @@ let analysis_row ?(decimal_places = 3) ~run ~selected summary =
 ;;
 
 let checklist_row ?now ~run ~selected = function
+  | Elaboration_preparation ->
+    row
+      ~status:Status.Unknown
+      ~active:selected
+      ~role:Muted
+      ~details:
+        [ "Current project preparation; independent of selected historical ASIC run"
+        ; "r: EDA-less preparation; Enter: read-only preparation history"
+        ]
+      "Elaboration"
+      "project preparation"
   | Physical_stage s -> asic_stage_row ?now ~run ~selected s
   | Timing_analysis summary ->
     let row = analysis_row ~run ~selected summary in
@@ -1619,11 +1634,13 @@ let%test_unit "summary freshness markers are typed, static and never stage verdi
           in
           render ~indicator_frames ~appearance ~attrs:(fun _ -> []) ~width ~height rows
         in
-        List.iter [ 0, 0; 1, 1; 24, 3; 80, 8 ] ~f:(fun (width, height) ->
-          let a = render_frame "A" width height in
-          let b = render_frame "B" width height in
-          assert (View.width a = width && View.height a = height);
-          assert (List.equal String.equal (plain_lines a) (plain_lines b)))));
+        List.iter
+          [ 0, 0; 1, 1; 24, 3; 80, 8 ]
+          ~f:(fun (width, height) ->
+            let a = render_frame "A" width height in
+            let b = render_frame "B" width height in
+            assert (View.width a = width && View.height a = height);
+            assert (List.equal String.equal (plain_lines a) (plain_lines b)))));
   (* A lifecycle status owns the single marker even if semantic metadata is present. *)
   let both = row ~status:Running ~indicator:Cached "Updating" "" in
   List.iter Appearance.Icons.all ~f:(fun icons ->

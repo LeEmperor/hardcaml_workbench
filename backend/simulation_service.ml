@@ -633,6 +633,7 @@ let run_task p (entry : entry) config ~environment =
         ~events_file
         ~artifact_dir
   ; timeout_seconds = config.Config.run_timeout_seconds
+  ; preflight = (fun () -> return ())
   ; start =
       (fun () ->
         reducer.attempt
@@ -719,6 +720,7 @@ let discover p config ~environment ~schedule =
         schedule ~name:"discover" ~reservation:None ~prepare:(fun _ ->
           { Simulation_task.invocation = Adapter.discover config ~root:p.root ~environment
           ; timeout_seconds = config.discovery_timeout_seconds
+          ; preflight = (fun () -> return ())
           ; start = (fun () -> ())
           ; stdout =
               (fun text ->

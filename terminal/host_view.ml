@@ -753,20 +753,25 @@ let checklist_preview host data tile =
       Option.bind
         (H.checklist_cursor (H.local host tile.id) ~run ~items)
         ~f:(fun item ->
-          let intent =
-            match item with
-            | Overview_tiles.Timing_analysis _ -> Stage_action.Fresh_endpoint "timing"
-            | Physical_stage stage -> Stage_action.Physical_stage stage
-          in
-          match
-            ( checklist_intent_selection host data run intent
-            , Option.bind data.asic ~f:(fun asic -> asic.preview) )
-          with
-          | Ok selection, Some preview
-            when Asic.Selection.equal selection preview.selection
-                 && Option.is_none host.stage_preparation
-                 && Planned_run.launchable host.planned_run preview -> Some preview
-          | _ -> None)))
+          match item with
+          | Overview_tiles.Elaboration_preparation -> None
+          | _ ->
+            let intent =
+              match item with
+              | Overview_tiles.Elaboration_preparation ->
+                Stage_action.Fresh_endpoint "__preparation_never_launch"
+              | Overview_tiles.Timing_analysis _ -> Stage_action.Fresh_endpoint "timing"
+              | Physical_stage stage -> Stage_action.Physical_stage stage
+            in
+            (match
+               ( checklist_intent_selection host data run intent
+               , Option.bind data.asic ~f:(fun asic -> asic.preview) )
+             with
+             | Ok selection, Some preview
+               when Asic.Selection.equal selection preview.selection
+                    && Option.is_none host.stage_preparation
+                    && Planned_run.launchable host.planned_run preview -> Some preview
+             | _ -> None))))
 ;;
 
 let checklist_hints host data tile =
@@ -784,7 +789,19 @@ let checklist_hints host data tile =
         | Some (Timing_analysis _) -> true
         | _ -> false)
     in
-    if timing && Option.is_none (checklist_preview host data tile)
+    let elaboration =
+      Option.exists (H.tile_run host tile) ~f:(fun run ->
+        H.checklist_cursor
+          (H.local host tile.id)
+          ~run
+          ~items:(Overview_tiles.checklist_items ~asic:data.asic ~run)
+        |> Option.exists ~f:(function
+          | Elaboration_preparation -> true
+          | _ -> false))
+    in
+    if elaboration
+    then [ "r EDA-less project preparation"; "Enter read-only history/logs" ]
+    else if timing && Option.is_none (checklist_preview host data tile)
     then
       [ "Enter exact historical timing evidence"
       ; "r prepare NEW timing run (current catalog)"
@@ -810,6 +827,17 @@ let utility_rows ?(now = Time_ns.now ()) host data tile =
       |> Option.bind ~f:(fun reference -> reference.run)
     in
     match tile.kind with
+    | "preparation" ->
+      let local = H.local host tile.id in
+      Some
+        (Preparation_view.rows
+           ~snapshot:host.preparation
+           ~jobs:data.jobs
+           ~project:(Option.map data.project ~f:(fun p -> p.Project.id))
+           ~rtl_scope:host.preparation_rtl_scope
+           ~cursor:local.cursor
+           ~detail:local.utility_detail
+           ~log_lines:data.log_lines)
     | "timing" when (H.local host tile.id).utility_detail ->
       Some
         (Option.value_map selected_run ~default:[] ~f:(fun run ->
@@ -892,6 +920,43 @@ let utility_rows ?(now = Time_ns.now ()) host data tile =
                 item
             in
             match item with
+            | Elaboration_preparation ->
+              let prep =
+                Preparation_view.rows
+                  ~snapshot:host.preparation
+                  ~jobs:data.jobs
+                  ~project:(Option.map data.project ~f:(fun p -> p.Project.id))
+                  ~rtl_scope:host.preparation_rtl_scope
+                  ~cursor:None
+                  ~detail:local.utility_detail
+                  ~log_lines:data.log_lines
+              in
+              let status = Preparation_view.checklist_status host.preparation in
+              let relation =
+                match
+                  ( Option.bind host.preparation ~f:(fun s -> s.latest)
+                    |> Option.bind ~f:(fun a -> a.bundle)
+                  , data.summary run )
+                with
+                | Some bundle, Some summary
+                  when Option.equal
+                         String.equal
+                         summary.plan_identity
+                         (Some bundle.plan_identity) ->
+                  "Exact plan identity match to selected historical run: "
+                  ^ bundle.plan_identity
+                | _ -> "No exact match to selected historical run established"
+              in
+              { row with
+                status = Some status
+              ; role = Overview_tiles.status_role status
+              ; value =
+                  (if Overview_tiles.Status.equal status Unsupported
+                   then "unavailable"
+                   else Overview_tiles.Status.label status)
+              ; details =
+                  row.details @ [ relation ] @ Overview_tiles.inspection_lines prep
+              }
             | Physical_stage s when String.equal s.id "timing" ->
               { row with
                 details =
@@ -899,7 +964,13 @@ let utility_rows ?(now = Time_ns.now ()) host data tile =
               }
             | _ -> row)
         | _ ->
-          Overview_tiles.stage_rows ~selected_run ~asic:data.asic ~observation:None ()
+          let status = Preparation_view.checklist_status host.preparation in
+          Overview_tiles.row
+            ~status
+            ~role:(Overview_tiles.status_role status)
+            "Elaboration"
+            (Preparation_view.status_label status)
+          :: Overview_tiles.stage_rows ~selected_run ~asic:data.asic ~observation:None ()
       in
       let facts =
         Option.bind selected_run ~f:data.summary
@@ -914,6 +985,8 @@ let utility_rows ?(now = Time_ns.now ()) host data tile =
               ~role:Muted
               "Interaction"
               (match selected with
+               | Some Elaboration_preparation ->
+                 "Esc overview; r EDA-less preparation; Enter read-only logs/history"
                | Some (Timing_analysis _) ->
                  "Esc overview; Enter exact historical evidence; r prepares NEW timing \
                   run if current catalog supports it"
@@ -1244,15 +1317,12 @@ let semantic_rows host data tile ~width ~height =
             |> List.mapi ~f:(fun i row ->
               if policy.freshness && Synthesis_view.Mode.equal mode Summary && i = 1
               then
-                Option.value_map
-                  (data.summary run)
-                  ~default:row
-                  ~f:(fun s ->
-                    freshness_row
-                      ~reading:(evidence_reading data ~views:[] ~runs:[ run ])
-                      host.H.appearance.icons
-                      s.freshness
-                      row)
+                Option.value_map (data.summary run) ~default:row ~f:(fun s ->
+                  freshness_row
+                    ~reading:(evidence_reading data ~views:[] ~runs:[ run ])
+                    host.H.appearance.icons
+                    s.freshness
+                    row)
                 |> E.clip ~width
               else row)
             |> Fn.flip List.take height
@@ -1438,8 +1508,22 @@ let indicator_role : Indicator.t -> Role.t = function
   | Failed -> Failure
   | Pending | Cancelled | Skipped | Stale -> Warning
   | Ready | Linked -> Success
-  | Cached | Independent | Expanded | Collapsed | Leaf | Top | Unavailable
-  | Not_requested | Unknown | Pin | Artifact | Log | Seed | Report | Trace | Info -> Muted
+  | Cached
+  | Independent
+  | Expanded
+  | Collapsed
+  | Leaf
+  | Top
+  | Unavailable
+  | Not_requested
+  | Unknown
+  | Pin
+  | Artifact
+  | Log
+  | Seed
+  | Report
+  | Trace
+  | Info -> Muted
 ;;
 
 let simulation_annotations ?(now = Time_ns.now ()) ?identifier_width host data tile =
@@ -2369,7 +2453,7 @@ let tile_view
                 List.exists
                   (Overview_tiles.checklist_items ~asic:data.asic ~run)
                   ~f:(function
-                  | Timing_analysis _ -> true
+                  | Timing_analysis _ | Elaboration_preparation -> true
                   | _ -> false)) ->
          Overview_tiles.render_checklist_strip
            ?indicator_frames
@@ -2388,7 +2472,7 @@ let tile_view
                        List.exists
                          (Overview_tiles.checklist_items ~asic:data.asic ~run)
                          ~f:(function
-                         | Timing_analysis _ -> true
+                         | Timing_analysis _ | Elaboration_preparation -> true
                          | _ -> false))))
               && Option.value horizontal_stages ~default:(H.horizontal_stages host tile)
               && Option.is_some (tile_run host tile) ->
@@ -2940,7 +3024,10 @@ let scroll_run_focused host data dimensions ~delta =
 let scroll_focused host data dimensions ~delta =
   match H.focused host with
   | Some tile
-    when List.mem [ "live-status"; "stage-checklist" ] tile.kind ~equal:String.equal
+    when List.mem
+           [ "preparation"; "live-status"; "stage-checklist" ]
+           tile.kind
+           ~equal:String.equal
          || (String.equal tile.kind "timing" && (H.local host tile.id).utility_detail) ->
     let _, _, layout = tile_layout host dimensions in
     (match
@@ -3243,6 +3330,8 @@ let render_palette host dimensions background =
       match p.argument with
       | Some (H.Plan_endpoint _) ->
         "PLAN ENDPOINT - exact provider endpoint; Enter previews; Esc closes"
+      | Some (H.Preparation_inputs _) ->
+        "PREPARATION INPUTS — endpoint and overrides; Enter selects; no launch"
       | Some (H.Finalization_attempt run) ->
         "INSPECT FINALIZATION for "
         ^ run_label run
@@ -3400,12 +3489,9 @@ let render ?(now = Time_ns.now ()) ?indicator_frames ?render_pane host data dime
       let rows =
         List.mapi rows ~f:(fun i row ->
           let text = View.text ~attrs:(Role.attrs host.appearance Surface) row in
-          (if i = 0 then View.hcat [ icon; text ] else text)
-          |> box ~width ~height:1)
+          (if i = 0 then View.hcat [ icon; text ] else text) |> box ~width ~height:1)
       in
-      View.vcat rows
-      |> colored host.appearance Surface
-      |> box ~width ~height
+      View.vcat rows |> colored host.appearance Surface |> box ~width ~height
     | None -> render_workspace ~now ?indicator_frames ?render_pane host data dimensions
   in
   render_palette host dimensions background
@@ -3547,12 +3633,14 @@ let%test_unit "WB002 stock Overview stage cards render typed freshness markers" 
                 then
                   (if String.is_empty glyph then "" else glyph ^ " ")
                   ^ "Goal: pass · signoff / post-PNR STA"
-                  ^ if Asic.Summary.Freshness.equal freshness Validated
-                    then ""
-                    else " [" ^ label ^ "]"
+                  ^
+                  if Asic.Summary.Freshness.equal freshness Validated
+                  then ""
+                  else " [" ^ label ^ "]"
                 else
                   (if String.is_empty glyph then "" else glyph ^ " ")
-                  ^ "Evidence: " ^ label
+                  ^ "Evidence: "
+                  ^ label
               in
               (* Validated compact Timing has no freshness qualifier. *)
               if not
@@ -3571,9 +3659,11 @@ let%test_unit "WB002 stock Overview stage cards render typed freshness markers" 
                 String.equal
                   (render ~indicator_frames:(frames "A") 120 20 |> plain_text)
                   (render ~indicator_frames:(frames "B") 120 20 |> plain_text));
-              List.iter [ 1, 1; 24, 4; 80, 8 ] ~f:(fun (width, height) ->
-                let view = render width height in
-                assert (View.width view = width && View.height view = height))))))
+              List.iter
+                [ 1, 1; 24, 4; 80, 8 ]
+                ~f:(fun (width, height) ->
+                  let view = render width height in
+                  assert (View.width view = width && View.height view = height))))))
 ;;
 
 let%test_unit "Session and Runs render effective global workspace and tile compression" =
@@ -3954,7 +4044,9 @@ let%test_unit "Waveforms banner and hints stay scoped with explicit local hint o
       ~substring:"j/k browse")
 ;;
 
-let%test_unit "WB-002 host context labels respect icon policy without duplicating pin badges" =
+let%test_unit "WB-002 host context labels respect icon policy without duplicating pin \
+               badges"
+  =
   let host, data, find = refinement_fixture P.Overview.definition in
   let registry = Option.value_exn host.registry in
   let workspace = Option.value_exn (H.active host) in
@@ -3963,7 +4055,8 @@ let%test_unit "WB-002 host context labels respect icon policy without duplicatin
     { context with id = W.Context_id.of_string "wb002-independent"; name = "Detached" }
   in
   let detached =
-    H.receive host
+    H.receive
+      host
       { registry with
         contexts = independent :: registry.contexts
       ; workspaces =
@@ -3974,12 +4067,14 @@ let%test_unit "WB-002 host context labels respect icon policy without duplicatin
       }
   in
   List.iter Appearance.Icons.all ~f:(fun icons ->
-    List.iter [ host, Indicator.Linked, "Linked"; detached, Independent, "Independent" ]
+    List.iter
+      [ host, Indicator.Linked, "Linked"; detached, Independent, "Independent" ]
       ~f:(fun (host, kind, label) ->
         let host = { host with appearance = { host.appearance with icons } } in
         let registry = Option.value_exn host.registry in
         let host =
-          H.receive host
+          H.receive
+            host
             { registry with
               tiles =
                 List.filter registry.tiles ~f:(fun tile ->
@@ -3990,14 +4085,14 @@ let%test_unit "WB-002 host context labels respect icon policy without duplicatin
           render_workspace host data { Dimensions.width = 200; height = 40 } |> plain_text
         in
         assert (
-          String.is_substring screen
-            ~substring:(indicator_label icons kind label ^ ": ")));
+          String.is_substring screen ~substring:(indicator_label icons kind label ^ ": ")));
     let tile = { (find "synthesis") with binding = Pin_run Fs0_fixture.run_a } in
     let host = { host with appearance = { host.appearance with icons } } in
     let screen = tile_view host data tile ~width:100 ~height:16 |> plain_text in
     let label = indicator_label icons Pin ("PIN " ^ run_label Fs0_fixture.run_a) in
     assert (String.is_substring screen ~substring:label);
-    assert (List.length (String.substr_index_all screen ~pattern:label ~may_overlap:false) = 1))
+    assert (
+      List.length (String.substr_index_all screen ~pattern:label ~may_overlap:false) = 1))
 ;;
 
 let%test_unit "WB-002 host freshness uses typed state and preserves fallback payloads" =
@@ -4025,13 +4120,17 @@ let%test_unit "WB-002 host freshness uses typed state and preserves fallback pay
       { data with summary = (fun _ -> None); run_lines = (fun _ _ -> fallback) }
     in
     assert (
-      List.equal String.equal fallback
+      List.equal
+        String.equal
+        fallback
         (terminal_content host fallback_data tile ~run |> List.map ~f:E.text));
     let mismatched =
       { fallback_data with summary = (fun _ -> data.summary Fs0_fixture.run_b) }
     in
     assert (
-      List.equal String.equal fallback
+      List.equal
+        String.equal
+        fallback
         (terminal_content host mismatched tile ~run |> List.map ~f:E.text));
     List.iter
       [ Asic.Summary.Freshness.Validated, Indicator.Completed
@@ -4041,7 +4140,10 @@ let%test_unit "WB-002 host freshness uses typed state and preserves fallback pay
       ]
       ~f:(fun (freshness, kind) ->
         let summary =
-          { (Option.value_exn (data.summary run)) with freshness; terminal = Some terminal }
+          { (Option.value_exn (data.summary run)) with
+            freshness
+          ; terminal = Some terminal
+          }
         in
         let data = { data with summary = (fun _ -> Some summary) } in
         let row = terminal_content host data tile ~run |> List.hd_exn |> E.text in
@@ -4079,17 +4181,24 @@ let%test_unit "WB-002 host freshness uses typed state and preserves fallback pay
       in
       let data = { data with summary = (fun _ -> Some summary) } in
       let row = terminal_content host data tile ~run |> List.hd_exn |> E.text in
-      let kind = if expected then Indicator.Running else freshness_indicator summary.freshness in
+      let kind =
+        if expected then Indicator.Running else freshness_indicator summary.freshness
+      in
       assert (
-        String.is_prefix row
+        String.is_prefix
+          row
           ~prefix:(indicator_label host.appearance.icons kind "Freshness: ")))
 ;;
 
-let%test_unit "WB-002 inspector frames stop for terminal, cache-only and unavailable states" =
+let%test_unit "WB-002 inspector frames stop for terminal, cache-only and unavailable \
+               states"
+  =
   let host, data, find = refinement_fixture P.Overview.definition in
   let tile = find "timing" in
   let run = Fs0_fixture.run_a in
-  let view = Inspection_view.create ~scope:run ~run ~domain:"timing" ~stage:"signoff" () in
+  let view =
+    Inspection_view.create ~scope:run ~run ~domain:"timing" ~stage:"signoff" ()
+  in
   let operation : Asic.Pending.t =
     { key = Inspection_view.index_key view
     ; kind = "inspection"
@@ -4104,7 +4213,9 @@ let%test_unit "WB-002 inspector frames stop for terminal, cache-only and unavail
       focus = Some tile.id
     }
   in
-  let frames glyph : Indicator.frames = { dot = View.text glyph; line = View.text glyph } in
+  let frames glyph : Indicator.frames =
+    { dot = View.text glyph; line = View.text glyph }
+  in
   List.iter Appearance.Icons.all ~f:(fun icons ->
     let host = { host with appearance = { host.appearance with icons } } in
     List.iter
@@ -4119,27 +4230,35 @@ let%test_unit "WB-002 inspector frames stop for terminal, cache-only and unavail
       ]
       ~f:(fun (operation, active) ->
         let snapshot = Option.value_exn data.asic in
-        let data = { data with asic = Some { snapshot with operations = [ operation ] } } in
+        let data =
+          { data with asic = Some { snapshot with operations = [ operation ] } }
+        in
         let screen glyph width height =
           render ~indicator_frames:(frames glyph) host data { Dimensions.width; height }
         in
         let a = screen "A" 120 24 |> plain_text
         and b = screen "B" 120 24 |> plain_text in
         assert (
-          Bool.equal (not (String.equal a b))
+          Bool.equal
+            (not (String.equal a b))
             (active && not (Appearance.Icons.equal icons None_)));
         assert (String.is_substring a ~substring:"INSPECT timing");
-        List.iter [ 1, 1; 7, 3; 32, 8; 120, 24 ] ~f:(fun (width, height) ->
-          let image = screen "A" width height in
-          assert (View.width image = width && View.height image = height))));
+        List.iter
+          [ 1, 1; 7, 3; 32, 8; 120, 24 ]
+          ~f:(fun (width, height) ->
+            let image = screen "A" width height in
+            assert (View.width image = width && View.height image = height))));
   assert (
     String.equal
       (Indicator.text Ascii (inspection_indicator ~reading:false view))
       (Indicator.text Ascii Unavailable));
   assert (
     String.equal
-      (Indicator.text Ascii
-         (inspection_indicator ~reading:false { view with pending_error = Some "running" }))
+      (Indicator.text
+         Ascii
+         (inspection_indicator
+            ~reading:false
+            { view with pending_error = Some "running" }))
       (Indicator.text Ascii Stale))
 ;;
 
@@ -5415,10 +5534,17 @@ let%test_unit "two-row compact facts retain stages and stale warnings with fresh
     ~f:(fun substring -> assert (String.is_substring text ~substring));
   let checklist = find "stage-checklist" in
   let normal = utility_rows host data checklist |> Option.value_exn in
-  assert (List.length normal = 7);
+  assert (List.length normal = 8);
   assert (List.for_all normal ~f:(fun row -> Option.is_some row.Overview_tiles.status));
   let detailed =
-    H.set_local host checklist.id { H.default_local with utility_detail = true }
+    H.set_local
+      host
+      checklist.id
+      { H.default_local with
+        utility_detail = true
+      ; cursor = Some "synthesis"
+      ; stage_run = Some Fs0_fixture.run_a
+      }
   in
   let details =
     utility_rows detailed data checklist
@@ -6667,7 +6793,7 @@ let%test_unit "actual preset host resolves quiet chrome, headerless pins and sel
   assert (
     select_cell.width = (cell (find "live-status")).width
     && select_cell.x < synthesis_cell.x
-    && select_cell.y > synthesis_cell.y);
+    && select_cell.y >= synthesis_cell.y);
   let renamed =
     { registry with
       workspaces =
@@ -7040,9 +7166,12 @@ let%test_unit "checklist follows exact run and pin with selected-stage detail an
     |> List.filter_map ~f:(fun row ->
       Option.map row.Overview_tiles.status ~f:(fun _ -> row.value))
   in
-  assert (List.equal String.equal (projected following) [ "running" ]);
+  assert (List.equal String.equal (projected following) [ "unavailable" ]);
   assert (
-    List.equal String.equal (projected pinned) [ "completed"; "failed"; "not reported" ]);
+    List.equal
+      String.equal
+      (projected pinned)
+      [ "unavailable"; "completed"; "failed"; "not reported" ]);
   let compact_host =
     H.set_local
       host
@@ -7060,10 +7189,10 @@ let%test_unit "checklist follows exact run and pin with selected-stage detail an
   let fallback = utility_rows host missing following |> Option.value_exn in
   assert (
     List.for_all fallback ~f:(fun row ->
-      Option.value_map
-        row.Overview_tiles.status
-        ~default:true
-        ~f:(Overview_tiles.Status.equal Unknown)));
+      Option.value_map row.Overview_tiles.status ~default:true ~f:(fun status ->
+        Overview_tiles.Status.equal status Unknown
+        || (String.equal row.label "Elaboration"
+            && Overview_tiles.Status.equal status Unsupported))));
   (* Six stages plus run identity, summaries and hints exceed an ordinary Overview
      viewport. Selection must survive both browsing and a stale manual scroll. *)
   let selection = (Option.value_exn snapshot.preview).selection in
@@ -7109,7 +7238,11 @@ let%test_unit "checklist follows exact run and pin with selected-stage detail an
           { (H.local host following.id) with presentation = T.inherit_; scroll }
       in
       let text = tile_view host data following ~width:60 ~height |> plain_text in
-      assert (String.is_substring text ~substring:"stage-5: pending")));
+      assert (
+        String.split_lines text
+        |> List.exists ~f:(fun line ->
+          String.is_substring line ~substring:"stage-5:"
+          && String.is_substring line ~substring:"pending"))));
   let top =
     H.browse_stages host following.id ~run:Fs0_fixture.run_b ~stages ~delta:(-5)
   in
@@ -7117,9 +7250,12 @@ let%test_unit "checklist follows exact run and pin with selected-stage detail an
     H.set_local top following.id { (H.local top following.id) with scroll = 99 }
   in
   assert (
-    String.is_substring
-      (tile_view top data following ~width:60 ~height:10 |> plain_text)
-      ~substring:"stage-0: pending");
+    tile_view top data following ~width:60 ~height:10
+    |> plain_text
+    |> String.split_lines
+    |> List.exists ~f:(fun line ->
+      String.is_substring line ~substring:"stage-0:"
+      && String.is_substring line ~substring:"pending"));
   let ready = tile_view host data following ~width:40 ~height:14 |> plain_text in
   assert (String.is_substring ready ~substring:"Space c c: Launch");
   assert (String.is_substring ready ~substring:"or Launch and view");
@@ -8078,6 +8214,7 @@ let%test_unit "stock Fit navigation completes rendered subtrees without reassign
           ; "run-selector"
           ; "stage-checklist"
           ; "planned-run"
+          ; "preparation"
           ; "synthesis"
           ; "timing"
           ; "placement"

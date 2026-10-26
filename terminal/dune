@@ -11,6 +11,8 @@
   panel
   evidence_style
   overview_tiles
+  preparation_view
+  preparation_test
   overview_summary
   overview_layout
   synthesis_view

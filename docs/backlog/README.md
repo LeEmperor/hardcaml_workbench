@@ -54,6 +54,32 @@ is observed; they do not reopen the completed FS1 or FS2 milestones.
 
 ## Deferred extensions
 
+### Preparation history and external emission adoption
+
+Deferred from [WB-004](../features/project/WB-004-build-bundle-status.md) by owner
+direction on 2026-10-25; not a prerequisite for its initial EDA-less preparation UI.
+
+- Retain exact build/emission attempt receipts, scope, outcome and published bundle
+  identity across daemon restart, distinguishing interrupted or unknown work.
+- Discover/adopt preparation launched outside Workbench from authoritative producer
+  receipts, without inferring success from directory existence or replaying work.
+- Preserve associations to historical hardening runs only when exact producer/bundle
+  evidence establishes them; retained bundles and completed producer attempts are
+  distinct facts.
+- Coordinate bounded retention and unavailable log/artifact states with
+  [WB-041 durable logs](../features/infrastructure/WB-041-durable-logs.md) and
+  [WB-042 resource budgets](../features/infrastructure/WB-042-resource-budgets.md).
+
+Related but separate: [WB-037 archived replay](../features/verification/WB-037-archived-replay.md)
+re-executes retained historical inputs; [WB-062 submission recovery](../features/verification/WB-062-submission-recovery.md)
+is simulation-specific; [WB-065 lifecycle coverage](../features/infrastructure/WB-065-asic-lifecycle-coverage.md)
+tests ASIC execution races. None currently owns general preparation receipt adoption.
+Reactivate when restart/external-producer history is needed, with explicit producer
+receipt/discovery and retention contracts. This entry is not included in WB-004's
+initial estimate.
+
+### Other deferred extensions
+
 | Deferred item | Preserved intent | Reactivation trigger |
 | --- | --- | --- |
 | Dedicated comparator tile | Explicit A/B selection, contextual deltas, corner/stage/unit/constraint alignment | Pinned reference tiles prove insufficient for a real comparison task |
