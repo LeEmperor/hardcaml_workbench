@@ -3,7 +3,7 @@ id: WB-004
 title: Core build, bundle emission and verification status
 category: project
 feature_sets: [FS0, FS1, FS2]
-status: delivered
+status: closed
 kind: enhancement
 priority: P2
 severity: n/a
@@ -95,7 +95,8 @@ history must not imply that an operation was never run.
 
 ## Delivery and verification — 2026-10-25
 
-Implemented, awaiting owner acceptance. See [controls, configuration and evidence](../../project_preparation.md).
+Implemented and owner-accepted; closure is recorded below. See
+[controls, configuration and evidence](../../project_preparation.md).
 
 - Source build and selected-flow emission are separate supervised jobs with exact
   inputs, outcomes, logs and bundle artifacts; no stale pinned executable fallback.
@@ -130,7 +131,7 @@ timing. Implemented and automatically verified:
   pins and contexts; saved layouts are not silently rewritten on reconnect.
 - Full combined build/tests/lint and preparation/checklist native HTTP/PTY checks
   pass. Backend tests cover zero-work staging, stale/config-changed tokens and
-  duplicate launch receipts. Owner acceptance of these refinements is pending.
+   duplicate launch receipts. Subsequent owner acceptance is recorded below.
 
 ### Palette refinement — 2026-10-26
 
@@ -142,6 +143,36 @@ elaboration retains context because it allocates no ASIC run. Actual incremental
 typing/Enter behavior, preference retention and pending-plan selection/capability
 withdrawal pass native HTTP/PTY regression. See the updated
 [palette controls](../../project_preparation.md#palette-launch-queries).
+
+### Planned-run presentation refinement — 2026-10-26
+
+Elaboration input plans now use compact lowercase status, endpoint, launch,
+flow/profile and assignment rows matching physical planned-run styling. Exact receipt
+IDs, paths, environment, provider endpoint and staging explanations move to Enter
+details. Ready/stale/consumed/unavailable states retain appropriate roles and icons;
+icon-aware wrapping also fixes detail scroll bounds. Combined build/tests/lint pass.
+
+## Owner acceptance and closure — 2026-10-26
+
+The owner confirmed the initial feature and successive staging, palette and visual
+refinements work well, then accepted the compact elaboration planned-run display.
+WB-004 is **closed, owner-accepted**, including:
+
+- EDA-less current-source build and selected-flow bundle emission, separate outcomes,
+  preparation tile, Elaboration checklist row and elapsed-time presentation.
+- Stage-only `r`, stage-and-launch `R`, manual launch and persistent context-viewing
+  preference, with preparation retaining context because no ASIC run is allocated.
+- Action-first palette names/search defaults and explicit named-stage quick launch.
+- Compact planned-run summary with full receipt/provenance details on Enter.
+
+Owner workflow acceptance complements the recorded automated checks; it does not
+claim every failure/cancellation case was manually repeated. Verification in this
+scope remains the project test-command outcome, not an aggregate bundle/signoff
+verdict. Session-history limits remain explicit.
+
+Restart/external-emission adoption stays in the linked preparation-history backlog.
+Resource-mapping/preparation composition and exact-bundle verification remain later
+scope and do not block closure. No implementation acceptance remains open on WB-004.
 
 ## References
 - [Driver operations](../../../project_integration/driver_protocol.ml)

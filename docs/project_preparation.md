@@ -1,6 +1,6 @@
 # Project preparation — build and EDA-less bundle emission
 
-WB-004 is implemented and automatically verified, awaiting owner acceptance.
+WB-004 is implemented, automatically verified and **owner-accepted/closed** on 2026-10-26.
 Preparation builds the declared source executable, invokes selected-flow bundle
 emission, and stops before synthesis or physical execution.
 
@@ -20,6 +20,22 @@ Open the palette with **Space c c**.
 
 The endpoint is part of the bundle's selected methodology; selecting `synthesis`
 as the endpoint does **not** execute synthesis during preparation.
+
+The planned-run tile uses the same compact status/endpoint/launch/selection structure
+as physical run previews:
+
+```text
+▸ ready: elaboration input plan / launch: not requested
+endpoint: elaboration
+launch: build and emit (EDA-less)
+flow: standard / profile: balanced
+assignments: (none)
+```
+
+Enter expands the exact stage receipt, provider endpoint, source/build/results paths,
+environment and staging limitations. Stale, consumed and unavailable plans keep
+compact disabled headlines; their exact reasons remain in details. Detail wrapping
+and scroll bounds share icon-aware widths so the final metadata rows remain reachable.
 
 | Control on preparation tile | Action |
 | --- | --- |
@@ -161,7 +177,7 @@ python3 -B scripts/real-asic-example-demo.py client
 
 No reseeding is needed. Demo daemon/client/exporter copies were refreshed after
 verification; live processes were not restarted. Refresh receipt:
-`hardcaml_asic_example/.dev/workbench-real-demo/receipts/refresh-binaries-68176cc5afe44718a14eac30416af3c0/`.
+`hardcaml_asic_example/.dev/workbench-real-demo/receipts/refresh-binaries-a02a24b1cd824c2aab423106244186a9/`.
 The SDK environment was also checked with the demo's `opam:5.2.0+ox` build path.
 
 ## Verification and limits
@@ -196,4 +212,5 @@ Attempts, generic jobs, logs and imported artifact handles are **daemon-session
 scoped**. Published bundles remain in their results store, but restart/external
 receipt discovery is [deferred](backlog/README.md#preparation-history-and-external-emission-adoption).
 Resource-preparation composition and exact-bundle verification remain separate work.
-Owner visual/workflow acceptance is pending.
+Owner visual/workflow acceptance covers the initial preparation feature and the
+subsequent staging, quick-launch palette and compact planned-run refinements.

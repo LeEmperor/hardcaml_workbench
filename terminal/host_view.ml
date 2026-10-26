@@ -1428,36 +1428,13 @@ let planned_asic_source_rows host tile =
 ;;
 
 let planned_source_rows host tile =
-  match
-    Option.bind host.H.preparation ~f:(fun s ->
-      if host.planned_preparation then Preparation_view.staged_available s else None)
-  with
-  | Some staged ->
-    (match host.stage_preparation with
-     | None -> Preparation_view.staged_lines staged
-     | Some reason ->
-       ("PREPARATION input plan stale/unconfirmed: " ^ reason)
-       :: List.drop (Preparation_view.staged_lines staged) 1)
-    |> List.map ~f:(fun text -> { Planned_run.role = Fact; text })
-  | None
-    when host.planned_preparation
-         && Option.exists host.preparation ~f:(fun s -> Option.is_some s.staged) ->
-    [ { Planned_run.role = Muted
-      ; text =
-          "PREPARATION input plan consumed/stale; r stages again. Generated provider \
-           preview belongs to attempt evidence."
-      }
-    ]
-  | None -> planned_asic_source_rows host tile
-;;
-
-let planned_rows host tile ~width =
-  let detail = (H.local host tile.W.Tile.id).utility_detail in
-  planned_source_rows host tile
-  |> List.concat_map ~f:(fun row ->
-    let text = Artifact_view.safe row.Planned_run.text in
-    (if detail then wrap_cells ~width text else [ E.text (E.clip ~width (E.plain text)) ])
-    |> List.map ~f:(fun text -> { row with text }))
+  if host.H.planned_preparation
+  then
+    Preparation_view.staged_plan_rows
+      ~snapshot:host.preparation
+      ~reason:host.stage_preparation
+      ~detail:(H.local host tile.W.Tile.id).utility_detail
+  else planned_asic_source_rows host tile
 ;;
 
 let plan_indicator : Planned_run.status -> Indicator.t = function
@@ -1485,23 +1462,25 @@ let planned_role : Planned_run.role -> Role.t = function
   | Success -> Success
 ;;
 
-let planned_view_rows ?indicator_frames host tile ~width =
+let planned_formatted_rows ?indicator_frames host tile ~width =
   let model = Planned_run.model host.H.planned_run in
   let detail = (H.local host tile.W.Tile.id).utility_detail in
   planned_source_rows host tile
   |> List.concat_mapi ~f:(fun i row ->
     let kind =
       if host.planned_preparation
-         && Option.exists host.preparation ~f:(fun s -> Option.is_some s.staged)
       then
         if i = 0
         then
           Some
-            (if Option.is_none host.stage_preparation
-                && Option.is_some
-                     (Option.bind host.preparation ~f:Preparation_view.staged_available)
-             then Indicator.Ready
-             else Stale)
+            (match
+               Preparation_view.staged_state
+                 ~snapshot:host.preparation
+                 ~reason:host.stage_preparation
+             with
+             | `Ready -> Indicator.Ready
+             | `Stale _ | `Consumed _ -> Stale
+             | `Unavailable _ -> Unavailable)
         else None
       else if Option.is_some host.stage_preparation
       then None
@@ -1511,7 +1490,6 @@ let planned_view_rows ?indicator_frames host tile ~width =
       then Some (producer_indicator model.launch.state)
       else None
     in
-    let role = planned_role row.Planned_run.role in
     let icon_role =
       match kind with
       | Some Running -> Role.Running
@@ -1528,13 +1506,31 @@ let planned_view_rows ?indicator_frames host tile ~width =
     in
     let text_width = Int.max 0 (width - View.width icon) in
     let text = Artifact_view.safe row.text in
-    let texts = if detail then wrap_cells ~width:text_width text else [ text ] in
+    let texts =
+      if detail
+      then wrap_cells ~width:text_width text
+      else [ E.text (E.clip ~width:text_width (E.plain text)) ]
+    in
     List.mapi texts ~f:(fun j text ->
-      View.hcat
-        [ (if j = 0 then icon else View.rectangle ~width:(View.width icon) ~height:1 ())
-        ; View.text ~attrs:(Role.attrs host.appearance role) text
-        ]
-      |> box ~width ~height:1))
+      ( { row with text }
+      , if j = 0 then icon else View.rectangle ~width:(View.width icon) ~height:1 () )))
+;;
+
+let planned_view_rows ?indicator_frames host tile ~width =
+  planned_formatted_rows ?indicator_frames host tile ~width
+  |> List.map ~f:(fun (row, icon) ->
+    View.hcat
+      [ icon
+      ; View.text
+          ~attrs:(Role.attrs host.H.appearance (planned_role row.Planned_run.role))
+          row.text
+      ]
+    |> box ~width ~height:1)
+;;
+
+(* Use the rendered wrapping (including indicator space) for scroll bounds too. *)
+let planned_rows host tile ~width =
+  planned_formatted_rows host tile ~width |> List.map ~f:fst
 ;;
 
 let job_indicator : Job.State.t -> Indicator.t = function
@@ -5193,7 +5189,7 @@ let%test_unit "shared host frames follow exact producers and leave tile layout u
       }
     in
     let planned_run, _ = Planned_run.begin_plan Planned_run.empty selection in
-    let pending_host = { host with planned_run } in
+    let pending_host = { host with planned_run; planned_preparation = false } in
     let plan frame =
       planned_view_rows ~indicator_frames:(frames frame) pending_host plan_tile ~width:100
       |> View.vcat
@@ -5633,7 +5629,10 @@ let%test_unit "shallow plan always shows readiness and endpoint; detail retains 
     }
   in
   let host =
-    { host with planned_run = Planned_run.receive host.planned_run ~revision:1 snapshot }
+    { host with
+      planned_run = Planned_run.receive host.planned_run ~revision:1 snapshot
+    ; planned_preparation = false
+    }
   in
   let preparing =
     { host with stage_preparation = Some "Preparing NEW run through routing" }

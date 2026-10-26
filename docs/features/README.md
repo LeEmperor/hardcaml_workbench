@@ -83,7 +83,8 @@ not claimed. WB-048 remains delivered.
 
 ## How this directory works
 
-**2026-10-25:** WB-004 is **delivered**, awaiting owner acceptance. EDA-less
+**2026-10-26:** WB-004 is **closed, owner-accepted**, including the r/R staging,
+quick-launch palette and compact elaboration planned-run refinements. EDA-less
 source build and selected-flow bundle emission have a preparation tile and an
 Elaboration checklist row before Synthesis. Real FIFO acceptance verified source
 build, publication/reuse and artifact reads without provider/EDA execution.

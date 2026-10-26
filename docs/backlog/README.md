@@ -82,6 +82,7 @@ initial estimate.
 
 | Deferred item | Preserved intent | Reactivation trigger |
 | --- | --- | --- |
+| Resource-mapping/preparation composition (WB-004 follow-up) | Join bundle preparation with provider-owned resource preparation while retaining distinct operation identities, outcomes and exact bundle associations | Resource-mapping integration is ready for a combined workflow; closed WB-004 is not blocked |
 | Dedicated comparator tile | Explicit A/B selection, contextual deltas, corner/stage/unit/constraint alignment | Pinned reference tiles prove insufficient for a real comparison task |
 | Bonsai Web and embedded graphical views | Browser tiles, layout/spatial heatmaps and graphical timing-path cross-probing beyond the delivered terminal explorer | A concrete visual inspection need that terminal/external viewers cannot serve |
 | Live FPGA integration | Vivado and project-side Hardcaml Xilinx/report providers, synthesis/implementation | Owner begins a real FPGA-only workflow; fixtures already protect shared boundaries |

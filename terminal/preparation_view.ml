@@ -213,9 +213,10 @@ let total_time ?(monotonic = monotonic_now ()) ~now snapshot =
 ;;
 
 let staged_lines (s : Preparation.Staged.t) =
-  [ "PREPARATION input-plan ready: " ^ s.id
-  ; "Not a generated provider preview; no processes started; source bytes are not frozen"
-  ; "Scope: " ^ s.source_root
+  [ "Stage receipt: " ^ s.id
+  ; "Not a generated provider preview; staging starts no processes; source bytes are not \
+     frozen"
+  ; "Source root: " ^ s.source_root
   ; "Build: " ^ s.build_target ^ " / executable: " ^ s.source_executable
   ; "Results: " ^ s.results_root
   ; "Environment: " ^ Sexp.to_string (V1.Environment_selection.sexp_of_t s.environment)
@@ -223,12 +224,74 @@ let staged_lines (s : Preparation.Staged.t) =
     ^ s.selection.flow
     ^ " / profile: "
     ^ s.selection.profile
-    ^ " / endpoint: "
+    ^ " / provider endpoint: "
     ^ s.selection.endpoint
   ; "Overrides: " ^ String.concat ~sep:"; " s.selection.assignments
-  ; "Stage availability: staged, unconsumed (superseded/consumed receipts cannot launch)"
+  ; "Expected plan: " ^ Option.value s.expected_plan_identity ~default:"none"
+  ; "Timeout: " ^ Int.to_string s.timeout_seconds ^ " seconds"
+  ; "Created: " ^ Sexp.to_string (Timestamp.sexp_of_t s.created_at)
   ; "Launch planned run: builds and emits; no ASIC allocation or context switch"
   ]
+;;
+
+let staged_state ~snapshot ~reason =
+  match snapshot with
+  | None -> `Unavailable "Preparation capability unavailable or not loaded"
+  | Some { Preparation.Snapshot.availability = Unavailable Not_configured; _ } ->
+    `Unavailable "Preparation unavailable: not configured"
+  | Some { availability = Unavailable (Invalid_configuration reason); _ } ->
+    `Unavailable ("Preparation unavailable: " ^ reason)
+  | Some s ->
+    (match s.staged, reason with
+     | Some _, _ when Option.is_none (staged_available s) ->
+       `Consumed
+         ("Stage receipt consumed/stale: latest preparation attempt is at or after \
+           staging"
+          ^ Option.value_map s.latest ~default:"" ~f:(fun a -> "; attempt: " ^ a.id))
+     | _, Some reason -> `Stale reason
+     | Some _, None -> `Ready
+     | None, None -> `Unavailable "No staged input plan; r stages current inputs")
+;;
+
+let staged_plan_rows ~snapshot ~reason ~detail =
+  let state, role, availability =
+    match staged_state ~snapshot ~reason with
+    | `Ready -> "ready", Planned_run.Success, "staged, unconsumed"
+    | `Stale reason -> "stale", Warning, reason
+    | `Consumed reason -> "consumed/stale", Warning, reason
+    | `Unavailable reason -> "unavailable", Muted, reason
+  in
+  let ready = String.equal state "ready" in
+  let row role text = { Planned_run.role; text } in
+  [ row
+      role
+      (state
+       ^ ": elaboration input plan / launch: "
+       ^ if ready then "not requested" else "disabled")
+  ; row Fact "endpoint: elaboration"
+  ; row Fact "launch: build and emit (EDA-less)"
+  ]
+  @ Option.value_map
+      (Option.bind snapshot ~f:(fun s -> s.Preparation.Snapshot.staged))
+      ~default:[]
+      ~f:(fun s ->
+        [ row Fact ("flow: " ^ s.selection.flow ^ " / profile: " ^ s.selection.profile)
+        ; row
+            Fact
+            ("assignments: "
+             ^
+             if List.is_empty s.selection.assignments
+             then "(none)"
+             else String.concat ~sep:"; " s.selection.assignments)
+        ]
+        @ if detail then List.map (staged_lines s) ~f:(row Fact) else [])
+  @
+  if detail
+  then
+    [ row role ("Stage availability: " ^ availability) ]
+    @ Option.value_map reason ~default:[] ~f:(fun reason ->
+      [ row Warning ("Preparation reason: " ^ reason) ])
+  else []
 ;;
 
 let attempt_details (a : Preparation.Attempt.t) =

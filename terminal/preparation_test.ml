@@ -337,3 +337,184 @@ let%test_unit "generic verification process completion and generic RTL cannot pu
       (List.hd_exn unsupported).value
       ~substring:"unavailable: not configured")
 ;;
+
+let%test_unit "staged elaboration plan shares compact planned-run rendering and retains \
+               exact expanded receipts for ready, stale, consumed and unavailable inputs"
+  =
+  let host, data, find =
+    Host_view.refinement_fixture Hardcaml_workbench_workspaces.Overview.definition
+  in
+  let tile = find "planned-run" in
+  let staged : Preparation.Staged.t =
+    { id = "Exact-Stage-Receipt-AbC-0123456789"
+    ; selection =
+        { flow = "standard"
+        ; profile = "balanced"
+        ; endpoint = "routing"
+        ; assignments = []
+        }
+    ; expected_plan_identity = Some "Exact-Expected-Plan-AbC"
+    ; source_root = "/exact/source/with/a/long/path/界界"
+    ; build_target = "exact/source.exe"
+    ; source_executable = "_build/default/exact/source.exe"
+    ; results_root = "/exact/results/with/a/long/path"
+    ; timeout_seconds = 123
+    ; environment = Inherit_daemon
+    ; created_at = Timestamp.of_time_ns Time_ns.epoch
+    }
+  in
+  let snapshot : Preparation.Snapshot.t =
+    { availability = Available
+    ; staged = Some staged
+    ; latest = None
+    ; history = []
+    ; session_only = true
+    ; requested_attempt = None
+    }
+  in
+  let host = { host with planned_preparation = true; preparation = Some snapshot } in
+  let expected =
+    [ "ready: elaboration input plan / launch: not requested"
+    ; "endpoint: elaboration"
+    ; "launch: build and emit (EDA-less)"
+    ; "flow: standard / profile: balanced"
+    ; "assignments: (none)"
+    ]
+  in
+  let source host = Host_view.planned_source_rows host tile in
+  assert (
+    List.equal
+      String.equal
+      (List.map (source host) ~f:(fun r -> r.Planned_run.text))
+      expected);
+  assert (Planned_run.equal_role (List.hd_exn (source host)).role Success);
+  let cases =
+    [ host, "ready:", Indicator.Ready, "staged, unconsumed"
+    ; ( { host with stage_preparation = Some "Exact stale reason: inputs changed AbC" }
+      , "stale:"
+      , Stale
+      , "Exact stale reason: inputs changed AbC" )
+    ; ( { host with
+          preparation =
+            Some
+              { snapshot with
+                latest =
+                  Some
+                    (Preparation_view.fixture_attempt "Exact-Consuming-Attempt" Completed)
+              }
+        }
+      , "consumed/stale:"
+      , Stale
+      , "Exact-Consuming-Attempt" )
+    ; ( { host with
+          preparation =
+            Some
+              { snapshot with
+                availability =
+                  Unavailable (Invalid_configuration "Exact configuration reason")
+              }
+        }
+      , "unavailable:"
+      , Unavailable
+      , "Exact configuration reason" )
+    ]
+  in
+  List.iter cases ~f:(fun (host, headline, indicator, reason) ->
+    assert (
+      Bool.equal
+        (Planned_run.equal_role (List.hd_exn (source host)).role Success)
+        (Poly.equal indicator Indicator.Ready));
+    List.iter [ Appearance.Icons.Unicode; Ascii; None_ ] ~f:(fun icons ->
+      let host = { host with appearance = { host.appearance with icons } } in
+      List.iter [ true; false ] ~f:(fun compression ->
+        let host =
+          H.set_local
+            host
+            tile.id
+            { H.default_local with
+              presentation =
+                { Tile_presentation.inherit_ with string_compression = Some compression }
+            }
+        in
+        List.iter [ 24; 60; 100 ] ~f:(fun width ->
+          let views = Host_view.planned_view_rows host tile ~width in
+          assert (List.length views = 5);
+          List.iter views ~f:(fun view ->
+            assert (
+              Bonsai_term.View.width view = width && Bonsai_term.View.height view = 1));
+          let first = Host_view.plain_text (List.hd_exn views) in
+          assert (String.is_substring first ~substring:headline);
+          let glyph = Indicator.text icons indicator in
+          assert (String.is_empty glyph || String.is_prefix first ~prefix:(glyph ^ " "));
+          let shallow =
+            Host_view.tile_view host data tile ~width:60 ~height:4 |> Host_view.plain_text
+          in
+          assert (String.is_substring shallow ~substring:"endpoint: elaboration");
+          assert (not (String.is_substring shallow ~substring:"routing"));
+          assert (not (String.is_substring shallow ~substring:staged.id));
+          let detail =
+            H.set_local host tile.id { (H.local host tile.id) with utility_detail = true }
+          in
+          let rows = Host_view.planned_rows detail tile ~width in
+          let rendered = Host_view.planned_view_rows detail tile ~width in
+          assert (List.length rows = List.length rendered);
+          let text = List.map rows ~f:(fun r -> r.Planned_run.text) |> String.concat in
+          List.iter
+            [ staged.id
+            ; staged.source_root
+            ; staged.build_target
+            ; staged.source_executable
+            ; staged.results_root
+            ; "Exact-Expected-Plan-AbC"
+            ; "Timeout: 123 seconds"
+            ; "Environment: Inherit_daemon"
+            ; "Created:"
+            ; "provider endpoint: routing"
+            ; "Not a generated provider preview"
+            ; "source bytes are not frozen"
+            ; reason
+            ]
+            ~f:(fun substring -> assert (String.is_substring text ~substring));
+          List.iter rendered ~f:(fun view -> assert (Bonsai_term.View.width view = width));
+          (* The production scroll limit uses planned_rows; reach the actual final row. *)
+          let _, _, _, body_width, body_height =
+            Host_view.body_geometry detail tile ~width ~height:4
+          in
+          let body_rows = Host_view.planned_rows detail tile ~width:body_width in
+          let scroll = Int.max 0 (List.length body_rows - body_height) in
+          let scrolled =
+            H.set_local detail tile.id { (H.local detail tile.id) with scroll }
+          in
+          let bottom =
+            Host_view.tile_view scrolled data tile ~width ~height:4
+            |> Host_view.plain_text
+          in
+          assert (
+            String.is_substring
+              bottom
+              ~substring:(String.strip (List.last_exn body_rows).text))))));
+  let assigned =
+    { host with
+      preparation =
+        Some
+          { snapshot with
+            staged =
+              Some
+                { staged with
+                  selection = { staged.selection with assignments = [ "EXACT=a b" ] }
+                }
+          }
+    }
+  in
+  assert (String.equal (List.last_exn (source assigned)).text "assignments: EXACT=a b");
+  List.iter
+    [ None; Some { snapshot with staged = None } ]
+    ~f:(fun preparation ->
+      let rows = source { host with preparation } in
+      assert (String.is_prefix (List.hd_exn rows).text ~prefix:"unavailable:"));
+  let provider = source { host with planned_preparation = false } in
+  assert (
+    not
+      (List.exists provider ~f:(fun row ->
+         String.is_substring row.Planned_run.text ~substring:"elaboration input plan")))
+;;
