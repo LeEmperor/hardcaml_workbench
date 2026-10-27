@@ -41,33 +41,38 @@ let plan config ~root ~environment selection =
   project config ~root ~environment ("plan" :: selection_args ~root selection)
 ;;
 
-let run config ~root ~environment (preview : Asic.Preview.t) =
-  let optional flag value =
-    Option.value_map value ~default:[] ~f:(fun v -> [ flag; v ])
+let metadata config ~root ~environment =
+  provider config ~root ~environment [ "--version"; "--json" ]
+;;
+
+let run_prepared config ~root ~environment ~(prepared : Asic.Fresh.Prepared.t) ~workspace =
+  let resolved value suffix =
+    Option.value value ~default:(Filename.concat config.Config.toolchain suffix)
   in
-  project
+  provider
     config
     ~root
     ~environment
-    ([ "run" ]
-     @ selection_args ~root preview.selection
-     @ [ "--expected-plan-identity"
-       ; preview.plan_identity
-       ; "--provider"
-       ; config.Config.provider_executable
-       ; "--results-root"
-       ; config.results_root
-       ; "--toolchain"
-       ; config.toolchain
-       ]
-     @ optional "--python" config.python
-     @ optional "--support-tools" config.support_tools
-     @ optional "--pdk-root" config.pdk_root
-     @ optional "--timeout" (Option.map config.stage_timeout_seconds ~f:Int.to_string))
-;;
-
-let metadata config ~root ~environment =
-  provider config ~root ~environment [ "--version"; "--json" ]
+    ([ "stages"
+     ; prepared.bundle_directory
+     ; "--methodology-plan"
+     ; prepared.methodology_plan_path
+     ; "--expected-plan-identity"
+     ; prepared.plan_identity
+     ; "--workspace"
+     ; workspace
+     ; "--checkpoint-store"
+     ; Filename.concat workspace "checkpoints"
+     ; "--support-tools"
+     ; resolved config.support_tools "tt"
+     ; "--pdk-root"
+     ; resolved config.pdk_root "pdk"
+     ; "--python"
+     ; resolved config.python ".venv/bin/python"
+     ; "--json"
+     ]
+     @ Option.value_map config.stage_timeout_seconds ~default:[] ~f:(fun n ->
+       [ "--timeout"; Int.to_string n ]))
 ;;
 
 let inspect config ~root ~environment (r : Asic.Reference.t) =

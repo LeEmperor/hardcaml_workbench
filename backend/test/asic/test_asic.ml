@@ -42,8 +42,76 @@ let launches root profile =
   In_thread.run (fun () ->
     In_channel.read_lines (Filename.concat root "calls")
     |> List.count ~f:(fun line ->
-      String.is_prefix line ~prefix:"[\"flow\", \"run\""
-      && String.is_substring line ~substring:("\"--profile\", \"" ^ profile ^ "\"")))
+      if not (String.is_prefix line ~prefix:"[\"stages\"")
+      then false
+      else (
+        let args = Public.list (Public.decode line) |> List.map ~f:Public.text in
+        let index =
+          List.findi_exn args ~f:(fun _ s -> String.equal s "--methodology-plan") |> fst
+        in
+        let plan = Public.decode (In_channel.read_all (List.nth_exn args (index + 1))) in
+        Poly.equal (Public.field "fixture_profile" plan) (`String profile))))
+;;
+
+(* These tests isolate provider observation/lifecycle. The full source supervisor, receipt
+   validation and exact bundle contract are exercised by test_preparation. *)
+let attach_preparation service =
+  let latest = ref None in
+  Service.set_preparation_runner
+    service
+    (fun ~root ~environment ~unique:_ ~cancelled:_ operation ->
+       (match operation with
+        | Preparation.Operation.Prepare
+            { submission_key; selection; expected_plan_identity } ->
+          let plan =
+            `Assoc
+              [ "contract", `String "hardcaml-asic.methodology-plan"
+              ; "schema_version", `Int 1
+              ; "plan_identity", `String (String.make 64 'a')
+              ; "bundle_identity", `String (String.make 64 'b')
+              ; "fixture_profile", `String selection.profile
+              ; "fixture_endpoint", `String selection.endpoint
+              ]
+          in
+          let created_at = Timestamp.of_time_ns (Time_ns.now ()) in
+          latest
+          := Some
+               { Preparation.Attempt.id = submission_key
+               ; selection
+               ; selection_identity = submission_key
+               ; expected_plan_identity
+               ; source_root = root
+               ; build_target = "fixture.exe"
+               ; source_executable = root ^ "/fixture.exe"
+               ; environment
+               ; results_root = root
+               ; timeout_seconds = 10
+               ; created_at
+               ; outcome = Completed
+               ; build_job = None
+               ; emission_job = None
+               ; diagnostic = None
+               ; bundle =
+                   Some
+                     { bundle_identity = String.make 64 'b'
+                     ; plan_identity = String.make 64 'a'
+                     ; output_dir = root
+                     ; reused = false
+                     ; plan_json = Yojson.Safe.to_string plan
+                     ; artifacts = []
+                     }
+               }
+        | Get | Cancel _ -> ()
+        | _ -> failwith "Unexpected preparation operation");
+       return
+         (Ok
+            { Preparation.Snapshot.availability = Available
+            ; session_only = true
+            ; requested_attempt = Option.map !latest ~f:(fun a -> a.id)
+            ; latest = !latest
+            ; history = Option.to_list !latest
+            ; staged = None
+            }))
 ;;
 
 let metric_fixtures () =
@@ -1555,6 +1623,13 @@ let main () =
       Out_channel.write_all
         (Filename.concat root Config.filename)
         ~data:(Sexp.to_string (Config.sexp_of_t config));
+      Out_channel.write_all
+        (Filename.concat root "hardcaml-workbench-preparation.sexp")
+        ~data:
+          (sprintf
+             "((schema_version 1)(build_target fixture.exe)(results_root \
+              %s)(timeout_seconds 10))"
+             config.results_root);
       root, state_dir)
   in
   let%bind () = stage_service_fixtures root state_dir in
@@ -1628,6 +1703,7 @@ let main () =
   let services = ref [] in
   let create ?(directory = state_dir) () =
     let service = Service.create ~state_dir:directory in
+    attach_preparation service;
     services := service :: !services;
     service
   in
@@ -1736,9 +1812,13 @@ let main () =
         let preview = Option.value_exn planned.preview in
         let%bind reserved = handle service root (Run { key; preview }) in
         require
-          (List.exists reserved.launches ~f:(fun l ->
-             String.equal l.key key && Asic.Preview.equal l.preview preview))
-          "Acknowledged launch lost exact durable preview/key";
+          (List.exists reserved.workflows ~f:(fun w ->
+             String.equal w.key key
+             && Option.equal
+                  String.equal
+                  w.intent.expected_plan_identity
+                  (Some preview.plan_identity)))
+          "Acknowledged launch lost exact durable fresh expectation/key";
         let%bind (_ : Asic.Snapshot.t) = handle service root (Run { key; preview }) in
         let rec allocation tries =
           require (tries > 0) "Early allocation not delivered";

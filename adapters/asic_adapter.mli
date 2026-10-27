@@ -45,17 +45,18 @@ val plan
   -> Asic.Selection.t
   -> Dune_adapter.Invocation.t
 
-val run
-  :  Config.t
-  -> root:string
-  -> environment:V1.Environment_selection.t
-  -> Asic.Preview.t
-  -> Dune_adapter.Invocation.t
-
 val metadata
   :  Config.t
   -> root:string
   -> environment:V1.Environment_selection.t
+  -> Dune_adapter.Invocation.t
+
+val run_prepared
+  :  Config.t
+  -> root:string
+  -> environment:V1.Environment_selection.t
+  -> prepared:Asic.Fresh.Prepared.t
+  -> workspace:string
   -> Dune_adapter.Invocation.t
 
 val inspect

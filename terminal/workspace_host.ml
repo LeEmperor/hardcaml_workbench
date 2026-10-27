@@ -86,6 +86,7 @@ type action =
   | Browse_separate_timing of Run_ref.t
   | Inspect_overview_analysis of W.Tile_id.t
   | Launch_asic of Asic.Preview.t * bool
+  | Launch_fresh_intent of Asic.Fresh.Intent.t * bool
   | Unavailable_launch
   | Prepare_stage of Asic.Stage.t * Run_ref.t
   | Prepare_endpoint of string * Run_ref.t
@@ -2101,7 +2102,7 @@ let asic_launch_commands t ~preview ~view_pending =
         action)
 ;;
 
-let launch_commands t ~preview ~view_pending =
+let legacy_launch_commands t ~preview ~view_pending =
   match
     Option.bind t.preparation ~f:(fun s ->
       if t.planned_preparation then Preparation_view.staged_available s else None)
@@ -2142,6 +2143,33 @@ let launch_commands t ~preview ~view_pending =
           "launch"
           Unavailable_launch)
   | None -> asic_launch_commands t ~preview ~view_pending
+;;
+
+let launch_commands t ~preview ~view_pending =
+  match Planned_run.fresh_intent t.planned_run with
+  | None -> legacy_launch_commands t ~preview ~view_pending
+  | Some intent ->
+    List.map
+      [ "asic.launch", "Launch planned run without view", false
+      ; "asic.launch-view", "Launch and view planned run in captured context", true
+      ]
+      ~f:(fun (id, title, view) ->
+        command
+          ?unavailable:
+            (if view && view_pending
+             then Some "Another launch-and-view is awaiting allocation"
+             else if Option.is_some t.stage_preparation
+             then t.stage_preparation
+             else if Planned_run.fresh_launchable t.planned_run intent
+             then None
+             else Some (Planned_run.model t.planned_run).message)
+          id
+          (title
+           ^ " — "
+           ^ if intent.elaboration_only then "Elaboration" else intent.selection.endpoint
+          )
+          "fresh source build emit workflow"
+          (Launch_fresh_intent (intent, view)))
 ;;
 
 let%test_unit "Launch remains searchable without preview and preserves captured disabled \
@@ -4788,6 +4816,13 @@ let input t event ~commands : t * effect =
           in
           ( set_local t tile.id { l with cursor; utility_detail = true; scroll = 0 }
           , No_effect )
+        | Character 'x', _
+          when Option.exists (focused t) ~f:(fun tile ->
+                 String.equal tile.kind "planned-run") ->
+          (match Planned_run.workflow t.planned_run, capture t with
+           | Some w, Some captured when Planned_run.workflow_active w ->
+             t, Execute (captured, Asic (Cancel_workflow w.id))
+           | _ -> { t with notice = "No active fresh workflow" }, No_effect)
         | Character (('r' | 'x' | 'a') as key), _
           when Option.exists (focused t) ~f:(fun tile ->
                  String.equal tile.kind "preparation") ->
@@ -6077,6 +6112,8 @@ let%test_unit "actual catalog and palette can cancel an allocated owned launch b
   let snapshot : Asic.Snapshot.t =
     { configured = true
     ; launches = []
+    ; fresh_intent = None
+    ; workflows = []
     ; flows = []
     ; catalog_default = None
     ; description_json = None

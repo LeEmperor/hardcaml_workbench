@@ -32,7 +32,7 @@ let shell ~root script : Dune.Invocation.t =
   }
 ;;
 
-let fixture config ~root =
+let fixture ?(selection = selection) ?(input = "let design = tiny\n") config ~root =
   let configuration =
     `Assoc
       [ "CLOCK_PERIOD", `Float 20.
@@ -42,7 +42,6 @@ let fixture config ~root =
   in
   let config_bytes = Yojson.Safe.pretty_to_string configuration ^ "\n" in
   let rtl = "module tiny(input clk); endmodule\n" in
-  let input = "let design = tiny\n" in
   let files =
     [ "constraints/top.sdc", "create_clock -name clk -period 20 [get_ports {clk}]\n"
     ; "info.yaml", "project:\n  top_module: tiny\n"
@@ -111,7 +110,20 @@ let fixture config ~root =
         , `Assoc [ "flow", `String selection.flow; "profile", `String selection.profile ]
         )
       ; "endpoint", `String selection.endpoint
-      ; "stages", `List [ `String selection.endpoint ]
+      ; ( "stages"
+        , `List
+            (List.take_while
+               [ "synthesis"
+               ; "floorplan"
+               ; "placement"
+               ; "cts"
+               ; "routing"
+               ; "timing"
+               ; "signoff"
+               ]
+               ~f:(fun stage -> not (String.equal stage selection.endpoint))
+             @ [ selection.endpoint ]
+             |> List.map ~f:(fun s -> `String s)) )
       ; "request", Receipt.assignments selection
       ; "parameters", `List []
       ]
@@ -125,7 +137,7 @@ let fixture config ~root =
       ; ( "recipe"
         , `Assoc
             [ "schema_version", `Int 4
-            ; "stages", `List [ `String selection.endpoint ]
+            ; "stages", Receipt.field snapshot "stages"
             ; "initial_boundary", `Null
             ] )
       ]
@@ -150,11 +162,11 @@ let fixture config ~root =
     | _ -> assert false
   in
   let bundles = Filename.concat config.Config.results_root "bundles" in
-  Core_unix.mkdir config.results_root;
-  Core_unix.mkdir bundles;
+  Core_unix.mkdir_p config.results_root;
+  Core_unix.mkdir_p bundles;
   let output_dir = Filename.concat bundles bundle_identity in
   let objects = Filename.concat bundles ".objects" in
-  Core_unix.mkdir objects;
+  Core_unix.mkdir_p objects;
   let object_name = bundle_identity ^ ".123.00000001" in
   let object_dir = Filename.concat objects object_name in
   Core_unix.mkdir object_dir;
@@ -214,7 +226,7 @@ let wait_for service project predicate =
   | `Timeout -> failwith "Preparation timed out"
 ;;
 
-let with_service f =
+let with_service ?(selected = selection) f =
   let directory = Filename_unix.temp_dir "wb004-test-" "" in
   let root = Filename.concat directory "project" in
   Core_unix.mkdir root;
@@ -234,7 +246,7 @@ let with_service f =
       (Filename.concat root Config.filename)
       ~data:(Sexp.to_string_hum (Config.sexp_of_t config))
   in
-  let plan_identity, receipt, output_dir = fixture config ~root in
+  let plan_identity, receipt, output_dir = fixture ~selection:selected config ~root in
   let build_script = ref "printf build-log; sleep 0.1" in
   let emit_script = ref "printf emission-log >&2; cat receipt.json" in
   let builds = ref 0
@@ -263,10 +275,9 @@ let with_service f =
   in
   let emit c ~root ~environment ~selection:actual ~expected_plan_identity =
     incr emissions;
-    require (Preparation.Selection.equal selection actual) "Selected parameters changed";
-    require
-      (Option.equal String.equal expected_plan_identity (Some plan_identity))
-      "Expected plan identity dropped";
+    require (Preparation.Selection.equal selected actual) "Selected parameters changed";
+    Option.iter expected_plan_identity ~f:(fun id ->
+      require (Receipt.valid_identity id) "Invalid expected plan identity");
     let invocation =
       Adapter.emit c ~root ~environment ~selection:actual ~expected_plan_identity
     in
@@ -277,27 +288,27 @@ let with_service f =
       (List.equal
          String.equal
          invocation.argv
-         [ Config.source_executable c ~root
-         ; "flow"
-         ; "emit"
-         ; "--flow"
-         ; "tiny-flow"
-         ; "--profile"
-         ; "fast"
-         ; "--endpoint"
-         ; "synthesis"
-         ; "--source-root"
-         ; root
-         ; "--json"
-         ; "--set"
-         ; "SYNTH_STRATEGY=AREA 0"
-         ; "--set"
-         ; "SYNTH_HIERARCHICAL=true"
-         ; "--results-root"
-         ; c.results_root
-         ; "--expected-plan-identity"
-         ; plan_identity
-         ])
+         ([ Config.source_executable c ~root
+          ; "flow"
+          ; "emit"
+          ; "--flow"
+          ; "tiny-flow"
+          ; "--profile"
+          ; "fast"
+          ; "--endpoint"
+          ; selected.endpoint
+          ; "--source-root"
+          ; root
+          ; "--json"
+          ; "--set"
+          ; "SYNTH_STRATEGY=AREA 0"
+          ; "--set"
+          ; "SYNTH_HIERARCHICAL=true"
+          ; "--results-root"
+          ; c.results_root
+          ]
+          @ Option.value_map expected_plan_identity ~default:[] ~f:(fun id ->
+            [ "--expected-plan-identity"; id ])))
       "Emission argv changed";
     shell ~root !emit_script
   in
@@ -308,6 +319,8 @@ let with_service f =
       ~kill_after:(Time_float.Span.of_ms 20.)
       ~preparation_build_invocation:build
       ~preparation_emit_invocation:emit
+      ~action_invocation:(fun ~root ~environment:_ _ ->
+        shell ~root "printf 'generic\\n' >> source-order")
       ()
   in
   let service = Or_error.ok_exn created in
@@ -553,8 +566,8 @@ let run_fixture () =
          (not (String.equal blocker_id queued_id))
          "Changed configuration coalesced into old work";
        require
-         (Job.State.equal (Option.value_exn (latest queued).build_job).state Queued)
-         "Configuration drift test did not queue its build";
+         (Option.is_none (latest queued).build_job)
+         "Source-lease waiter enqueued a build ahead of the preceding emission";
        Out_channel.write_all
          (Filename.concat root Config.filename)
          ~data:
@@ -613,8 +626,9 @@ let run_fixture () =
        let%bind failed, replay =
          Deferred.both (prepare "invocation-error") (prepare "invocation-error")
        in
+       let%bind settled = wait_for service project (fun s -> terminal (latest s)) in
        require
-         (Preparation.Outcome.equal (latest failed).outcome Build_failed
+         (Preparation.Outcome.equal (latest settled).outcome Build_failed
           && Option.equal String.equal failed.requested_attempt replay.requested_attempt)
          "Invocation failure left an active attempt or blocked duplicate replay";
        Out_channel.write_all
@@ -933,6 +947,802 @@ let run_staging_fixture () =
        return ())
 ;;
 
+let run_fresh_fixture endpoint =
+  let selected = { selection with endpoint } in
+  with_service
+    ~selected
+    (fun
+        ~service
+        ~project
+        ~root
+        ~config
+        ~write_config
+        ~plan_identity
+        ~receipt
+        ~output_dir
+        ~build_script
+        ~emit_script
+        ~builds
+        ~emissions
+      ->
+       write_config ();
+       let provider = Filename.concat root "fresh-provider.py" in
+       Out_channel.write_all provider ~data:(In_channel.read_all "fresh_provider.py");
+       Core_unix.chmod provider ~perm:0o700;
+       let module Asic_config = Hardcaml_workbench_project_integration.Asic_config in
+       let asic_config : Asic_config.t =
+         { schema_version = 1
+         ; project_executable = Filename.concat root "provider"
+         ; provider_executable = provider
+         ; results_root = Filename.concat root "physical-results"
+         ; toolchain = root
+         ; python = Some "/literal/python"
+         ; support_tools = Some "/literal/tt"
+         ; pdk_root = Some "/literal/pdk"
+         ; stage_timeout_seconds = Some 11
+         }
+       in
+       Out_channel.write_all
+         (Filename.concat root Asic_config.filename)
+         ~data:(Sexp.to_string (Asic_config.sexp_of_t asic_config));
+       let asic operation =
+         Service.asic service { instance_id; project; operation } >>| ok
+       in
+       let find snapshot key =
+         List.find_exn snapshot.Asic.Snapshot.workflows ~f:(fun w ->
+           String.equal w.Asic.Fresh.Workflow.key key)
+       in
+       let wait key predicate =
+         let rec loop remaining =
+           let%bind snapshot = asic Get in
+           let w = find snapshot key in
+           if predicate w
+           then return w
+           else if remaining = 0
+           then raise_s [%message "Fresh workflow timed out" (w : Asic.Fresh.Workflow.t)]
+           else (
+             let%bind () = Clock.after (Time_float.Span.of_ms 20.) in
+             loop (remaining - 1))
+         in
+         loop 500
+       in
+       let settled key =
+         wait key (fun w ->
+           match w.phase with
+           | Completed | Failed | Cancelled | Interrupted -> true
+           | _ -> false)
+       in
+       let stage ?(expected_plan_identity = None) ~elaboration_only () =
+         let%map snapshot =
+           asic
+             (Stage_fresh
+                { selection = selected; elaboration_only; expected_plan_identity })
+         in
+         Option.value_exn snapshot.fresh_intent
+       in
+       let launch key intent =
+         asic (Launch_fresh { key; intent_id = intent.Asic.Fresh.Intent.id })
+       in
+       let physical_calls () =
+         let path = Filename.concat root "physical-calls" in
+         if Poly.equal (Sys_unix.file_exists path) `No
+         then []
+         else In_channel.read_lines path |> List.map ~f:Yojson.Safe.from_string
+       in
+       let stages () =
+         List.filter (physical_calls ()) ~f:(function
+           | `List (`String "stages" :: _) -> true
+           | _ -> false)
+       in
+       let assert_completed w =
+         if not (Asic.Fresh.Phase.equal w.Asic.Fresh.Workflow.phase Completed)
+         then
+           raise_s
+             [%message "Expected completed fresh workflow" (w : Asic.Fresh.Workflow.t)]
+       in
+       (* Input staging does no build/emission/provider work. Elaboration-only uses the
+          same durable workflow but never even probes a physical provider. *)
+       let%bind elab = stage ~elaboration_only:true () in
+       require
+         (!builds = 0 && !emissions = 0 && List.is_empty (physical_calls ()))
+         "Staging performed work";
+       let%bind _ = launch "elab" elab in
+       let%bind elaborated = settled "elab" in
+       assert_completed elaborated;
+       require
+         (List.is_empty (physical_calls ())
+          && Option.is_none elaborated.run
+          && String.equal elaborated.elaboration_status "completed")
+         "Elaboration-only executed physical work";
+       let%bind _ = launch "elab" elab in
+       require (!builds = 1 && !emissions = 1) "Submission replay reran elaboration";
+       let%bind superseded = stage ~elaboration_only:true () in
+       let%bind current = stage ~elaboration_only:true () in
+       let%bind stale =
+         Service.asic
+           service
+           { instance_id
+           ; project
+           ; operation = Launch_fresh { key = "superseded"; intent_id = superseded.id }
+           }
+       in
+       require (Result.is_error stale && !builds = 1) "Superseded input intent launched";
+       let%bind invalid =
+         Service.asic
+           service
+           { instance_id
+           ; project
+           ; operation =
+               Stage_fresh
+                 { selection =
+                     { selected with
+                       assignments = [ "DUPLICATE=true"; "DUPLICATE=false" ]
+                     }
+                 ; elaboration_only = true
+                 ; expected_plan_identity = None
+                 }
+           }
+       in
+       let%bind invalidated = asic Get in
+       require
+         (Result.is_error invalid
+          && Option.is_none invalidated.fresh_intent
+          && not (String.equal current.id superseded.id))
+         "Failed staging retained a launchable old intent";
+       let%bind physical = stage ~elaboration_only:false () in
+       let%bind _ = launch "physical" physical in
+       let%bind completed = settled "physical" in
+       assert_completed completed;
+       let prepared = Option.value_exn completed.prepared in
+       require
+         (String.equal prepared.bundle_directory output_dir
+          && String.equal prepared.plan_identity plan_identity
+          && String.equal
+               prepared.bundle_identity
+               (Receipt.text (Receipt.field receipt "bundle_identity"))
+          && String.equal
+               (Receipt.sha256 (In_channel.read_all prepared.methodology_plan_path))
+               prepared.methodology_plan_digest
+          && Option.is_some completed.reference
+          && Option.is_some completed.run)
+         "Exact bundle/plan/allocation lineage lost";
+       let argv = List.hd_exn (stages ()) |> Receipt.array |> List.map ~f:Receipt.text in
+       let option name =
+         let index, _ = List.findi_exn argv ~f:(fun _ arg -> String.equal arg name) in
+         List.nth_exn argv (index + 1)
+       in
+       require
+         (String.equal (List.nth_exn argv 1) output_dir
+          && String.equal (option "--methodology-plan") prepared.methodology_plan_path
+          && String.equal (option "--expected-plan-identity") plan_identity
+          && String.equal (option "--python") "/literal/python"
+          && String.equal (option "--support-tools") "/literal/tt"
+          && String.equal (option "--pdk-root") "/literal/pdk"
+          && String.equal (option "--timeout") "11")
+         "Provider exact-input/tool argv mismatch";
+       require
+         (!builds = 2 && !emissions = 2 && List.length (stages ()) = 1)
+         "Fresh physical launch borrowed preparation";
+       let%bind _ = launch "physical" physical in
+       require
+         (!builds = 2 && !emissions = 2 && List.length (stages ()) = 1)
+         "Physical submission replay reran producer";
+       let%bind conflict =
+         Service.asic
+           service
+           { instance_id
+           ; project
+           ; operation = Launch_fresh { key = "physical"; intent_id = elab.id }
+           }
+       in
+       require (Result.is_error conflict) "Conflicting workflow replay accepted";
+       let%bind consumed =
+         Service.asic
+           service
+           { instance_id
+           ; project
+           ; operation = Launch_fresh { key = "different-key"; intent_id = physical.id }
+           }
+       in
+       require (Result.is_error consumed) "Consumed input intent launched twice";
+       let reused_receipt =
+         match receipt with
+         | `Assoc fields ->
+           `Assoc
+             (("reused", `Bool true)
+              :: List.Assoc.remove fields "reused" ~equal:String.equal)
+         | _ -> assert false
+       in
+       Out_channel.write_all
+         (Filename.concat root "receipt.json")
+         ~data:(Yojson.Safe.to_string reused_receipt);
+       let%bind next = stage ~elaboration_only:false () in
+       let%bind _ = launch "physical-repeat" next in
+       let%bind repeated = settled "physical-repeat" in
+       assert_completed repeated;
+       let%bind preparation = get service project in
+       require
+         (Option.value_exn (latest preparation).bundle).reused
+         "Identical-publication reuse receipt was lost";
+       require
+         (!builds = 3
+          && !emissions = 3
+          && List.length (stages ()) = 2
+          && (not (String.equal completed.id repeated.id))
+          && not (Option.equal Run_ref.equal completed.run repeated.run))
+         "Distinct fresh launch reused workflow";
+       (* Build failure, failed emission and explicit mismatch gate physical work. *)
+       build_script := "exit 9";
+       let%bind input = stage ~elaboration_only:false () in
+       let%bind _ = launch "build-failure" input in
+       let%bind failed = settled "build-failure" in
+       require
+         (String.equal failed.elaboration_status "build_failed"
+          && Option.is_none failed.run
+          && !emissions = 3
+          && List.length (stages ()) = 2)
+         "Build failure admitted emission/physical";
+       build_script := "exit 0";
+       emit_script := "cat receipt.json; exit 7";
+       let%bind input = stage ~elaboration_only:false () in
+       let%bind _ = launch "emit-failure" input in
+       let%bind failed = settled "emit-failure" in
+       require
+         (String.equal failed.elaboration_status "emission_failed"
+          && Option.is_none failed.prepared
+          && List.length (stages ()) = 2)
+         "Failed emission admitted physical";
+       emit_script := "cat receipt.json";
+       let%bind input =
+         stage
+           ~elaboration_only:false
+           ~expected_plan_identity:(Some (String.make 64 '0'))
+           ()
+       in
+       let%bind _ = launch "identity-mismatch" input in
+       let%bind mismatch = settled "identity-mismatch" in
+       require
+         (Asic.Fresh.Phase.equal mismatch.phase Failed
+          && Option.is_none mismatch.prepared
+          && List.length (stages ()) = 2)
+         "Expected identity guard failed";
+       (* Cancel actual supervised build and emission processes. *)
+       build_script := "touch fresh-build-started; sleep 30";
+       let%bind input = stage ~elaboration_only:false () in
+       let%bind _ = launch "cancel-build" input in
+       let%bind active =
+         wait "cancel-build" (fun w ->
+           Option.exists w.build_job ~f:(fun j -> Job.State.equal j.state Running))
+       in
+       let%bind _ = asic (Cancel_workflow active.id) in
+       let%bind cancelled = settled "cancel-build" in
+       require
+         (Asic.Fresh.Phase.equal cancelled.phase Cancelled
+          && Option.is_none cancelled.emission_job
+          && List.length (stages ()) = 2)
+         "Cancelled build advanced";
+       build_script := "exit 0";
+       emit_script := "sleep 30; cat receipt.json";
+       let%bind input = stage ~elaboration_only:false () in
+       let%bind _ = launch "cancel-emission" input in
+       let%bind active =
+         wait "cancel-emission" (fun w ->
+           Option.exists w.emission_job ~f:(fun j -> Job.State.equal j.state Running))
+       in
+       let%bind _ = asic (Cancel_workflow active.id) in
+       let%bind cancelled = settled "cancel-emission" in
+       require
+         (Asic.Fresh.Phase.equal cancelled.phase Cancelled
+          && Option.is_none cancelled.prepared
+          && List.length (stages ()) = 2)
+         "Cancelled emission advanced";
+       (* Source lease covers both steps, across standalone and workflow APIs. *)
+       build_script
+       := "printf 'build-start\\n' >> source-order; sleep 0.1; printf 'build-end\\n' >> \
+           source-order";
+       emit_script
+       := "printf 'emit-start\\n' >> source-order; sleep 0.1; cat receipt.json; printf \
+           'emit-end\\n' >> source-order";
+       let%bind standalone =
+         call
+           service
+           project
+           (Prepare
+              { submission_key = "standalone-lease"
+              ; selection = selected
+              ; expected_plan_identity = None
+              })
+         >>| ok
+       in
+       let%bind _ =
+         wait_for service project (fun s ->
+           Option.exists (latest s).build_job ~f:(fun job ->
+             Job.State.equal job.state Running))
+       in
+       let%bind generic =
+         Service.submit_job
+           service
+           { instance_id
+           ; project
+           ; action = Build
+           ; submission_key = "generic-during-source-lease"
+           }
+         >>| ok
+       in
+       require
+         (Job.State.equal generic.job.state Queued)
+         "Generic source build bypassed preparation lease";
+       let%bind input = stage ~elaboration_only:true () in
+       let%bind _ = launch "workflow-lease" input in
+       let%bind lease = settled "workflow-lease" in
+       assert_completed lease;
+       let%bind _ =
+         wait_for service project (fun s ->
+           List.exists s.history ~f:(fun a ->
+             String.equal a.id (Option.value_exn standalone.requested_attempt)
+             && terminal a))
+       in
+       require
+         (List.equal
+            String.equal
+            (In_channel.read_lines (Filename.concat root "source-order"))
+            [ "build-start"
+            ; "build-end"
+            ; "emit-start"
+            ; "emit-end"
+            ; "generic"
+            ; "build-start"
+            ; "build-end"
+            ; "emit-start"
+            ; "emit-end"
+            ])
+         "Source build-through-emission lease interleaved producers";
+       (* One active physical owner keeps the second physical task queued. Cancellation of
+          the queued workflow must never create its provider process. *)
+       build_script := "exit 0";
+       emit_script := "cat receipt.json";
+       Out_channel.write_all (Filename.concat root "hold-physical") ~data:"";
+       let%bind input = stage ~elaboration_only:false () in
+       let%bind _ = launch "physical-owner" input in
+       let%bind owner = wait "physical-owner" (fun w -> Option.is_some w.run) in
+       let%bind input = stage ~elaboration_only:false () in
+       let%bind _ = launch "physical-queued" input in
+       let%bind queued =
+         wait "physical-queued" (fun w -> Asic.Fresh.Phase.equal w.phase Physical)
+       in
+       let%bind _ = asic (Cancel_workflow queued.id) in
+       let%bind _ = asic (Cancel_workflow owner.id) in
+       let%bind queued = settled "physical-queued" in
+       let%bind owner = settled "physical-owner" in
+       require
+         (Asic.Fresh.Phase.equal queued.phase Cancelled
+          && Option.is_none queued.run
+          && Asic.Fresh.Phase.equal owner.phase Cancelled
+          && List.length (stages ()) = 3
+          && Poly.equal
+               (Sys_unix.file_exists (Filename.concat root "physical-stopped"))
+               `Yes)
+         "Queued cancellation launched a provider or owned physical cancellation failed";
+       Core_unix.unlink (Filename.concat root "hold-physical");
+       (* Missing configuration and drift fail before a workflow producer exists. *)
+       let%bind input = stage ~elaboration_only:false () in
+       Out_channel.write_all
+         (Filename.concat root Config.filename)
+         ~data:(Sexp.to_string (Config.sexp_of_t { config with timeout_seconds = 12 }));
+       let before = !builds in
+       let%bind drift =
+         Service.asic
+           service
+           { instance_id
+           ; project
+           ; operation = Launch_fresh { key = "scope-drift"; intent_id = input.id }
+           }
+       in
+       require
+         (Result.is_error drift && !builds = before)
+         "Scope drift started source work";
+       write_config ();
+       let%bind input = stage ~elaboration_only:false () in
+       let provider_bytes = In_channel.read_all provider in
+       Out_channel.write_all
+         provider
+         ~data:(provider_bytes ^ "\n# changed provider generation\n");
+       let%bind provider_drift =
+         Service.asic
+           service
+           { instance_id
+           ; project
+           ; operation = Launch_fresh { key = "provider-drift"; intent_id = input.id }
+           }
+       in
+       require
+         (Result.is_error provider_drift && !builds = before)
+         "Provider generation drift started source work";
+       Out_channel.write_all provider ~data:provider_bytes;
+       (* New source bytes establish a new emitted identity without inheriting a pinned
+          preview expectation. The earlier workflow keeps its own identity. *)
+       let changed_plan, changed_receipt, changed_directory =
+         fixture
+           ~selection:selected
+           ~input:"let design = changed_source_v2\n"
+           config
+           ~root
+       in
+       let%bind changed_input = stage ~elaboration_only:false () in
+       let%bind _ = launch "changed-source" changed_input in
+       let%bind changed = settled "changed-source" in
+       assert_completed changed;
+       let changed_prepared = Option.value_exn changed.prepared in
+       require
+         ((not (String.equal changed_plan plan_identity))
+          && (not (String.equal changed_directory output_dir))
+          && String.equal changed_prepared.plan_identity changed_plan
+          && String.equal changed_prepared.bundle_directory changed_directory
+          && Option.equal Asic.Fresh.Prepared.equal completed.prepared (Some prepared))
+         "Source edit reused stale identity or relabelled earlier preparation";
+       let legacy_preview : Asic.Preview.t =
+         { selection = selected
+         ; plan_identity = changed_plan
+         ; plan_json = Yojson.Safe.to_string (Receipt.field changed_receipt "plan")
+         }
+       in
+       let%bind _ = asic (Run { key = "legacy-run"; preview = legacy_preview }) in
+       let%bind legacy = settled "legacy-run" in
+       assert_completed legacy;
+       require
+         (Option.equal
+            String.equal
+            legacy.intent.expected_plan_identity
+            (Some changed_plan)
+          && List.length (stages ()) = 5)
+         "Legacy Run bypassed source chain";
+       let stale_preview : Asic.Preview.t =
+         { selection = selected
+         ; plan_identity
+         ; plan_json = Yojson.Safe.to_string (Receipt.field receipt "plan")
+         }
+       in
+       let%bind _ = asic (Run { key = "stale-legacy-run"; preview = stale_preview }) in
+       let%bind stale = settled "stale-legacy-run" in
+       require
+         (Asic.Fresh.Phase.equal stale.phase Failed && List.length (stages ()) = 5)
+         "Legacy explicit preview expectation silently replaced";
+       (* Restart while another source producer is active. Reopening is historical
+          evidence only and must neither replay nor acquire/cancel that producer. *)
+       build_script := "sleep 30";
+       let%bind unfinished_input = stage ~elaboration_only:true () in
+       let%bind _ = launch "unfinished" unfinished_input in
+       let%bind unfinished =
+         wait "unfinished" (fun w ->
+           Option.exists w.build_job ~f:(fun j -> Job.State.equal j.state Running))
+       in
+       let before_reopen = !builds in
+       (* Restart the ASIC state owner without restarting the user's daemon. The direct
+          service is a read-only reopen of this private fixture's registry. *)
+       let state_dir = Filename.concat (Filename.dirname root) "logs-state" in
+       let reopened = Hardcaml_workbench_backend.Asic_service.create ~state_dir in
+       let%bind restored =
+         Hardcaml_workbench_backend.Asic_service.handle
+           reopened
+           ~root
+           ~environment:Inherit_daemon
+           Get
+         >>| ok
+       in
+       let old = find restored "physical" in
+       require
+         (Asic.Fresh.Phase.equal old.phase Completed
+          && Option.is_some old.prepared
+          && Option.equal Run_ref.equal old.run completed.run
+          && Option.is_some old.elaboration_started_at
+          && Option.is_some old.elaboration_finished_at
+          && Option.is_none old.build_job
+          && Option.is_none old.emission_job)
+         "Restart lost durable lineage or retained live job handles";
+       let interrupted = find restored "unfinished" in
+       require
+         (Asic.Fresh.Phase.equal interrupted.phase Interrupted
+          && String.equal interrupted.elaboration_status "interrupted"
+          && Option.is_some interrupted.elaboration_started_at)
+         "Restart advertised unfinished preparation as owned/complete";
+       let%bind replay =
+         Hardcaml_workbench_backend.Asic_service.handle
+           reopened
+           ~root
+           ~environment:Inherit_daemon
+           (Launch_fresh { key = "physical"; intent_id = physical.id })
+       in
+       let%bind unfinished_replay =
+         Hardcaml_workbench_backend.Asic_service.handle
+           reopened
+           ~root
+           ~environment:Inherit_daemon
+           (Launch_fresh { key = "unfinished"; intent_id = unfinished_input.id })
+       in
+       let%bind _ =
+         Hardcaml_workbench_backend.Asic_service.handle
+           reopened
+           ~root
+           ~environment:Inherit_daemon
+           (Cancel_workflow interrupted.id)
+       in
+       require
+         (Result.is_ok replay
+          && Result.is_ok unfinished_replay
+          && !builds = before_reopen
+          && List.length (stages ()) = 5)
+         "Restart replay reran a producer";
+       let%bind () = Hardcaml_workbench_backend.Asic_service.shutdown reopened in
+       let%bind still_owned = asic Get in
+       require
+         (Asic.Fresh.Phase.equal (find still_owned "unfinished").phase Building)
+         "Historical cancellation signalled another owner";
+       let%bind _ = asic (Cancel_workflow unfinished.id) in
+       let%bind _ = settled "unfinished" in
+       printf
+         "Unified fresh %s: exact handoff, failure/cancel gates, source lease and \
+          durable replay passed\n\
+          %!"
+         endpoint;
+       return ())
+;;
+
+let run_fresh_probe_fixture ~shutdown =
+  with_service
+    (fun
+        ~service
+        ~project
+        ~root
+        ~config
+        ~write_config
+        ~plan_identity:_
+        ~receipt:_
+        ~output_dir:_
+        ~build_script:_
+        ~emit_script:_
+        ~builds
+        ~emissions
+      ->
+       write_config ();
+       let provider = Filename.concat root "probe-provider.py" in
+       Out_channel.write_all provider ~data:(In_channel.read_all "fresh_provider.py");
+       Core_unix.chmod provider ~perm:0o700;
+       let module C = Hardcaml_workbench_project_integration.Asic_config in
+       let provider_config : C.t =
+         { schema_version = 1
+         ; project_executable = Filename.concat root "provider"
+         ; provider_executable = provider
+         ; results_root = config.results_root
+         ; toolchain = root
+         ; python = None
+         ; support_tools = None
+         ; pdk_root = None
+         ; stage_timeout_seconds = None
+         }
+       in
+       Out_channel.write_all
+         (Filename.concat root C.filename)
+         ~data:(Sexp.to_string (C.sexp_of_t provider_config));
+       let marker name = Filename.concat root name in
+       let touch name = Out_channel.write_all (marker name) ~data:"" in
+       let asic operation =
+         Service.asic service { instance_id; project; operation } >>| ok
+       in
+       let get key =
+         let%map snapshot = asic Get in
+         List.find_exn snapshot.workflows ~f:(fun w ->
+           String.equal w.Asic.Fresh.Workflow.key key)
+       in
+       let bounded label f =
+         let%map outcome = Clock.with_timeout (Time_float.Span.of_sec 3.) (f ()) in
+         match outcome with
+         | `Result value -> value
+         | `Timeout -> failwith ("Timed out: " ^ label)
+       in
+       let wait label predicate =
+         bounded label (fun () ->
+           let rec loop () =
+             let%bind result = predicate () in
+             match result with
+             | Some value -> return value
+             | None ->
+               let%bind () = Clock.after (Time_float.Span.of_ms 10.) in
+               loop ()
+           in
+           loop ())
+       in
+       let launch key =
+         let%bind snapshot =
+           asic
+             (Stage_fresh
+                { selection; elaboration_only = false; expected_plan_identity = None })
+         in
+         let intent = Option.value_exn snapshot.fresh_intent in
+         let%bind _ = asic (Launch_fresh { key; intent_id = intent.id }) in
+         get key
+       in
+       let entered () =
+         wait "owned metadata process enters gate" (fun () ->
+           return
+             (if Poly.equal (Sys_unix.file_exists (marker "probe-entered")) `Yes
+              then Some (String.strip (In_channel.read_all (marker "probe-entered")))
+              else None))
+       in
+       let terminal key =
+         wait ("terminal workflow " ^ key) (fun () ->
+           let%map w = get key in
+           match w.phase with
+           | Completed | Failed | Cancelled | Interrupted -> Some w
+           | _ -> None)
+       in
+       let alive pid = Poly.equal (Sys_unix.file_exists ("/proc/" ^ pid)) `Yes in
+       let assert_no_downstream () =
+         require (!builds = 0 && !emissions = 0) "Capability probe admitted source work";
+         require
+           (not
+              (List.exists
+                 (In_channel.read_lines (marker "physical-calls"))
+                 ~f:(fun line -> String.is_prefix line ~prefix:"[\"stages\"")))
+           "Capability probe admitted physical work"
+       in
+       touch "hold-probe";
+       Monitor.protect
+         ~finally:(fun () ->
+           touch "probe-release";
+           return ())
+         (fun () ->
+           let%bind held = launch "held-probe" in
+           let%bind pid = entered () in
+           assert_no_downstream ();
+           if shutdown
+           then (
+             let%bind () =
+               bounded "shutdown joins and reaps owned capability probe" (fun () ->
+                 Service.shutdown service)
+             in
+             require
+               (not (alive pid))
+               "Shutdown returned with capability process alive or unreaped";
+             require
+               (String.equal
+                  (String.strip (In_channel.read_all (marker "probe-stopped")))
+                  pid)
+               "Shutdown did not signal its owned capability process";
+             assert_no_downstream ();
+             let reopened =
+               Hardcaml_workbench_backend.Asic_service.create
+                 ~state_dir:(Filename.concat (Filename.dirname root) "logs-state")
+             in
+             let%bind snapshot =
+               Hardcaml_workbench_backend.Asic_service.handle
+                 reopened
+                 ~root
+                 ~environment:Inherit_daemon
+                 Get
+               >>| ok
+             in
+             let restored =
+               List.find_exn snapshot.workflows ~f:(fun w -> String.equal w.id held.id)
+             in
+             require
+               (Asic.Fresh.Phase.equal restored.phase Cancelled
+                && Option.is_none restored.preparation_id)
+               "Shutdown failed to retain cancelled pre-preparation workflow";
+             Hardcaml_workbench_backend.Asic_service.shutdown reopened)
+           else (
+             (* A second workflow owns a separate probe. Cancelling the first must not
+                cancel/coalesce the second through the shared metadata cache. *)
+             Core_unix.unlink (marker "probe-entered");
+             let%bind _ = launch "independent-probe" in
+             let%bind second_pid = entered () in
+             require
+               (not (String.equal pid second_pid))
+               "Independent workflow borrowed an owned probe";
+             let%bind _ = asic (Cancel_workflow held.id) in
+             let%bind cancelled = terminal "held-probe" in
+             require
+               (Asic.Fresh.Phase.equal cancelled.phase Cancelled
+                && Option.is_none cancelled.preparation_id
+                && not (alive pid))
+               "Cancellation did not join/reap capability process before completion";
+             require
+               (String.equal
+                  (String.strip (In_channel.read_all (marker "probe-stopped")))
+                  pid
+                && alive second_pid)
+               "Cancellation affected another workflow's probe";
+             assert_no_downstream ();
+             touch "probe-release";
+             let%bind positive = terminal "independent-probe" in
+             require
+               (Asic.Fresh.Phase.equal positive.phase Completed
+                && !builds = 1
+                && !emissions = 1)
+               "Uncancelled capability probe did not permit its exact source/physical \
+                chain";
+             touch "fail-probe";
+             let%bind _ = launch "failed-probe" in
+             let%bind failed = terminal "failed-probe" in
+             require
+               (Asic.Fresh.Phase.equal failed.phase Failed
+                && Option.is_none failed.preparation_id
+                && !builds = 1
+                && !emissions = 1
+                && Option.exists failed.error ~f:(fun e ->
+                  String.is_substring e ~substring:"fixture capability probe failure"))
+               "Failed fresh probe reused cached success or admitted downstream work";
+             Core_unix.unlink (marker "fail-probe");
+             let%bind _ = launch "recovered-probe" in
+             let%bind recovered = terminal "recovered-probe" in
+             require
+               (Asic.Fresh.Phase.equal recovered.phase Completed
+                && !builds = 2
+                && !emissions = 2)
+               "Failed/cancelled capability probe poisoned later fresh admission";
+             return ())))
+;;
+
+let run_fresh_persistence_fixture () =
+  with_service
+    (fun
+        ~service
+        ~project
+        ~root
+        ~config:_
+        ~write_config
+        ~plan_identity:_
+        ~receipt:_
+        ~output_dir:_
+        ~build_script:_
+        ~emit_script:_
+        ~builds
+        ~emissions
+      ->
+       write_config ();
+       let asic operation = Service.asic service { instance_id; project; operation } in
+       let%bind staged =
+         asic
+           (Stage_fresh
+              { selection; elaboration_only = true; expected_plan_identity = None })
+         >>| ok
+       in
+       let intent = Option.value_exn staged.fresh_intent in
+       let state_dir = Filename.concat (Filename.dirname root) "logs-state" in
+       Out_channel.write_all state_dir ~data:"obstruct workflow reservation";
+       let request =
+         Asic.Operation.Launch_fresh
+           { key = "durable-before-source"; intent_id = intent.id }
+       in
+       let%bind first, second = Deferred.both (asic request) (asic request) in
+       require
+         (Result.is_error first && Result.is_error second && !builds = 0 && !emissions = 0)
+         "Failed durable reservation acknowledged or started preparation";
+       let%bind failed = asic Get >>| ok in
+       require
+         (List.is_empty failed.workflows)
+         "Failed durable reservation poisoned workflow key";
+       Core_unix.unlink state_dir;
+       let%bind first, second = Deferred.both (asic request) (asic request) in
+       require
+         (Result.is_ok first && Result.is_ok second)
+         "Durable reservation failed to recover";
+       let rec wait remaining =
+         let%bind snapshot = asic Get >>| ok in
+         let w = List.hd_exn snapshot.workflows in
+         if Asic.Fresh.Phase.equal w.phase Completed
+         then return ()
+         else (
+           require (remaining > 0) "Recovered workflow never completed";
+           let%bind () = Clock.after (Time_float.Span.of_ms 20.) in
+           wait (remaining - 1))
+       in
+       let%bind () = wait 200 in
+       require
+         (!builds = 1 && !emissions = 1)
+         "Reservation retry started duplicate preparation";
+       return ())
+;;
+
 (* Optional read-only acceptance check against a provider's real receipt and publication.
    Selection and store location are taken from that supplied receipt. *)
 let validate_receipt_file path =
@@ -994,6 +1804,11 @@ let () =
         in
         fun () ->
           let%bind () = run_staging_fixture () in
-          let%map () = run_fixture () in
+          let%bind () = run_fixture () in
+          let%bind () = run_fresh_persistence_fixture () in
+          let%bind () = run_fresh_probe_fixture ~shutdown:false in
+          let%bind () = run_fresh_probe_fixture ~shutdown:true in
+          let%bind () = run_fresh_fixture "synthesis" in
+          let%map () = run_fresh_fixture "cts" in
           Option.iter receipt ~f:validate_receipt_file))
 ;;

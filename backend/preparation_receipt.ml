@@ -289,6 +289,18 @@ let validate config ~selection ~expected_plan_identity output =
             (List.last (array (field recipe "stages")))
             (Some (`String selection.endpoint)))
       "Receipt does not describe the selected fresh recipe endpoint";
+    let canonical_stages = Asic_public.recipe_stages recipe in
+    let prefix =
+      List.take_while canonical_stages ~f:(fun stage ->
+        not (String.equal stage selection.endpoint))
+      @ [ selection.endpoint ]
+    in
+    require
+      (List.mem canonical_stages selection.endpoint ~equal:String.equal
+       && Poly.equal
+            (field recipe "stages")
+            (`List (List.map prefix ~f:(fun s -> `String s))))
+      "Receipt recipe is not a complete fresh prefix";
     let request =
       array (field snapshot "request")
       |> List.sort ~compare:(fun a b ->

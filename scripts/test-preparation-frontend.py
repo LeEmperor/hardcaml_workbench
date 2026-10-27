@@ -4,6 +4,7 @@
 Uses existing binaries; all generated projects/evidence live under /tmp/opencode.
 """
 import argparse
+import hashlib
 import importlib.util
 import json
 import re
@@ -11,6 +12,7 @@ from pathlib import Path
 import secrets
 import signal
 import sys
+import traceback
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
@@ -19,6 +21,9 @@ spec = importlib.util.spec_from_file_location('preparation_composition', HERE / 
 c = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(c)
 field, wait, require, sexp = c.field, c.wait, c.require, c.sexp
+shared_spec = importlib.util.spec_from_file_location('preparation_fresh_frontend', HERE / 'fixtures/fresh_frontend.py')
+shared = importlib.util.module_from_spec(shared_spec)
+shared_spec.loader.exec_module(shared)
 
 
 def acceptance(t, check, http, runs, presets, args):
@@ -26,20 +31,29 @@ def acceptance(t, check, http, runs, presets, args):
     def snapshot():
         return http.rpc(domain='preparation', wait=False)
     def latest():
-        return next(iter(field(snapshot(), 'latest')), None)
+        w = workflow()
+        return next((a for a in field(snapshot(), 'history') if field(a, 'id') in field(w, 'preparation_id')), None) if w else None
+    def workflow():
+        return next(iter(field(http.rpc(wait=False), 'workflows')), None)
+    def staged():
+        return next(iter(field(http.rpc(wait=False), 'fresh_intent')), None)
     def terminal(outcome):
         return wait(lambda: a if (a := latest()) and field(a, 'outcome') == outcome else None,
                     'preparation ' + outcome)
     def calls():
         path = root / 'preparation-calls.jsonl'
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    timer_detail = False
     def checklist_time(label, status):
-        t.command('Unzoom workspace')
-        t.focus_view('stage checklist')
-        t.command('Zoom focused tile')
-        screen = t.capture(label, ['Elaboration:', status])
-        match = re.search(r'Elaboration:\s+' + re.escape(status) + r'\s+\|\s+(\d+)s', screen.text())
-        check(match is not None, label + ': inclusive preparation duration is aligned with physical stage suffixes')
+        nonlocal timer_detail
+        shared.zoom(args.fixture, 'planned-run')
+        t.capture(label + '-workflow', ['Workflow ID:', field(workflow(), 'id')])
+        if not timer_detail:
+            t.key(b'\r')
+            timer_detail = True
+        screen = t.capture(label, ['Elaboration: ' + status, 'Time:'])
+        match = re.search(r'Time:\s+(\d+)s', screen.text())
+        check(match is not None, label + ': inclusive preparation duration belongs to the exact workflow')
         return int(match.group(1))
     registry_before = http.rpc(domain='workspace')
     historical = http.rpc(wait=False)
@@ -100,32 +114,64 @@ def acceptance(t, check, http, runs, presets, args):
     t.focus_view('stage checklist')
     t.command('Zoom focused tile')
     t.key(b'k' * 20)
-    t.capture('elaboration-selected', ['Elaboration:', 'not requested'])
-    check(re.search(r'Elaboration:\s+not requested\s+\|\s+unknown', t.capture('elaboration-unknown-time').text()) is not None,
-          'Unrequested preparation duration is explicitly unknown')
+    t.capture('elaboration-selected', ['Elaboration:', 'unavailable'])
+    check('Elaboration:' in t.capture('elaboration-unknown-time').text(),
+           'Historical run without workflow linkage remains unavailable, independent of project preparation config')
     t.key(b'\r')
-    t.capture('elaboration-read-only', ['Current project preparation', 'no session history'])
+    t.capture('elaboration-read-only', ['Elaboration linkage unavailable', 'historical run'])
     check(not calls(), 'Elaboration Enter inspects preparation without a producer')
     t.key(b'\x1b')
     jobs_before = {field(j, 'id') for j in field(http.raw('/api/v1/snapshot', [['instance_id', http.instance]]), 'jobs')}
     t.key(b'r')
-    staged = wait(lambda: dict(snapshot()).get('staged'), 'input plan staging')
+    intent = wait(staged, 'input intent staging')
     t.drain(1)
     state = http.raw('/api/v1/snapshot', [['instance_id', http.instance]])
     check(not calls() and not field(snapshot(), 'latest') and
           {field(j, 'id') for j in field(state, 'jobs')} == jobs_before,
           'Elaboration r stages exact input plan with zero producer/jobs')
-    t.open_palette('Launch and view planned PREPARATION')
-    http.rpc('(Stage (selection %s) (expected_plan_identity ()))' % sexp(field(staged, 'selection')),
-             domain='preparation', wait=False)
-    t.key(b'\r')
-    t.drain(1)
-    t.capture('superseded-stage-rejected')
-    check(not calls() and not field(snapshot(), 'latest'), 'Captured superseded PREPARATION receipt never launches replacement inputs')
+    t.open_palette('Launch and view planned run')
+    # Identical selection is insufficient evidence of receipt ownership: replace
+    # it under a genuinely different captured preparation configuration scope.
+    prep_path = root / 'hardcaml-workbench-preparation.sexp'
+    original_config = prep_path.read_bytes()
+    different_scope = c.parse(original_config.decode())
+    next(pair for pair in different_scope if pair[0] == 'timeout_seconds')[1] = '91'
+    try:
+        prep_path.write_text(sexp(different_scope))
+        http.rpc('(Stage_fresh (selection %s) (elaboration_only true) (expected_plan_identity ()))' % sexp(field(intent, 'selection')),
+                 wait=False)
+        superseded = staged()
+        shared.api.save(t.base / 'same-selection-scope-replacement.json',
+                        dict(captured=intent, replacement=superseded))
+        t.key(b'\r')
+        t.drain(1)
+        t.capture('superseded-stage-rejected')
+        check(field(superseded, 'selection') == field(intent, 'selection') and
+              field(superseded, 'scope') != field(intent, 'scope') and
+              field(superseded, 'id') != field(intent, 'id') and not calls() and not workflow(),
+              'Same-selection different-scope replacement cannot satisfy or launch the captured original fresh intent')
+    finally:
+        prep_path.write_bytes(original_config)
+    t.key(b'\x1b')
     t.key(b'r')
-    wait(lambda: dict(snapshot()).get('staged') != staged, 'fresh manual preparation receipt')
+    wait(lambda: staged() != superseded, 'fresh manual preparation intent')
     t.drain(.5)
-    t.type_action('launch and vi', 'Launch and view planned PREPARATION', 'manual-preparation-selected-action')
+    t.open_palette('Launch and view planned run')
+    recovery = t.capture('restaged-intent-launch-eligibility', ['Launch and view planned run'])
+    recovered = '[Fresh intent' not in recovery.text()
+    check(recovered, 'Same client can launch a newly staged intent after rejecting a superseded captured action', fatal=False)
+    t.key(b'\x1b')
+    if not recovered:
+        # Keep the failing recovery assertion and final nonzero result, while a
+        # fresh client allows independent log/artifact/standalone regressions to run.
+        t.close()
+        c.Terminal.__init__(t, t.base, args.fixture.client_args, http.url, 180, 55)
+        t.capture('fresh-client-recovery-for-independent-cases', ['stage checklist'])
+        old_intent = staged()
+        t.key(b'r')
+        wait(lambda: staged() != old_intent, 'independent fresh-client input stage')
+        t.drain(.7)
+    t.type_action('launch and vi', 'Launch and view planned run', 'manual-preparation-selected-action')
     completed = terminal('Completed')
     completed_id = field(completed, 'id')
     bundle = field(completed, 'bundle')[0]
@@ -150,7 +196,9 @@ def acceptance(t, check, http, runs, presets, args):
         t.key(b']' * 4)
     check(found, 'Exact emission job log fetched through ordinary Read_log and reachable by scrolling')
     artifact = field(bundle, 'artifacts')[-1]
-    t.command('Preparation ' + completed_id + ': artifact ' + artifact)
+    t.open_palette('Preparation ' + completed_id + ': artifact ' + artifact)
+    t.capture('exact-artifact-palette', ['> Preparation ' + completed_id[:36], artifact[-32:]], ['No matching commands'])
+    t.key(b'\r')
     t.capture('bundle-artifact', ['PREPARATION BUNDLE ARTIFACT', 'WB004 published config'])
     t.key(b'\x1b')
     (root / 'preparation-mode').write_text('fail')
@@ -183,14 +231,15 @@ def acceptance(t, check, http, runs, presets, args):
     t.key(b'\x1b'); t.key(b'R')
     terminal('Emitting')
     check(len(calls()) == 3, 'Preparation tile R emits once for a new exact staged receipt')
-    first_time = checklist_time('emitting-duration', 'running')
+    first_time = checklist_time('emitting-duration', 'emitting')
     t.drain(1.2)
-    second_time = int(re.search(r'Elaboration:\s+running\s+\|\s+(\d+)s', t.capture('emitting-live-duration').text()).group(1))
+    second_time = int(re.search(r'Time:\s+(\d+)s', t.capture('emitting-live-duration').text()).group(1))
     check(second_time >= first_time + 1, 'Active preparation timer advances monotonically across build plus emission')
     t.command('Unzoom workspace'); t.focus_view('preparation'); t.command('Zoom focused tile')
     count_before_reconnect = len(calls())
     t.close()
-    c.Terminal.__init__(t, t.base, args, http.url)
+    c.Terminal.__init__(t, t.base, args.fixture.client_args, http.url, 180, 55)
+    timer_detail = False  # Utility-detail mode is intentionally session-local.
     t.capture('reconnected-active', ['emitting elaboration bundle'])
     check(len(calls()) == count_before_reconnect,
           'Fresh client connection retrieves active preparation and history without resubmission')
@@ -199,8 +248,64 @@ def acceptance(t, check, http, runs, presets, args):
     t.capture('cancelled-headline', ['cancelled'])
     frozen = checklist_time('cancelled-duration', 'cancelled')
     t.drain(1.2)
-    check(int(re.search(r'Elaboration:\s+cancelled\s+\|\s+(\d+)s', t.capture('cancelled-frozen-duration').text()).group(1)) == frozen,
+    check(int(re.search(r'Time:\s+(\d+)s', t.capture('cancelled-frozen-duration').text()).group(1)) == frozen,
           'Cancelled preparation duration freezes instead of animating as active')
+    # The configured ASIC executable and the freshly built publisher deliberately
+    # produce different methodology identities for the SAME selected inputs.
+    # Exercise the real dispatcher: the palette's initial eligibility check alone
+    # cannot catch accidentally borrowing the ASIC identity when lowering to Stage.
+    (root / 'preparation-mode').write_text('success')
+    t.command('Preparation inputs: ' + field(flow, 'id') + ' / ' + field(flow, 'profiles')[0])
+    t.key(b'\x15'); t.key(b'synthesis'); t.key(b'\r')
+    selected = [['flow', field(flow, 'id')], ['profile', field(flow, 'profiles')[0]],
+                ['endpoint', 'synthesis'], ['assignments', []]]
+    http.rpc('(Plan %s)' % sexp(selected))
+    preview = wait(lambda: next(iter(field(http.rpc(wait=False), 'preview')), None),
+                   'same-selection ASIC preview')
+    check(field(preview, 'selection') == selected, 'ASIC preview exactly matches standalone preparation selection')
+    t.drain(1)
+    def fresh_completed(previous):
+        return wait(lambda: a if (a := latest()) and field(a, 'id') != previous and
+                    field(a, 'outcome') == 'Completed' else None, 'fresh standalone preparation completion')
+    def independent(attempt, route):
+        check(not field(attempt, 'expected_plan_identity') and
+              field(attempt, 'selection') == selected and
+              field(field(attempt, 'bundle')[0], 'plan_identity') != field(preview, 'plan_identity'),
+              route + ' builds fresh source without borrowing same-selection ASIC preview identity')
+        check(field(http.rpc(wait=False), 'preview') == [preview], route + ' preserves ASIC preview')
+    t.command('Unzoom workspace'); t.focus_view('stage checklist'); t.command('Zoom focused tile')
+    t.key(b'k' * 20)
+    previous = field(latest(), 'id')
+    old_stage = staged()
+    before_calls = len(calls())
+    t.key(b'r')
+    intent = wait(lambda: s if (s := staged()) != old_stage else None,
+                  'same-selection standalone input stage')
+    check(not field(intent, 'expected_plan_identity') and field(intent, 'selection') == selected and
+          len(calls()) == before_calls and field(latest(), 'id') == previous,
+          'Regular Elaboration r stages unpinned current-source inputs without launching')
+    t.command('Launch and view planned run')
+    manual = fresh_completed(previous)
+    independent(manual, 'Regular r/manual launch')
+    t.key(b'R')
+    quick = fresh_completed(field(manual, 'id'))
+    independent(quick, 'Elaboration R')
+    t.type_action('launch elab', 'Launch elaboration bundle', 'same-selection-palette-elaboration')
+    named = fresh_completed(field(quick, 'id'))
+    independent(named, 'Named elaboration palette launch')
+    t.command('Quick launch selected stage')
+    selected_quick = fresh_completed(field(named, 'id'))
+    independent(selected_quick, 'Selected Elaboration palette quick launch')
+    # Explicit API callers still own their expectation. The same unrelated identity
+    # must fail backend receipt validation rather than being silently discarded.
+    http.rpc('(Stage_fresh (selection %s) (elaboration_only true) '
+             '(expected_plan_identity (%s)))' % (sexp(selected), sexp(field(preview, 'plan_identity'))), wait=False)
+    http.rpc('(Launch_fresh (key explicit-stale-preview) (intent_id %s))' % sexp(field(staged(), 'id')), wait=False)
+    stale = terminal('Emission_failed')
+    check(field(stale, 'expected_plan_identity') == [field(preview, 'plan_identity')] and
+          field(field(stale, 'build_job')[0], 'state') == 'Complete' and not field(stale, 'bundle') and
+          'Expected plan mismatch' in str(field(stale, 'diagnostic')),
+          'Explicit stale API expectation survives dispatch and fails backend publication validation')
     current = http.rpc(wait=False)
     check(field(current, 'launches') == field(historical, 'launches') and
           field(current, 'runs') == field(historical, 'runs'),
@@ -217,7 +322,7 @@ def main():
     for name in ('daemon', 'client', 'preset-export'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--evidence', type=Path)
-    parser.add_argument('--timeout', type=int, default=150)
+    parser.add_argument('--timeout', type=int, default=360)
     args = parser.parse_args()
     for name in ('daemon', 'client', 'preset_export'):
         setattr(args, name, getattr(args, name).resolve(strict=True))
@@ -227,10 +332,34 @@ def main():
     args.harness = 'WB004 preparation frontend'
     signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError('WB004 budget exhausted')))
     signal.alarm(args.timeout)
+    args.evidence = args.evidence.resolve()
+    args.evidence.mkdir(exist_ok=False)
+    print('Evidence: ' + str(args.evidence), flush=True)
+    result = dict(status='failed', checks=[], evidence=str(args.evidence),
+                  binaries={str(p): hashlib.sha256(p.read_bytes()).hexdigest()
+                            for p in (args.daemon, args.client, args.preset_export)})
+    fixture = None
+    def check(ok, message, fatal=True):
+        result['checks'].append(dict(passed=bool(ok), expectation=message))
+        if fatal:
+            require(ok, message)
     try:
-        c.run(args, acceptance=lambda *values: acceptance(*values, args), extra_runs=(), focused=True)
+        fixture, presets = shared.setup(args, 'native', check, preparation=False)
+        args.fixture = fixture
+        acceptance(fixture.terminal, check, fixture.http, (), presets, args)
+        require(all(item['passed'] for item in result['checks']), 'One or more retained regression assertions failed; see result.json')
+        result['status'] = 'passed'
+    except BaseException:
+        result['error'] = traceback.format_exc()
+        raise
     finally:
         signal.alarm(0)
+        try:
+            if fixture is not None:
+                shared.finish(fixture)
+        finally:
+            shared.api.save(args.evidence / 'result.json', result)
+    print('PASS WB004 unified preparation frontend: ' + str(len(result['checks'])) + ' assertions; ' + str(args.evidence))
 
 
 if __name__ == '__main__':

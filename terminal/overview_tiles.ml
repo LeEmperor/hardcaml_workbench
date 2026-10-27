@@ -409,11 +409,11 @@ let checklist_row ?now ~run ~selected = function
       ~active:selected
       ~role:Muted
       ~details:
-        [ "Current project preparation; independent of selected historical ASIC run"
-        ; "r: EDA-less preparation; Enter: read-only preparation history"
+        [ "Elaboration linkage unavailable until the selected run's workflow is resolved"
+        ; "r: stage fresh source inputs; Enter: read-only linked evidence"
         ]
       "Elaboration"
-      "project preparation"
+      "unavailable"
   | Physical_stage s -> asic_stage_row ?now ~run ~selected s
   | Timing_analysis summary ->
     let row = analysis_row ~run ~selected summary in
@@ -423,6 +423,83 @@ let checklist_row ?now ~run ~selected = function
          checks current catalog for a NEW timing run"
         :: row.details
     }
+;;
+
+let workflow_for_run ~asic ~run =
+  Option.bind asic ~f:(fun (s : Asic.Snapshot.t) ->
+    List.find s.workflows ~f:(fun w -> Option.exists w.run ~f:(Run_ref.equal run)))
+;;
+
+let elaboration_row ~now ~selected workflow =
+  match workflow with
+  | None ->
+    row
+      ~status:Status.Unknown
+      ~active:selected
+      ~role:Muted
+      ~details:
+        [ "Elaboration linkage unavailable for this historical run; no project-latest \
+           substitution"
+        ]
+      "Elaboration"
+      "unavailable"
+  | Some (w : Asic.Fresh.Workflow.t) ->
+    let status : Status.t =
+      match w.elaboration_status with
+      | "building" | "emitting" -> Running
+      | "completed" -> Completed
+      | "build_failed" | "emission_failed" -> Failed
+      | "cancelled" -> Cancelled
+      | "interrupted" -> Unknown
+      | _ -> Pending
+    in
+    let time =
+      Option.value_map w.elaboration_started_at ~default:"unknown" ~f:(fun start ->
+        let finish =
+          match w.elaboration_finished_at with
+          | Some finish -> Some (Timestamp.to_time_ns finish)
+          | None
+            when List.mem
+                   [ "building"; "emitting" ]
+                   w.elaboration_status
+                   ~equal:String.equal -> Some now
+          | None -> None
+        in
+        Option.value_map finish ~default:"unknown" ~f:(fun finish ->
+          let seconds =
+            Time_ns.Span.to_sec (Time_ns.diff finish (Timestamp.to_time_ns start))
+          in
+          let seconds = Float.max 0. seconds in
+          if Float.(seconds < 60.)
+          then Int.to_string (Float.to_int seconds) ^ "s"
+          else
+            Int.to_string (Float.to_int (seconds /. 60.))
+            ^ "m "
+            ^ Int.to_string (Float.to_int seconds mod 60)
+            ^ "s"))
+    in
+    row
+      ~status
+      ~active:selected
+      ~role:(status_role status)
+      ~time
+      ~details:
+        ([ "Workflow: " ^ w.id
+         ; "Submission key: " ^ w.key
+         ; "Preparation: " ^ Option.value w.preparation_id ~default:"awaiting admission"
+         ; "Source input intent: " ^ w.intent.id
+         ; "Elaboration: " ^ w.elaboration_status
+         ]
+         @ Option.to_list w.error
+         @ Option.value_map w.prepared ~default:[] ~f:(fun p ->
+           [ "Bundle: " ^ p.bundle_identity
+           ; "Output directory: " ^ p.bundle_directory
+           ; "Exact plan identity: " ^ p.plan_identity
+           ; "Methodology plan: " ^ p.methodology_plan_path
+           ; "Plan digest: " ^ p.methodology_plan_digest
+           ]))
+      "Elaboration"
+      w.elaboration_status
 ;;
 
 (** Only shorten ASCII opaque identifiers. Human/provider labels remain intact and are
@@ -1500,6 +1577,8 @@ let%test_unit "process completion is not stage evidence; mismatched and duplicat
         ]
     ; operations = []
     ; launches = []
+    ; fresh_intent = None
+    ; workflows = []
     ; summaries = []
     ; finalizations = []
     ; artifacts = []

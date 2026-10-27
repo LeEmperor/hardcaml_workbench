@@ -318,6 +318,69 @@ module Finalization = struct
   [@@deriving bin_io, compare, equal, sexp]
 end
 
+module Fresh = struct
+  module Intent = struct
+    (** Captured inputs, not generated source bytes or an exact provider preview. *)
+    type t =
+      { id : string
+      ; selection : Selection.t
+      ; elaboration_only : bool
+      ; expected_plan_identity : string option
+      ; scope : string
+      ; created_at : Timestamp.t
+      }
+    [@@deriving bin_io, compare, equal, sexp]
+  end
+
+  module Phase = struct
+    type t =
+      | Reserved
+      | Building
+      | Emitting
+      | Prepared
+      | Physical
+      | Completed
+      | Failed
+      | Cancelled
+      | Interrupted
+    [@@deriving bin_io, compare, equal, sexp]
+  end
+
+  module Prepared = struct
+    type t =
+      { bundle_identity : string
+      ; bundle_directory : string
+      ; plan_identity : string
+      ; methodology_plan_path : string
+      ; methodology_plan_digest : string
+      }
+    [@@deriving bin_io, compare, equal, sexp]
+  end
+
+  module Workflow = struct
+    type t =
+      { id : string
+      ; key : string
+      ; intent : Intent.t
+      ; phase : Phase.t
+      ; cancel_requested : bool
+      ; preparation_id : string option
+      ; elaboration_started_at : Timestamp.t option [@sexp.default None]
+      ; elaboration_finished_at : Timestamp.t option [@sexp.default None]
+      ; elaboration_status : string
+      ; build_job : Job.t option
+      ; emission_job : Job.t option
+      ; prepared : Prepared.t option
+      ; run : Run_ref.t option
+      ; reference : Reference.t option
+      ; error : string option
+      ; created_at : Timestamp.t
+      ; finished_at : Timestamp.t option
+      }
+    [@@deriving bin_io, compare, equal, sexp]
+  end
+end
+
 module Snapshot = struct
   type t =
     { configured : bool
@@ -336,6 +399,8 @@ module Snapshot = struct
     ; inspections : Asic_inspection.Index.t list [@sexp.default []]
     ; inspection_details : Asic_inspection.Detail.t list [@sexp.default []]
     ; cache_error : string option
+    ; fresh_intent : Fresh.Intent.t option [@sexp.default None]
+    ; workflows : Fresh.Workflow.t list [@sexp.default []]
     }
   [@@deriving bin_io, compare, equal, sexp]
 end
@@ -365,6 +430,16 @@ module Operation = struct
     | Discover
     | Describe of string
     | Plan of Selection.t
+    | Stage_fresh of
+        { selection : Selection.t
+        ; elaboration_only : bool
+        ; expected_plan_identity : string option
+        }
+    | Launch_fresh of
+        { key : string
+        ; intent_id : string
+        }
+    | Cancel_workflow of string
     | Run of
         { key : string
         ; preview : Preview.t

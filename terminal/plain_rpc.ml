@@ -20,6 +20,11 @@ let keys (operation : Asic.Operation.t) (snapshot : Asic.Snapshot.t) =
   | Plan selection ->
     [ "plan:" ^ digest (Sexp.to_string_mach (Asic.Selection.sexp_of_t selection)) ]
   | Run { key; _ } -> [ "run:" ^ key ]
+  | Stage_fresh _ -> []
+  | Launch_fresh { key; _ } ->
+    List.filter_map snapshot.workflows ~f:(fun w ->
+      if String.equal w.key key then Some ("workflow:" ^ w.id) else None)
+  | Cancel_workflow id -> [ "workflow:" ^ id ]
   | Register _ -> []
   | Observe run ->
     let key = "observe:" ^ run.id in
@@ -62,7 +67,7 @@ let keys (operation : Asic.Operation.t) (snapshot : Asic.Snapshot.t) =
 
 let watched_keys operation keys (snapshot : Asic.Snapshot.t) =
   match (operation : Asic.Operation.t) with
-  | Run _ ->
+  | Run _ | Launch_fresh _ ->
     keys
     @ List.concat_map snapshot.operations ~f:(fun op ->
       if List.mem keys op.key ~equal:String.equal
@@ -140,6 +145,42 @@ type progress =
   | Complete
   | Failed of string
 
+let%test_unit "fresh RPC keys preserve historical snapshot defaults and distinguish \
+               workflow ownership"
+  =
+  let old = Asic.Snapshot.sexp_of_t Fs0_fixture.snapshot in
+  let historical =
+    match old with
+    | Sexp.List fields ->
+      Sexp.List
+        (List.filter fields ~f:(function
+          | Sexp.List (Sexp.Atom ("fresh_intent" | "workflows") :: _) -> false
+          | _ -> true))
+    | _ -> assert false
+  in
+  let restored = Asic.Snapshot.t_of_sexp historical in
+  assert (Option.is_none restored.fresh_intent && List.is_empty restored.workflows);
+  let intent = Fs0_fixture.fresh_intent "wait" in
+  let w = Fs0_fixture.workflow "wait-key" intent in
+  let snapshot = { restored with fresh_intent = Some intent; workflows = [ w ] } in
+  assert (
+    List.is_empty
+      (keys
+         (Stage_fresh
+            { selection = intent.selection
+            ; elaboration_only = false
+            ; expected_plan_identity = None
+            })
+         snapshot));
+  assert (
+    List.equal
+      String.equal
+      (keys (Launch_fresh { key = w.key; intent_id = intent.id }) snapshot)
+      [ "workflow:" ^ w.id ]);
+  assert (
+    List.equal String.equal (keys (Cancel_workflow w.id) snapshot) [ "workflow:" ^ w.id ])
+;;
+
 let finalization_error key (snapshot : Asic.Snapshot.t) =
   let identity =
     Option.first_some
@@ -170,19 +211,35 @@ let progress ~wait keys (snapshot : Asic.Snapshot.t) =
     match progress with
     | Failed _ -> progress
     | Pending | Complete ->
-      (match List.find snapshot.operations ~f:(fun op -> String.equal op.key key) with
-       | None -> Failed ("Requested ASIC operation is absent or evicted: " ^ key)
-       | Some { error = Some error; _ } -> Failed (key ^ ": " ^ error)
-       | Some op ->
-         (match op.state with
-          | "completed" ->
-            Option.value_map
-              (finalization_error key snapshot)
-              ~default:progress
-              ~f:(fun error -> Failed (key ^ ": " ^ error))
-          | "pending" | "executing" -> if wait then Pending else progress
-          | "failed" | "detached" -> Failed (key ^ ": " ^ op.state)
-          | state -> Failed ("Unknown ASIC operation state for " ^ key ^ ": " ^ state))))
+      let workflow =
+        List.find snapshot.workflows ~f:(fun w -> String.equal key ("workflow:" ^ w.id))
+      in
+      (match workflow with
+       | Some w ->
+         (match w.phase with
+          | Failed | Cancelled | Interrupted ->
+            Failed
+              (Option.value
+                 w.error
+                 ~default:
+                   ("Workflow " ^ Sexp.to_string (Asic.Fresh.Phase.sexp_of_t w.phase)))
+          | Completed -> progress
+          | Reserved | Building | Emitting | Prepared | Physical ->
+            if wait then Pending else progress)
+       | None ->
+         (match List.find snapshot.operations ~f:(fun op -> String.equal op.key key) with
+          | None -> Failed ("Requested ASIC operation is absent or evicted: " ^ key)
+          | Some { error = Some error; _ } -> Failed (key ^ ": " ^ error)
+          | Some op ->
+            (match op.state with
+             | "completed" ->
+               Option.value_map
+                 (finalization_error key snapshot)
+                 ~default:progress
+                 ~f:(fun error -> Failed (key ^ ": " ^ error))
+             | "pending" | "executing" -> if wait then Pending else progress
+             | "failed" | "detached" -> Failed (key ^ ": " ^ op.state)
+             | state -> Failed ("Unknown ASIC operation state for " ^ key ^ ": " ^ state)))))
 ;;
 
 let%test_unit "documented typed operation sexps decode without a shell or human-output \
@@ -209,6 +266,25 @@ let%test_unit "documented typed operation sexps decode without a shell or human-
     match mutation with
     | Mutate { expected_revision = 0; mutation = Make_independent _ } -> true
     | _ -> false)
+;;
+
+let%test_unit "workflow wait consults durable phase including failure after successful \
+               RPC and restored terminal history"
+  =
+  let intent = Fs0_fixture.fresh_intent "wait" in
+  let w = Fs0_fixture.workflow "wait-key" intent in
+  let check phase expected =
+    let snapshot = { Fs0_fixture.snapshot with workflows = [ { w with phase } ] } in
+    match progress ~wait:true [ "workflow:" ^ w.id ] snapshot, expected with
+    | Pending, `Pending | Complete, `Complete | Failed _, `Failed -> ()
+    | _ -> assert false
+  in
+  List.iter
+    [ Asic.Fresh.Phase.Reserved; Building; Emitting; Prepared; Physical ]
+    ~f:(fun phase -> check phase `Pending);
+  check Completed `Complete;
+  List.iter [ Asic.Fresh.Phase.Failed; Cancelled; Interrupted ] ~f:(fun phase ->
+    check phase `Failed)
 ;;
 
 let%test_unit "lifecycle wait keys distinguish collection, reconnect, and acceptance \
@@ -292,6 +368,8 @@ let%test_unit "Observe waits for its read, independently of a long execution" =
   let snapshot : Asic.Snapshot.t =
     { configured = true
     ; launches = []
+    ; fresh_intent = None
+    ; workflows = []
     ; flows = []
     ; catalog_default = None
     ; description_json = None
@@ -386,6 +464,8 @@ let%test_unit "Observe does not await the lifetime of a coalesced automatic obse
     ; runs = []
     ; operations = [ observer ]
     ; launches = []
+    ; fresh_intent = None
+    ; workflows = []
     ; summaries = []
     ; cache_error = None
     ; finalizations = []
@@ -424,6 +504,8 @@ let%test_unit "a targeted operation failure fails without treating historical fa
     ; runs = []
     ; operations = [ failed ]
     ; launches = []
+    ; fresh_intent = None
+    ; workflows = []
     ; summaries = []
     ; cache_error = None
     ; finalizations = []

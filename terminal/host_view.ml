@@ -799,7 +799,16 @@ let checklist_hints host data tile =
           | Elaboration_preparation -> true
           | _ -> false))
     in
-    if elaboration
+    if Option.exists
+         (Planned_run.fresh_intent host.planned_run)
+         ~f:(Planned_run.fresh_launchable host.planned_run)
+    then
+      [ "Space c c: Launch"
+      ; "or Launch and view"
+      ; "Fresh inputs; launch runs Elaboration first"
+      ; "r stage NEW inputs"
+      ]
+    else if elaboration
     then [ "r EDA-less project preparation"; "Enter read-only history/logs" ]
     else if timing && Option.is_none (checklist_preview host data tile)
     then
@@ -921,47 +930,17 @@ let utility_rows ?(now = Time_ns.now ()) host data tile =
             in
             match item with
             | Elaboration_preparation ->
-              let prep =
-                Preparation_view.rows
-                  ~snapshot:host.preparation
-                  ~jobs:data.jobs
-                  ~project:(Option.map data.project ~f:(fun p -> p.Project.id))
-                  ~rtl_scope:host.preparation_rtl_scope
-                  ~cursor:None
-                  ~detail:local.utility_detail
-                  ~log_lines:data.log_lines
+              let workflow = Overview_tiles.workflow_for_run ~asic:data.asic ~run in
+              let linked =
+                Overview_tiles.elaboration_row ~now ~selected:row.active workflow
               in
-              let status = Preparation_view.checklist_status host.preparation in
-              let relation =
-                match
-                  ( Option.bind host.preparation ~f:(fun s -> s.latest)
-                    |> Option.bind ~f:(fun a -> a.bundle)
-                  , data.summary run )
-                with
-                | Some bundle, Some summary
-                  when Option.equal
-                         String.equal
-                         summary.plan_identity
-                         (Some bundle.plan_identity) ->
-                  "Exact plan identity match to selected historical run: "
-                  ^ bundle.plan_identity
-                | _ -> "No exact match to selected historical run established"
-              in
-              { row with
-                status = Some status
-              ; time = Some (Preparation_view.total_time ~now host.preparation)
-              ; role = Overview_tiles.status_role status
-              ; value =
-                  (if Overview_tiles.Status.equal status Unsupported
-                   then "unavailable"
-                   else Overview_tiles.Status.label status)
-              ; details =
-                  row.details
-                  @ [ relation
-                    ; "Time: total preparation inclusive of build and emission; unknown \
-                       if finish unavailable"
-                    ]
-                  @ Overview_tiles.inspection_lines prep
+              { linked with
+                details =
+                  linked.details
+                  @ Option.value_map workflow ~default:[] ~f:(fun w ->
+                    List.concat_map
+                      (Option.to_list w.build_job @ Option.to_list w.emission_job)
+                      ~f:(fun j -> data.log_lines j.Job.id))
               }
             | Physical_stage s when String.equal s.id "timing" ->
               { row with
@@ -970,13 +949,12 @@ let utility_rows ?(now = Time_ns.now ()) host data tile =
               }
             | _ -> row)
         | _ ->
-          let status = Preparation_view.checklist_status host.preparation in
-          Overview_tiles.row
-            ~status
-            ~time:(Preparation_view.total_time ~now host.preparation)
-            ~role:(Overview_tiles.status_role status)
-            "Elaboration"
-            (Preparation_view.status_label status)
+          Overview_tiles.elaboration_row
+            ~now
+            ~selected:false
+            (match selected_run with
+             | Some run -> Overview_tiles.workflow_for_run ~asic:data.asic ~run
+             | None -> Planned_run.workflow host.planned_run)
           :: Overview_tiles.stage_rows ~selected_run ~asic:data.asic ~observation:None ()
       in
       let facts =
@@ -993,7 +971,8 @@ let utility_rows ?(now = Time_ns.now ()) host data tile =
               "Interaction"
               (match selected with
                | Some Elaboration_preparation ->
-                 "Esc overview; r EDA-less preparation; Enter read-only logs/history"
+                 "Esc overview; r stages fresh Elaboration inputs; R launches; Enter \
+                  linked evidence"
                | Some (Timing_analysis _) ->
                  "Esc overview; Enter exact historical evidence; r prepares NEW timing \
                   run if current catalog supports it"
@@ -1405,7 +1384,10 @@ let planned_asic_source_rows host tile =
           { row with
             Planned_run.text =
               state
-              ^ ": provider preview / "
+              ^ (if Option.is_some (Planned_run.fresh_intent host.planned_run)
+                    || Option.is_some (Planned_run.workflow host.planned_run)
+                 then ": fresh input intent / "
+                 else ": provider preview / ")
               ^ (if Option.is_none model.preview
                  then "separate launch: "
                  else if Planned_run.equal_status model.status Ready
@@ -1428,7 +1410,71 @@ let planned_asic_source_rows host tile =
 ;;
 
 let planned_source_rows host tile =
-  if host.H.planned_preparation
+  let fresh_intent = Planned_run.fresh_intent host.H.planned_run in
+  let workflow = Planned_run.workflow host.planned_run in
+  if Option.is_some fresh_intent || Option.is_some workflow
+  then (
+    let model = Planned_run.model host.planned_run in
+    let row role text = { Planned_run.role; text } in
+    let intent =
+      Option.first_some
+        fresh_intent
+        (Option.map workflow ~f:(fun w -> w.Asic.Fresh.Workflow.intent))
+    in
+    let detail = (H.local host tile.W.Tile.id).utility_detail in
+    [ row
+        (if Planned_run.equal_status model.status Ready then Success else Warning)
+        (String.lowercase (Sexp.to_string (Planned_run.sexp_of_status model.status))
+         ^ ": "
+         ^ model.message)
+    ; row Fact ("Workflow: " ^ model.launch.message)
+    ]
+    @ Option.value_map host.stage_preparation ~default:[] ~f:(fun reason ->
+      [ row Warning reason ])
+    @ Option.value_map intent ~default:[] ~f:(fun i ->
+      [ row
+          Fact
+          ("endpoint: "
+           ^ if i.elaboration_only then "elaboration" else i.selection.endpoint)
+      ; row Fact ("flow: " ^ i.selection.flow ^ " / profile: " ^ i.selection.profile)
+      ; row Fact ("assignments: " ^ String.concat ~sep:"; " i.selection.assignments)
+      ; row
+          Muted
+          "Fresh launch: source build → bundle emission → physical prefix \
+           (Elaboration-only stops after emission)"
+      ]
+      @
+      if detail
+      then
+        [ row Fact ("Input intent: " ^ i.id)
+        ; row Fact ("Captured scope: " ^ i.scope)
+        ; row
+            Fact
+            ("Expected plan identity: "
+             ^ Option.value i.expected_plan_identity ~default:"none (current source)")
+        ]
+      else [])
+    @ Option.value_map model.launch.run_id ~default:[] ~f:(fun id ->
+      [ row Fact ("exact allocated run: " ^ id) ])
+    @ Option.value_map workflow ~default:[] ~f:(fun w ->
+      [ row Fact ("Workflow ID: " ^ w.id); row Fact ("submission key: " ^ w.key) ]
+      @ (if Planned_run.workflow_active w
+         then
+           [ row
+               Muted
+               "x cancel workflow; palette Cancel fresh workflow (build, emission and \
+                physical execution)"
+           ]
+         else [])
+      @
+      if detail
+      then
+        Overview_tiles.inspection_lines
+          [ Overview_tiles.elaboration_row ~now:(Time_ns.now ()) ~selected:false (Some w)
+          ]
+        |> List.map ~f:(row Fact)
+      else []))
+  else if host.H.planned_preparation
   then
     Preparation_view.staged_plan_rows
       ~snapshot:host.preparation
@@ -1468,7 +1514,15 @@ let planned_formatted_rows ?indicator_frames host tile ~width =
   planned_source_rows host tile
   |> List.concat_mapi ~f:(fun i row ->
     let kind =
-      if host.planned_preparation
+      if Option.is_some (Planned_run.fresh_intent host.planned_run)
+         || Option.is_some (Planned_run.workflow host.planned_run)
+      then
+        if i = 0
+        then Some (plan_indicator model.status)
+        else if i = 1
+        then Some (producer_indicator model.launch.state)
+        else None
+      else if host.planned_preparation
       then
         if i = 0
         then

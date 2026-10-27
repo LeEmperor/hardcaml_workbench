@@ -8,8 +8,10 @@ module Adapter = Hardcaml_workbench_adapters.Preparation_adapter
 type attempt =
   { mutable value : Attempt.t
   ; mutable cancelled : bool
-  ; ready : unit Ivar.t
+  ; is_cancelled : unit -> bool
+  ; finished : unit Ivar.t
   ; config : Config.t
+  ; exclusive : bool
   }
 
 type staged =
@@ -27,6 +29,8 @@ type project =
 type t =
   { projects : (string, project) Hashtbl.t
   ; mutable next_id : int
+  ; source_tails : unit Deferred.t String.Table.t
+  ; leased_roots : String.Hash_set.t
   ; build :
       Config.t
       -> root:string
@@ -42,7 +46,13 @@ type t =
   }
 
 let create ?(build = Adapter.build) ?(emit = Adapter.emit) () =
-  { projects = Hashtbl.create (module String); next_id = 0; build; emit }
+  { projects = Hashtbl.create (module String)
+  ; next_id = 0
+  ; source_tails = String.Table.create ()
+  ; leased_roots = String.Hash_set.create ()
+  ; build
+  ; emit
+  }
 ;;
 
 exception Rpc_error of V1.Error.t
@@ -71,6 +81,8 @@ let active a =
   | _ -> false
 ;;
 
+let cancelled a = a.cancelled || a.is_cancelled ()
+
 let job_failure (job : Job.t) =
   Option.first_some
     job.failure
@@ -83,6 +95,9 @@ let job_failure (job : Job.t) =
 ;;
 
 let handle
+  ?(unique = false)
+  ?(is_cancelled = fun () -> false)
+  ?(on_release = fun () -> ())
   t
   ~root
   ~project_key
@@ -217,7 +232,6 @@ let handle
         then return (snapshot ~requested_attempt:id availability)
         else (
           a.cancelled <- true;
-          let%bind () = Ivar.read a.ready in
           let%bind () =
             Deferred.List.iter
               (List.filter_opt [ a.value.build_job; a.value.emission_job ])
@@ -243,14 +257,15 @@ let handle
          | Some (previous, a) ->
            if not (String.equal previous payload)
            then rpc_error Conflict "Submission key already used for a different selection";
-           let%map () = Ivar.read a.ready in
-           snapshot ~requested_attempt:a.value.id availability
+           return (snapshot ~requested_attempt:a.value.id availability)
          | None ->
            (match
               List.find project.attempts ~f:(fun a ->
-                Option.is_none launching
+                (not unique)
+                && (not a.exclusive)
+                && Option.is_none launching
                 && active a
-                && (not a.cancelled)
+                && (not (cancelled a))
                 && Selection.equal a.value.selection selection
                 && Option.value_map config ~default:false ~f:(Config.equal a.config)
                 && Option.equal
@@ -260,8 +275,7 @@ let handle
             with
             | Some a ->
               Hashtbl.set project.submissions ~key:submission_key ~data:(payload, a);
-              let%map () = Ivar.read a.ready in
-              snapshot ~requested_attempt:a.value.id availability
+              return (snapshot ~requested_attempt:a.value.id availability)
             | None ->
               let config =
                 match launching with
@@ -273,7 +287,13 @@ let handle
               t.next_id <- t.next_id + 1;
               let a =
                 { value =
-                    { Attempt.id = sprintf "preparation-%d" t.next_id
+                    { Attempt.id =
+                        (if unique
+                         then
+                           "preparation-"
+                           ^ Preparation_receipt.sha256
+                               (project_key ^ "\000" ^ submission_key)
+                         else sprintf "preparation-%d" t.next_id)
                     ; selection
                     ; selection_identity =
                         Preparation_receipt.sha256
@@ -293,8 +313,10 @@ let handle
                     ; diagnostic = None
                     }
                 ; cancelled = false
-                ; ready = Ivar.create ()
+                ; is_cancelled
+                ; finished = Ivar.create ()
                 ; config
+                ; exclusive = unique
                 }
               in
               project.attempts <- a :: project.attempts;
@@ -306,7 +328,7 @@ let handle
                 ; preflight =
                     (fun () ->
                       let%map _, current = load_config root in
-                      if a.cancelled then failwith "Preparation cancelled before launch";
+                      if cancelled a then failwith "Preparation cancelled before launch";
                       if not (Option.equal Config.equal current (Some config))
                       then
                         failwith
@@ -320,170 +342,202 @@ let handle
                     (fun message -> a.value <- { a.value with diagnostic = Some message })
                 }
               in
-              let%bind scheduled =
-                Monitor.try_with_or_error (fun () ->
-                  let build_task =
-                    task
-                      (t.build config ~root ~environment)
-                      ~stdout:ignore
-                      ~drain:(fun () -> return ())
-                      ~finish:(fun ~cancelled:_ _ -> a.value.diagnostic)
-                  in
-                  schedule ~name:"build" ~cancelled:(fun () -> a.cancelled) build_task)
+              (* Hold the source lease before enqueueing either job. Acquiring it in a job
+                 preflight would deadlock an earlier emission behind that job. *)
+              let previous =
+                Hashtbl.find t.source_tails root |> Option.value ~default:Deferred.unit
               in
-              (match scheduled with
-               | Error error ->
-                 a.value
-                 <- { a.value with
-                      outcome = Build_failed
-                    ; diagnostic = Some (Error.to_string_hum error)
-                    };
-                 Ivar.fill_if_empty a.ready ();
-                 return (snapshot ~requested_attempt:a.value.id availability)
-               | Ok build ->
-                 a.value <- { a.value with build_job = Some build };
-                 Ivar.fill_if_empty a.ready ();
-                 don't_wait_for
-                   (let%map result =
-                      Monitor.try_with (fun () ->
-                        let%bind () =
-                          if a.cancelled then cancel build.id else return ()
+              let released = Ivar.create () in
+              Hashtbl.set t.source_tails ~key:root ~data:(Ivar.read released);
+              let release () =
+                Hash_set.remove t.leased_roots root;
+                Ivar.fill_if_empty a.finished ();
+                Ivar.fill_if_empty released ();
+                on_release ()
+              in
+              don't_wait_for
+                (let%bind () = previous in
+                 Hash_set.add t.leased_roots root;
+                 if cancelled a
+                 then (
+                   a.value <- { a.value with outcome = Cancelled };
+                   release ();
+                   return ())
+                 else (
+                   let%bind scheduled =
+                     Monitor.try_with_or_error (fun () ->
+                       let build_task =
+                         task
+                           (t.build config ~root ~environment)
+                           ~stdout:ignore
+                           ~drain:(fun () -> return ())
+                           ~finish:(fun ~cancelled:_ _ -> a.value.diagnostic)
+                       in
+                       schedule
+                         ~name:"build"
+                         ~cancelled:(fun () -> cancelled a)
+                         build_task)
+                   in
+                   match scheduled with
+                   | Error error ->
+                     a.value
+                     <- { a.value with
+                          outcome = Build_failed
+                        ; diagnostic = Some (Error.to_string_hum error)
+                        };
+                     release ();
+                     return ()
+                   | Ok build ->
+                     a.value <- { a.value with build_job = Some build };
+                     don't_wait_for
+                       (let%map result =
+                          Monitor.try_with (fun () ->
+                            let%bind () =
+                              if cancelled a then cancel build.id else return ()
+                            in
+                            let%bind built = wait build.id in
+                            a.value <- { a.value with build_job = Some built };
+                            if cancelled a || Job.State.equal built.state Cancelled
+                            then (
+                              a.value <- { a.value with outcome = Cancelled };
+                              return ())
+                            else if not (Job.State.equal built.state Complete)
+                            then (
+                              a.value
+                              <- { a.value with
+                                   outcome = Build_failed
+                                 ; diagnostic =
+                                     Option.first_some
+                                       a.value.diagnostic
+                                       (job_failure built)
+                                 };
+                              return ())
+                            else (
+                              a.value
+                              <- { a.value with outcome = Emitting; diagnostic = None };
+                              let buffer = Buffer.create 4096 in
+                              let overflow = ref false in
+                              let validation_error = ref None in
+                              let pending_bundle = ref None in
+                              let emission =
+                                task
+                                  (t.emit
+                                     config
+                                     ~root
+                                     ~environment
+                                     ~selection
+                                     ~expected_plan_identity)
+                                  ~stdout:(fun data ->
+                                    if Buffer.length buffer + String.length data
+                                       > 16 * 1024 * 1024
+                                    then overflow := true
+                                    else Buffer.add_string buffer data)
+                                  ~drain:(fun () -> return ())
+                                  ~finish:(fun ~cancelled:_ _ ->
+                                    Option.first_some !validation_error a.value.diagnostic)
+                              in
+                              (* The supervisor calls drain after reaping and before
+                                 marking Complete. *)
+                              let emission =
+                                { emission with
+                                  drain =
+                                    (fun () ->
+                                      if !overflow
+                                      then (
+                                        validation_error
+                                        := Some "Emission receipt exceeded byte budget";
+                                        return ())
+                                      else if cancelled a
+                                              || Option.is_some a.value.diagnostic
+                                      then return ()
+                                      else (
+                                        let%bind validated =
+                                          In_thread.run (fun () ->
+                                            Preparation_receipt.validate
+                                              config
+                                              ~selection
+                                              ~expected_plan_identity
+                                              (Buffer.contents buffer))
+                                        in
+                                        match validated with
+                                        | Error error ->
+                                          validation_error
+                                          := Some (Error.to_string_hum error);
+                                          return ()
+                                        | Ok _
+                                          when cancelled a
+                                               || Option.is_some a.value.diagnostic ->
+                                          return ()
+                                        | Ok validated ->
+                                          let%map imported =
+                                            import
+                                              ~job:
+                                                (Option.value_exn a.value.emission_job).id
+                                              ~valid:(fun () ->
+                                                (not (cancelled a))
+                                                && Option.is_none a.value.diagnostic)
+                                              ~output_dir:validated.bundle.output_dir
+                                              ~files:validated.files
+                                          in
+                                          (match imported with
+                                           | Error error ->
+                                             validation_error
+                                             := Some (Error.to_string_hum error)
+                                           | Ok artifacts ->
+                                             pending_bundle
+                                             := Some { validated.bundle with artifacts })))
+                                }
+                              in
+                              let%bind emitted =
+                                schedule
+                                  ~name:"emit"
+                                  ~cancelled:(fun () -> cancelled a)
+                                  emission
+                              in
+                              a.value <- { a.value with emission_job = Some emitted };
+                              let%bind () =
+                                if cancelled a then cancel emitted.id else return ()
+                              in
+                              let%map emitted = wait emitted.id in
+                              let outcome =
+                                if cancelled a || Job.State.equal emitted.state Cancelled
+                                then Outcome.Cancelled
+                                else if Job.State.equal emitted.state Complete
+                                        && Option.is_some !pending_bundle
+                                then Completed
+                                else Emission_failed
+                              in
+                              a.value
+                              <- { a.value with
+                                   emission_job = Some emitted
+                                 ; outcome
+                                 ; bundle =
+                                     (if Outcome.equal outcome Completed
+                                      then !pending_bundle
+                                      else None)
+                                 ; diagnostic =
+                                     (if Outcome.equal outcome Completed
+                                      then None
+                                      else
+                                        Option.first_some
+                                          !validation_error
+                                          (Option.first_some
+                                             a.value.diagnostic
+                                             (job_failure emitted)))
+                                 }))
                         in
-                        let%bind built = wait build.id in
-                        a.value <- { a.value with build_job = Some built };
-                        if a.cancelled || Job.State.equal built.state Cancelled
-                        then (
-                          a.value <- { a.value with outcome = Cancelled };
-                          return ())
-                        else if not (Job.State.equal built.state Complete)
-                        then (
+                        match result with
+                        | Ok () -> release ()
+                        | Error exn ->
+                          release ();
                           a.value
                           <- { a.value with
-                               outcome = Build_failed
-                             ; diagnostic =
-                                 Option.first_some a.value.diagnostic (job_failure built)
-                             };
-                          return ())
-                        else (
-                          a.value
-                          <- { a.value with outcome = Emitting; diagnostic = None };
-                          let buffer = Buffer.create 4096 in
-                          let overflow = ref false in
-                          let validation_error = ref None in
-                          let pending_bundle = ref None in
-                          let emission =
-                            task
-                              (t.emit
-                                 config
-                                 ~root
-                                 ~environment
-                                 ~selection
-                                 ~expected_plan_identity)
-                              ~stdout:(fun data ->
-                                if Buffer.length buffer + String.length data
-                                   > 16 * 1024 * 1024
-                                then overflow := true
-                                else Buffer.add_string buffer data)
-                              ~drain:(fun () -> return ())
-                              ~finish:(fun ~cancelled:_ _ ->
-                                Option.first_some !validation_error a.value.diagnostic)
-                          in
-                          (* The supervisor calls drain after reaping and before marking
-                             Complete. *)
-                          let emission =
-                            { emission with
-                              drain =
-                                (fun () ->
-                                  if !overflow
-                                  then (
-                                    validation_error
-                                    := Some "Emission receipt exceeded byte budget";
-                                    return ())
-                                  else if a.cancelled || Option.is_some a.value.diagnostic
-                                  then return ()
-                                  else (
-                                    let%bind validated =
-                                      In_thread.run (fun () ->
-                                        Preparation_receipt.validate
-                                          config
-                                          ~selection
-                                          ~expected_plan_identity
-                                          (Buffer.contents buffer))
-                                    in
-                                    match validated with
-                                    | Error error ->
-                                      validation_error := Some (Error.to_string_hum error);
-                                      return ()
-                                    | Ok _
-                                      when a.cancelled
-                                           || Option.is_some a.value.diagnostic ->
-                                      return ()
-                                    | Ok validated ->
-                                      let%map imported =
-                                        import
-                                          ~job:(Option.value_exn a.value.emission_job).id
-                                          ~valid:(fun () ->
-                                            (not a.cancelled)
-                                            && Option.is_none a.value.diagnostic)
-                                          ~output_dir:validated.bundle.output_dir
-                                          ~files:validated.files
-                                      in
-                                      (match imported with
-                                       | Error error ->
-                                         validation_error
-                                         := Some (Error.to_string_hum error)
-                                       | Ok artifacts ->
-                                         pending_bundle
-                                         := Some { validated.bundle with artifacts })))
-                            }
-                          in
-                          let%bind emitted =
-                            schedule
-                              ~name:"emit"
-                              ~cancelled:(fun () -> a.cancelled)
-                              emission
-                          in
-                          a.value <- { a.value with emission_job = Some emitted };
-                          let%bind () =
-                            if a.cancelled then cancel emitted.id else return ()
-                          in
-                          let%map emitted = wait emitted.id in
-                          let outcome =
-                            if a.cancelled || Job.State.equal emitted.state Cancelled
-                            then Outcome.Cancelled
-                            else if Job.State.equal emitted.state Complete
-                                    && Option.is_some !pending_bundle
-                            then Completed
-                            else Emission_failed
-                          in
-                          a.value
-                          <- { a.value with
-                               emission_job = Some emitted
-                             ; outcome
-                             ; bundle =
-                                 (if Outcome.equal outcome Completed
-                                  then !pending_bundle
-                                  else None)
-                             ; diagnostic =
-                                 (if Outcome.equal outcome Completed
-                                  then None
-                                  else
-                                    Option.first_some
-                                      !validation_error
-                                      (Option.first_some
-                                         a.value.diagnostic
-                                         (job_failure emitted)))
-                             }))
-                    in
-                    match result with
-                    | Ok () -> ()
-                    | Error exn ->
-                      a.value
-                      <- { a.value with
-                           outcome = (if a.cancelled then Cancelled else Emission_failed)
-                         ; diagnostic = Some (Exn.to_string exn)
-                         });
-                 return (snapshot ~requested_attempt:a.value.id availability)))))
+                               outcome =
+                                 (if cancelled a then Cancelled else Emission_failed)
+                             ; diagnostic = Some (Exn.to_string exn)
+                             });
+                     return ()));
+              return (snapshot ~requested_attempt:a.value.id availability))))
   in
   match handled with
   | Ok value -> Ok value
@@ -491,4 +545,18 @@ let handle
     (match Monitor.extract_exn exn with
      | Rpc_error error -> Error error
      | exn -> Error (V1.Error.create Internal_failure (Exn.to_string exn)))
+;;
+
+let stop t =
+  Hashtbl.iter t.projects ~f:(fun project ->
+    List.iter project.attempts ~f:(fun a -> if active a then a.cancelled <- true))
+;;
+
+let source_leased t root = Hash_set.mem t.leased_roots root
+
+let completion t =
+  Deferred.all_unit
+    (Hashtbl.data t.projects
+     |> List.concat_map ~f:(fun project ->
+       List.map project.attempts ~f:(fun a -> Ivar.read a.finished)))
 ;;

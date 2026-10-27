@@ -1418,6 +1418,7 @@ let rec asic_request
   ?inspection_request
   ?plan_request
   ?timing_receipt
+  ?fresh_receipt
   session
   operation
   =
@@ -1443,6 +1444,7 @@ let rec asic_request
         ?inspection_request
         ?plan_request
         ?timing_receipt
+        ?fresh_receipt
         session
         operation
     in
@@ -1457,6 +1459,7 @@ and perform_asic_request
   ?inspection_request
   ?plan_request
   ?timing_receipt
+  ?fresh_receipt
   session
   operation
   =
@@ -1484,6 +1487,11 @@ and perform_asic_request
       | Asic.Operation.Plan selection ->
         let planned_run, ticket = Planned_run.begin_plan planned_run selection in
         planned_run, Some ticket
+      | Asic.Operation.Stage_fresh { selection; elaboration_only; _ } ->
+        let planned_run, ticket =
+          Planned_run.begin_fresh planned_run ~elaboration_only selection
+        in
+        planned_run, Some ticket
       | _ -> planned_run, None
     in
     let planned_run, launch_ticket =
@@ -1491,6 +1499,14 @@ and perform_asic_request
       | Asic.Operation.Run { key; preview } ->
         let planned_run, ticket = Planned_run.begin_launch planned_run ~key preview in
         planned_run, Some ticket
+      | Asic.Operation.Launch_fresh { key; intent_id } ->
+        (match Planned_run.fresh_intent planned_run with
+         | Some intent when String.equal intent.id intent_id ->
+           let planned_run, ticket =
+             Planned_run.begin_fresh_launch planned_run ~key intent
+           in
+           planned_run, Some ticket
+         | _ -> planned_run, None)
       | _ -> planned_run, None
     in
     session.host <- { session.host with planned_run };
@@ -1508,6 +1524,7 @@ and perform_asic_request
       Option.value_map plan_ticket ~default:true ~f:(fun ticket ->
         Planned_run.current_ticket session.host.planned_run ticket)
     in
+    if current && plan_current then Option.iter fresh_receipt ~f:(fun f -> f response);
     if current
     then
       Option.iter launch_ticket ~f:(fun ticket ->
@@ -1530,18 +1547,33 @@ and perform_asic_request
         session.host
         <- { session.host with
              planned_run =
-               Planned_run.receipt
-                 session.host.planned_run
-                 ticket
-                 ~floor
-                 (Result.map response ~f:(fun _ -> ()))
+               (match operation with
+                | Stage_fresh _ ->
+                  Planned_run.fresh_receipt
+                    session.host.planned_run
+                    ticket
+                    ~floor
+                    (Result.bind response ~f:(fun s ->
+                       Option.value_map
+                         s.Asic.Snapshot.fresh_intent
+                         ~default:
+                           (Error "Successful staging response omitted its input intent")
+                         ~f:Result.return))
+                | _ ->
+                  Planned_run.receipt
+                    session.host.planned_run
+                    ticket
+                    ~floor
+                    (Result.map response ~f:(fun _ -> ())))
            });
     (* A rejected/timed-out launch must release its pending view even when a newer Get
        snapshot has already arrived. Never retry a potentially accepted launch. *)
     if current
     then (
       match operation, response, session.view_on_allocation with
-      | Asic.Operation.Run { key; _ }, Error message, Some (pending, _)
+      | ( (Asic.Operation.Run { key; _ } | Launch_fresh { key; _ })
+        , Error message
+        , Some (pending, _) )
         when String.equal key pending ->
         session.view_on_allocation <- None;
         session.host
@@ -5250,6 +5282,89 @@ let rec execute_host ?(validate = fun () -> Ok ()) session captured action ~exit
            };
         return ()))
   in
+  let launch_fresh ~current ~target ~view (intent : Asic.Fresh.Intent.t) =
+    if (not (current ()))
+       || Option.is_some session.host.stage_preparation
+       || not (Planned_run.fresh_launchable session.host.planned_run intent)
+    then (
+      session.host
+      <- { session.host with
+           notice = "Fresh input intent changed or launch unresolved; stage again"
+         };
+      return ())
+    else if view
+            && (not intent.elaboration_only)
+            && Option.is_some session.view_on_allocation
+    then (
+      session.host
+      <- { session.host with notice = "Another launch-and-view is awaiting allocation" };
+      return ())
+    else (
+      let key = submission_key "fresh-run" in
+      if view && not intent.elaboration_only
+      then
+        Option.iter target ~f:(fun target ->
+          session.view_on_allocation <- Some (key, target));
+      asic_request session (Launch_fresh { key; intent_id = intent.id }))
+  in
+  let stage_fresh ~current ~selection ~elaboration_only ~quick ~view =
+    let generation = session.host.stage_generation + 1 in
+    let target = Host.launch_target session.host in
+    session.host
+    <- { session.host with
+         stage_generation = generation
+       ; planned_preparation = false
+       ; stage_preparation = Some "Staging fresh source inputs; no processes"
+       };
+    let instance = session.hello.instance_id in
+    let current () =
+      current ()
+      && generation = session.host.stage_generation
+      && phys_equal captured_client session.client
+      && V1.Daemon_instance_id.equal instance session.hello.instance_id
+      && Option.equal
+           Project_id.equal
+           captured_project
+           (Option.map (current_project session) ~f:(fun p -> p.id))
+    in
+    fun () ->
+      let staged = ref None in
+      let%bind () =
+        if not (current ())
+        then return ()
+        else
+          asic_request
+            ~fresh_receipt:(function
+              | Ok s -> staged := s.Asic.Snapshot.fresh_intent
+              | Error _ -> ())
+            session
+            (Stage_fresh { selection; elaboration_only; expected_plan_identity = None })
+      in
+      let%bind () = if current () then asic_request session Get else return () in
+      if not (current ())
+      then return ()
+      else (
+        session.host <- { session.host with stage_preparation = None };
+        match !staged with
+        | Some intent when Planned_run.fresh_launchable session.host.planned_run intent ->
+          session.host
+          <- { session.host with
+               notice = "Fresh input intent staged; launch runs Elaboration first"
+             };
+          let%bind () =
+            if quick then launch_fresh ~current ~target ~view intent else return ()
+          in
+          if current () then save_preferences session selection else return ()
+        | _ ->
+          session.host
+          <- { session.host with
+               stage_preparation =
+                 Some
+                   ("Fresh intent unavailable or superseded; stage again: "
+                    ^ (Planned_run.model session.host.planned_run).message)
+             };
+          return ())
+  in
   if (not (Host.current session.host captured)) || Result.is_error (validate ())
   then (
     session.host
@@ -5677,36 +5792,25 @@ let rec execute_host ?(validate = fun () -> Ok ()) session captured action ~exit
         | Quick_prepare_project -> true
         | _ -> false
       in
-      let generation = session.host.stage_generation + 1 in
-      session.host
-      <- { session.host with
-           stage_generation = generation
-         ; planned_preparation = true
-         ; stage_preparation = Some "Staging PREPARATION input plan; launch disabled"
-         };
       let captured_selection = session.remembered_selection in
       let selection =
         Terminal_presentation.Preparation_view.selection
           ~remembered:session.remembered_selection
           ~asic:session.asic
       in
-      let expected_plan_identity =
-        Option.bind session.asic ~f:(fun s -> s.preview)
-        |> Option.bind ~f:(fun p ->
-          match selection with
-          | Ok s when Asic.Selection.equal s p.selection -> Some p.plan_identity
-          | _ -> None)
-      in
       (match
          Terminal_presentation.Preparation_view.stage
            ~snapshot:session.host.preparation
            ~selection
-           ~expected_plan_identity
+             (* The ASIC preview belongs to its configured executable. Standalone
+                preparation builds current source, so even identical selections do not
+                establish ownership of that preview's methodology plan. *)
+           ~expected_plan_identity:None
        with
        | Error notice ->
          session.host <- { session.host with notice; stage_preparation = Some notice };
          Effect.Ignore
-       | Ok operation ->
+       | Ok _ ->
          let input_validation () =
            Result.bind selection ~f:(fun selection ->
              Terminal_presentation.Stage_launch_commands.validate_elaboration
@@ -5717,7 +5821,6 @@ let rec execute_host ?(validate = fun () -> Ok ()) session captured action ~exit
          let current () =
            Host.current session.host captured
            && phys_equal captured_client session.client
-           && generation = session.host.stage_generation
            && Option.equal
                 Asic.Selection.equal
                 captured_selection
@@ -5725,69 +5828,19 @@ let rec execute_host ?(validate = fun () -> Ok ()) session captured action ~exit
            && Result.is_ok (validate ())
            && Result.is_ok (input_validation ())
          in
-         async (fun () ->
-           if current ()
-           then
-             preparation_request
-               ~accept:current
-               session
-               operation
-               ~on_snapshot:(fun snapshot ->
-                 match snapshot.staged with
-                 | Some _ when (not quick) && current () ->
-                   session.host
-                   <- { session.host with
-                        planned_preparation = true
-                      ; stage_preparation = None
-                      ; notice =
-                          "PREPARATION input plan staged; no processes. Launch planned \
-                           run manually, or R to stage and launch"
-                      };
-                   return ()
-                 | Some staged when quick && current () ->
-                   session.host
-                   <- { session.host with
-                        planned_preparation = true
-                      ; stage_preparation = None
-                      ; notice =
-                          "Launching exact PREPARATION input plan; no ASIC run \
-                           allocated, context retained"
-                      };
-                   preparation_request
-                     ~accept:current
-                     session
-                     (Launch_staged
-                        { stage_id = staged.id
-                        ; submission_key = submission_key "preparation"
-                        })
-                 | _ -> return ())
-           else (
-             session.host
-             <- { session.host with
-                  notice = "Preparation inputs changed before dispatch; prepare again"
-                };
-             return ())))
-    | Launch_preparation stage_id ->
-      let generation = session.host.stage_generation in
-      let current () =
-        Host.current session.host captured
-        && phys_equal captured_client session.client
-        && generation = session.host.stage_generation
-      in
-      async (fun () ->
-        if not (current ())
-        then return ()
-        else (
-          session.host
-          <- { session.host with
-               notice =
-                 "Launching exact PREPARATION input plan; no ASIC allocation, context \
-                  retained"
-             };
-          preparation_request
-            ~accept:current
-            session
-            (Launch_staged { stage_id; submission_key = submission_key "preparation" })))
+         async
+           (stage_fresh
+              ~current
+              ~selection:(Result.ok_or_failwith selection)
+              ~elaboration_only:true
+              ~quick
+              ~view:false))
+    | Launch_preparation _ ->
+      session.host
+      <- { session.host with
+           notice = "Legacy preparation input plan; press r to stage a fresh workflow"
+         };
+      Effect.Ignore
     | Set_quick_launch_view view ->
       session.host <- { session.host with quick_launch_view = view };
       Effect.of_deferred_thunk (fun () -> save_presentation_preferences session)
@@ -5821,12 +5874,16 @@ let rec execute_host ?(validate = fun () -> Ok ()) session captured action ~exit
          };
       Effect.Ignore
     | Cancel_preparation ->
-      (match Option.bind session.host.preparation ~f:(fun s -> s.latest) with
-       | Some a when Terminal_presentation.Preparation_view.active a ->
-         async (fun () -> preparation_request session (Cancel a.id))
+      (match Planned_run.workflow session.host.planned_run with
+       | Some w when Planned_run.workflow_active w ->
+         async (fun () -> asic_request session (Cancel_workflow w.id))
        | _ ->
-         session.host <- { session.host with notice = "No active preparation" };
-         Effect.Ignore)
+         (match Option.bind session.host.preparation ~f:(fun s -> s.latest) with
+          | Some a when Terminal_presentation.Preparation_view.active a ->
+            async (fun () -> preparation_request session (Cancel a.id))
+          | _ ->
+            session.host <- { session.host with notice = "No active preparation" };
+            Effect.Ignore))
     | Preparation_artifact ->
       let cursor =
         Option.bind (Host.focused session.host) ~f:(fun tile ->
@@ -5866,7 +5923,6 @@ let rec execute_host ?(validate = fun () -> Ok ()) session captured action ~exit
         | Launch_stage_and_view _ -> true
         | _ -> session.host.quick_launch_view
       in
-      let target = Host.launch_target session.host in
       let intent, run =
         match preparation with
         | Prepare_stage (stage, run) | Quick_prepare_stage (stage, run) ->
@@ -6000,89 +6056,23 @@ let rec execute_host ?(validate = fun () -> Ok ()) session captured action ~exit
                   ~intent
                   ~selection
               in
-              let planned_run, ticket =
-                Planned_run.begin_plan session.host.planned_run selection
-              in
-              session.host
-              <- { session.host with
-                   planned_run
-                 ; planned_preparation = false
-                 ; stage_preparation = None
-                 ; remembered_selection = Some selection
-                 ; notice =
-                     (if quick
-                      then
-                        "Quick launch: planning NEW run; waiting for exact preview \
-                         before launch"
-                      else
-                        "Planning NEW run; Space c c: Launch when ready (reopen palette)")
-                 };
-              let%bind () = asic_request ~plan_request:ticket session (Plan selection) in
-              let%bind () =
-                if current () && Result.is_ok (resolved_validation ())
-                then save_preferences session selection
-                else return ()
-              in
-              let current () =
-                Host.current session.host captured
-                && phys_equal captured_client session.client
-                && generation = session.host.stage_generation
-                && Planned_run.same_generation session.host.planned_run ticket
-                && Option.equal
-                     Asic.Selection.equal
-                     (Some selection)
-                     session.remembered_selection
-                && Result.is_ok (named_validation ())
-                && Result.is_ok (validate ())
-                && Result.is_ok (resolved_validation ())
-              in
-              let rec launch () =
-                if not quick
-                then return ()
-                else if not (current ())
-                then (
-                  fail
-                    ("Quick launch stopped: "
-                     ^ Option.value
-                         (Option.first_some
-                            (Result.error (validate ()))
-                            (Result.error (resolved_validation ())))
-                         ~default:"captured workspace/context or inputs changed");
-                  return ())
-                else (
-                  let model = Planned_run.model session.host.planned_run in
-                  match model.status, model.preview with
-                  | Ready, Some preview
-                    when Asic.Selection.equal preview.selection selection
-                         && Planned_run.launchable session.host.planned_run preview
-                         && Option.exists session.asic ~f:(fun s ->
-                           Option.equal Asic.Preview.equal s.preview (Some preview)) ->
-                    if view && Option.is_some session.view_on_allocation
-                    then return ()
-                    else (
-                      let key = submission_key "asic-run" in
-                      if current ()
-                      then (
-                        if view
-                        then
-                          Option.iter target ~f:(fun target ->
-                            session.view_on_allocation <- Some (key, target));
-                        asic_request session (Run { key; preview }))
-                      else return ())
-                  | Pending, _ ->
-                    let%bind () = Clock.after (Time_float.Span.of_ms 100.) in
-                    if not (current ())
-                    then return ()
-                    else (
-                      let%bind () = asic_request session Get in
-                      launch ())
-                  | _ ->
-                    fail
-                      "Quick launch stopped: exact plan unavailable, stale, failed or \
-                       launch blocked";
-                    return ())
-              in
-              launch ()))
+              (* Source execution and physical chaining belong to the daemon. This
+                 terminal phase captures only the authorized current input recipe. *)
+              stage_fresh
+                ~current:(fun () ->
+                  Host.current session.host captured
+                  && phys_equal captured_client session.client
+                  && Option.equal
+                       Asic.Selection.equal
+                       remembered
+                       session.remembered_selection
+                  && Result.is_ok (validate ())
+                  && Result.is_ok (resolved_validation ()))
+                ~selection
+                ~elaboration_only:false
+                ~quick
+                ~view
+                ()))
     | Unavailable_launch ->
       session.host
       <- { session.host with
@@ -6091,41 +6081,15 @@ let rec execute_host ?(validate = fun () -> Ok ()) session captured action ~exit
               preview"
          };
       Effect.Ignore
-    | Asic (Plan selection as operation) ->
-      (match current_project session with
-       | None -> Effect.Ignore
-       | Some project ->
-         (* Fence at command acceptance, before effect dispatch or preference I/O can
-            yield to a poll, a newer Plan, or Launch. *)
-         let planned_run =
-           Planned_run.reset session.host.planned_run ~scope:(plan_scope session project)
-         in
-         let planned_run, ticket = Planned_run.begin_plan planned_run selection in
-         session.host
-         <- { session.host with
-              planned_run
-            ; planned_preparation = false
-            ; stage_preparation = None
-            ; stage_generation = session.host.stage_generation + 1
-            };
-         async
-           ~on_rejected:(fun () ->
-             session.host
-             <- { session.host with
-                  planned_run =
-                    Planned_run.receipt
-                      session.host.planned_run
-                      ticket
-                      ~floor:Int.max_value
-                      (Error "Command target changed before Plan dispatch")
-                })
-           (fun () ->
-             if not (Planned_run.current_ticket session.host.planned_run ticket)
-             then return ()
-             else (
-               let response = asic_request ~plan_request:ticket session operation in
-               let%bind () = save_preferences session selection in
-               response)))
+    | Asic (Plan selection) ->
+      async
+        (stage_fresh
+           ~current:(fun () ->
+             Host.current session.host captured && Result.is_ok (validate ()))
+           ~selection
+           ~elaboration_only:false
+           ~quick:false
+           ~view:false)
     | Asic (Cancel key as operation) ->
       async (fun () ->
         if Option.value_map session.asic ~default:false ~f:(fun snapshot ->
@@ -6300,44 +6264,23 @@ let rec execute_host ?(validate = fun () -> Ok ()) session captured action ~exit
          };
       Effect.Ignore
     | Launch_asic (preview, view) ->
-      let ready () =
-        Option.is_none session.host.stage_preparation
-        && Planned_run.launchable session.host.planned_run preview
-        && Option.value_map session.asic ~default:false ~f:(fun asic ->
-          Option.equal Asic.Preview.equal asic.preview (Some preview))
-      in
-      let invalidated () =
-        session.host
-        <- { session.host with
-             notice =
-               "ASIC preview unavailable or launch unresolved; inspect plan/launch state \
-                before retrying explicitly"
-           }
-      in
-      if not (ready ())
-      then (
-        invalidated ();
-        Effect.Ignore)
-      else (
-        let key = submission_key "asic-run" in
-        async (fun () ->
-          if not (ready ())
-          then (
-            invalidated ();
-            return ())
-          else if view && Option.is_some session.view_on_allocation
-          then (
-            session.host
-            <- { session.host with
-                 notice = "Another launch-and-view is awaiting allocation"
-               };
-            return ())
-          else (
-            if view
-            then
-              Option.iter (Host.launch_target session.host) ~f:(fun target ->
-                session.view_on_allocation <- Some (key, target));
-            asic_request session (Run { key; preview }))))
+      async
+        (stage_fresh
+           ~current:(fun () ->
+             Host.current session.host captured && Result.is_ok (validate ()))
+           ~selection:preview.selection
+           ~elaboration_only:false
+           ~quick:true
+           ~view)
+    | Launch_fresh_intent (intent, view) ->
+      let target = Host.launch_target session.host in
+      async (fun () ->
+        launch_fresh
+          ~target
+          ~view
+          ~current:(fun () ->
+            Host.current session.host captured && Result.is_ok (validate ()))
+          intent)
     | Set_presentation (id, presentation) ->
       let host, save = Host.set_presentation session.host id presentation in
       session.host <- host;

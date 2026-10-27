@@ -4,6 +4,16 @@ open Hardcaml_workbench_protocol
 
 type t
 
+type preparation_runner =
+  root:string
+  -> environment:V1.Environment_selection.t
+  -> unique:bool
+  -> cancelled:(unit -> bool)
+  -> Preparation.Operation.t
+  -> Preparation.Response.t Deferred.t
+
+val set_preparation_runner : t -> preparation_runner -> unit
+
 (** One service per daemon; no I/O until [handle]. State directory must be absolute,
     single-writer and separate from provider results. *)
 val create : state_dir:string -> t

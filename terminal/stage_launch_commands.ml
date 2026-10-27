@@ -226,4 +226,19 @@ let commands host ~asic ~remembered =
   selected_commands host ~asic
   @ [ elaboration_command host ~asic ~remembered ]
   @ named_commands host ~asic ~remembered
+  @ Option.value_map asic ~default:[] ~f:(fun snapshot ->
+    List.filter_map snapshot.Asic.Snapshot.workflows ~f:(fun w ->
+      if Planned_run.workflow_active w
+      then
+        Some
+          (H.command
+             ("workflow.cancel." ^ w.id)
+             ("Cancel fresh workflow "
+              ^ w.key
+              ^ " (Elaboration: "
+              ^ w.elaboration_status
+              ^ ")")
+             "stop build emit physical workflow"
+             (H.Asic (Cancel_workflow w.id)))
+      else None))
 ;;

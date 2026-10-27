@@ -10,7 +10,7 @@ type allocation =
   | Allocated of Run_ref.t
   | Allocation_failed of string
 
-let allocation ~key (snapshot : Asic.Snapshot.t) =
+let legacy_allocation ~key (snapshot : Asic.Snapshot.t) =
   match
     List.find snapshot.operations ~f:(fun op -> String.equal op.key ("run:" ^ key))
   with
@@ -24,6 +24,24 @@ let allocation ~key (snapshot : Asic.Snapshot.t) =
        Allocation_failed "ASIC launch completed without an allocation"
      | ("pending" | "executing"), None -> Awaiting
      | state, _ -> Allocation_failed ("Unknown launch operation state: " ^ state))
+;;
+
+let allocation ~key (snapshot : Asic.Snapshot.t) =
+  match List.find snapshot.workflows ~f:(fun w -> String.equal w.key key) with
+  | None -> legacy_allocation ~key snapshot
+  | Some w ->
+    (match w.run with
+     | Some run -> Allocated run
+     | None ->
+       (match w.phase with
+        | Failed | Cancelled | Interrupted ->
+          Allocation_failed
+            (Option.value
+               w.error
+               ~default:("Workflow " ^ Sexp.to_string (Asic.Fresh.Phase.sexp_of_t w.phase)))
+        | Completed ->
+          Allocation_failed "Elaboration-only workflow completed; no physical allocation"
+        | Reserved | Building | Emitting | Prepared | Physical -> Awaiting))
 ;;
 
 (** Client-local interest bookkeeping, never evidence or run selection. Unknown executions
@@ -179,6 +197,8 @@ let fixture_snapshot ?(operations = []) ?(summaries = []) runs : Asic.Snapshot.t
   ; runs
   ; operations
   ; launches = []
+  ; fresh_intent = None
+  ; workflows = []
   ; summaries
   ; finalizations = []
   ; artifacts = []

@@ -146,6 +146,12 @@ Separate foreground startup is:
 
 ### Open the current real ASIC example demo
 
+Fresh checklist launches now execute **Elaboration → Synthesis → … → endpoint**
+as one daemon-owned workflow, consuming the exact emitted bundle. Both app binaries
+must be current. See [unified fresh-prefix controls and restart instructions](docs/unified_fresh_prefix_plan.md#delivery-and-user-verification)
+for the PT.5 example provider configuration and validated default-binary pair;
+the pinned demo launcher below keeps its own copied binaries until refreshed.
+
 The actual example has a prepared persistent provider and isolated demo state.
 From this checkout, Terminal1:
 

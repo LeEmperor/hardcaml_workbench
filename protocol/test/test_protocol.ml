@@ -670,6 +670,18 @@ let%expect_test "ASIC metrics round-trip and old summary sexps have no metrics" 
     ; List_artifacts summary.run
     ; Read_artifact
         { run = summary.run; artifact_id = "known"; offset = 10; limit = 1024 }
+    ; Stage_fresh
+        { selection =
+            { flow = "standard"
+            ; profile = "balanced"
+            ; endpoint = "cts"
+            ; assignments = []
+            }
+        ; elaboration_only = false
+        ; expected_plan_identity = None
+        }
+    ; Launch_fresh { key = "fresh-key"; intent_id = "fresh-input-intent" }
+    ; Cancel_workflow "workflow-key"
     ]
     ~f:(fun operation ->
       require_portable_round_trip
@@ -718,6 +730,8 @@ let%expect_test "ASIC metrics round-trip and old summary sexps have no metrics" 
     ; inspections = []
     ; inspection_details = []
     ; cache_error = None
+    ; fresh_intent = None
+    ; workflows = []
     }
   in
   require_portable_round_trip
@@ -745,6 +759,7 @@ let%expect_test "ASIC metrics round-trip and old summary sexps have no metrics" 
                  | "inspections"
                  | "inspection_details" )
               :: _) -> false
+          | Sexp.List (Sexp.Atom ("fresh_intent" | "workflows") :: _) -> false
           | _ -> true))
     | _ -> assert false
   in

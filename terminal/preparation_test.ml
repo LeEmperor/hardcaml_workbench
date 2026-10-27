@@ -3,6 +3,166 @@ open Hardcaml_workbench_protocol
 module H = Workspace_host
 module O = Overview_tiles
 
+let%test_unit "manual launch palette retains exact local stage receipt through \
+               same-selection supersession and restaging"
+  =
+  let host, _, _ =
+    Host_view.refinement_fixture Hardcaml_workbench_workspaces.Overview.definition
+  in
+  let first = Fs0_fixture.fresh_intent "local-receipt" in
+  let foreign = { first with id = "other-client-same-selection-and-scope" } in
+  let snapshot intent = { Fs0_fixture.snapshot with fresh_intent = Some intent } in
+  let pending, ticket =
+    Planned_run.begin_fresh host.planned_run ~elaboration_only:false first.selection
+  in
+  let pending = Planned_run.fresh_receipt pending ticket ~floor:1 (Ok first) in
+  let replaced = Planned_run.receive pending ~revision:1 (snapshot foreign) in
+  let commands state =
+    H.launch_commands { host with planned_run = state } ~preview:None ~view_pending:false
+  in
+  List.iter (commands replaced) ~f:(fun command ->
+    assert (Option.is_some command.unavailable);
+    match command.action with
+    | Launch_fresh_intent (captured, _) -> assert (Asic.Fresh.Intent.equal captured first)
+    | _ -> assert false);
+  let restaged = { first with id = "new-local-receipt" } in
+  let pending, ticket =
+    Planned_run.begin_fresh replaced ~elaboration_only:false restaged.selection
+  in
+  let pending = Planned_run.fresh_receipt pending ticket ~floor:2 (Ok restaged) in
+  let ready = Planned_run.receive pending ~revision:2 (snapshot restaged) in
+  List.iter (commands ready) ~f:(fun command ->
+    assert (Option.is_none command.unavailable);
+    match command.action with
+    | Launch_fresh_intent (captured, _) ->
+      assert (Asic.Fresh.Intent.equal captured restaged)
+    | _ -> assert false)
+;;
+
+let%test_unit "selected run Elaboration uses durable workflow linkage, never latest \
+               preparation or matching plan"
+  =
+  let host, data, find =
+    Host_view.refinement_fixture Hardcaml_workbench_workspaces.Overview.definition
+  in
+  let intent = Fs0_fixture.fresh_intent "linked" in
+  let linked =
+    { (Fs0_fixture.workflow ~run:Fs0_fixture.run_a ~phase:Completed "old" intent) with
+      elaboration_status = "completed"
+    ; elaboration_finished_at =
+        Some (Timestamp.of_time_ns (Time_ns.add Time_ns.epoch (Time_ns.Span.of_sec 12.)))
+    }
+  in
+  let unrelated =
+    { (Fs0_fixture.workflow ~run:Fs0_fixture.run_b ~phase:Failed "new" intent) with
+      elaboration_status = "emission_failed"
+    }
+  in
+  let asic = { Fs0_fixture.snapshot with workflows = [ unrelated; linked ] } in
+  let data = { data with asic = Some asic } in
+  let host = { host with preparation = Some (Preparation_view.fixture_snapshot ()) } in
+  let row host =
+    Host_view.utility_rows host data (find "stage-checklist")
+    |> Option.value_exn
+    |> List.hd_exn
+  in
+  let result = row host in
+  assert (Option.equal O.Status.equal result.status (Some Completed));
+  assert (Option.equal String.equal result.time (Some "12s"));
+  assert (List.mem result.details "Workflow: workflow-old" ~equal:String.equal);
+  assert (not (List.mem result.details "Workflow: workflow-new" ~equal:String.equal));
+  let host = { host with preparation = None } in
+  assert (Option.equal O.Status.equal (row host).status (Some Completed));
+  let historical =
+    O.workflow_for_run
+      ~asic:(Some { asic with workflows = [ unrelated ] })
+      ~run:Fs0_fixture.run_a
+  in
+  assert (Option.is_none historical);
+  assert (
+    String.equal
+      (O.elaboration_row ~now:Time_ns.epoch ~selected:false historical).value
+      "unavailable")
+;;
+
+let%test_unit "fresh manual launch captures intent, preallocation progress cancels exact \
+               workflow and late allocation keeps context guard"
+  =
+  let host, data, find =
+    Host_view.refinement_fixture Hardcaml_workbench_workspaces.Overview.definition
+  in
+  let intent = Fs0_fixture.fresh_intent "manual" in
+  let snapshot = { Fs0_fixture.snapshot with fresh_intent = Some intent } in
+  let planned_run = Planned_run.receive host.planned_run ~revision:1 snapshot in
+  let host = { host with planned_run; planned_preparation = false } in
+  List.iter (H.launch_commands host ~preview:None ~view_pending:false) ~f:(fun command ->
+    assert (Option.is_none command.unavailable);
+    match command.action with
+    | Launch_fresh_intent (captured, _) ->
+      assert (Asic.Fresh.Intent.equal captured intent);
+      assert (Option.is_none captured.expected_plan_identity)
+    | _ -> assert false);
+  let target = H.launch_target host |> Option.value_exn in
+  let w = Fs0_fixture.workflow "manual-key" intent in
+  let snapshot = { snapshot with workflows = [ w ] } in
+  assert (
+    match Asic_intents.allocation ~key:w.key snapshot with
+    | Awaiting -> true
+    | _ -> false);
+  let planned_run = Planned_run.receive planned_run ~revision:2 snapshot in
+  let tile = find "planned-run" in
+  let host = { host with planned_run; focus = Some tile.id } in
+  let text =
+    Host_view.planned_source_rows host tile
+    |> List.map ~f:(fun r -> r.Planned_run.text)
+    |> String.concat ~sep:"\n"
+  in
+  assert (String.is_substring text ~substring:"Elaboration: building");
+  assert (String.is_substring text ~substring:w.id);
+  assert (String.is_substring text ~substring:"x cancel workflow");
+  (match snd (H.input host (Character 'x') ~commands:[]) with
+   | Execute (_, Asic (Cancel_workflow id)) -> assert (String.equal id w.id)
+   | _ -> assert false);
+  let commands =
+    Stage_launch_commands.commands host ~asic:(Some snapshot) ~remembered:None
+  in
+  assert (
+    List.exists commands ~f:(fun c ->
+      match c.H.action with
+      | Asic (Cancel_workflow id) -> String.equal id w.id
+      | _ -> false));
+  let allocated = { w with phase = Physical; run = Some Fs0_fixture.run_b } in
+  assert (
+    match
+      Asic_intents.allocation ~key:w.key { snapshot with workflows = [ allocated ] }
+    with
+    | Allocated run -> Run_ref.equal run Fs0_fixture.run_b
+    | _ -> false);
+  let registry = Option.value_exn host.registry in
+  assert (Option.is_some (H.selection_after_allocation registry target Fs0_fixture.run_b));
+  let changed =
+    { registry with
+      revision = registry.revision + 1
+    ; contexts =
+        List.map registry.contexts ~f:(fun c ->
+          { c with
+            selected_run = Some Fs0_fixture.run_b
+          ; selection_revision = c.selection_revision + 1
+          })
+    }
+  in
+  assert (Option.is_none (H.selection_after_allocation changed target Fs0_fixture.run_b));
+  let _ = data in
+  List.iter [ Asic.Fresh.Phase.Failed; Cancelled; Interrupted ] ~f:(fun phase ->
+    let terminal = { w with phase } in
+    assert (
+      match
+        Asic_intents.allocation ~key:w.key { snapshot with workflows = [ terminal ] }
+      with
+      | Allocation_failed _ -> true
+      | _ -> false))
+;;
+
 let%test_unit "emission and checklist distinguish unavailable from supported not \
                requested, including no selected ASIC run"
   =
@@ -33,22 +193,25 @@ let%test_unit "emission and checklist distinguish unavailable from supported not
     check
       (Host_view.utility_rows host data (find "preparation") |> Option.value_exn)
       "Elaboration-bundle emission";
-    check
-      (Host_view.utility_rows host data (find "stage-checklist") |> Option.value_exn)
-      "Elaboration";
+    let check_linkage rows =
+      let row = List.find_exn rows ~f:(fun r -> String.equal r.O.label "Elaboration") in
+      assert (Option.equal O.Status.equal row.status (Some Unknown));
+      assert (String.equal row.value "unavailable")
+    in
+    check_linkage
+      (Host_view.utility_rows host data (find "stage-checklist") |> Option.value_exn);
     let registry = Option.value_exn host.registry in
     let registry =
       { registry with
         contexts = List.map registry.contexts ~f:(fun c -> { c with selected_run = None })
       }
     in
-    check
+    check_linkage
       (Host_view.utility_rows
          { host with registry = Some registry }
          data
          (find "stage-checklist")
-       |> Option.value_exn)
-      "Elaboration")
+       |> Option.value_exn))
 ;;
 
 let%test_unit "generic RTL fallback is bounded to latest exact selected project target \
@@ -251,7 +414,7 @@ let%test_unit "preparation tile keyboard inspection and history preserve stage l
   assert (Option.is_none (Host_view.checklist_preview host data checklist));
   let rows = Host_view.utility_rows host data checklist |> Option.value_exn in
   assert (String.equal (List.hd_exn rows).label "Elaboration");
-  assert (Option.equal O.Status.equal (List.hd_exn rows).status (Some Failed));
+  assert (Option.equal O.Status.equal (List.hd_exn rows).status (Some Unknown));
   let matching_summary =
     { (Option.value_exn (data.summary Fs0_fixture.run_a)) with
       Asic.Summary.plan_identity = Some "plan"
@@ -264,13 +427,12 @@ let%test_unit "preparation tile keyboard inspection and history preserve stage l
     |> List.hd_exn
     |> fun row -> String.concat ~sep:"\n" row.O.details
   in
-  assert (String.is_substring (relation host) ~substring:"No exact match");
+  assert (String.is_substring (relation host) ~substring:"linkage unavailable");
   let completed = Preparation_view.fixture_attempt "matched-current" Completed in
   let matched_host =
     { host with preparation = Some { snapshot with latest = Some completed } }
   in
-  assert (
-    String.is_substring (relation matched_host) ~substring:"Exact plan identity match");
+  assert (String.is_substring (relation matched_host) ~substring:"linkage unavailable");
   List.iter [ false; true ] ~f:(fun horizontal ->
     let rendered =
       Host_view.tile_view

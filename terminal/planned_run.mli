@@ -59,6 +59,11 @@ type row =
 val empty : t
 val reset : t -> scope:string -> t
 val begin_plan : t -> Asic.Selection.t -> t * ticket
+val begin_fresh : t -> elaboration_only:bool -> Asic.Selection.t -> t * ticket
+val fresh_intent : t -> Asic.Fresh.Intent.t option
+val workflow : t -> Asic.Fresh.Workflow.t option
+val workflow_active : Asic.Fresh.Workflow.t -> bool
+val fresh_launchable : t -> Asic.Fresh.Intent.t -> bool
 val current_ticket : t -> ticket -> bool
 val same_generation : t -> ticket -> bool
 
@@ -68,7 +73,18 @@ val same_generation : t -> ticket -> bool
     same-selection completion even if its response arrives after the receipt. *)
 val receipt : t -> ticket -> floor:int -> (unit, string) Result.t -> t
 
+(** Retain the exact successful Stage_fresh receipt. Matching selection alone never
+    authorizes adoption of a replacement intent. *)
+val fresh_receipt
+  :  t
+  -> ticket
+  -> floor:int
+  -> (Asic.Fresh.Intent.t, string) Result.t
+  -> t
+
 type launch_ticket
+
+val begin_fresh_launch : t -> key:string -> Asic.Fresh.Intent.t -> t * launch_ticket
 
 (** A separate local launch fence, unaffected by replanning. An unconfirmed transport
     outcome blocks another launch until exact authoritative evidence reconciles it. *)

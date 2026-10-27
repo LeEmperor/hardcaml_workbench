@@ -76,9 +76,13 @@ elif args[:2] == ['flow', 'describe']:
         capabilities=dict(stage_selection='complete-prefix-through-declared-endpoint')))
 elif args[:2] == ['flow', 'plan']:
     emit(plan())
-elif args[:2] == ['flow', 'run']:
-    profile = option('--profile')
-    if option('--endpoint') == 'timing':
+elif args[:1] == ['stages']:
+    with open(option('--methodology-plan')) as src:
+        frozen = json.load(src)
+    assert option('--expected-plan-identity') == frozen['plan_identity']
+    profile = frozen['fixture_profile']
+    endpoint = frozen['fixture_endpoint']
+    if endpoint == 'timing':
         profile += '-timing'
     attempt = os.path.join(root, 'attempt-' + profile)
     os.makedirs(attempt, exist_ok=True)
@@ -105,7 +109,7 @@ elif args[:2] == ['flow', 'run']:
     time.sleep(0.6 if not os.path.exists('hold') else 30)
     with open(os.path.join(attempt, 'done'), 'w') as out:
         out.write('done')
-    if option('--endpoint') == 'timing':
+    if endpoint == 'timing':
         stages = ['synthesis', 'floorplan', 'placement', 'cts', 'routing', 'timing']
         execution = dict(attempt_id=stream, status='completed', exit_code=0,
                          plan=dict(schema_version=4, initial_boundary=None, stages=stages),

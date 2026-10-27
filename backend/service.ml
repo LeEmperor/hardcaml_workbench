@@ -111,6 +111,7 @@ type t =
   ; projects : (Project_id.t, project_session) Hashtbl.t
   ; root_queues : (string, job_entry Queue.t) Hashtbl.t
   ; running_roots : String.Hash_set.t
+  ; preparation_waiters : String.Hash_set.t
   ; jobs : (Job_id.t, job_entry) Hashtbl.t
   ; artifacts : (Artifact_id.t, artifact_entry) Hashtbl.t
   ; hierarchies : (Artifact_id.t, hierarchy_entry) Hashtbl.t
@@ -204,6 +205,7 @@ let create
     ; projects = Project_id.Table.create ()
     ; root_queues = Hashtbl.create (module String)
     ; running_roots = Hash_set.create (module String)
+    ; preparation_waiters = Hash_set.create (module String)
     ; jobs = Job_id.Table.create ()
     ; artifacts = Artifact_id.Table.create ()
     ; hierarchies = Artifact_id.Table.create ()
@@ -1141,8 +1143,29 @@ let complete_generate_rtl
 
 let rec run_next t root =
   let queue = Hashtbl.find_or_add t.root_queues root ~default:Queue.create in
-  match Queue.dequeue queue with
-  | None -> Hash_set.remove t.running_roots root
+  let leased = Preparation_service.source_leased t.preparation_service root in
+  let next =
+    if not leased
+    then Queue.dequeue queue
+    else (
+      (* A preparation is one source transaction across two supervised jobs. Leave other
+         source-mutating jobs queued until its emission has finished. *)
+      let before, remaining =
+        List.split_while (Queue.to_list queue) ~f:(fun entry ->
+          not (String.equal entry.job.kind.namespace "preparation"))
+      in
+      match remaining with
+      | [] -> None
+      | entry :: rest ->
+        Queue.clear queue;
+        List.iter (before @ rest) ~f:(Queue.enqueue queue);
+        Some entry)
+  in
+  match next with
+  | None ->
+    if leased
+    then Hash_set.add t.preparation_waiters root
+    else Hash_set.remove t.running_roots root
   | Some entry when Job.is_terminal entry.job -> run_next t root
   | Some entry ->
     don't_wait_for
@@ -2033,7 +2056,7 @@ let workspace t (request : Workspace.Request.t) =
          request.operation)
 ;;
 
-let asic t (request : Asic.Request.t) =
+let asic_without_preparation t (request : Asic.Request.t) =
   match check_instance t request.instance_id with
   | Error error -> return (Error error)
   | Ok () ->
@@ -2278,7 +2301,12 @@ let simulation t (request : Simulation.Request.t) =
          request.operation)
 ;;
 
-let preparation t (request : Preparation.Request.t) =
+let preparation_internal
+  ?(unique = false)
+  ?is_cancelled
+  t
+  (request : Preparation.Request.t)
+  =
   match check_instance t request.instance_id with
   | Error error -> return (Error error)
   | Ok () when t.shutting_down -> return (error Conflict "Daemon is shutting down")
@@ -2341,7 +2369,11 @@ let preparation t (request : Preparation.Request.t) =
              Hashtbl.find_or_add t.root_queues session.root ~default:Queue.create
            in
            Queue.enqueue queue entry;
-           if not (Hash_set.mem t.running_roots session.root)
+           if Hash_set.mem t.preparation_waiters session.root
+           then (
+             Hash_set.remove t.preparation_waiters session.root;
+             run_next t session.root)
+           else if not (Hash_set.mem t.running_roots session.root)
            then (
              Hash_set.add t.running_roots session.root;
              run_next t session.root));
@@ -2439,6 +2471,13 @@ let preparation t (request : Preparation.Request.t) =
            return (Ok ids)
        in
        Preparation_service.handle
+         ~unique
+         ?is_cancelled
+         ~on_release:(fun () ->
+           if Hash_set.mem t.preparation_waiters session.root
+           then (
+             Hash_set.remove t.preparation_waiters session.root;
+             run_next t session.root))
          t.preparation_service
          ~root:session.root
          ~project_key:session.key
@@ -2457,12 +2496,39 @@ let preparation t (request : Preparation.Request.t) =
          request.operation)
 ;;
 
+let preparation t request = preparation_internal t request
+
+let asic t request =
+  Asic_service.set_preparation_runner
+    t.asic_service
+    (fun ~root ~environment ~unique ~cancelled operation ->
+       match
+         Hashtbl.data t.projects
+         |> List.find ~f:(fun session ->
+           String.equal session.root root
+           && V1.Environment_selection.equal session.environment environment)
+       with
+       | None -> return (error Not_found "Preparation project session unavailable")
+       | Some session ->
+         preparation_internal
+           ~unique
+           ~is_cancelled:cancelled
+           t
+           { Preparation.Request.instance_id = t.instance_id
+           ; project = session.project.id
+           ; operation
+           });
+  asic_without_preparation t request
+;;
+
 let shutdown t =
   t.shutting_down <- true;
+  Preparation_service.stop t.preparation_service;
   let%bind () = Asic_service.shutdown t.asic_service in
   let%bind () =
     Hashtbl.data t.jobs |> Deferred.List.iter ~how:`Parallel ~f:(cancel_entry t)
   in
+  let%bind () = Preparation_service.completion t.preparation_service in
   Monitor.try_with (fun () ->
     In_thread.run (fun () ->
       remove_tree_sync t.log_dir;

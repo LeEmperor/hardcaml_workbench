@@ -1,5 +1,29 @@
 # Hardcaml Workbench — Demo construction plan
 
+## Active unified fresh-prefix workflow — 2026-10-27
+
+Owner authorized Elaboration as the first peer workflow step before every fresh
+physical prefix. [Implementation contract](unified_fresh_prefix_plan.md) defines
+ownership, exact-bundle handoff, durable linkage, cancellation and acceptance.
+This supersedes the earlier standalone-only preparation/fresh-launch separation.
+
+- [x] Daemon-owned Elaboration → exact emitted bundle → physical-prefix chain.
+- [x] All fresh launch routes and run-linked checklist/status presentation.
+- [x] Failure/cancellation/replay/restart and native frontend acceptance.
+- [x] Independent review, broader checks and matching app binary build.
+
+No new ASIC physical-stage enum or implicit checkpoint-resume behavior is required.
+Delivered 2026-10-27: 223 native scripted assertions, forced full build/tests/lint,
+and independent adversarial review pass. Source-build/emit runs for each fresh
+submission; replay retains the same workflow. Exact stage receipt ownership,
+same-client retry recovery and capability-probe cancellation defects were corrected.
+The standalone preview-ownership guarantee is preserved. After a real no-EDA
+compatibility check, the owner explicitly approved updating the example's configured
+physical provider to PT.5 generation `dd1ec9002cdc40f2936488cedd9eb0fe`; old generation
+pointers/results were preserved. Matching default app binaries are built; restart
+and real physical execution remain manual. See [controls and closeout](unified_fresh_prefix_plan.md#delivery-and-user-verification)
+and [acceptance](unified_fresh_prefix_acceptance.md).
+
 ## Active Overview compression/title regression
 
 Owner supplied live Overview state where Placement/Routing lose titles and show

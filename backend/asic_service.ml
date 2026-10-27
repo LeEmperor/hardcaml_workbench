@@ -46,6 +46,7 @@ module Stored = struct
     ; terminal_attempts : (string * string) list [@sexp.default []]
     ; finalizations : Finalization_stored.t list [@sexp.default []]
     ; stage_starts : (string * (string * Timestamp.t) list) list [@sexp.default []]
+    ; workflows : Asic.Fresh.Workflow.t list [@sexp.default []]
     }
   [@@deriving sexp]
 end
@@ -176,7 +177,19 @@ type project =
   ; mutable cache_error : string option
   ; mutable registry_writable : bool
   ; mutable save_tail : unit Deferred.t
+  ; mutable fresh_intent : Asic.Fresh.Intent.t option
+  ; mutable fresh_generation : int
+  ; mutable workflows : Asic.Fresh.Workflow.t list
+  ; workflow_reservations : (unit, exn) Result.t Deferred.t String.Table.t
   }
+
+type preparation_runner =
+  root:string
+  -> environment:V1.Environment_selection.t
+  -> unique:bool
+  -> cancelled:(unit -> bool)
+  -> Preparation.Operation.t
+  -> Preparation.Response.t Deferred.t
 
 type t =
   { state_dir : string
@@ -186,6 +199,7 @@ type t =
   ; queries : unit Throttle.t
   ; executions : unit Throttle.t
   ; mutable closing : bool
+  ; mutable preparation_runner : preparation_runner option
   }
 
 let create_with_detail_cache
@@ -204,10 +218,12 @@ let create_with_detail_cache
   ; queries = Throttle.create ~continue_on_error:true ~max_concurrent_jobs:4
   ; executions = Throttle.create ~continue_on_error:true ~max_concurrent_jobs:1
   ; closing = false
+  ; preparation_runner = None
   }
 ;;
 
 let create ~state_dir = create_with_detail_cache ~state_dir ()
+let set_preparation_runner t runner = t.preparation_runner <- Some runner
 
 let path t identity suffix =
   Filename.concat t.state_dir ("asic-" ^ Public.digest identity ^ suffix)
@@ -274,6 +290,7 @@ let save_registry ?reservation t p =
         ; terminal_attempts = p.terminal_attempts
         ; finalizations = p.finalizations
         ; stage_starts = p.stage_starts
+        ; workflows = p.workflows
         }
       in
       let data = Sexp.to_string (Stored.sexp_of_t stored) in
@@ -379,6 +396,10 @@ let load_project t ~root ~environment =
     ; cache_error = None
     ; registry_writable = true
     ; save_tail = Deferred.unit
+    ; fresh_intent = None
+    ; fresh_generation = 0
+    ; workflows = []
+    ; workflow_reservations = String.Table.create ()
     }
   in
   let%bind loaded =
@@ -392,6 +413,38 @@ let load_project t ~root ~environment =
             Stored.t_of_sexp (Sexp.of_string (read_bounded filename (4 * 1024 * 1024)))
           in
           List.iter stored.runs ~f:(fun run -> Public.validate_stages run.stages);
+          let workflow_keys = String.Hash_set.create () in
+          List.iter stored.workflows ~f:(fun w ->
+            Public.require
+              (not (Hash_set.mem workflow_keys w.Asic.Fresh.Workflow.key))
+              "Duplicate retained workflow submission key";
+            Hash_set.add workflow_keys w.key;
+            Public.require
+              (String.equal
+                 w.id
+                 ("workflow-" ^ Public.digest (p.identity ^ "\000" ^ w.key)))
+              "Retained workflow identity mismatch";
+            Preparation_receipt.validate_selection
+              w.intent.selection
+              w.intent.expected_plan_identity;
+            Option.iter w.prepared ~f:(fun prepared ->
+              Public.require
+                (Preparation_receipt.valid_identity prepared.bundle_identity
+                 && Preparation_receipt.valid_identity prepared.plan_identity
+                 && Preparation_receipt.valid_identity prepared.methodology_plan_digest
+                 && String.equal
+                      prepared.methodology_plan_path
+                      (path t (p.identity ^ w.id) "-methodology-plan.json"))
+                "Invalid retained prepared-input identity");
+            match w.run, w.reference with
+            | None, None -> ()
+            | Some run, Some reference ->
+              Public.require
+                (List.exists stored.runs ~f:(fun r ->
+                   Run_ref.equal r.Asic.Run.run run
+                   && Asic.Reference.equal r.reference reference))
+                "Retained workflow/provider linkage mismatch"
+            | _ -> failwith "Incomplete retained workflow/provider linkage");
           Some stored)))
   in
   (match loaded with
@@ -407,6 +460,7 @@ let load_project t ~root ~environment =
         || List.length s.submissions > 256
         || List.length s.terminal_attempts > 256
         || List.length s.finalizations > 256
+        || List.length s.workflows > 256
         || List.length s.finalizations
            <> List.length
                 (List.dedup_and_sort
@@ -427,6 +481,33 @@ let load_project t ~root ~environment =
                   })
             });
        p.submissions <- s.submissions;
+       p.workflows
+       <- List.map s.workflows ~f:(fun w ->
+            let active =
+              match w.Asic.Fresh.Workflow.phase with
+              | Reserved | Building | Emitting | Prepared | Physical -> true
+              | Completed | Failed | Cancelled | Interrupted -> false
+            in
+            { w with
+              phase = (if active then Interrupted else w.phase)
+            ; build_job = None
+            ; emission_job = None
+            ; elaboration_status =
+                (if List.mem
+                      [ "building"; "emitting"; "not_requested" ]
+                      w.elaboration_status
+                      ~equal:String.equal
+                    && active
+                 then "interrupted"
+                 else w.elaboration_status)
+            ; error =
+                (if active
+                 then
+                   Some
+                     "Daemon restarted; producer ownership unavailable; no automatic \
+                      replay"
+                 else w.error)
+            });
        p.index <- s.index;
        p.terminal_attempts <- s.terminal_attempts;
        p.stage_starts
@@ -505,30 +586,31 @@ let query ?(max_bytes = 16 * 1024 * 1024) ?(before = fun () -> ()) t _p cancel i
     Public.decode output)
 ;;
 
-let check_provider t p cancel =
+let check_provider ?(cache = true) t p cancel =
+  let probe () =
+    Monitor.try_with (fun () ->
+      let%map metadata = query t p cancel (invoke p Adapter.metadata) in
+      Public.metadata metadata;
+      p.timing_stage
+      <- Poly.equal
+           (Public.field
+              "timing_stage1"
+              (Public.field "capabilities" (Public.field "cli_contract" metadata)))
+           (`Bool true))
+  in
   let checked =
-    match p.provider_check with
+    match if cache then p.provider_check else None with
     | Some checked -> checked
     | None ->
-      let checked =
-        Monitor.try_with (fun () ->
-          let%map metadata = query t p cancel (invoke p Adapter.metadata) in
-          Public.metadata metadata;
-          p.timing_stage
-          <- Poly.equal
-               (Public.field
-                  "timing_stage1"
-                  (Public.field "capabilities" (Public.field "cli_contract" metadata)))
-               (`Bool true))
-      in
-      p.provider_check <- Some checked;
+      let checked = probe () in
+      if cache then p.provider_check <- Some checked;
       checked
   in
   checked
   >>| function
   | Ok () -> ()
   | Error exn ->
-    p.provider_check <- None;
+    if cache then p.provider_check <- None;
     raise exn
 ;;
 
@@ -559,7 +641,13 @@ let replace_run (p : project) (r : Asic.Run.t) =
        not (Run_ref.equal old.run r.run))
 ;;
 
-let register t (p : project) ?selection (reference : Asic.Reference.t) =
+let register
+  ?(persist_reference = true)
+  t
+  (p : project)
+  ?selection
+  (reference : Asic.Reference.t)
+  =
   ignore (Public.absolute reference.Asic.Reference.attempt : string);
   Public.require (not (String.is_empty reference.stream_id)) "Empty stream ID";
   let id = run_id reference in
@@ -587,7 +675,7 @@ let register t (p : project) ?selection (reference : Asic.Reference.t) =
       }
     in
     replace_run p r;
-    let%map () = persist t p in
+    let%map () = if persist_reference then persist t p else Deferred.unit in
     r
 ;;
 
@@ -1090,6 +1178,8 @@ let snapshot p : Asic.Snapshot.t =
   ; inspections = p.inspections
   ; inspection_details = p.inspection_details
   ; cache_error = p.cache_error
+  ; fresh_intent = p.fresh_intent
+  ; workflows = p.workflows
   }
 ;;
 
@@ -2054,7 +2144,82 @@ let load_inspection_detail
       publish_detail p detail)
 ;;
 
-let handle_operation t p operation =
+let fresh_scope ?(physical = true) p =
+  In_thread.run (fun () ->
+    let module Preparation_config =
+      Hardcaml_workbench_project_integration.Preparation_config
+    in
+    let preparation =
+      Preparation_config.parse_string
+        (read_bounded (Filename.concat p.root Preparation_config.filename) 65536)
+      |> Or_error.ok_exn
+    in
+    let asic_path = Filename.concat p.root Config.filename in
+    let current =
+      match Sys_unix.file_exists asic_path with
+      | `No -> None
+      | `Yes | `Unknown ->
+        Some (Config.parse_string (read_bounded asic_path 65536) |> Or_error.ok_exn)
+    in
+    Public.require
+      (Option.equal Config.equal current p.config)
+      "ASIC configuration changed; loaded provider scope is stale";
+    let provider_stamp =
+      if not physical
+      then "elaboration-only"
+      else (
+        let config = config p in
+        Public.require
+          (Poly.equal (Core_unix.stat config.provider_executable).st_kind S_REG)
+          "Provider executable must be a regular file";
+        Filename_unix.realpath config.provider_executable
+        ^ Preparation_receipt.sha256
+            (read_bounded config.provider_executable (128 * 1024 * 1024)))
+    in
+    Sexp.to_string_mach
+      (Sexp.List
+         [ Sexp.List [ Atom "project_scope"; Sexp.of_string p.identity ]
+         ; Sexp.List [ Atom "provider_stamp"; Atom provider_stamp ]
+         ; Sexp.List [ Atom "preparation"; Preparation_config.sexp_of_t preparation ]
+         ]))
+;;
+
+let workflow p id =
+  List.find_exn p.workflows ~f:(fun w -> String.equal w.Asic.Fresh.Workflow.id id)
+;;
+
+let update_workflow p id f =
+  p.workflows
+  <- List.map p.workflows ~f:(fun w ->
+       if String.equal w.Asic.Fresh.Workflow.id id then f w else w)
+;;
+
+let workflow_active (w : Asic.Fresh.Workflow.t) =
+  match w.phase with
+  | Reserved | Building | Emitting | Prepared | Physical -> true
+  | Completed | Failed | Cancelled | Interrupted -> false
+;;
+
+let workflow_cancel_key (w : Asic.Fresh.Workflow.t) key =
+  List.mem [ w.id; w.key; "run:" ^ w.key; "workflow:" ^ w.id ] key ~equal:String.equal
+;;
+
+let legacy_intent_id key preview =
+  "legacy-fresh-"
+  ^ Public.digest (key ^ Sexp.to_string_mach (Asic.Preview.sexp_of_t preview))
+;;
+
+let await_workflow_reservation p key =
+  match Hashtbl.find p.workflow_reservations key with
+  | None -> Deferred.unit
+  | Some result ->
+    result
+    >>| (function
+     | Ok () -> ()
+     | Error exn -> raise exn)
+;;
+
+let rec handle_operation ?prepared_input t p operation =
   let analysis, operation =
     match operation with
     | Asic.Operation.Inspect_analysis { run; target; refresh } ->
@@ -2331,6 +2496,55 @@ let handle_operation t p operation =
                     && old.limit = page.limit)))
               8);
     Deferred.unit
+  | Stage_fresh { selection; elaboration_only; expected_plan_identity } ->
+    p.fresh_generation <- p.fresh_generation + 1;
+    let generation = p.fresh_generation in
+    p.fresh_intent <- None;
+    Preparation_receipt.validate_selection selection expected_plan_identity;
+    let%map scope = fresh_scope ~physical:(not elaboration_only) p in
+    Public.require (generation = p.fresh_generation) "Fresh input staging superseded";
+    let created_at = Timestamp.of_time_ns (Time_ns.now ()) in
+    let id =
+      "fresh-intent-"
+      ^ Public.digest
+          (scope
+           ^ Int.to_string generation
+           ^ Sexp.to_string_mach
+               ([%sexp_of: Asic.Selection.t * bool * string option * Timestamp.t]
+                  (selection, elaboration_only, expected_plan_identity, created_at)))
+    in
+    p.fresh_intent
+    <- Some
+         { Asic.Fresh.Intent.id
+         ; selection
+         ; elaboration_only
+         ; expected_plan_identity
+         ; scope
+         ; created_at
+         }
+  | Launch_fresh { key; intent_id } ->
+    (match
+       List.find p.workflows ~f:(fun w -> String.equal w.Asic.Fresh.Workflow.key key)
+     with
+     | Some w ->
+       Public.require
+         (String.equal w.intent.id intent_id)
+         "Submission key reused with different intent";
+       await_workflow_reservation p key
+     | None ->
+       let intent =
+         Option.value_exn
+           p.fresh_intent
+           ~message:"Fresh input intent unavailable; stage again"
+       in
+       Public.require
+         (String.equal intent.id intent_id)
+         "Fresh input intent superseded; stage again";
+       launch_fresh ~staged:true t p ~key ~intent)
+  | Cancel_workflow id -> cancel_workflow t p id
+  | Cancel key when List.exists p.workflows ~f:(fun w -> workflow_cancel_key w key) ->
+    let w = List.find_exn p.workflows ~f:(fun w -> workflow_cancel_key w key) in
+    cancel_workflow t p w.id
   | Cancel key ->
     let task =
       match Hashtbl.find p.tasks key with
@@ -2483,6 +2697,41 @@ let handle_operation t p operation =
               hot p { s with freshness = Refresh_failed (Exn.to_string exn) });
             raise exn));
     Deferred.unit
+  | Run { key; preview } when Option.is_none prepared_input ->
+    (* Compatibility is strict: an explicitly supplied generated preview is an
+       expectation, never permission to execute a pinned source producer. *)
+    (match
+       List.find p.workflows ~f:(fun w -> String.equal w.Asic.Fresh.Workflow.key key)
+     with
+     | Some w ->
+       Public.require
+         (String.equal w.intent.id (legacy_intent_id key preview)
+          && Asic.Selection.equal w.intent.selection preview.selection
+          && Option.equal
+               String.equal
+               w.intent.expected_plan_identity
+               (Some preview.plan_identity))
+         "Submission key reused with different fresh inputs";
+       await_workflow_reservation p key
+     | None ->
+       let validated =
+         Public.preview preview.selection (Public.decode preview.plan_json)
+       in
+       Public.require
+         (String.equal validated.plan_identity preview.plan_identity)
+         "Preview identity mismatch";
+       let%bind scope = fresh_scope p in
+       let created_at = Timestamp.of_time_ns (Time_ns.now ()) in
+       let intent : Asic.Fresh.Intent.t =
+         { id = legacy_intent_id key preview
+         ; selection = preview.selection
+         ; elaboration_only = false
+         ; expected_plan_identity = Some preview.plan_identity
+         ; scope
+         ; created_at
+         }
+       in
+       launch_fresh t p ~key ~intent)
   | Run { key; preview } ->
     Public.require
       p.registry_writable
@@ -2498,7 +2747,24 @@ let handle_operation t p operation =
          preview.plan_identity
          (Public.text (Public.field "plan_identity" (Public.decode preview.plan_json))))
       "Preview identity mismatch";
-    reserve_and_schedule t p ~key ~preview (fun () ->
+    (* Retain the complete plan once in the workflow file. The legacy launch ledger needs
+       only exact identities for observation/report fencing. *)
+    let reservation_preview =
+      match prepared_input with
+      | None -> preview
+      | Some (_, (prepared : Asic.Fresh.Prepared.t)) ->
+        { preview with
+          plan_json =
+            Yojson.Safe.to_string
+              (`Assoc
+                [ "contract", `String "hardcaml-asic.methodology-plan"
+                ; "schema_version", `Int 1
+                ; "plan_identity", `String prepared.plan_identity
+                ; "bundle_identity", `String prepared.bundle_identity
+                ])
+        }
+    in
+    reserve_and_schedule t p ~key ~preview:reservation_preview (fun () ->
       schedule t p ~key:("run:" ^ key) ~kind:"run" ~execution:true (fun task ->
         (* The entire execution task, including metadata and its automatic reader, shares
            one deadline. Allocation must not reset the execution budget. *)
@@ -2509,7 +2775,8 @@ let handle_operation t p operation =
           (p.timing_stage || not (String.equal preview.selection.endpoint "timing"))
           "Provider does not advertise executable Timing";
         let%bind () =
-          if String.equal preview.selection.endpoint "synthesis"
+          if Option.is_some prepared_input
+             || String.equal preview.selection.endpoint "synthesis"
           then Deferred.unit
           else (
             let%map description =
@@ -2537,13 +2804,25 @@ let handle_operation t p operation =
           | `String "observation_allocated" ->
             Public.require (Option.is_none !allocated) "Duplicate allocation";
             let reference = Public.allocation j in
-            let%bind r = register t p ~selection:preview.selection reference in
+            Public.require
+              (not
+                 (List.exists p.submissions ~f:(fun (other, _, run) ->
+                    (not (String.equal other key))
+                    && Option.equal String.equal run (Some reference.stream_id))))
+              "Provider allocation already belongs to another submission";
+            (* Publish allocation and workflow linkage in one registry write. *)
+            let%bind r =
+              register ~persist_reference:false t p ~selection:preview.selection reference
+            in
             allocated := Some r.run;
             task.pending <- { task.pending with run = Some r.run };
             p.submissions
             <- List.map p.submissions ~f:(fun (k, v, id) ->
                  k, v, if String.equal k key then Some r.run.id else id);
-            let%map () = persist t p in
+            Option.iter prepared_input ~f:(fun (id, _) ->
+              update_workflow p id (fun w ->
+                { w with run = Some r.run; reference = Some reference }));
+            let%map () = save_required t p in
             (* Start observation before waiting for launcher EOF. *)
             if not (Deferred.is_determined cancel)
             then
@@ -2614,6 +2893,30 @@ let handle_operation t p operation =
         in
         let%bind result =
           Monitor.try_with (fun () ->
+            let id, prepared = Option.value_exn prepared_input in
+            let%bind scope = fresh_scope p in
+            let current = workflow p id in
+            Public.require
+              (String.equal scope current.intent.scope)
+              "Fresh scope changed while physical execution was queued";
+            let workspace =
+              Filename.concat (config p).results_root ("fresh-" ^ Public.digest id)
+            in
+            let%bind () =
+              In_thread.run (fun () ->
+                Public.require
+                  (String.equal
+                     prepared.methodology_plan_digest
+                     (Preparation_receipt.sha256
+                        (read_bounded prepared.methodology_plan_path (16 * 1024 * 1024))))
+                  "Frozen workflow methodology plan changed before launch";
+                (* The public observation writer requires an existing workspace parent.
+                   The provider owns creation of the fresh workspace. *)
+                Core_unix.mkdir_p (config p).results_root;
+                Public.require
+                  (Poly.equal (Sys_unix.file_exists workspace) `No)
+                  "Fresh physical workspace already exists; implicit reuse forbidden")
+            in
             Asic_process.run
             (* The adopted producer needs its child termination grace, five-second
                container cleanup window, and terminal receipt publication before
@@ -2623,8 +2926,13 @@ let handle_operation t p operation =
               ~cancel
               ~on_process:ignore
               ~on_line
-              (invoke p (fun c ~root ~environment ->
-                 Adapter.run c ~root ~environment preview)))
+              (let id, prepared = Option.value_exn prepared_input in
+               let w = workflow p id in
+               Public.require
+                 ((not w.cancel_requested) && not t.closing)
+                 "Fresh workflow cancelled before provider process creation";
+               invoke p (fun c ~root ~environment ->
+                 Adapter.run_prepared c ~root ~environment ~prepared ~workspace)))
         in
         (* EOF (including nonzero exit) is not provider stage evidence. Retire and join
            the polling reader before a fresh, bounded reconciliation: otherwise its
@@ -2712,6 +3020,321 @@ let handle_operation t p operation =
           if not (List.mem [ "allocated"; "observing" ] r.status ~equal:String.equal)
           then validate_delivery run;
           Deferred.unit))
+
+and cancel_workflow t p id =
+  let w = workflow p id in
+  if not (workflow_active w)
+  then Deferred.unit
+  else (
+    (* No yield between the latch and finding/cancelling the physical owner. *)
+    update_workflow p id (fun w -> { w with cancel_requested = true });
+    Option.iter
+      (Hashtbl.find p.tasks ("workflow:" ^ id))
+      ~f:(fun task -> Ivar.fill_if_empty task.cancel ());
+    Option.iter
+      (Hashtbl.find p.tasks ("run:" ^ w.key))
+      ~f:(fun task -> Ivar.fill_if_empty task.cancel ());
+    let%bind () = save_required t p in
+    match w.preparation_id, t.preparation_runner with
+    | Some attempt, Some runner ->
+      let%map (_ : Preparation.Response.t) =
+        runner
+          ~root:p.root
+          ~environment:p.environment
+          ~unique:true
+          ~cancelled:(fun () -> true)
+          (Preparation.Operation.Cancel attempt)
+      in
+      ()
+    | _ -> Deferred.unit)
+
+and launch_fresh ?(staged = false) t p ~key ~(intent : Asic.Fresh.Intent.t) =
+  Public.require
+    ((not (String.is_empty key)) && String.length key <= 256)
+    "Invalid fresh submission key";
+  serialized p "fresh-reservation" (fun () ->
+    match
+      List.find p.workflows ~f:(fun w -> String.equal w.Asic.Fresh.Workflow.key key)
+    with
+    | Some w ->
+      Public.require
+        (String.equal w.intent.id intent.id
+         && Asic.Selection.equal w.intent.selection intent.selection
+         && Bool.equal w.intent.elaboration_only intent.elaboration_only
+         && Option.equal
+              String.equal
+              w.intent.expected_plan_identity
+              intent.expected_plan_identity
+         && String.equal w.intent.scope intent.scope)
+        "Submission key reused with different fresh intent";
+      Deferred.unit
+    | None ->
+      Public.require p.registry_writable "Fresh workflow registry unavailable";
+      Public.require
+        (not
+           (List.exists p.workflows ~f:(fun w ->
+              String.equal w.Asic.Fresh.Workflow.intent.id intent.id)))
+        "Fresh input intent already launched; stage again for a distinct submission";
+      Public.require
+        (List.length p.workflows < 256)
+        "Fresh workflow history budget exhausted";
+      Public.require
+        (not (List.exists p.submissions ~f:(fun (old, _, _) -> String.equal old key)))
+        "Historical submission key already reserved; observe it instead of relaunching";
+      let%bind scope = fresh_scope ~physical:(not intent.elaboration_only) p in
+      Public.require
+        (String.equal scope intent.scope)
+        "Fresh input scope changed; stage again";
+      if staged
+      then
+        Public.require
+          (Option.exists p.fresh_intent ~f:(fun current ->
+             String.equal current.id intent.id))
+          "Fresh input intent superseded before reservation; stage again";
+      ignore
+        (Option.value_exn
+           t.preparation_runner
+           ~message:"Preparation supervisor unavailable"
+         : preparation_runner);
+      let id = "workflow-" ^ Public.digest (p.identity ^ "\000" ^ key) in
+      let w : Asic.Fresh.Workflow.t =
+        { id
+        ; key
+        ; intent
+        ; phase = Reserved
+        ; cancel_requested = false
+        ; preparation_id = None
+        ; elaboration_status = "not_requested"
+        ; elaboration_started_at = None
+        ; elaboration_finished_at = None
+        ; build_job = None
+        ; emission_job = None
+        ; prepared = None
+        ; run = None
+        ; reference = None
+        ; error = None
+        ; created_at = Timestamp.of_time_ns (Time_ns.now ())
+        ; finished_at = None
+        }
+      in
+      p.workflows <- w :: p.workflows;
+      let reserved = Ivar.create () in
+      Hashtbl.set p.workflow_reservations ~key ~data:(Ivar.read reserved);
+      let%bind saved = Monitor.try_with (fun () -> save_required t p) in
+      Ivar.fill_exn reserved saved;
+      Hashtbl.remove p.workflow_reservations key;
+      (match saved with
+       | Error exn ->
+         p.workflows
+         <- List.filter p.workflows ~f:(fun old -> not (String.equal old.id id));
+         raise exn
+       | Ok () ->
+         schedule
+           t
+           p
+           ~key:("workflow:" ^ id)
+           ~kind:"workflow"
+           ~execution:false
+           (fun task -> execute_fresh t p id task);
+         Deferred.unit))
+
+and execute_fresh t p id task =
+  let check () =
+    Public.require
+      ((not t.closing) && not (workflow p id).cancel_requested)
+      "Fresh workflow cancelled; downstream launch blocked"
+  in
+  let runner = Option.value_exn t.preparation_runner in
+  let call operation =
+    runner
+      ~root:p.root
+      ~environment:p.environment
+      ~unique:true
+      ~cancelled:(fun () -> t.closing || (workflow p id).cancel_requested)
+      operation
+    >>| function
+    | Ok value -> value
+    | Error error -> failwith error.V1.Error.message
+  in
+  let%bind result =
+    Monitor.try_with (fun () ->
+      check ();
+      let w = workflow p id in
+      let%bind scope = fresh_scope ~physical:(not w.intent.elaboration_only) p in
+      check ();
+      Public.require
+        (String.equal scope w.intent.scope)
+        "Fresh scope changed before preparation";
+      let%bind () =
+        if w.intent.elaboration_only
+        then Deferred.unit
+        else
+          (* This probe belongs to this workflow, not to the shared reader cache. Cancel
+             and shutdown must terminate/reap it before orchestration joins. *)
+          check_provider
+            ~cache:false
+            t
+            p
+            (Deferred.any
+               [ Ivar.read task.cancel; Clock.after (Time_float.Span.of_sec 30.) ])
+      in
+      check ();
+      let%bind started =
+        call
+          (Prepare
+             { submission_key = "fresh:" ^ id
+             ; selection = w.intent.selection
+             ; expected_plan_identity = w.intent.expected_plan_identity
+             })
+      in
+      let attempt_id = Option.value_exn started.requested_attempt in
+      update_workflow p id (fun w ->
+        { w with preparation_id = Some attempt_id; phase = Building });
+      let%bind () = save_required t p in
+      let rec wait_preparation (snapshot : Preparation.Snapshot.t) =
+        let attempt =
+          List.find_exn snapshot.history ~f:(fun a ->
+            String.equal a.Preparation.Attempt.id attempt_id)
+        in
+        let active, phase, status =
+          match attempt.outcome with
+          | Building -> true, Asic.Fresh.Phase.Building, "building"
+          | Emitting -> true, Emitting, "emitting"
+          | Completed -> false, Prepared, "completed"
+          | Build_failed -> false, Failed, "build_failed"
+          | Emission_failed -> false, Failed, "emission_failed"
+          | Cancelled -> false, Cancelled, "cancelled"
+        in
+        let before = workflow p id in
+        update_workflow p id (fun w ->
+          { w with
+            phase
+          ; elaboration_status = status
+          ; elaboration_started_at = Some attempt.created_at
+          ; elaboration_finished_at =
+              (if active
+               then None
+               else
+                 Option.first_some
+                   (Option.bind
+                      (Option.first_some attempt.emission_job attempt.build_job)
+                      ~f:(fun job -> job.Job.finished_at))
+                   (Some (Timestamp.of_time_ns (Time_ns.now ()))))
+          ; build_job = attempt.build_job
+          ; emission_job = attempt.emission_job
+          ; error = attempt.diagnostic
+          });
+        let%bind () =
+          if Asic.Fresh.Workflow.equal before (workflow p id)
+          then Deferred.unit
+          else save_required t p
+        in
+        if active
+        then (
+          let%bind () =
+            if (workflow p id).cancel_requested || t.closing
+            then call (Cancel attempt_id) >>| ignore
+            else Deferred.unit
+          in
+          let%bind () = Clock.after (Time_float.Span.of_ms 50.) in
+          let%bind snapshot = call Get in
+          wait_preparation snapshot)
+        else return attempt
+      in
+      let%bind attempt = wait_preparation started in
+      check ();
+      Public.require
+        (Preparation.Outcome.equal attempt.outcome Completed)
+        (Option.value attempt.diagnostic ~default:"Fresh preparation did not complete");
+      let bundle = Option.value_exn attempt.bundle in
+      let plan_path = path t (p.identity ^ id) "-methodology-plan.json" in
+      let%bind () =
+        In_thread.run (fun () ->
+          if Poly.equal (Sys_unix.file_exists plan_path) `Yes
+          then
+            Public.require
+              (String.equal (read_bounded plan_path (16 * 1024 * 1024)) bundle.plan_json)
+              "Frozen workflow plan already exists with different bytes"
+          else (
+            atomic_write t plan_path bundle.plan_json;
+            Core_unix.chmod plan_path ~perm:0o400))
+      in
+      check ();
+      let prepared : Asic.Fresh.Prepared.t =
+        { bundle_identity = bundle.bundle_identity
+        ; bundle_directory = bundle.output_dir
+        ; plan_identity = bundle.plan_identity
+        ; methodology_plan_path = plan_path
+        ; methodology_plan_digest = Preparation_receipt.sha256 bundle.plan_json
+        }
+      in
+      update_workflow p id (fun w ->
+        { w with prepared = Some prepared; phase = Prepared });
+      let%bind () = save_required t p in
+      check ();
+      let%bind scope = fresh_scope ~physical:(not w.intent.elaboration_only) p in
+      check ();
+      Public.require
+        (String.equal scope w.intent.scope)
+        "Fresh scope changed before physical handoff";
+      if w.intent.elaboration_only
+      then Deferred.unit
+      else (
+        let preview : Asic.Preview.t =
+          { selection = w.intent.selection
+          ; plan_identity = bundle.plan_identity
+          ; plan_json = bundle.plan_json
+          }
+        in
+        update_workflow p id (fun w -> { w with phase = Physical });
+        let%bind () = save_required t p in
+        check ();
+        let%bind () =
+          handle_operation
+            ~prepared_input:(id, prepared)
+            t
+            p
+            (Run { key = w.key; preview })
+        in
+        let task = Hashtbl.find_exn p.tasks ("run:" ^ w.key) in
+        if (workflow p id).cancel_requested then Ivar.fill_if_empty task.cancel ();
+        let%bind () = task.completion in
+        Public.require
+          (String.equal task.pending.state "completed")
+          (Option.value task.pending.error ~default:"Physical producer failed");
+        let current = workflow p id in
+        let run = find_run p (Option.value_exn current.run) in
+        Public.require
+          (String.equal run.status "completed")
+          ("Provider terminal outcome: " ^ run.status);
+        Deferred.unit))
+  in
+  let%bind () =
+    match result, (workflow p id).preparation_id with
+    | Error _, Some attempt ->
+      Monitor.try_with (fun () -> call (Cancel attempt) >>| ignore) >>| ignore
+    | _ -> Deferred.unit
+  in
+  update_workflow p id (fun w ->
+    { w with
+      phase =
+        (if w.cancel_requested
+            || t.closing
+            || String.equal w.elaboration_status "cancelled"
+         then Cancelled
+         else (
+           match result with
+           | Ok () -> Completed
+           | Error _ -> Failed))
+    ; error =
+        (match result with
+         | Ok () -> w.error
+         | Error exn -> Some (Exn.to_string exn))
+    ; finished_at = Some (Timestamp.of_time_ns (Time_ns.now ()))
+    });
+  (* Failure to retain a terminal update is exposed by cache_error; it must never cause a
+     producer retry. *)
+  persist t p
 ;;
 
 let handle t ~root ~environment operation : Asic.Response.t Deferred.t =

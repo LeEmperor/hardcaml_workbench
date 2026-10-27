@@ -62,6 +62,7 @@ type intent =
   ; acknowledged : bool
   ; floor : int
   ; error : string option
+  ; fresh_receipt : Asic.Fresh.Intent.t option
   }
 
 type t =
@@ -72,10 +73,13 @@ type t =
   ; snapshot : Asic.Snapshot.t option
   ; launch_generation : int
   ; launch_intent : launch_intent option
+  ; fresh_mode : bool
+  ; elaboration_only : bool
   }
 
 and launch_intent =
   { preview : Asic.Preview.t
+  ; fresh_input : Asic.Fresh.Intent.t option
   ; key : string
   ; acknowledged : bool
   ; floor : int
@@ -95,6 +99,8 @@ let empty =
   ; snapshot = None
   ; launch_generation = 0
   ; launch_intent = None
+  ; fresh_mode = false
+  ; elaboration_only = false
   }
 ;;
 
@@ -114,7 +120,14 @@ let begin_launch (t : t) ~key preview =
   ( { t with
       launch_generation
     ; launch_intent =
-        Some { preview; key; acknowledged = false; floor = Int.max_value; error = None }
+        Some
+          { preview
+          ; fresh_input = None
+          ; key
+          ; acknowledged = false
+          ; floor = Int.max_value
+          ; error = None
+          }
     }
   , { launch_scope = t.scope; launch_generation } )
 ;;
@@ -144,18 +157,56 @@ let begin_plan t selection =
           ; acknowledged = false
           ; floor = Int.max_value
           ; error = None
+          ; fresh_receipt = None
           }
     }
   , { scope = t.scope; generation } )
 ;;
 
+let begin_fresh t ~elaboration_only selection =
+  let t, ticket = begin_plan t selection in
+  { t with fresh_mode = true; elaboration_only }, ticket
+;;
+
+let fresh_preview (i : Asic.Fresh.Intent.t) : Asic.Preview.t =
+  { selection = i.selection; plan_identity = i.id; plan_json = "" }
+;;
+
+let begin_fresh_launch t ~key intent =
+  let t, ticket = begin_launch t ~key (fresh_preview intent) in
+  ( { t with
+      launch_intent =
+        Option.map t.launch_intent ~f:(fun i -> { i with fresh_input = Some intent })
+    }
+  , ticket )
+;;
+
+let workflow_active (w : Asic.Fresh.Workflow.t) =
+  match w.phase with
+  | Reserved | Building | Emitting | Prepared | Physical -> true
+  | Completed | Failed | Cancelled | Interrupted -> false
+;;
+
+let shared_fresh_intent t = Option.bind t.snapshot ~f:(fun s -> s.fresh_intent)
+
+let fresh_intent t =
+  if t.fresh_mode
+  then Option.bind t.intent ~f:(fun i -> i.fresh_receipt)
+  else shared_fresh_intent t
+;;
+
+let workflow t =
+  Option.bind t.snapshot ~f:(fun s ->
+    match t.launch_intent with
+    | Some i -> List.find s.workflows ~f:(fun w -> String.equal w.key i.key)
+    | None -> List.hd s.workflows)
+;;
+
 let same_generation t (ticket : ticket) =
-  String.equal t.scope ticket.scope
-  && t.generation = ticket.generation
+  String.equal t.scope ticket.scope && t.generation = ticket.generation
 ;;
 
 let current_ticket t ticket = same_generation t ticket && Option.is_some t.intent
-;;
 
 let receipt t ticket ~floor result =
   if not (current_ticket t ticket)
@@ -168,6 +219,30 @@ let receipt t ticket ~floor result =
     }
 ;;
 
+let fresh_receipt t ticket ~floor result =
+  if not (current_ticket t ticket)
+  then t
+  else (
+    let result =
+      Result.bind result ~f:(fun (received : Asic.Fresh.Intent.t) ->
+        let requested = Option.value_exn t.intent in
+        if Asic.Selection.equal requested.selection received.selection
+           && Bool.equal t.elaboration_only received.elaboration_only
+        then Ok received
+        else Error "Staging receipt does not match requested fresh inputs")
+    in
+    { t with
+      intent =
+        Option.map t.intent ~f:(fun i ->
+          { i with
+            acknowledged = true
+          ; floor
+          ; error = Result.error result
+          ; fresh_receipt = Result.ok result
+          })
+    })
+;;
+
 let receive t ~revision snapshot =
   if revision < t.revision
   then t
@@ -175,7 +250,8 @@ let receive t ~revision snapshot =
     let intent =
       Option.filter t.intent ~f:(fun i ->
         not
-          (i.acknowledged
+          ((not t.fresh_mode)
+           && i.acknowledged
            && Option.is_none i.error
            && revision >= i.floor
            && Option.exists snapshot.Asic.Snapshot.preview ~f:(fun p ->
@@ -188,13 +264,42 @@ let receive t ~revision snapshot =
     in
     let launch_intent =
       Option.filter t.launch_intent ~f:(fun i ->
-        not
-          (i.acknowledged
-           && revision >= i.floor
-           && List.exists snapshot.launches ~f:(fun l ->
-             String.equal l.key i.key && Asic.Preview.equal l.preview i.preview)))
+        let superseded_before_reservation =
+          t.fresh_mode
+          && i.acknowledged
+          && Option.is_some i.error
+          && Option.exists intent ~f:(fun staged ->
+            staged.acknowledged
+            && Option.is_none staged.error
+            && revision >= staged.floor
+            && Option.exists staged.fresh_receipt ~f:(fun received ->
+              Option.exists i.fresh_input ~f:(fun prior ->
+                not (String.equal received.id prior.id))
+              && Option.exists
+                   snapshot.Asic.Snapshot.fresh_intent
+                   ~f:(Asic.Fresh.Intent.equal received)))
+          && not (List.exists snapshot.workflows ~f:(fun w -> String.equal w.key i.key))
+        in
+        (* A new successful Stage_fresh supersedes the old intent before the daemon's
+           reservation guard. A post-receipt snapshot with no old workflow proves that old
+           key cannot subsequently reserve. Ordinary polls cannot clear uncertainty. *)
+        (not superseded_before_reservation)
+        && not
+             (i.acknowledged
+              && revision >= i.floor
+              && List.exists snapshot.launches ~f:(fun l ->
+                String.equal l.key i.key && Asic.Preview.equal l.preview i.preview)))
     in
-    { t with revision; snapshot = Some snapshot; intent; launch_intent })
+    { t with
+      revision
+    ; snapshot = Some snapshot
+    ; intent
+    ; launch_intent
+    ; launch_generation =
+        (if Option.is_some t.launch_intent && Option.is_none launch_intent
+         then t.launch_generation + 1
+         else t.launch_generation)
+    })
 ;;
 
 let launch_active (op : Asic.Pending.t) =
@@ -288,7 +393,7 @@ let launch_model t preview =
        make ~key:l.key ?run_id:l.run_id state message)
 ;;
 
-let model t =
+let legacy_model t =
   let preview = Option.bind t.snapshot ~f:(fun s -> s.preview) in
   let launch_preview =
     match preview with
@@ -392,6 +497,95 @@ let model t =
           local
             Stale
             "Requested plan operation expired or unavailable; prepare explicitly again"))
+;;
+
+let model t =
+  if (not t.fresh_mode) && Option.is_none (fresh_intent t) && Option.is_none (workflow t)
+  then legacy_model t
+  else (
+    let intent = fresh_intent t in
+    let consumed i =
+      Option.exists t.snapshot ~f:(fun s ->
+        List.exists s.workflows ~f:(fun w ->
+          String.equal w.intent.id i.Asic.Fresh.Intent.id))
+    in
+    let status, message =
+      match t.intent, shared_fresh_intent t with
+      | Some i, _ when Option.is_some i.error ->
+        Failed, "Input staging failed: " ^ Option.value_exn i.error
+      | Some i, _ when (not i.acknowledged) || t.revision < i.floor ->
+        Pending, "Staging current source/configuration inputs; no producer started"
+      | Some i, Some current
+        when not (Option.exists i.fresh_receipt ~f:(Asic.Fresh.Intent.equal current)) ->
+        Stale, "Staged inputs superseded; press r again"
+      | _, Some i when consumed i ->
+        Stale, "Input intent consumed; r stages a new fresh run"
+      | _, Some _ ->
+        Ready, "Fresh input intent ready; launch builds and emits current source"
+      | Some _, None -> Stale, "Fresh input intent unavailable; stage again"
+      | None, None -> Empty, "No fresh input intent; r stages current inputs"
+    in
+    let launch =
+      match workflow t with
+      | Some w ->
+        let state : launch_status =
+          match w.phase with
+          | Completed -> Completed
+          | Failed -> Launch_failed
+          | Cancelled -> Cancelled
+          | Interrupted -> Detached
+          | Physical -> if Option.is_some w.run then Running else Submitting
+          | Reserved | Building | Emitting | Prepared -> Submitting
+        in
+        { key = Some w.key
+        ; run_id = Option.map w.run ~f:(fun r -> r.id)
+        ; state
+        ; message =
+            "Elaboration: "
+            ^ w.elaboration_status
+            ^ "; workflow "
+            ^ w.id
+            ^ "; "
+            ^ Sexp.to_string (Asic.Fresh.Phase.sexp_of_t w.phase)
+            ^ Option.value_map w.error ~default:"" ~f:(fun e -> ": " ^ e)
+        }
+      | None ->
+        (match t.launch_intent with
+         | Some i ->
+           { key = Some i.key
+           ; run_id = None
+           ; state = (if Option.is_some i.error then Unavailable else Submitting)
+           ; message =
+               Option.value
+                 i.error
+                 ~default:"Submitting fresh workflow; reservation pending"
+           }
+         | None ->
+           { key = None; run_id = None; state = Unavailable; message = "Not submitted" })
+    in
+    { status
+    ; selection =
+        Option.first_some
+          (Option.map t.intent ~f:(fun i -> i.selection))
+          (Option.map intent ~f:(fun i -> i.selection))
+    ; requested = Option.map t.intent ~f:(fun i -> i.selection)
+    ; operation_key = None
+    ; preview = None
+    ; launch_preview = None
+    ; message
+    ; launch
+    })
+;;
+
+let fresh_launchable t (intent : Asic.Fresh.Intent.t) =
+  equal_status (model t).status Ready
+  && Option.exists (fresh_intent t) ~f:(Asic.Fresh.Intent.equal intent)
+  && not
+       (Option.exists t.launch_intent ~f:(fun i ->
+          match workflow t with
+          | Some w when String.equal w.key i.key ->
+            workflow_active w || Asic.Fresh.Phase.equal w.phase Interrupted
+          | _ -> true))
 ;;
 
 let launchable t preview =
@@ -502,8 +696,11 @@ let rows m ~detail =
                "Retained/unconfirmed shared preview below; not ready for current intent."
            }
          ])
-       @ [ { role = Muted; text = "Generated provider plan preview (separate from PREPARATION input plan):" }
-         ; { role = Fact; text = "exact plan identity: " ^ p.plan_identity }
+      @ [ { role = Muted
+          ; text =
+              "Generated provider plan preview (separate from PREPARATION input plan):"
+          }
+        ; { role = Fact; text = "exact plan identity: " ^ p.plan_identity }
         ; { role = Muted; text = "shared preview selection:" }
         ]
       @ facts p.selection
@@ -516,6 +713,193 @@ let rows m ~detail =
 ;;
 
 let max_scroll m ~detail = Int.max 0 (List.length (rows m ~detail) - 1)
+
+let%test_unit "local fresh receipt never adopts same-selection replacement and survives \
+               legacy preview completion"
+  =
+  let first = Fs0_fixture.fresh_intent "first" in
+  let state, ticket =
+    begin_fresh (reset empty ~scope:"owner") ~elaboration_only:false first.selection
+  in
+  let state = fresh_receipt state ticket ~floor:2 (Ok first) in
+  let snapshot intent = { Fs0_fixture.snapshot with fresh_intent = Some intent } in
+  let ready = receive state ~revision:2 (snapshot first) in
+  assert (fresh_launchable ready first);
+  List.iter
+    [ { first with id = "same-selection-other-client" }
+    ; { first with scope = "different captured provider/source scope" }
+    ; { first with expected_plan_identity = Some "explicit-assertion" }
+    ]
+    ~f:(fun replacement ->
+      let replaced = receive ready ~revision:3 (snapshot replacement) in
+      assert (equal_status (model replaced).status Stale);
+      assert (Option.equal Asic.Fresh.Intent.equal (fresh_intent replaced) (Some first));
+      assert (not (fresh_launchable replaced first));
+      assert (not (fresh_launchable replaced replacement)));
+  let preview : Asic.Preview.t =
+    { selection = first.selection; plan_identity = "pinned"; plan_json = "{}" }
+  in
+  let plan : Asic.Pending.t =
+    { key = key first.selection
+    ; kind = "plan"
+    ; state = "completed"
+    ; run = None
+    ; error = None
+    ; activity = Unreported
+    }
+  in
+  let replaced =
+    receive
+      ready
+      ~revision:4
+      { (snapshot { first with id = "other" }) with
+        preview = Some preview
+      ; operations = [ plan ]
+      }
+  in
+  assert (Option.is_some replaced.intent);
+  assert (equal_status (model replaced).status Stale);
+  let restaging, newer = begin_fresh replaced ~elaboration_only:false first.selection in
+  let late = fresh_receipt restaging ticket ~floor:5 (Ok first) in
+  assert (equal_status (model late).status Pending);
+  let replacement = { first with id = "own-new-receipt" } in
+  let restored = fresh_receipt late newer ~floor:6 (Ok replacement) in
+  let restored = receive restored ~revision:6 (snapshot replacement) in
+  assert (fresh_launchable restored replacement)
+;;
+
+let%test_unit "rejected or uncertain fresh launch recovers only after exact new staging \
+               barrier and absence of old reservation"
+  =
+  let first = Fs0_fixture.fresh_intent "first" in
+  let replacement = { first with id = "recovery" } in
+  let state, ticket =
+    begin_fresh (reset empty ~scope:"owner") ~elaboration_only:false first.selection
+  in
+  let state = fresh_receipt state ticket ~floor:1 (Ok first) in
+  let snapshot intent workflows =
+    { Fs0_fixture.snapshot with fresh_intent = Some intent; workflows }
+  in
+  let state = receive state ~revision:1 (snapshot first []) in
+  let submitted, launch_ticket =
+    begin_fresh_launch state ~key:"possibly-submitted" first
+  in
+  let rejected =
+    launch_receipt
+      submitted
+      launch_ticket
+      ~floor:2
+      (Error "request rejected or transport unconfirmed")
+  in
+  let observed =
+    receive rejected ~revision:2 (snapshot { first with id = "foreign" } [])
+  in
+  assert (Option.is_some observed.launch_intent);
+  assert (not (fresh_launchable observed replacement));
+  let restaged, ticket = begin_fresh observed ~elaboration_only:false first.selection in
+  let restaged = fresh_receipt restaged ticket ~floor:5 (Ok replacement) in
+  let before_floor = receive restaged ~revision:4 (snapshot replacement []) in
+  assert (Option.is_some before_floor.launch_intent);
+  assert (not (fresh_launchable before_floor replacement));
+  let recovered = receive before_floor ~revision:5 (snapshot replacement []) in
+  assert (Option.is_none recovered.launch_intent);
+  assert (fresh_launchable recovered replacement);
+  let late =
+    launch_receipt recovered launch_ticket ~floor:6 (Error "late old response")
+  in
+  assert (fresh_launchable late replacement);
+  let reserved = Fs0_fixture.workflow "possibly-submitted" first in
+  let still_owned = receive restaged ~revision:5 (snapshot replacement [ reserved ]) in
+  assert (Option.is_some still_owned.launch_intent);
+  assert (not (fresh_launchable still_owned replacement));
+  let missing_receipt, ticket =
+    begin_fresh rejected ~elaboration_only:false first.selection
+  in
+  let missing_receipt = receipt missing_receipt ticket ~floor:5 (Ok ()) in
+  let missing_receipt = receive missing_receipt ~revision:5 (snapshot replacement []) in
+  assert (Option.is_some missing_receipt.launch_intent);
+  assert (not (fresh_launchable missing_receipt replacement));
+  (* The staging barrier cannot prove absence of a legacy Run, whose daemon entry point
+     deliberately has no staged-intent supersession guard. *)
+  let legacy, legacy_ticket =
+    begin_launch state ~key:"legacy-unconfirmed" (fresh_preview first)
+  in
+  let legacy =
+    launch_receipt legacy legacy_ticket ~floor:2 (Error "transport unconfirmed")
+  in
+  let legacy, ticket = begin_fresh legacy ~elaboration_only:false first.selection in
+  let legacy = fresh_receipt legacy ticket ~floor:5 (Ok replacement) in
+  let legacy = receive legacy ~revision:5 (snapshot replacement []) in
+  assert (Option.is_some legacy.launch_intent);
+  assert (not (fresh_launchable legacy replacement))
+;;
+
+let%test_unit "fresh staging ignores pinned preview, fences receipts and follows exact \
+               workflow before allocation"
+  =
+  let intent = Fs0_fixture.fresh_intent "input" in
+  let pinned : Asic.Preview.t =
+    { selection = intent.selection
+    ; plan_identity = "old-pinned-executable"
+    ; plan_json = "{}"
+    }
+  in
+  let base = { Fs0_fixture.snapshot with preview = Some pinned } in
+  let owner = reset empty ~scope:"daemon/project" in
+  let pending, ticket = begin_fresh owner ~elaboration_only:false intent.selection in
+  let observed = { base with fresh_intent = Some intent } in
+  let pending = receive pending ~revision:3 observed in
+  assert (equal_status (model pending).status Pending);
+  let pending = fresh_receipt pending ticket ~floor:5 (Ok intent) in
+  let pending = receive pending ~revision:4 observed in
+  assert (not (fresh_launchable pending intent));
+  let ready = receive pending ~revision:5 observed in
+  assert (fresh_launchable ready intent);
+  assert (Option.is_none (model ready).preview);
+  let submitting, launch_ticket = begin_fresh_launch ready ~key:"fresh" intent in
+  assert (not (fresh_launchable submitting intent));
+  let unknown = launch_receipt submitting launch_ticket ~floor:6 (Error "timeout") in
+  assert (not (fresh_launchable unknown intent));
+  let w = Fs0_fixture.workflow "fresh" intent in
+  let accepted = receive unknown ~revision:6 { observed with workflows = [ w ] } in
+  assert (equal_launch_status (model accepted).launch.state Submitting);
+  assert (Option.is_none (model accepted).launch.run_id);
+  assert (String.is_substring (model accepted).launch.message ~substring:"building");
+  let allocated =
+    { w with
+      phase = Physical
+    ; run = Some Fs0_fixture.run_a
+    ; elaboration_status = "completed"
+    }
+  in
+  let accepted =
+    receive accepted ~revision:7 { observed with workflows = [ allocated ] }
+  in
+  assert (
+    Option.equal String.equal (model accepted).launch.run_id (Some Fs0_fixture.run_a.id));
+  let next = { intent with id = "next-input" } in
+  let pending, ticket = begin_fresh accepted ~elaboration_only:false intent.selection in
+  let pending = fresh_receipt pending ticket ~floor:8 (Ok next) in
+  let ready =
+    receive
+      pending
+      ~revision:8
+      { observed with fresh_intent = Some next; workflows = [ allocated ] }
+  in
+  assert (not (fresh_launchable ready next));
+  let completed = { allocated with phase = Completed } in
+  let ready =
+    receive
+      ready
+      ~revision:9
+      { observed with fresh_intent = Some next; workflows = [ completed ] }
+  in
+  assert (fresh_launchable ready next);
+  assert (not (fresh_launchable ready intent));
+  let reset = reset ready ~scope:"replacement/project" in
+  assert (Option.is_none (fresh_intent reset));
+  assert (Option.is_none (workflow reset))
+;;
 
 let%test_unit "launch lifecycle uses exact durable reservations, local receipt fences, \
                and independent plan reuse"

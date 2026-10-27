@@ -185,6 +185,8 @@ let%test_unit "inspection wire codecs preserve unknown values and provenance" =
     ; inspections = [ index ]
     ; inspection_details = [ detail ]
     ; cache_error = None
+    ; fresh_intent = None
+    ; workflows = []
     }
   in
   round_trip

@@ -35,6 +35,7 @@
 (test
  (name test_preparation)
  (modules test_preparation)
+ (deps fresh_provider.py)
  (libraries
   async
   core
