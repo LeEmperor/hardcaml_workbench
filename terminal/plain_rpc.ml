@@ -16,6 +16,7 @@ let keys (operation : Asic.Operation.t) (snapshot : Asic.Snapshot.t) =
   match operation with
   | Get -> List.filter snapshot.operations ~f:active |> List.map ~f:(fun op -> op.key)
   | Discover -> [ "discover" ]
+  | Resources operation -> [ Asic_resources.Operation.key operation ]
   | Describe flow -> [ "describe:" ^ flow ]
   | Plan selection ->
     [ "plan:" ^ digest (Sexp.to_string_mach (Asic.Selection.sexp_of_t selection)) ]
@@ -370,6 +371,7 @@ let%test_unit "Observe waits for its read, independently of a long execution" =
     ; launches = []
     ; fresh_intent = None
     ; workflows = []
+    ; resources = None
     ; flows = []
     ; catalog_default = None
     ; description_json = None
@@ -466,6 +468,7 @@ let%test_unit "Observe does not await the lifetime of a coalesced automatic obse
     ; launches = []
     ; fresh_intent = None
     ; workflows = []
+    ; resources = None
     ; summaries = []
     ; cache_error = None
     ; finalizations = []
@@ -506,6 +509,7 @@ let%test_unit "a targeted operation failure fails without treating historical fa
     ; launches = []
     ; fresh_intent = None
     ; workflows = []
+    ; resources = None
     ; summaries = []
     ; cache_error = None
     ; finalizations = []

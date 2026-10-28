@@ -1,0 +1,6 @@
+(test
+ (name test_resources)
+ (deps provider.py)
+ (libraries async core core_unix yojson hardcaml_workbench_backend
+  hardcaml_workbench_adapters hardcaml_workbench_protocol hardcaml_workbench_project_integration)
+ (preprocess (pps ppx_jane)))

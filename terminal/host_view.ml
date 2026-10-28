@@ -1905,6 +1905,22 @@ let rows host data tile ~width ~height =
            Hierarchy_view.rows ~icons:host.appearance.icons view ~height)
        | "planned-run" ->
          planned_rows host tile ~width |> List.map ~f:(fun row -> row.Planned_run.text)
+       | "resources" | "resource-summary" ->
+         let view =
+           Resources_view.reconcile
+             local.resources
+             ~run:scope
+             ~filter:local.filter
+             data.asic
+         in
+         (if String.equal tile.kind "resource-summary"
+          then
+            Resources_view.summary view
+            |> List.concat_map ~f:(E.wrap ~width)
+            |> Fn.flip List.take height
+          else
+            Resources_view.rows view ~filter:local.filter ~asic:data.asic ~width ~height)
+         |> List.map ~f:E.text
        | "run-selector" -> run_rows ()
        | kind when P.Waveforms.is_pane kind ->
          (match H.waveform_pin host tile.workspace with
@@ -2002,6 +2018,7 @@ let rows host data tile ~width ~height =
   if Option.is_some local.artifacts
      || Option.is_some local.inspection
      || String.equal tile.kind "synthesis"
+     || Resources_view.is_kind tile.kind
      || Terminal_result_view.supports tile.kind
      || Option.is_some (Timing_workspace.pane tile.kind)
      || (String.equal tile.kind "logs" && local.follow)
@@ -2247,9 +2264,11 @@ let tile_view
     Option.value_map host.H.focus ~default:false ~f:(W.Tile_id.equal tile.id)
   in
   let binding =
-    if Testing_workspace.is_pane tile.kind
-       || P.Waveforms.is_pane tile.kind
-       || String.equal tile.kind "hierarchy"
+    if Resources_view.is_kind tile.kind && Option.is_some local.resources.explicit
+    then "explicit resource source"
+    else if Testing_workspace.is_pane tile.kind
+            || P.Waveforms.is_pane tile.kind
+            || String.equal tile.kind "hierarchy"
     then "project"
     else (
       match tile.binding with
@@ -2750,7 +2769,30 @@ let tile_view
            (List.drop rows local.scroll))
   in
   let body =
-    if String.equal tile.kind "planned-run"
+    if Resources_view.is_kind tile.kind
+    then (
+      let view =
+        Resources_view.reconcile
+          local.resources
+          ~run:(tile_run host tile)
+          ~filter:local.filter
+          data.asic
+      in
+      let rows =
+        if String.equal tile.kind "resource-summary"
+        then
+          Resources_view.summary view
+          |> E.page ~width:body_width ~height:body_height ~offset:0
+        else
+          Resources_view.rows
+            view
+            ~filter:local.filter
+            ~asic:data.asic
+            ~width:body_width
+            ~height:body_height
+      in
+      E.render ~attrs:(evidence_attrs appearance) rows)
+    else if String.equal tile.kind "planned-run"
     then
       planned_view_rows ?indicator_frames host tile ~width:body_width
       |> Fn.flip List.drop local.scroll
@@ -3425,6 +3467,9 @@ let render_palette host dimensions background =
         "PLAN ENDPOINT - exact provider endpoint; Enter previews; Esc closes"
       | Some (H.Preparation_inputs _) ->
         "PREPARATION INPUTS — endpoint and overrides; Enter selects; no launch"
+      | Some (H.Resource_path bundle) ->
+        (if bundle then "IMPORT EMITTED BUNDLE" else "IMPORT RETAINED RESOURCE EVIDENCE")
+        ^ " — exact absolute directory; Enter reads; no run allocation"
       | Some (H.Finalization_attempt run) ->
         "INSPECT FINALIZATION for "
         ^ run_label run
@@ -8308,6 +8353,7 @@ let%test_unit "stock Fit navigation completes rendered subtrees without reassign
           [ "workspace-tabs"
           ; "live-status"
           ; "run-selector"
+          ; "resource-summary"
           ; "stage-checklist"
           ; "planned-run"
           ; "preparation"

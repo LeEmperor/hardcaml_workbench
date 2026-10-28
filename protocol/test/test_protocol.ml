@@ -732,6 +732,7 @@ let%expect_test "ASIC metrics round-trip and old summary sexps have no metrics" 
     ; cache_error = None
     ; fresh_intent = None
     ; workflows = []
+    ; resources = None
     }
   in
   require_portable_round_trip

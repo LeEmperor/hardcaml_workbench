@@ -475,6 +475,7 @@ let%test_unit "artifact inspector pins run/attempt/hash and pages with exact off
     ; launches = []
     ; fresh_intent = None
     ; workflows = []
+    ; resources = None
     ; summaries = []
     ; finalizations = []
     ; artifacts = [ artifact ]
@@ -742,6 +743,7 @@ let%test_unit "wrapped viewport persists its bottom clamp and reclamps on resize
     ; launches = []
     ; fresh_intent = None
     ; workflows = []
+    ; resources = None
     ; summaries = []
     ; finalizations = []
     ; artifacts = List.init 40 ~f:(fun i -> { artifact with id = Int.to_string i })

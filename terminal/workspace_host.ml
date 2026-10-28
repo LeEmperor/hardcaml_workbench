@@ -18,6 +18,7 @@ type local =
   ; metrics_scope : (Run_ref.t * string) option
   ; utility_detail : bool
   ; synthesis : Synthesis_view.State.t
+  ; resources : Resources_view.t
   ; terminal_result : Terminal_result_view.State.t
   ; artifacts : Artifact_view.t option
   ; artifact_generation : int
@@ -60,6 +61,11 @@ type action =
   | Load_hierarchy of W.Tile_id.t
   | Hierarchy_detail of W.Tile_id.t
   | Discover_asic
+  | Open_resources
+  | Resource_target of Asic_resources.Target.t option
+  | Resource_import of bool
+  | Resource_import_path of bool * string
+  | Resource_input of Resources_view.input
   | Prepare_project
   | Quick_prepare_project
   | Launch_preparation of string
@@ -147,6 +153,7 @@ type argument =
   | Plan_endpoint of string * string
   | Preparation_inputs of string * string
   | Finalization_attempt of Run_ref.t
+  | Resource_path of bool
   | Acceptance of Run_ref.t * string * string
   | Simulation_selection of W.Tile_id.t * string * string * Simulation_view.Form.t
 
@@ -249,6 +256,7 @@ let default_local =
   ; metrics_scope = None
   ; utility_detail = false
   ; synthesis = Synthesis_view.State.empty
+  ; resources = Resources_view.empty
   ; terminal_result = Terminal_result_view.State.empty
   ; artifacts = None
   ; artifact_generation = 0
@@ -1037,6 +1045,22 @@ let receive t (s : W.Snapshot.t) =
               && String.equal old.kind tile.kind)))
       | _ -> []
     in
+    let locals =
+      List.map locals ~f:(fun (id, local) ->
+        let scope snapshot =
+          Result.ok (W.resolve_tile snapshot (W.Tile_id.of_string id))
+          |> Option.map ~f:(fun r -> r.context, r.selection_revision, r.run)
+        in
+        if Option.is_none local.resources.explicit
+           && Option.exists t.registry ~f:(fun previous ->
+             not
+               ([%equal: (W.Context_id.t option * int option * Run_ref.t option) option]
+                  (scope previous)
+                  (scope s)))
+        then
+          id, { local with resources = Resources_view.select_target local.resources None }
+        else id, local)
+    in
     let notice =
       match t.palette with
       | Some { argument = Some (Simulation_selection _); _ } -> t.notice
@@ -1186,6 +1210,7 @@ let reconnect t ~replacement =
           ( id
           , { local with
               artifact_generation = local.artifact_generation + 1
+            ; resources = Resources_view.reconnect local.resources
             ; artifacts =
                 Option.map local.artifacts ~f:(fun view ->
                   { view with
@@ -2395,7 +2420,9 @@ let evidence_runs t =
   | Some registry ->
     tiles t
     |> List.filter ~f:(fun tile ->
-      (not (project_scoped_kind tile.kind)) && not (String.equal tile.kind "run-selector"))
+      (not (project_scoped_kind tile.kind))
+      && (not (Resources_view.is_kind tile.kind))
+      && not (String.equal tile.kind "run-selector"))
     |> List.filter_map ~f:(fun tile ->
       W.resolve_tile registry tile.id
       |> Result.ok
@@ -3402,6 +3429,21 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
         "read output"
         Inspect_artifact
     ; command "hierarchy.inspect" "Inspect hardware hierarchy" "tree" Inspect_hierarchy
+    ; command
+        "resources.open"
+        "Inspect resources (open Resources workspace)"
+        "resource inventory table memory macro"
+        Open_resources
+    ; command
+        "resources.import-coarse"
+        "Resources: Import retained resource evidence"
+        "exact coarse source absolute path no run allocation"
+        (Resource_import false)
+    ; command
+        "resources.import-bundle"
+        "Resources: Import emitted bundle"
+        "exact bundle inventory pre-run absolute path"
+        (Resource_import true)
     ; command "host.chrome" "Toggle host chrome" "header footer" Toggle_chrome
     ; command
         "host.hints.main"
@@ -3579,6 +3621,8 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
         ; "logs"
         ; "timing"
         ; "synthesis"
+        ; "resources"
+        ; "resource-summary"
         ; "asic"
         ; "project"
         ; "navigation"
@@ -3669,6 +3713,81 @@ let catalog t ~(project : Project.t option) ~(jobs : Job.t list) =
         ; command "logs.follow" "Resume log follow" "tail" Resume_log
         ]
       @ presentation_commands t tile
+      @ (if not (String.equal tile.kind "resources")
+         then []
+         else
+           [ command
+               "resources.follow"
+               "Resources: Follow tile run binding"
+               "selected execution pin Main"
+               (Resource_target None)
+           ; command
+               "resources.refresh"
+               "Resources: Refresh exact evidence (r)"
+               "read only no EDA"
+               (Resource_input Refresh)
+           ; command
+               "resources.table"
+               "Resources: Resource table"
+               "inventory summary"
+               (Resource_input Show_table)
+           ; command
+               "resources.detail"
+               "Resources: Open selected resource (Enter)"
+               "contract policy selection reason actual role stages"
+               (Resource_input Open)
+           ; command
+               "resources.sources"
+               "Resources: Authorized sources (a)"
+               "artifacts catalog paged text"
+               (Resource_input Show_sources)
+           ; command
+               "resources.context"
+               "Resources: Full source provenance (d)"
+               "scope digest identity"
+               (Resource_input Show_context)
+           ; command
+               "resources.next-page"
+               "Resources: Next page (n)"
+               "detail sources bytes"
+               (Resource_input Next_page)
+           ; command
+               "resources.previous-page"
+               "Resources: Previous page (p)"
+               "detail sources bytes"
+               (Resource_input Previous_page)
+           ; command
+               "resources.compare-left"
+               "Resources: Capture comparison A"
+               "explicit baseline source digest"
+               (Resource_input Capture_left)
+           ; command
+               "resources.compare-right"
+               "Resources: Capture comparison B"
+               "explicit candidate source digest"
+               (Resource_input Capture_right)
+           ; command
+               "resources.compare"
+               "Resources: Compare captured A / B (c)"
+               "compatible measurements deltas"
+               (Resource_input Show_compare)
+           ; command
+               "resources.swap"
+               "Resources: Swap comparison A / B"
+               "reverse delta"
+               (Resource_input Swap_compare)
+           ; command
+               "resources.back"
+               "Resources: Back to table (Esc)"
+               "close detail"
+               (Resource_input Back)
+           ]
+           @ List.map Resources_view.sections ~f:(fun section ->
+             command
+               ("resources.section." ^ section)
+               ("Resources: Inspect " ^ section)
+               "geometry area ratios sampled timing electrical contract provenance"
+               (Resource_input (Section section))))
       @ (if not (String.equal tile.kind "synthesis")
          then []
          else
@@ -4209,7 +4328,9 @@ let decode_event (event : Bonsai_term.Event.t) : input option =
 let finalization_form t =
   Option.exists t.palette ~f:(fun p ->
     match p.argument with
-    | Some (Finalization_attempt _ | Acceptance _ | Simulation_selection _) -> true
+    | Some
+        (Finalization_attempt _ | Resource_path _ | Acceptance _ | Simulation_selection _)
+      -> true
     | _ -> false)
 ;;
 
@@ -4590,8 +4711,11 @@ let input t event ~commands : t * effect =
         | Escape -> { t with palette = None; prefix = 0 }, No_effect
         | Character _
           when match p.argument with
-               | Some (Finalization_attempt _ | Acceptance _ | Simulation_selection _) ->
-                 String.length p.query >= 4096
+               | Some
+                   ( Finalization_attempt _
+                   | Resource_path _
+                   | Acceptance _
+                   | Simulation_selection _ ) -> String.length p.query >= 4096
                | None | Some (Plan_endpoint _ | Preparation_inputs _) -> false ->
           { t with notice = "Finalization reference is limited to 4096 bytes" }, No_effect
         | Character ch ->
@@ -4633,8 +4757,12 @@ let input t event ~commands : t * effect =
               }
             , No_effect )
           else if match p.argument with
-                  | Some (Finalization_attempt _ | Acceptance _ | Simulation_selection _)
-                    -> String.length p.query > reference_limit t
+                  | Some
+                      ( Finalization_attempt _
+                      | Resource_path _
+                      | Acceptance _
+                      | Simulation_selection _ ) ->
+                    String.length p.query > reference_limit t
                   | None | Some (Plan_endpoint _ | Preparation_inputs _) -> false
           then
             ( { t with notice = "Finalization reference is limited to 4096 bytes" }
@@ -4643,6 +4771,7 @@ let input t event ~commands : t * effect =
             let operation =
               Or_error.try_with (fun () ->
                 match Option.value_exn p.argument with
+                | Resource_path bundle -> Resource_import_path (bundle, p.query)
                 | Finalization_attempt run ->
                   Asic (Asic.Operation.Inspect_finalization { run; attempt = p.query })
                 | Acceptance (run, execution_file, key) ->
@@ -4697,6 +4826,53 @@ let input t event ~commands : t * effect =
           in
           { t with prefix = 0 }, No_effect
         | Character ' ', _ -> { t with prefix = 1 }, No_effect
+        | Enter, 0
+          when Option.exists (focused t) ~f:(fun tile ->
+                 String.equal tile.kind "resource-summary") ->
+          (match capture t with
+           | None -> t, No_effect
+           | Some capture -> t, Execute (capture, Open_resources))
+        | ( ( Enter | Escape
+            | Character
+                ( 'j'
+                | 'k'
+                | 'r'
+                | 'a'
+                | 'd'
+                | 'n'
+                | 'p'
+                | 'c'
+                | 't'
+                | 'g'
+                | 'e'
+                | '['
+                | ']' )
+            | Next | Previous )
+          , 0 )
+          when Option.exists (focused t) ~f:(fun tile ->
+                 String.equal tile.kind "resources") ->
+          let action =
+            Resource_input
+              (match event with
+               | Enter -> Open
+               | Escape -> Back
+               | Character 'r' -> Refresh
+               | Character 'a' -> Show_sources
+               | Character 'd' -> Show_context
+               | Character 'n' -> Next_page
+               | Character 'p' -> Previous_page
+               | Character 'c' -> Show_compare
+               | Character 't' -> Section "timing"
+               | Character 'g' -> Section "geometry"
+               | Character 'e' -> Section "electrical"
+               | Character 'k' | Previous -> Move (-1)
+               | Character '[' -> Scroll (-8)
+               | Character ']' -> Scroll 8
+               | _ -> Move 1)
+          in
+          (match capture t with
+           | None -> t, No_effect
+           | Some capture -> t, Execute (capture, action))
         | (Character ('j' | 'k' | 'r' | 'i') | Next | Previous | Enter), 0
           when Option.exists (focused t) ~f:(fun tile ->
                  String.equal tile.kind "hierarchy") ->
@@ -5340,6 +5516,7 @@ let%test_unit "persisted Runs-last Overview traverses the complete tree and wrap
     [ "workspace-tabs"
     ; "live-status"
     ; "run-selector"
+    ; "resource-summary"
     ; "stage-checklist"
     ; "planned-run"
     ; "preparation"
@@ -6114,6 +6291,7 @@ let%test_unit "actual catalog and palette can cancel an allocated owned launch b
     ; launches = []
     ; fresh_intent = None
     ; workflows = []
+    ; resources = None
     ; flows = []
     ; catalog_default = None
     ; description_json = None

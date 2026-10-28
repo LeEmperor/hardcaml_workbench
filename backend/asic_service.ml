@@ -159,6 +159,8 @@ type project =
   ; mutable artifact_byte_pages : Asic_artifact.Byte_page.t list
   ; mutable inspections : Inspection_wire.Index.t list
   ; mutable inspection_details : Inspection_wire.Detail.t list
+  ; resources : Asic_resources_service.t
+  ; resource_refreshes : bool ref String.Table.t
   ; detail_cache : Inspection_detail_cache.t
   ; inspection_refreshes : bool ref String.Table.t
   ; hot : Asic.Summary.t String.Table.t
@@ -375,6 +377,8 @@ let load_project t ~root ~environment =
     ; artifact_byte_pages = []
     ; inspections = []
     ; inspection_details = []
+    ; resources = Asic_resources_service.create ~state_dir:t.state_dir ~identity
+    ; resource_refreshes = String.Table.create ()
     ; detail_cache =
         Inspection_detail_cache.create
           ~entries:t.inspection_detail_cache_entries
@@ -630,6 +634,7 @@ let replace_run (p : project) (r : Asic.Run.t) =
             && old.cursor = r.cursor
             && Option.equal String.equal old.execution_file r.execution_file)
       then (
+        Asic_resources_service.invalidate_run p.resources r.run;
         Inspection_detail_cache.retain p.detail_cache ~f:(fun ~identity:_ detail ->
           not (Run_ref.equal detail.run r.run));
         p.inspection_details
@@ -1177,9 +1182,10 @@ let snapshot p : Asic.Snapshot.t =
   ; artifact_byte_pages = p.artifact_byte_pages
   ; inspections = p.inspections
   ; inspection_details = p.inspection_details
-  ; cache_error = p.cache_error
+  ; cache_error = Option.first_some p.cache_error (Asic_resources_service.cache_error p.resources)
   ; fresh_intent = p.fresh_intent
   ; workflows = p.workflows
+  ; resources = Some (Asic_resources_service.snapshot p.resources)
   }
 ;;
 
@@ -2219,6 +2225,83 @@ let await_workflow_reservation p key =
      | Error exn -> raise exn)
 ;;
 
+let resource_target p (target : Asic_resources.Target.t) =
+  let absolute path =
+    Public.require (String.length path <= 4096 && not (String.contains path '\000')) "Resource path budget";
+    Public.absolute path in
+  match target with
+  | Coarse_run path -> "coarse_run", absolute path, Sexp.to_string_mach (Asic_resources.Target.sexp_of_t target)
+  | Bundle path -> "bundle", absolute path, Sexp.to_string_mach (Asic_resources.Target.sexp_of_t target)
+  | Workflow_bundle id ->
+    let w = List.find_exn p.workflows ~f:(fun w -> String.equal w.Asic.Fresh.Workflow.id id) in
+    let b = Option.value_exn w.prepared ~message:"Workflow has no verified emitted bundle" in
+    "bundle", b.bundle_directory, Sexp.to_string_mach (Asic.Fresh.Prepared.sexp_of_t b)
+  | Run run ->
+    let r = find_run p run in
+    "execution", Option.value_exn r.execution_file ~message:"Run has no registered execution; Observe first",
+    Sexp.to_string_mach (Asic.Run.sexp_of_t r)
+  | Finalization { run; attempt } ->
+    let r = find_run p run in
+    let adopted = List.exists p.terminal_attempts ~f:(fun (id,path) -> String.equal id run.id && String.equal path attempt)
+      || List.exists p.finalizations ~f:(fun f -> Run_ref.equal f.value.run run && Option.equal String.equal f.value.attempt (Some attempt)) in
+    Public.require adopted "Resource finalization must be explicitly adopted for this run";
+    "finalization", absolute attempt, Sexp.to_string_mach (Asic.Run.sexp_of_t r)
+;;
+
+let resource_provider_identity p =
+  let executable = Filename_unix.realpath (config p).provider_executable in
+  let companion = Filename.concat (Filename.dirname executable)
+    (if String.equal (Filename.basename executable) "flow_cli.exe"
+     then "experimental_resource_inspect.exe" else "hardcaml-asic-experimental-resource-inspect") in
+  let hash path =
+    let fd = Core_unix.openfile path ~mode:[O_RDONLY;O_NONBLOCK;O_CLOEXEC] in
+    Exn.protect ~finally:(fun () -> Core_unix.close fd) ~f:(fun () ->
+      let before = Core_unix.fstat fd in
+      Public.require (Poly.equal before.st_kind S_REG && Int64.(before.st_size <= of_int 134217728)) "Resource provider binary budget/type";
+      let h = Cryptokit.Hash.sha256 () and buf = Bytes.create 65536 in
+      let total = ref 0 in
+      let rec loop () =
+        let n = Core_unix.read fd ~buf ~pos:0 ~len:(Bytes.length buf) in
+        if n > 0 then (
+          total := !total+n;
+          Public.require (!total <= 128*1024*1024) "Provider binary grew beyond budget";
+          h#add_substring buf 0 n;
+          loop ()) in
+      loop ();
+      let after=Core_unix.fstat fd in
+      Public.require (Int.equal before.st_ino after.st_ino && Int64.equal before.st_size after.st_size
+        && Poly.equal before.st_mtime after.st_mtime && Poly.equal before.st_ctime after.st_ctime)
+        "Provider binary changed while hashing";
+      Cryptokit.transform_string (Cryptokit.Hexa.encode ()) h#result) in
+  Public.digest (executable ^ "\000" ^ hash executable ^ "\000" ^ Filename_unix.realpath companion ^ "\000" ^ hash companion)
+;;
+
+let check_resource_lineage p target response =
+  let provenance = Public.field "provenance" response in
+  let linked_bundle run build =
+    List.iter p.workflows ~f:(fun w ->
+      if Option.equal Run_ref.equal w.Asic.Fresh.Workflow.run (Some run) then
+        Option.iter w.prepared ~f:(fun b ->
+          Public.require (Poly.equal build (`String b.bundle_identity)) "Resource execution/workflow bundle mismatch")) in
+  match (target : Asic_resources.Target.t) with
+  | Workflow_bundle id ->
+    let w = List.find_exn p.workflows ~f:(fun w -> String.equal w.Asic.Fresh.Workflow.id id) in
+    let b = Option.value_exn w.prepared in
+    Public.require (Poly.equal (Public.field "build_identity" provenance) (`String b.bundle_identity)) "Resource bundle/workflow identity mismatch"
+  | Run run ->
+    let r=find_run p run in
+    Public.require (Poly.equal (Public.field "attempt_id" provenance) (`String r.reference.stream_id)) "Resource named execution/run mismatch";
+    linked_bundle run (Public.field "build_identity" provenance)
+  | Finalization {run;_} ->
+    let r=find_run p run in
+    let execution=Public.field "execution" (Public.field "finalization" provenance) in
+    Public.require (Poly.equal (Public.field "attempt_id" execution) (`String r.reference.stream_id)
+      && Poly.equal (Public.field "path" execution) (Option.value_map r.execution_file ~default:`Null ~f:(fun s -> `String s)))
+      "Resource finalization/selected execution mismatch";
+    linked_bundle run (Public.field "build_identity" (Public.field "resource_provenance" provenance))
+  | Coarse_run _ | Bundle _ -> ()
+;;
+
 let rec handle_operation ?prepared_input t p operation =
   let analysis, operation =
     match operation with
@@ -2243,6 +2326,97 @@ let rec handle_operation ?prepared_input t p operation =
   in
   match operation with
   | Asic.Operation.Get -> Deferred.unit
+  | Resources operation ->
+    let key = Asic_resources.Operation.key operation in
+    (match operation with
+     | Asic_resources.Operation.Load { target; refresh } ->
+       (match Hashtbl.find p.resource_refreshes key with
+        | Some requested -> if refresh then requested := true
+        | None ->
+          let requested = ref refresh in
+          Hashtbl.set p.resource_refreshes ~key ~data:requested;
+          let start () =
+          schedule t p ~key ~kind:"resources" ~execution:false (fun task ->
+            Monitor.protect ~finally:(fun () -> Hashtbl.remove p.resource_refreshes key; Deferred.unit)
+              (fun () ->
+                task.pending <- {task.pending with activity=Evidence_cache_lookup};
+                serialized p "resources-publication" (fun () ->
+                  if not !requested && Asic_resources_service.cached p.resources target then Deferred.unit
+                  else (
+                    task.pending <- {task.pending with activity=Evidence_read};
+                    let%bind result = Monitor.try_with (fun () ->
+                      let kind,path,binding = resource_target p target in
+                      let%bind () = In_thread.run (fun () ->
+                        match target with
+                        | Asic_resources.Target.Workflow_bundle id ->
+                          let w=List.find_exn p.workflows ~f:(fun w -> String.equal w.Asic.Fresh.Workflow.id id) in
+                          let b=Option.value_exn w.prepared in
+                          let raw=Asic_evidence_file.read_bounded b.methodology_plan_path (16*1024*1024) in
+                          Public.require (String.equal (Public.digest raw) b.methodology_plan_digest) "Workflow resource plan bytes changed";
+                          let plan=Public.decode raw in
+                          Public.require (Poly.equal (Public.field "bundle_identity" plan) (`String b.bundle_identity)
+                            && Poly.equal (Public.field "plan_identity" plan) (`String b.plan_identity))
+                            "Workflow resource plan/bundle identity mismatch"
+                        | _ -> ()) in
+                      let%bind path = In_thread.run (fun () -> Filename_unix.realpath path) in
+                      let%bind () = In_thread.run (fun () ->
+                        let source_root = if String.equal kind "execution" then Filename.dirname path else path in
+                        let cache = Filename_unix.realpath t.state_dir in
+                        Public.require (not (String.equal source_root "/" || String.equal cache source_root
+                          || String.is_prefix cache ~prefix:(source_root ^ "/")))
+                          "Resource cache must be outside the selected evidence root") in
+                      let%bind metadata = query t p (Ivar.read task.cancel) (invoke p Adapter.metadata) in
+                      Public.metadata metadata;
+                      Public.require (Poly.equal (Public.field "resource_inspection1" (Public.field "capabilities" (Public.field "cli_contract" metadata))) (`Bool true)) "Provider lacks resource_inspection1";
+                      let%bind provider_identity = In_thread.run (fun () -> resource_provider_identity p) in
+                      let check () =
+                        Public.require (not (Ivar.is_full task.cancel)) "Resource read cancelled";
+                        let current_kind,_,current_binding = resource_target p target in
+                        Public.require (String.equal current_kind kind && String.equal current_binding binding) "Resource target changed during read" in
+                      let query args =
+                        let%bind output = Throttle.enqueue t.queries (fun () ->
+                           Asic_process.run_with_status ~accept_evidence_failure:true ~max_stdout_bytes:(2*1024*1024) ~max_record_bytes:(2*1024*1024) ~seconds:30. ~cancel:(Ivar.read task.cancel)
+                            ~on_process:ignore ~on_line:(fun _ -> Deferred.unit)
+                            (invoke p (fun c ~root ~environment -> Adapter.resources c ~root ~environment ~kind ~target:path args))) in
+                        check ();
+                        let%map after = In_thread.run (fun () -> resource_provider_identity p) in
+                        Public.require (String.equal after provider_identity) "Resource provider changed during read";
+                         Public.require (String.length output.stdout <= 2*1024*1024) "Resource provider index budget";
+                         let response=Asic_resources_service.parse_process_result output in
+                        check_resource_lineage p target response;
+                        response in
+                      Asic_resources_service.load p.resources ~target ~kind ~path ~provider_identity ~check ~query)
+                    in
+                    match result with
+                    | Ok () -> Deferred.unit
+                    | Error exn -> Asic_resources_service.fail p.resources target (Exn.to_string exn); raise exn)))) in
+          (try start () with exn -> Hashtbl.remove p.resource_refreshes key; raise exn))
+     | _ ->
+       schedule t p ~key ~kind:"resources" ~execution:false (fun task ->
+         task.pending <- {task.pending with activity=Evidence_read};
+         serialized p "resources-publication" (fun () ->
+           let id = match operation with
+             | Detail {source_id;_} | Artifacts {source_id;_} | Read_artifact {source_id;_} -> source_id
+             | Load _ -> assert false in
+           let s = Asic_resources_service.source p.resources id in
+           let _,_,binding = resource_target p s.target in
+           let%bind provider_identity = In_thread.run (fun () -> resource_provider_identity p) in
+           Public.require (String.equal provider_identity s.provider_identity) "Resource provider generation changed; refresh index";
+           let check () =
+             Public.require (not (Ivar.is_full task.cancel)) "Resource read cancelled";
+             let _,_,current = resource_target p s.target in
+             Public.require (String.equal binding current) "Resource target changed during page read" in
+           let query args =
+             let%bind output = Throttle.enqueue t.queries (fun () ->
+               Asic_process.run_with_status ~accept_evidence_failure:true ~max_stdout_bytes:65536 ~max_record_bytes:65536 ~seconds:30. ~cancel:(Ivar.read task.cancel)
+                 ~on_process:ignore ~on_line:(fun _ -> Deferred.unit)
+                 (invoke p (fun c ~root ~environment -> Adapter.resources c ~root ~environment ~kind:s.kind ~target:s.path args))) in
+             let%map after = In_thread.run (fun () -> resource_provider_identity p) in
+             Public.require (String.equal after provider_identity) "Resource provider changed during page read";
+              Public.require (String.length output.stdout <= 65536) "Resource provider page budget";
+              Asic_resources_service.parse_process_result output in
+           Asic_resources_service.page p.resources operation ~check ~query)));
+    Deferred.unit
   | Inspect_analysis _ | Inspect_analysis_detail _ -> assert false
   | Inspect { run; domain; stage; refresh } ->
     ignore (find_run p run : Asic.Run.t);

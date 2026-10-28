@@ -4,6 +4,127 @@ open Hardcaml_workbench_workspaces
 
 let kinds d = List.map d.Definition.tiles ~f:(fun t -> t.Common.kind)
 
+let%test_unit "version1 custom resources key survives serialized upgrade and builtin \
+               creation without rewriting layout"
+  =
+  let module W = Workspace in
+  let template : Workspace_template.t =
+    { version = 1
+    ; name = "My retained resources"
+    ; preset = None
+    ; views =
+        [ { kind = "synthesis"
+          ; hidden = false
+          ; geometry = { x = 3; y = 4; width = 57; height = 19 }
+          }
+        ]
+    }
+  in
+  let definition =
+    Workspace_config.definition_of_template ~key:"resources" template |> Or_error.ok_exn
+  in
+  let config : Workspace_config.t =
+    { version = 1
+    ; id = "legacy-custom-resources"
+    ; definitions = [ definition ]
+    ; windows =
+        [ { key = "main"
+          ; name = "Main"
+          ; workspaces =
+              [ { key = "mine"
+                ; name = "Personal resources"
+                ; definition = Custom "resources"
+                }
+              ]
+          }
+        ]
+    }
+  in
+  let text = Workspace_config.encode config |> Or_error.ok_exn in
+  assert (Workspace_config.equal config (Presets.decode text |> Or_error.ok_exn));
+  let resolved = Presets.resolve config |> Or_error.ok_exn in
+  let snapshot =
+    W.apply
+      (W.initial ~session_id:(W.Session_id.of_string "legacy-custom-resources"))
+      (Initialize_config resolved)
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let tile = List.hd_exn snapshot.tiles in
+  let mutate snapshot mutation =
+    W.apply
+      snapshot
+      (Mutate { expected_revision = snapshot.W.Snapshot.revision; mutation })
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let snapshot =
+    mutate
+      snapshot
+      (Set_tile_binding
+         { tile = tile.id
+         ; binding =
+             Pin_run
+               { backend = Backend_id.of_string "asic"
+               ; id = "retained-run"
+               ; build = None
+               ; label = None
+               }
+         })
+  in
+  let snapshot =
+    mutate snapshot (Set_zoom { workspace = tile.workspace; tile = Some tile.id })
+  in
+  let bytes = Sexp.to_string_mach (W.Snapshot.sexp_of_t snapshot) in
+  let restored = W.Snapshot.t_of_sexp (Sexp.of_string bytes) in
+  assert (Result.is_ok (W.validate restored));
+  assert (W.Snapshot.equal snapshot restored);
+  assert (String.equal bytes (Sexp.to_string_mach (W.Snapshot.sexp_of_t restored)));
+  let origin = List.hd_exn restored.config_workspaces in
+  assert (Workspace_config.Reference.equal origin.reference (Custom "resources"));
+  assert (Workspace_config.Definition.equal origin.definition definition);
+  let builtin = Presets.builtins "resources" |> Or_error.ok_exn in
+  let created =
+    mutate
+      restored
+      (Instantiate_template
+         { window = (List.hd_exn restored.windows).id; template = builtin.template })
+  in
+  assert (W.Tile.equal (W.tile restored tile.id) (W.tile created tile.id));
+  assert (
+    W.Arrangement.equal
+      (W.workspace restored tile.workspace)
+      (W.workspace created tile.workspace));
+  assert (
+    List.equal
+      W.Config_workspace.equal
+      restored.config_workspaces
+      created.config_workspaces);
+  (* Exported configs containing other builtins must not discard the custom collision. *)
+  let mixed =
+    { resolved with
+      definitions = definition :: [ Presets.builtins "overview" |> Or_error.ok_exn ]
+    ; windows =
+        [ { (List.hd_exn resolved.windows) with
+            workspaces =
+              (List.hd_exn resolved.windows).workspaces
+              @ [ { key = "overview"; name = "Overview"; definition = Builtin "overview" }
+                ]
+          }
+        ]
+    }
+  in
+  let decoded =
+    Workspace_config.Resolved.encode mixed
+    |> Or_error.ok_exn
+    |> Presets.decode
+    |> Or_error.ok_exn
+  in
+  assert (
+    List.exists decoded.definitions ~f:(Workspace_config.Definition.equal definition));
+  assert (Result.is_ok (Presets.resolve decoded))
+;;
+
 let%test_unit "authored and exported stock Overview include visible Preparation defaults" =
   let exported =
     Presets.export_config ()
@@ -104,7 +225,7 @@ let%test_unit "complete stock spec roundtrips and is accepted as startup input" 
     assert (Workspace_template.equal (Definition.template wrapper) stock.template);
     assert (List.length wrapper.tiles = List.length stock.tiles));
   assert (List.length resolved.windows = 1);
-  assert (List.length (List.hd_exn resolved.windows).workspaces = 4);
+  assert (List.length (List.hd_exn resolved.windows).workspaces = 5);
   assert (Result.is_error (Presets.builtins "not-a-builtin"));
   (* An exported stock definition cannot be silently edited under a reserved ID. *)
   let changed =
@@ -118,12 +239,12 @@ let%test_unit "complete stock spec roundtrips and is accepted as startup input" 
   assert (Result.is_error (Presets.decode changed))
 ;;
 
-let%test_unit "stock startup opens four ordered built-in workspaces" =
+let%test_unit "stock startup opens five ordered built-in workspaces" =
   assert (
     List.equal
       String.equal
       (List.map Presets.starters ~f:(fun d -> d.Definition.id))
-      [ "overview"; "testing"; "waveforms"; "timing" ]);
+      [ "overview"; "testing"; "waveforms"; "timing"; "resources" ]);
   let initial = Workspace.initial ~session_id:(Workspace.Session_id.of_string "merged") in
   let initialized =
     Workspace.apply initial (Presets.startup_operation initial |> Option.value_exn)
@@ -134,7 +255,7 @@ let%test_unit "stock startup opens four ordered built-in workspaces" =
     List.equal
       String.equal
       (List.map initialized.workspaces ~f:(fun w -> w.name))
-      [ "Overview"; "Testing"; "Waveforms"; "Timing" ]);
+      [ "Overview"; "Testing"; "Waveforms"; "Timing"; "Resources" ]);
   (* Legacy bootstrap still targets only the two original placeholders. A catalog upgrade
      must not silently add Testing to a saved/edited legacy session. *)
   let legacy = { initial with configuration_pending = false } in
@@ -204,6 +325,7 @@ let%test_unit "stock navigation follows layout subtrees even with shuffled Runs 
       , [ "workspace-tabs"
         ; "live-status"
         ; "run-selector"
+        ; "resource-summary"
         ; "stage-checklist"
         ; "planned-run"
         ; "preparation"
@@ -853,7 +975,7 @@ let%test_unit "actual terminal content bounds at80x24,120x40,large" =
       match Layout.compute d ~width ~height ~kinds:(kinds d) with
       | Compact -> assert (width = 80)
       | Grid cells ->
-        assert (List.length cells = 12);
+        assert (List.length cells = 13);
         List.iteri cells ~f:(fun i (a : Workspace.Geometry.t) ->
           assert (a.x >= 0 && a.y >= 0 && a.width > 0 && a.height > 0);
           assert (a.x + a.width <= width && a.y + a.height <= height);
@@ -883,7 +1005,8 @@ let%test_unit "one-third sidebar splits stages and plan above six full-width dom
     assert (session.width = 40 && session.height = Overview.session_height);
     assert (selector.x = session.x && selector.y = session.y + session.height);
     assert (selector.width = session.width && selector.height = Overview.selector_height);
-    assert ((cell "stage-checklist").y = selector.y + selector.height);
+    assert ((cell "resource-summary").y = selector.y + selector.height);
+    assert ((cell "stage-checklist").y = (cell "resource-summary").y + 1);
     let stages = cell "stage-checklist"
     and plan = cell "planned-run" in
     assert (stages.x = 0 && stages.width = session.width);
@@ -930,7 +1053,7 @@ let%test_unit "six-row selector preserves readable stages and balanced plan at12
       assert (selector.height = selector_height);
       assert (stages.height >= 10 && plan.height >= 10);
       assert (Int.abs (stages.height - plan.height) <= 1);
-      assert (stages.y = selector.y + selector.height);
+      assert (stages.y = selector.y + selector.height + 1);
       assert (plan.y = stages.y + stages.height && plan.y + plan.height = 38))
 ;;
 

@@ -1,0 +1,308 @@
+{
+  "scope": "independent raw byte spans; not bridge output",
+  "paths": [
+    {
+      "corner": "nom_slow_1p08V_125C",
+      "path_type": "max",
+      "path": "flow/56-openroad-stapostpnr/nom_slow_1p08V_125C/max.rpt",
+      "sha256": "4a90de20c474c9408db3d95d2fd649f5d067f3aa6215748d1273e8364a2815d4",
+      "first_line": 7,
+      "last_line": 62,
+      "span_sha256": "43cb4d3e9d9002ca3125170633f44cbe17676a1f6e934317aa2b0dcf82b7d766",
+      "span_utf8": "Startpoint: hc_resource_7_program\n            (rising edge-triggered flip-flop clocked by clk)\nEndpoint: uo_out[3] (output port clocked by clk)\nPath Group: clk\nPath Type: max\n\nFanout         Cap        Slew       Delay        Time   Description\n---------------------------------------------------------------------------------------------\n                                  0.000000    0.000000   clock clk (rise edge)\n                                  0.000000    0.000000   clock source latency\n     2    0.109492    0.187740    0.147970    0.147970 ^ clk (in)\n                                                         clk (net)\n                      0.191789    0.000000    0.147970 ^ delaybuf_0_clk/A (sg13cmos5l_buf_8)\n     1    0.068837    0.077296    0.212329    0.360299 ^ delaybuf_0_clk/X (sg13cmos5l_buf_8)\n                                                         delaynet_0_clk (net)\n                      0.083827    0.018212    0.378511 ^ clkbuf_0_clk/A (sg13cmos5l_buf_8)\n     1    0.010338    0.031493    0.132412    0.510922 ^ clkbuf_0_clk/X (sg13cmos5l_buf_8)\n                                                         clknet_0_clk (net)\n                      0.031499    0.000866    0.511788 ^ clkbuf_1_0__f_clk/A (sg13cmos5l_buf_8)\n     1    0.008598    0.028429    0.100144    0.611932 ^ clkbuf_1_0__f_clk/X (sg13cmos5l_buf_8)\n                                                         clknet_1_0__leaf_clk (net)\n                      0.037909    0.000530    0.612462 ^ hc_resource_7_program/A_CLK (RM_IHPSG13_1P_256x16_c2_bm_bist)\n     1    0.004815    0.067838    5.275789    5.888251 ^ hc_resource_7_program/A_DOUT[11] (RM_IHPSG13_1P_256x16_c2_bm_bist)\n                                                         signal_inst[11] (net)\n                      0.050878    0.000115    5.888366 ^ _135_/A (sg13cmos5l_inv_1)\n     1    0.031419    0.166370    0.168869    6.057235 v _135_/Y (sg13cmos5l_inv_1)\n                                                         _039_ (net)\n                      0.166457    0.003348    6.060584 v _152_/A2 (sg13cmos5l_a21oi_1)\n     1    0.024714    0.347388    0.382913    6.443497 ^ _152_/Y (sg13cmos5l_a21oi_1)\n                                                         net208 (net)\n                      0.347436    0.003551    6.447048 ^ wire211/A (sg13cmos5l_buf_1)\n     1    0.018401    0.132627    0.288659    6.735707 ^ wire211/X (sg13cmos5l_buf_1)\n                                                         net211 (net)\n                      0.132638    0.001386    6.737093 ^ wire210/A (sg13cmos5l_buf_2)\n     1    0.020437    0.082357    0.198594    6.935688 ^ wire210/X (sg13cmos5l_buf_2)\n                                                         net210 (net)\n                      0.082589    0.003249    6.938937 ^ wire209/A (sg13cmos5l_buf_1)\n     1    0.017061    0.119978    0.190002    7.128939 ^ wire209/X (sg13cmos5l_buf_1)\n                                                         net209 (net)\n                      0.119987    0.001187    7.130126 ^ wire208/A (sg13cmos5l_buf_2)\n     1    0.024736    0.094259    0.204162    7.334287 ^ wire208/X (sg13cmos5l_buf_2)\n                                                         uo_out[3] (net)\n                      0.094329    0.002486    7.336773 ^ uo_out[3] (out)\n                                              7.336773   data arrival time\n\n                                 20.833334   20.833334   clock clk (rise edge)\n                                  0.000000   20.833334   clock network delay (propagated)\n                                 -0.250000   20.583334   clock uncertainty\n                                  0.000000   20.583334   clock reconvergence pessimism\n                                 -2.000000   18.583334   output external delay\n                                             18.583334   data required time\n---------------------------------------------------------------------------------------------\n                                             18.583334   data required time\n                                             -7.336773   data arrival time\n---------------------------------------------------------------------------------------------\n                                             11.246561   slack (MET)\n",
+      "public_path": {
+        "path_id": "a15c6deb5abd6aa8afc38c4a82824ae90b569fe88d9a0445cdba8da0451e211b",
+        "corner": "nom_slow_1p08V_125C",
+        "group": "clk",
+        "path_type": "max",
+        "header_startpoint": "hc_resource_7_program",
+        "header_endpoint": "uo_out[3] (output port clocked by clk)",
+        "data_start": {
+          "line": 29,
+          "name": "hc_resource_7_program/A_DOUT[11]",
+          "instance": "hc_resource_7_program",
+          "pin": "A_DOUT[11]",
+          "master": "RM_IHPSG13_1P_256x16_c2_bm_bist",
+          "role": "data",
+          "edge": "rise",
+          "fanout": 1,
+          "reported_load": 0.004815,
+          "slew": 0.067838,
+          "incremental_delay": 5.275789,
+          "arrival": 5.888251,
+          "time_unit": "ns",
+          "capacitance_unit": "pF"
+        },
+        "data_end": {
+          "line": 49,
+          "name": "uo_out[3]",
+          "instance": null,
+          "pin": null,
+          "master": null,
+          "role": "data",
+          "edge": "rise",
+          "fanout": null,
+          "reported_load": null,
+          "slew": 0.094329,
+          "incremental_delay": 0.002486,
+          "arrival": 7.336773,
+          "time_unit": "ns",
+          "capacitance_unit": "pF"
+        },
+        "arrival": 7.336773,
+        "required": 18.583334,
+        "slack": 11.246561,
+        "time_unit": "ns",
+        "status": "met",
+        "provenance": {
+          "origin": "coarse_run_retained_post_pnr_sta",
+          "run_id": "be961b2c95f74c81ad6af81ca4d2b269",
+          "build_identity": "fa38d9064dffdf2ec1578c79c2e8890eba81bf704af460e85fcc6031b707d53c",
+          "stage": "final_physical",
+          "producer": "OpenROAD.STAPostPNR",
+          "directory": "flow/56-openroad-stapostpnr",
+          "report": {
+            "path": "flow/56-openroad-stapostpnr/nom_slow_1p08V_125C/max.rpt",
+            "sha256": "4a90de20c474c9408db3d95d2fd649f5d067f3aa6215748d1273e8364a2815d4",
+            "format": "sta_path_report",
+            "scope": "retained observed bytes; integrity is not producer authentication"
+          },
+          "first_line": 7,
+          "last_line": 62,
+          "unit_library": {
+            "path": "flow/56-openroad-stapostpnr/nom_slow_1p08V_125C/tt_um_program_memory__nom_slow_1p08V_125C.lib",
+            "sha256": "a3f4434cd88425377dc94083b0a9a5b9236221f61e0b0ca6c627f0df16eec81b",
+            "format": "liberty",
+            "scope": "retained observed bytes; integrity is not producer authentication"
+          },
+          "external_models": [
+            {
+              "master": "RM_IHPSG13_1P_256x16_c2_bm_bist",
+              "analysis_corner": "nom_slow_1p08V_125C",
+              "reference": "/home/wayne/devel/jane/hardcaml_asic_example/_flow_tools/pdk/ihp-sg13cmos5l/libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_256x16_c2_bm_bist_slow_1p08V_125C.lib",
+              "recorded_reference": "pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_256x16_c2_bm_bist_slow_1p08V_125C.lib",
+              "sha256": "a04cff61cb4befb2290427db1ff2cb1c31c8d5990dca53ee3e5d1cc621679cd9",
+              "verification": "recorded_external_model_not_read"
+            }
+          ],
+          "evidence_refs": [
+            {
+              "path": "flow/56-openroad-stapostpnr/config.json",
+              "sha256": "a4bbafed76e815de437b362c4269496fa85f6a74a63113770dd527cd3db980da",
+              "format": "json",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            },
+            {
+              "path": "flow/56-openroad-stapostpnr/state_in.json",
+              "sha256": "21539d7d9df71e0455d7981acb0879a4e98c94e60d51538c0959956fb5fe01dd",
+              "format": "json",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            },
+            {
+              "path": "flow/56-openroad-stapostpnr/state_out.json",
+              "sha256": "85372863b45d527ee2a56ef9bac4d5c7cf60fdb4175f04f2295ed4fc8e696be3",
+              "format": "json",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            },
+            {
+              "path": "flow/56-openroad-stapostpnr/runtime.txt",
+              "sha256": "6ec8df89ec6dda020fd1d699455e24719b701f9672a04164768a95025c21c8e5",
+              "format": "text",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            },
+            {
+              "path": "flow/53-openroad-fillinsertion/tt_um_program_memory.nl.v",
+              "sha256": "d3dbd631a4906a3be7342933a2eca6bad0f693afdd36244554cb99031e35635b",
+              "format": "verilog_gate_netlist",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            },
+            {
+              "path": "flow/final/nl/tt_um_program_memory.nl.v",
+              "sha256": "d3dbd631a4906a3be7342933a2eca6bad0f693afdd36244554cb99031e35635b",
+              "format": "physical_checker_artifact",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            },
+            {
+              "path": "flow/56-openroad-stapostpnr/nom_slow_1p08V_125C/tt_um_program_memory__nom_slow_1p08V_125C.lib",
+              "sha256": "a3f4434cd88425377dc94083b0a9a5b9236221f61e0b0ca6c627f0df16eec81b",
+              "format": "liberty",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            },
+            {
+              "path": "flow/56-openroad-stapostpnr/nom_slow_1p08V_125C/sta.log",
+              "sha256": "d7ae1e1d761d46916957dc2e94553c853929563cc60a2329ca523f3db621ec4e",
+              "format": "sta_log",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            },
+            {
+              "path": "flow/56-openroad-stapostpnr/nom_slow_1p08V_125C/max.rpt",
+              "sha256": "4a90de20c474c9408db3d95d2fd649f5d067f3aa6215748d1273e8364a2815d4",
+              "format": "sta_path_report",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            },
+            {
+              "path": "preflight.json",
+              "sha256": "9da2706fbdbf551360c112f47365904b4ff2de31c26dbbe6ce9b54e88da417f4",
+              "format": "json",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "corner": "nom_fast_1p32V_m40C",
+      "path_type": "min",
+      "path": "flow/56-openroad-stapostpnr/nom_fast_1p32V_m40C/min.rpt",
+      "sha256": "b012d1e997d1047bd7b7751ba2522023a7c4e0f7cc5b0962703a4fdcf2fe21c8",
+      "first_line": 7,
+      "last_line": 61,
+      "span_sha256": "ced6fb9b965898a565313d5bf40413d68fea8e031ef80f6b92c9dd70bf28aba4",
+      "span_utf8": "Startpoint: _203_ (rising edge-triggered flip-flop clocked by clk)\nEndpoint: hc_resource_7_program (rising edge-triggered flip-flop clocked by clk)\nPath Group: clk\nPath Type: min\n\nFanout         Cap        Slew       Delay        Time   Description\n---------------------------------------------------------------------------------------------\n                                  0.000000    0.000000   clock clk (rise edge)\n                                  0.000000    0.000000   clock source latency\n     2    0.109161    0.075710    0.067503    0.067503 ^ clk (in)\n                                                         clk (net)\n                      0.098541    0.000000    0.067503 ^ clkbuf_regs_0_clk/A (sg13cmos5l_buf_8)\n     1    0.008888    0.016676    0.068795    0.136298 ^ clkbuf_regs_0_clk/X (sg13cmos5l_buf_8)\n                                                         clk_regs (net)\n                      0.016677    0.000345    0.136642 ^ clkbuf_0_clk_regs/A (sg13cmos5l_buf_8)\n     4    0.044095    0.022658    0.047707    0.184349 ^ clkbuf_0_clk_regs/X (sg13cmos5l_buf_8)\n                                                         clknet_0_clk_regs (net)\n                      0.022961    0.001884    0.186234 ^ clkbuf_2_1__f_clk_regs/A (sg13cmos5l_buf_8)\n     4    0.038161    0.021090    0.048361    0.234595 ^ clkbuf_2_1__f_clk_regs/X (sg13cmos5l_buf_8)\n                                                         clknet_2_1__leaf_clk_regs (net)\n                      0.021898    0.003025    0.237620 ^ _203_/CLK (sg13cmos5l_dfrbpq_1)\n     1    0.003760    0.017866    0.106652    0.344273 ^ _203_/Q (sg13cmos5l_dfrbpq_1)\n                                                         signal_reg_1[6] (net)\n                      0.017866    0.000133    0.344406 ^ hold198/A (sg13cmos5l_dlygate4sd3_1)\n     1    0.020539    0.066217    0.268952    0.613357 ^ hold198/X (sg13cmos5l_dlygate4sd3_1)\n                                                         net198 (net)\n                      0.066263    0.001506    0.614864 ^ hold140/A (sg13cmos5l_dlygate4sd3_1)\n     2    0.045538    0.125626    0.332280    0.947144 ^ hold140/X (sg13cmos5l_dlygate4sd3_1)\n                                                         net140 (net)\n                      0.167545    0.001894    0.949038 ^ hc_resource_7_program/A_ADDR[6] (RM_IHPSG13_1P_256x16_c2_bm_bist)\n                                              0.949038   data arrival time\n\n                                  0.000000    0.000000   clock clk (rise edge)\n                                  0.000000    0.000000   clock source latency\n     2    0.112296    0.077581    0.064317    0.064317 ^ clk (in)\n                                                         clk (net)\n                      0.088646    0.000000    0.064317 ^ delaybuf_0_clk/A (sg13cmos5l_buf_8)\n     1    0.070238    0.032242    0.082762    0.147079 ^ delaybuf_0_clk/X (sg13cmos5l_buf_8)\n                                                         delaynet_0_clk (net)\n                      0.046352    0.017289    0.164368 ^ clkbuf_0_clk/A (sg13cmos5l_buf_8)\n     1    0.011740    0.014860    0.056459    0.220826 ^ clkbuf_0_clk/X (sg13cmos5l_buf_8)\n                                                         clknet_0_clk (net)\n                      0.014878    0.000993    0.221819 ^ clkbuf_1_0__f_clk/A (sg13cmos5l_buf_8)\n     1    0.008703    0.012356    0.043332    0.265151 ^ clkbuf_1_0__f_clk/X (sg13cmos5l_buf_8)\n                                                         clknet_1_0__leaf_clk (net)\n                      0.016482    0.000538    0.265689 ^ hc_resource_7_program/A_CLK (RM_IHPSG13_1P_256x16_c2_bm_bist)\n                                  0.250000    0.515689   clock uncertainty\n                                  0.000000    0.515689   clock reconvergence pessimism\n                                  0.209815    0.725504   library hold time\n                                              0.725504   data required time\n---------------------------------------------------------------------------------------------\n                                              0.725504   data required time\n                                             -0.949038   data arrival time\n---------------------------------------------------------------------------------------------\n                                              0.223533   slack (MET)\n",
+      "public_path": {
+        "path_id": "8a8dbdb01fe9bf32e8fdf13cdd149bdf6585e162e8ad982cebfc49969699d8e3",
+        "corner": "nom_fast_1p32V_m40C",
+        "group": "clk",
+        "path_type": "min",
+        "header_startpoint": "_203_ (rising edge-triggered flip-flop clocked by clk)",
+        "header_endpoint": "hc_resource_7_program (rising edge-triggered flip-flop clocked by clk)",
+        "data_start": {
+          "line": 28,
+          "name": "_203_/Q",
+          "instance": "_203_",
+          "pin": "Q",
+          "master": "sg13cmos5l_dfrbpq_1",
+          "role": "data",
+          "edge": "rise",
+          "fanout": 1,
+          "reported_load": 0.00376,
+          "slew": 0.017866,
+          "incremental_delay": 0.106652,
+          "arrival": 0.344273,
+          "time_unit": "ns",
+          "capacitance_unit": "pF"
+        },
+        "data_end": {
+          "line": 36,
+          "name": "hc_resource_7_program/A_ADDR[6]",
+          "instance": "hc_resource_7_program",
+          "pin": "A_ADDR[6]",
+          "master": "RM_IHPSG13_1P_256x16_c2_bm_bist",
+          "role": "data",
+          "edge": "rise",
+          "fanout": null,
+          "reported_load": null,
+          "slew": 0.167545,
+          "incremental_delay": 0.001894,
+          "arrival": 0.949038,
+          "time_unit": "ns",
+          "capacitance_unit": "pF"
+        },
+        "arrival": 0.949038,
+        "required": 0.725504,
+        "slack": 0.223533,
+        "time_unit": "ns",
+        "status": "met",
+        "provenance": {
+          "origin": "coarse_run_retained_post_pnr_sta",
+          "run_id": "be961b2c95f74c81ad6af81ca4d2b269",
+          "build_identity": "fa38d9064dffdf2ec1578c79c2e8890eba81bf704af460e85fcc6031b707d53c",
+          "stage": "final_physical",
+          "producer": "OpenROAD.STAPostPNR",
+          "directory": "flow/56-openroad-stapostpnr",
+          "report": {
+            "path": "flow/56-openroad-stapostpnr/nom_fast_1p32V_m40C/min.rpt",
+            "sha256": "b012d1e997d1047bd7b7751ba2522023a7c4e0f7cc5b0962703a4fdcf2fe21c8",
+            "format": "sta_path_report",
+            "scope": "retained observed bytes; integrity is not producer authentication"
+          },
+          "first_line": 7,
+          "last_line": 61,
+          "unit_library": {
+            "path": "flow/56-openroad-stapostpnr/nom_fast_1p32V_m40C/tt_um_program_memory__nom_fast_1p32V_m40C.lib",
+            "sha256": "a7a9d68eeaa7455c434c948bf4e8adb78a382448b6ed11c2bbe20f0524ae9efe",
+            "format": "liberty",
+            "scope": "retained observed bytes; integrity is not producer authentication"
+          },
+          "external_models": [
+            {
+              "master": "RM_IHPSG13_1P_256x16_c2_bm_bist",
+              "analysis_corner": "nom_fast_1p32V_m40C",
+              "reference": "/home/wayne/devel/jane/hardcaml_asic_example/_flow_tools/pdk/ihp-sg13cmos5l/libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_256x16_c2_bm_bist_fast_1p32V_m55C.lib",
+              "recorded_reference": "pdk_dir::libs.ref/sg13cmos5l_sram/lib/RM_IHPSG13_1P_256x16_c2_bm_bist_fast_1p32V_m55C.lib",
+              "sha256": "c28bb80737d7a7daea14b9d259380c7e1dfc27c71c3ad1223a5387d8515ebe4b",
+              "verification": "recorded_external_model_not_read"
+            }
+          ],
+          "evidence_refs": [
+            {
+              "path": "flow/56-openroad-stapostpnr/config.json",
+              "sha256": "a4bbafed76e815de437b362c4269496fa85f6a74a63113770dd527cd3db980da",
+              "format": "json",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            },
+            {
+              "path": "flow/56-openroad-stapostpnr/state_in.json",
+              "sha256": "21539d7d9df71e0455d7981acb0879a4e98c94e60d51538c0959956fb5fe01dd",
+              "format": "json",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            },
+            {
+              "path": "flow/56-openroad-stapostpnr/state_out.json",
+              "sha256": "85372863b45d527ee2a56ef9bac4d5c7cf60fdb4175f04f2295ed4fc8e696be3",
+              "format": "json",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            },
+            {
+              "path": "flow/56-openroad-stapostpnr/runtime.txt",
+              "sha256": "6ec8df89ec6dda020fd1d699455e24719b701f9672a04164768a95025c21c8e5",
+              "format": "text",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            },
+            {
+              "path": "flow/53-openroad-fillinsertion/tt_um_program_memory.nl.v",
+              "sha256": "d3dbd631a4906a3be7342933a2eca6bad0f693afdd36244554cb99031e35635b",
+              "format": "verilog_gate_netlist",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            },
+            {
+              "path": "flow/final/nl/tt_um_program_memory.nl.v",
+              "sha256": "d3dbd631a4906a3be7342933a2eca6bad0f693afdd36244554cb99031e35635b",
+              "format": "physical_checker_artifact",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            },
+            {
+              "path": "flow/56-openroad-stapostpnr/nom_fast_1p32V_m40C/tt_um_program_memory__nom_fast_1p32V_m40C.lib",
+              "sha256": "a7a9d68eeaa7455c434c948bf4e8adb78a382448b6ed11c2bbe20f0524ae9efe",
+              "format": "liberty",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            },
+            {
+              "path": "flow/56-openroad-stapostpnr/nom_fast_1p32V_m40C/sta.log",
+              "sha256": "34d2365a747b4c41b7e8742a5246eeb4d5ab884b4a9f657c1a79e738771f80b8",
+              "format": "sta_log",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            },
+            {
+              "path": "flow/56-openroad-stapostpnr/nom_fast_1p32V_m40C/min.rpt",
+              "sha256": "b012d1e997d1047bd7b7751ba2522023a7c4e0f7cc5b0962703a4fdcf2fe21c8",
+              "format": "sta_path_report",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            },
+            {
+              "path": "preflight.json",
+              "sha256": "9da2706fbdbf551360c112f47365904b4ff2de31c26dbbe6ce9b54e88da417f4",
+              "format": "json",
+              "scope": "retained observed bytes; integrity is not producer authentication"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "expected_paths": 186,
+  "expected_points": 372,
+  "macro_area_um2": 28127.104,
+  "nonspacer_area_um2": 4793.6448,
+  "gross_core_area_um2": 902417.2416
+}

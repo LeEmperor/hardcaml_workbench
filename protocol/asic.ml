@@ -401,6 +401,7 @@ module Snapshot = struct
     ; cache_error : string option
     ; fresh_intent : Fresh.Intent.t option [@sexp.default None]
     ; workflows : Fresh.Workflow.t list [@sexp.default []]
+    ; resources : Asic_resources.Snapshot.t option [@sexp.default None] [@sexp_drop_default.equal]
     }
   [@@deriving bin_io, compare, equal, sexp]
 end
@@ -427,6 +428,7 @@ module Operation = struct
       [Asic_inspection.analysis_index_key]/[analysis_detail_key]. *)
   type t =
     | Get
+    | Resources of Asic_resources.Operation.t
     | Discover
     | Describe of string
     | Plan of Selection.t

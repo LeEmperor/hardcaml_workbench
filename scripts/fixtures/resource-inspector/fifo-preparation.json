@@ -1,0 +1,16 @@
+{
+  "fixture_scope": "public evidence projection; not bridge wire format or a new run",
+  "source": "acceptance/preparation/capture-final/fifo-zero-resources/resources.json",
+  "source_sha256": "cc9a20fa5d248ee155732fc97902d943967c341eb81e9bbce453b993668b1dd4",
+  "data": {
+    "resources": {
+      "mode": "implementation",
+      "project": "controlled_fifo_specimen",
+      "resources": [],
+      "schema_version": 1,
+      "scope": "resolved",
+      "top": "tt_um_controlled_fifo"
+    },
+    "circuit_identity": "9120d5d2029cc0695e4d4df46c22d0f9a58fe6b7f1daf353903a05f0149c69d5"
+  }
+}

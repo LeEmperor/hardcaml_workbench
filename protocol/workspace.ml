@@ -431,7 +431,9 @@ let validate (s : Snapshot.t) =
       in
       require
         (String.equal key p.definition.key
-         && Bool.equal builtin (Workspace_config.is_builtin key)
+         && (if builtin
+             then Workspace_config.is_builtin key
+             else Workspace_config.custom_key_allowed key)
          && Option.equal
               String.equal
               p.definition.template.preset

@@ -19,6 +19,7 @@ import fcntl
 import http.server
 import importlib.util
 import json
+import re
 import os
 from pathlib import Path
 import signal
@@ -224,10 +225,16 @@ class Terminal(fs3.Terminal):
             left = [p[name] for name in names[:3]]
             # The tabs are an unframed full-width top row; each right summary
             # must be painted on a distinct row in a single common right track.
-            tabs = next((y for y, row in enumerate(rows)
-                         if ('Renamed source' in row or 'Renamed after capture' in row)
-                         and 'Timing' in row), None)
+            # With five starters and imported roundtrips, bounded tabs need not
+            # show both the renamed active workspace and an inactive Timing tab.
+            # Match an actual top-row workspace label; assert active scope in footer.
+            tab_names = [field(w, 'name') for w in field(self.test.workspace(), 'workspaces')]
+            tabs = next((y for y, row in enumerate(rows[:2])
+                         if any(name in row for name in tab_names)), None)
+            active_scope = ('Renamed source' in rows[-1] or 'Renamed after capture' in rows[-1]
+                            or re.search(r'\[\d+ Renamed (?:source|after capture)\]', rows[0]))
             ok = (all(p.values()) and tabs is not None and
+                   active_scope and
                   all(x < self.width // 2 for x, _ in left) and
                   len({x for x, _ in right}) == 1 and right[0][0] > self.width // 4 and
                   [y for _, y in right] == sorted({y for _, y in right}) and
@@ -387,13 +394,19 @@ def exercise(test):
     (test.root / 'dune').write_text('(dirs)\n')
     test.command(test.args.setup, ['--root', test.root, '--project-name', 'FS3 acceptance'], 'setup')
     templates = {name: parse(test.command(test.args.workspace_cli, ['starter', name], 'preset-' + name))
-                 for name in ('overview', 'timing', 'testing')}
+                 for name in ('overview', 'timing', 'testing', 'resources')}
     test.start()
     proxy = ReceiptProxy(test)
     terminal = None
     try:
         terminal = Terminal(test, 'bootstrap', proxy)
         terminal.wait('ready', ['Space c c commands'], ['Loading workspace...'], ready=True)
+        # The first interactive frame can precede asynchronous default composition.
+        # Wait for the authoritative initialization receipt, not just terminal chrome.
+        deadline = time.monotonic() + 20
+        while field(test.workspace(), 'defaults_initialized') != 'true':
+            require(time.monotonic() < deadline, 'Native shared defaults bootstrap timeout')
+            terminal.drain(.1)
         require(field(test.workspace(), 'defaults_initialized') == 'true', 'Native shared defaults bootstrapped')
         terminal.close()
         terminal = None
@@ -481,7 +494,7 @@ def exercise(test):
 
         # Named commands all act on the captured current workspace; none switches
         # to a display-name workspace. Export/import checks stable preset identity.
-        for name in ('timing', 'testing', 'overview'):
+        for name in ('timing', 'testing', 'resources', 'overview'):
             before = test.workspace()
             proxy.sync(terminal, before)
             index = len(proxy.events)

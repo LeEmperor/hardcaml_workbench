@@ -146,6 +146,11 @@ Separate foreground startup is:
 
 ### Open the current real ASIC example demo
 
+The **Resources inspector** is now available through **Space c c → Inspect
+resources (open Resources workspace)**. It can explicitly import the retained SRAM
+capture without running EDA. See [Resources controls, current provider and restart
+commands](docs/resource_inspector.md); existing saved layouts are preserved.
+
 Fresh checklist launches now execute **Elaboration → Synthesis → … → endpoint**
 as one daemon-owned workflow, consuming the exact emitted bundle. Both app binaries
 must be current. See [unified fresh-prefix controls and restart instructions](docs/unified_fresh_prefix_plan.md#delivery-and-user-verification)

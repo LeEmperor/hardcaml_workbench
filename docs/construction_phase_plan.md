@@ -1,5 +1,27 @@
 # Hardcaml Workbench — Demo construction plan
 
+## Active PT.6 resource inspector — 2026-10-28
+
+Owner authorized presentation of ASIC-owned requested/selected/realized resources,
+physical measurements and sampled timing/electrical links. The
+[integration plan](resource_inspector_plan.md) freezes provider/backend/UI ownership,
+exact evidence targets, bounded queries and native retained-SRAM acceptance.
+
+- [x] Public provider inspection bridge and typed Workbench source/cache ingestion.
+- [x] Resource table, drilldown, source navigation and bounded comparison/controls.
+- [x] Native synthetic and actual retained-example acceptance, independent review.
+- [x] Broader checks, matching binaries and explicit provider/restart handoff.
+
+Delivered 2026-10-28: final native bridge533, synthetic HTTP/PTY70, retained SRAM
+HTTP/PTY52, unified-flow99 and saved-layout17 assertions passed, along with both
+full suites. Independent peer recheck passed66 assertions after corrections.
+Importing coarse historical evidence does not create a new physical run. Owner
+explicitly approved changing only the example's configured provider executable to
+final PT.6 generation `97b85a9e25e24615b758b97b21ca9697`; generation pointers and
+old evidence remain untouched. Matching default app pair is built; live restart is
+manual. See [controls/restart](resource_inspector.md) and
+[acceptance](resource_inspector_acceptance.md) for scope and limitations.
+
 ## Active unified fresh-prefix workflow — 2026-10-27
 
 Owner authorized Elaboration as the first peer workflow step before every fresh

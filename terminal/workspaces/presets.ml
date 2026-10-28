@@ -27,7 +27,7 @@ let decode text =
     let%bind () =
       List.fold config.definitions ~init:(Ok ()) ~f:(fun acc d ->
         let%bind () = acc in
-        if Workspace_config.is_builtin d.key
+        if Workspace_config.builtin_definition d
         then (
           let%bind stock = builtins d.key in
           if Workspace_config.Definition.equal stock d then Ok () else Error original)
@@ -37,7 +37,7 @@ let decode text =
       { config with
         definitions =
           List.filter config.definitions ~f:(fun d ->
-            not (Workspace_config.is_builtin d.key))
+            not (Workspace_config.builtin_definition d))
       }
     in
     let%map () = Workspace_config.validate config in

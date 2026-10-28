@@ -51,6 +51,10 @@ val metadata
   -> environment:V1.Environment_selection.t
   -> Dune_adapter.Invocation.t
 
+val resources
+  : Config.t -> root:string -> environment:V1.Environment_selection.t
+  -> kind:string -> target:string -> string list -> Dune_adapter.Invocation.t
+
 val run_prepared
   :  Config.t
   -> root:string

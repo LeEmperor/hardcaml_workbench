@@ -122,8 +122,20 @@ let max_tree_nodes = 4096
 let max_dimension = 1_000_000
 let max_sexp_nesting = 256
 let max_sexp_comments = 256
-let builtin_ids = [ "overview"; "timing"; "testing"; "waveforms" ]
+let builtin_ids = [ "overview"; "timing"; "testing"; "waveforms"; "resources" ]
 let is_builtin key = List.mem builtin_ids key ~equal:String.equal
+
+(** Version 1 already permitted user definitions named [resources]. Adding a builtin is
+    not permission to expand that version's reserved custom namespace. References and
+    template ancestry distinguish the new builtin from an unchanged custom key. Changing
+    these reservations requires an authoring-version migration. *)
+let custom_key_allowed key =
+  not (List.mem [ "overview"; "timing"; "testing"; "waveforms" ] key ~equal:String.equal)
+;;
+
+let builtin_definition (d : Definition.t) =
+  Option.equal String.equal d.template.preset (Some d.key) && is_builtin d.key
+;;
 
 let valid_key key =
   String.length key > 0
@@ -193,8 +205,8 @@ let validate_definition (d : Definition.t) =
     Option.iter d.layout ~f:(tree 1))
 ;;
 
-(** [resolved] permits reserved definitions, and requires every built-in reference to have
-    its complete definition embedded. Custom references never use reserved IDs. *)
+(** [resolved] permits builtin definitions and requires their complete definitions.
+    Version-1 custom reservations are frozen separately from the expanding catalog. *)
 let validate_common ~resolved (t : t) =
   Or_error.try_with (fun () ->
     require (t.version = version) "Unsupported workspace configuration version";
@@ -208,13 +220,14 @@ let validate_common ~resolved (t : t) =
     let definitions = String.Table.create () in
     let stored_tiles = ref 0 in
     List.iter t.definitions ~f:(fun d ->
-      require (resolved || not (is_builtin d.key)) "Custom definition shadows a built-in";
+      let builtin = builtin_definition d in
+      require (resolved || not builtin) "Custom definition shadows a built-in";
       validate_definition d |> Or_error.ok_exn;
       (* A custom definition cannot select compiled preset policy via its template. *)
       require
-        (if is_builtin d.key
-         then Option.equal String.equal d.template.preset (Some d.key)
-         else Option.is_none d.template.preset)
+        (if builtin
+         then true
+         else custom_key_allowed d.key && Option.is_none d.template.preset)
         "Custom templates must omit preset; built-in templates must match their key";
       stored_tiles := !stored_tiles + List.length d.tiles;
       require (!stored_tiles <= max_tiles) "Too many definition tiles";
@@ -235,7 +248,9 @@ let validate_common ~resolved (t : t) =
             require (is_builtin key) ("Unknown built-in: " ^ key);
             key, resolved
           | Custom key ->
-            require (not (is_builtin key)) "Custom reference uses a reserved built-in ID";
+            require
+              (custom_key_allowed key)
+              "Custom reference uses a reserved built-in ID";
             key, true
         in
         if must_resolve
@@ -244,6 +259,13 @@ let validate_common ~resolved (t : t) =
             Hashtbl.find definitions key
             |> Option.value_exn ~message:("Missing definition: " ^ key)
           in
+          require
+            (Bool.equal
+               (builtin_definition d)
+               (match i.definition with
+                | Builtin _ -> true
+                | Custom _ -> false))
+            "Definition reference/ancestry mismatch";
           instantiated_tiles := !instantiated_tiles + List.length d.tiles;
           require (!instantiated_tiles <= max_tiles) "Too many instantiated tiles"))))
 ;;

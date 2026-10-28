@@ -1579,6 +1579,7 @@ let%test_unit "process completion is not stage evidence; mismatched and duplicat
     ; launches = []
     ; fresh_intent = None
     ; workflows = []
+    ; resources = None
     ; summaries = []
     ; finalizations = []
     ; artifacts = []

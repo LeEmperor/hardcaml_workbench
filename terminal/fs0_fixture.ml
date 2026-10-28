@@ -87,6 +87,7 @@ let snapshot : Asic.Snapshot.t =
   ; launches = []
   ; fresh_intent = None
   ; workflows = []
+  ; resources = None
   ; summaries =
       [ summary run_a 50 [ "NAND2", 35; "DFF", 15 ]
       ; summary run_b 73 [ "NAND2", 50; "DFF", 23 ]

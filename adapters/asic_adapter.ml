@@ -45,6 +45,11 @@ let metadata config ~root ~environment =
   provider config ~root ~environment [ "--version"; "--json" ]
 ;;
 
+let resources config ~root ~environment ~kind ~target args =
+  provider config ~root ~environment
+    ([ "resource-inspect"; target; "--kind"; kind; "--json" ] @ args)
+;;
+
 let run_prepared config ~root ~environment ~(prepared : Asic.Fresh.Prepared.t) ~workspace =
   let resolved value suffix =
     Option.value value ~default:(Filename.concat config.Config.toolchain suffix)

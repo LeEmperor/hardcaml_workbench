@@ -32,6 +32,7 @@ module Waveform_data = Terminal_presentation.Waveform_data
 module Waveform_view = Terminal_presentation.Waveform_view
 module Waveform_preferences = Terminal_presentation.Waveform_preferences
 module Waveforms = Hardcaml_workbench_workspaces.Waveforms
+module Resources_view = Terminal_presentation.Resources_view
 module Planned_run = Terminal_presentation.Planned_run
 module Stage_action = Terminal_presentation.Stage_action
 
@@ -133,6 +134,7 @@ type session =
   ; mutable registry_busy : bool
   ; mutable asic : Asic.Snapshot.t option
   ; mutable asic_request_id : int
+  ; mutable resource_navigation_intent : unit ref
   ; mutable preparation_request_id : int
   ; mutable asic_applied_id : int
   ; mutable timing_demand :
@@ -336,6 +338,7 @@ let create_session
       ; registry_busy = false
       ; asic = None
       ; asic_request_id = 0
+      ; resource_navigation_intent = ref ()
       ; preparation_request_id = 0
       ; asic_applied_id = 0
       ; timing_demand = None
@@ -1185,6 +1188,18 @@ let reconcile_synthesis session =
       in
       session.host
       <- Host.set_local session.host tile.id { local with artifacts; inspection };
+      if Resources_view.is_kind tile.kind
+      then (
+        let local = Host.local session.host tile.id in
+        let resources =
+          Resources_view.reconcile
+            ~revision:session.asic_applied_id
+            local.resources
+            ~run:(Host.tile_run session.host tile)
+            ~filter:local.filter
+            session.asic
+        in
+        session.host <- Host.set_local session.host tile.id { local with resources });
       if String.equal tile.kind "synthesis"
       then (
         let local = Host.local session.host tile.id in
@@ -4346,6 +4361,7 @@ let session_of_baseline_fixture (fixture : Baseline_fixture.t) =
     ; registry_busy = false
     ; asic = None
     ; asic_request_id = 0
+    ; resource_navigation_intent = ref ()
     ; preparation_request_id = 0
     ; asic_applied_id = 0
     ; timing_demand = None
@@ -4710,7 +4726,39 @@ let host_catalog_base session =
 ;;
 
 (* WB-054: contextual actions for the focused view lead the palette and key dispatch. *)
-let host_catalog session = Host.contextual session.host (host_catalog_base session)
+let host_catalog session =
+  let resource_commands =
+    Option.value_map session.asic ~default:[] ~f:(fun asic ->
+      let select label target =
+        Host.command
+          ("resources.select."
+           ^ Plain_rpc.digest
+               (Sexp.to_string_mach (Asic_resources.Target.sexp_of_t target)))
+          ("Resources: Select " ^ label)
+          "exact source inventory read only"
+          (Resource_target (Some target))
+      in
+      List.map (Resources_view.snapshot session.asic).sources ~f:(fun s ->
+        select ("source " ^ s.Asic_resources.Source.label ^ " · " ^ s.id) s.target)
+      @ List.map asic.workflows ~f:(fun w ->
+        let command =
+          select ("workflow bundle " ^ w.Asic.Fresh.Workflow.id) (Workflow_bundle w.id)
+        in
+        if Option.is_some w.prepared
+        then command
+        else
+          { command with
+            unavailable = Some ("Workflow has no emitted bundle: " ^ w.elaboration_status)
+          })
+      @ List.map asic.runs ~f:(fun r ->
+        select ("execution " ^ r.Asic.Run.run.id) (Run r.run))
+      @ List.filter_map asic.finalizations ~f:(fun f ->
+        Option.map f.Asic.Finalization.attempt ~f:(fun attempt ->
+          select ("finalization " ^ attempt) (Finalization { run = f.run; attempt }))))
+  in
+  Host.contextual session.host (host_catalog_base session @ resource_commands)
+;;
+
 let timing_prefetch_neighbors = ref 2
 
 let activate_timing_demand session tile view =
@@ -5255,8 +5303,134 @@ let inspection_step session tile view action =
         asic_request ~inspection_request session operation))
 ;;
 
+(* Explicit navigation may instantiate the new builtin, never reset an existing layout.
+   Capture client/project/session across that acknowledgement before touching local state. *)
 (** Wrappers must retain their live validator when lowering to a preparation action.
     Tile-local selection and provider capabilities can change without a registry edit. *)
+let resource_tile session ~current =
+  let client = session.client in
+  let instance = session.hello.instance_id in
+  let project = Option.map (current_project session) ~f:(fun p -> p.Project.id) in
+  match Host.focused session.host with
+  | Some tile when String.equal tile.kind "resources" -> return (Some tile)
+  | _ ->
+    (match session.host.registry, Host.active session.host with
+     | Some initial, Some active ->
+       let valid () =
+         phys_equal client session.client
+         && current ()
+         && V1.Daemon_instance_id.equal instance session.hello.instance_id
+         && Option.equal
+              Project_id.equal
+              project
+              (Option.map (current_project session) ~f:(fun p -> p.Project.id))
+         && Option.exists session.host.registry ~f:(fun s ->
+           Workspace.Session_id.equal initial.session_id s.session_id)
+         && Option.exists (Host.active session.host) ~f:(fun w ->
+           Workspace.Workspace_id.equal w.id active.id)
+       in
+       let existing registry =
+         List.find registry.Workspace.Snapshot.workspaces ~f:(fun w ->
+           Workspace.Window_id.equal w.window active.window
+           && Option.equal String.equal w.preset (Some "resources"))
+       in
+       let%bind () =
+         if Option.is_some (existing initial)
+         then return ()
+         else
+           mutate_workspace
+             session
+             (Instantiate_template
+                { window = active.window
+                ; template =
+                    (Hardcaml_workbench_workspaces.Presets.builtins "resources"
+                     |> Or_error.ok_exn)
+                      .template
+                })
+       in
+       if not (valid ())
+       then return None
+       else (
+         match Option.bind session.host.registry ~f:existing with
+         | None -> return None
+         | Some workspace ->
+           let tile =
+             Option.bind session.host.registry ~f:(fun registry ->
+               List.find registry.tiles ~f:(fun tile ->
+                 Workspace.Workspace_id.equal tile.workspace workspace.id
+                 && String.equal tile.kind "resources"
+                 && (not tile.hidden)
+                 && Option.value_map
+                      workspace.zoomed_tile
+                      ~default:true
+                      ~f:(Workspace.Tile_id.equal tile.id)))
+           in
+           Option.iter tile ~f:(fun tile ->
+             activate_workspace session workspace.id;
+             session.host <- { session.host with focus = Some tile.id });
+           if Option.is_none tile
+           then
+             session.host
+             <- { session.host with
+                  notice =
+                    "Resources tile hidden/zoomed out; restore it explicitly from the \
+                     palette"
+                };
+           return tile)
+     | _ -> return None)
+;;
+
+let resource_request session tile operation =
+  let local = Host.local session.host tile.Workspace.Tile.id in
+  let identity = local.identity in
+  let view = local.resources in
+  let generation = view.generation in
+  let resources =
+    Resources_view.admit view ~generation ~request_floor:(session.asic_request_id + 1)
+  in
+  session.host <- Host.set_local session.host tile.id { local with resources };
+  let binding =
+    Option.bind session.host.registry ~f:(fun s ->
+      Result.ok (Workspace.resolve_tile s tile.id))
+  in
+  asic_request session (Resources operation) ~fresh_receipt:(fun response ->
+    let local = Host.local session.host tile.id in
+    let binding_current =
+      Option.is_some view.explicit
+      || Option.equal
+           Workspace.View_reference.equal
+           binding
+           (Option.bind session.host.registry ~f:(fun s ->
+              Result.ok (Workspace.resolve_tile s tile.id)))
+    in
+    if phys_equal identity local.identity
+       && binding_current
+       && Option.equal Asic_resources.Target.equal view.target local.resources.target
+    then
+      session.host
+      <- Host.set_local
+           session.host
+           tile.id
+           { local with
+             resources =
+               Resources_view.receipt
+                 ~floor:(session.asic_request_id + 1)
+                 local.resources
+                 ~generation
+                 (Result.map response ~f:(fun _ -> ()))
+           })
+;;
+
+let resource_input session tile input =
+  reconcile_synthesis session;
+  let local = Host.local session.host tile.Workspace.Tile.id in
+  let resources, operation =
+    Resources_view.input local.resources ~filter:local.filter ~asic:session.asic input
+  in
+  session.host <- Host.set_local session.host tile.id { local with resources };
+  Option.value_map operation ~default:(return ()) ~f:(resource_request session tile)
+;;
+
 let rec execute_host ?(validate = fun () -> Ok ()) session captured action ~exit =
   let open Bonsai_term in
   let captured_client = session.client in
@@ -5786,6 +5960,123 @@ let rec execute_host ?(validate = fun () -> Ok ()) session captured action ~exit
     | Load_hierarchy id -> async (fun () -> load_tile_hierarchy session id)
     | Hierarchy_detail id -> async (fun () -> detail_tile_hierarchy session id)
     | Discover_asic -> async (fun () -> asic_request session Discover)
+    | Open_resources ->
+      let expected_run =
+        Option.bind (Host.focused session.host) ~f:(Host.tile_run session.host)
+      in
+      let intent = ref () in
+      session.resource_navigation_intent <- intent;
+      async (fun () ->
+        let%bind tile =
+          resource_tile session ~current:(fun () ->
+            phys_equal intent session.resource_navigation_intent)
+        in
+        match tile with
+        | None -> return ()
+        | Some tile ->
+          reconcile_synthesis session;
+          let local = Host.local session.host tile.id in
+          if Option.is_none local.resources.explicit
+             && not
+                  (Option.equal
+                     Run_ref.equal
+                     expected_run
+                     (Host.tile_run session.host tile))
+          then (
+            session.host
+            <- { session.host with
+                 notice =
+                   "Resources has a different run/pin; use Resources: Select execution \
+                    explicitly"
+               };
+            return ())
+          else (
+            match local.resources.target with
+            | None ->
+              session.host
+              <- { session.host with
+                   notice =
+                     "Resources: select a workflow bundle or import exact retained \
+                      evidence (Space c c)"
+                 };
+              return ()
+            | Some target ->
+              let resources, operation =
+                Resources_view.begin_request
+                  local.resources
+                  (Load { target; refresh = false })
+              in
+              session.host <- Host.set_local session.host tile.id { local with resources };
+              Option.value_map
+                operation
+                ~default:(return ())
+                ~f:(resource_request session tile)))
+    | Resource_target explicit ->
+      let intent = ref () in
+      session.resource_navigation_intent <- intent;
+      async (fun () ->
+        let%bind tile =
+          resource_tile session ~current:(fun () ->
+            phys_equal intent session.resource_navigation_intent)
+        in
+        match tile with
+        | None -> return ()
+        | Some tile ->
+          let local = Host.local session.host tile.id in
+          let resources =
+            Resources_view.select_target local.resources explicit
+            |> fun view ->
+            Resources_view.reconcile
+              view
+              ~run:(Host.tile_run session.host tile)
+              ~filter:local.filter
+              session.asic
+          in
+          session.host <- Host.set_local session.host tile.id { local with resources };
+          (match resources.target with
+           | None -> return ()
+           | Some target ->
+             let resources, operation =
+               Resources_view.begin_request resources (Load { target; refresh = false })
+             in
+             session.host <- Host.set_local session.host tile.id { local with resources };
+             Option.value_map
+               operation
+               ~default:(return ())
+               ~f:(resource_request session tile)))
+    | Resource_import bundle ->
+      session.host
+      <- { session.host with
+           palette =
+             Some
+               { capture = captured
+               ; commands = []
+               ; query = ""
+               ; index = 0
+               ; argument = Some (Host.Resource_path bundle)
+               }
+         ; notice =
+             "Enter exact absolute source directory; import reads retained evidence and \
+              creates no run"
+         };
+      Effect.Ignore
+    | Resource_import_path (bundle, path) ->
+      if Filename.is_relative path
+      then (
+        session.host
+        <- { session.host with notice = "Resource import requires an absolute directory" };
+        Effect.Ignore)
+      else
+        execute_host
+          session
+          captured
+          (Resource_target (Some (if bundle then Bundle path else Coarse_run path)))
+          ~exit
+    | Resource_input input ->
+      (match Host.focused session.host with
+       | Some tile when Resources_view.is_kind tile.kind ->
+         async (fun () -> resource_input session tile input)
+       | _ -> Effect.Ignore)
     | Prepare_project | Quick_prepare_project ->
       let quick =
         match action with
@@ -6554,9 +6845,23 @@ let host_handler_regular session event ~exit : unit Bonsai_term.Effect.t option 
   in
   session.host <- host;
   if host.editing_filter
-  then
+  then (
     change_synthesis session (fun _ local ->
       { local with synthesis = Synthesis_view.State.set_mode local.synthesis Cells });
+    Option.iter (Host.focused session.host) ~f:(fun tile ->
+      if String.equal tile.kind "resources"
+      then (
+        let local = Host.local session.host tile.id in
+        if not (Resources_view.equal_mode local.resources.mode Table)
+        then (
+          let resources, _ =
+            Resources_view.input
+              local.resources
+              ~filter:local.filter
+              ~asic:session.asic
+              Show_table
+          in
+          session.host <- Host.set_local session.host tile.id { local with resources }))));
   reconcile_synthesis session;
   match effect with
   | Host.Execute (capture, action) -> Some (execute_host session capture action ~exit)

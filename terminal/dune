@@ -17,7 +17,9 @@
   preparation_test
   overview_summary
   overview_layout
-  synthesis_view
+   synthesis_view
+   resources_view
+   resources_view_test
   terminal_result_view
   artifact_view
   artifact_export
