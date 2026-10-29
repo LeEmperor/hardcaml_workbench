@@ -6217,7 +6217,23 @@ let rec execute_host ?(validate = fun () -> Ok ()) session captured action ~exit
       let intent, run =
         match preparation with
         | Prepare_stage (stage, run) | Quick_prepare_stage (stage, run) ->
-          Stage_action.Physical_stage stage, Some run
+          (* The checklist may derive Timing's action from the fresh catalog. Such
+             an action is not an observation-advertised capability: revalidate the
+             fresh endpoint instead of requiring it in the raw observed stage. *)
+          let catalog_timing =
+            String.equal stage.id "timing"
+            && not
+                 (List.exists
+                    (Terminal_presentation.Overview_tiles.observed_stages
+                       ~asic:session.asic
+                       ~run)
+                    ~f:(fun observed ->
+                      String.equal observed.id "timing" && Option.is_some observed.action))
+          in
+          ( (if catalog_timing
+             then Stage_action.Fresh_endpoint "timing"
+             else Stage_action.Physical_stage stage)
+          , Some run )
         | Prepare_endpoint (endpoint, run) | Quick_prepare_endpoint (endpoint, run) ->
           Stage_action.Fresh_endpoint endpoint, Some run
         | Launch_stage_and_view (intent, run, _) -> intent, run

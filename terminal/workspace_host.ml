@@ -4305,6 +4305,10 @@ let decode_event (event : Bonsai_term.Event.t) : input option =
   | Paste `Start -> Some Paste_start
   | Paste `End -> Some Paste_end
   | Key_press { key = Tab; mods = [ Shift ] } -> Some Focus_previous
+  | Key_press { key = ASCII ('r' | 'R'); mods = [ Shift ] } -> Some (Character 'R')
+  | Key_press { key = Uchar value; mods = [ Shift ] }
+    when Uchar.equal value (Uchar.of_char 'r') || Uchar.equal value (Uchar.of_char 'R') ->
+    Some (Character 'R')
   | Key_press { key = ASCII ('u' | 'U'); mods = [ Ctrl ] } -> Some Clear_filter
   | Key_press { key = Uchar value; mods = [ Ctrl ] }
     when Uchar.equal value (Uchar.of_char 'u') || Uchar.equal value (Uchar.of_char 'U') ->
@@ -4323,6 +4327,30 @@ let decode_event (event : Bonsai_term.Event.t) : input option =
      | Arrow `Up -> Some Previous
      | _ -> None)
   | _ -> None
+;;
+
+let%test_unit "Shift-R decodes to quick-launch character" =
+  let open Bonsai_term.Event.Key in
+  List.iter [ ASCII 'R'; Uchar (Uchar.of_char 'R'); ASCII 'r'; Uchar (Uchar.of_char 'r') ]
+    ~f:(fun key ->
+      assert (
+        Poly.equal
+          (decode_event (Key_press { key; mods = [ Shift ] }))
+          (Some (Character 'R'))))
+;;
+
+let%test_unit "Shift-R decoder preserves legacy keys and modifier boundaries" =
+  List.iter [ 'r'; 'R' ] ~f:(fun ch ->
+    List.iter [ Bonsai_term.Event.Key.ASCII ch; Uchar (Uchar.of_char ch) ] ~f:(fun key ->
+      assert (
+        Poly.equal (decode_event (Key_press { key; mods = [] })) (Some (Character ch)));
+      List.iter
+        [ [ Bonsai_term.Event.Modifier.Ctrl ]; [ Meta ]; [ Ctrl; Shift ]; [ Meta; Shift ] ]
+        ~f:(fun mods -> assert (Option.is_none (decode_event (Key_press { key; mods }))))));
+  assert (
+    Poly.equal
+      (decode_event (Key_press { key = Tab; mods = [ Shift ] }))
+      (Some Focus_previous))
 ;;
 
 let finalization_form t =

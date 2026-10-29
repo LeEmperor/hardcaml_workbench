@@ -236,6 +236,50 @@ def quick_case(args, check, view=True, failure=False, changed=False, named=False
             shared.finish(f)
 
 
+def consumed_synthesis_timing_case(args, check):
+    """One raw ASCII R replaces a consumed synthesis intent with fresh timing work."""
+    f = proxy = None
+    try:
+        f, presets = shared.setup(args, 'consumed-synthesis-timing', check)
+        f.launch('completed-synthesis')
+        synthesis = f.done('completed-synthesis')
+        old = field(f.snapshot(), 'fresh_intent')[0]
+        check(field(old, 'id') == field(field(synthesis, 'intent'), 'id') and
+              field(field(old, 'selection'), 'endpoint') == 'synthesis',
+              'Completed synthesis retains its consumed synthesis intent')
+        setup_workspace(f.http, field(synthesis, 'run')[0], presets)
+        f.terminal.close()
+        proxy = shared.StageReplyGate(f)
+        proxy.release.set()
+        f.terminal = t = c.Terminal(f.base, f.client_args, proxy.url, 180, 55)
+        position(f, 6)  # Elaboration followed by physical stages through Timing.
+        t.capture('timing-selected-before-R', ['> · timing:', 'not requested'])
+        check(any('timing' in field(flow, 'fresh_stage_endpoints')
+                  for flow in field(f.snapshot(), 'flows')), 'Live synthetic catalog advertises timing')
+        t.key(b'R')
+        t.drain(1)
+        t.capture('after-raw-R')
+        workflow = wait(lambda: next((w for w in field(f.snapshot(), 'workflows')
+                                     if field(w, 'id') != field(synthesis, 'id')), None),
+                        'raw R timing workflow', timeout=25)
+        intent = field(workflow, 'intent')
+        check(field(intent, 'id') != field(old, 'id') and
+              field(field(intent, 'selection'), 'endpoint') == 'timing',
+              'Raw R stages a distinct timing intent and launches without a manual step')
+        f.done(field(workflow, 'key'))
+        t.drain(1)
+        check(len(field(f.snapshot(), 'workflows')) == 2 and
+              len(f.events('emit-start')) == 2 and len(f.events('physical-admitted')) == 2 and
+              sum('(Stage_fresh' in r['request'] for r in proxy.requests) == 1 and
+              sum('(Launch_fresh' in r['request'] for r in proxy.requests) == 1,
+              'One raw R sends exactly one Stage_fresh and one Launch_fresh, producing one new workflow')
+    finally:
+        if proxy:
+            proxy.close()
+        if f:
+            shared.finish(f)
+
+
 def synthetic_case(args, check):
     """Manual r/launch, failed replacement and pending-response launch fences."""
     f = proxy = None
@@ -344,7 +388,7 @@ def main():
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--evidence', type=Path)
     parser.add_argument('--timeout', type=int, default=900)
-    choices = ('historical-default', 'remembered', 'default-not-first', 'stale-profile', 'nonfresh', 'unsupported-endpoint', 'changed-context', 'synthetic', 'selected-async')
+    choices = ('historical-default', 'remembered', 'default-not-first', 'stale-profile', 'nonfresh', 'unsupported-endpoint', 'changed-context', 'synthetic', 'selected-async', 'consumed-synthesis-timing')
     parser.add_argument('--case', action='append', choices=choices)
     args = parser.parse_args()
     for name in ('daemon', 'client', 'preset_export'):
@@ -375,6 +419,8 @@ def main():
         if not args.case or 'selected-async' in args.case:
             for change in ('cursor', 'action', 'capability'):
                 selected_async_case(args, check, change)
+        if not args.case or 'consumed-synthesis-timing' in args.case:
+            consumed_synthesis_timing_case(args, check)
         result['status'] = 'passed'
     except BaseException:
         result['error'] = traceback.format_exc()

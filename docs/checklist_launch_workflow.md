@@ -1,5 +1,15 @@
 # Checklist r/R: stage for review or stage and launch
 
+**2026-10-29 demo correction:** Timing quick-launch after a completed synthesis
+could silently reject a catalog-derived action as though it had to be advertised
+by the old run observation. Catalog-derived Timing now uses fresh-endpoint
+validation; explicit observed actions and asynchronous selection guards remain.
+Shift-only ASCII/Unicode R events are also recognized. An isolated HTTP/PTY
+regression reproduces the old no-op and now verifies exactly one Stage_fresh,
+Launch_fresh and new timing workflow after raw R, without a manual launch.
+Only the client needs restarting for this correction; no live daemon or real
+physical run was started by the test.
+
 **2026-10-26:** lowercase **r** retains the manual workflow below; uppercase **R**
 stages the selected operation and automatically launches its exact ready plan.
 Quick launch defaults to viewing the new run in the captured linked context. The
